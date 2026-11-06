@@ -100,13 +100,13 @@ internal static class StorageCostChecks
         Statement("SelectClosureKeys", probe.Execute(StateSchema.SelectClosureKeys,
             (StateSchema.ParamPair, "cost"), (StateSchema.ParamKinds, ClosureKindsJson)));
         Statement("ScanUpsert", probe.Execute(StateSchema.ScanUpsert, ScanArguments(0)));
-        Statement("ScanDeleteSelf", probe.ExecuteFirst(StateSchema.ScanDeleteSelf, ("$p", "cost"), ("$side", 0L),
+        Statement("ScanDeleteSelf", probe.ExecuteFirst(StateSchema.ScanDeleteSelf, (StateSchema.ParamScan, Guid.Empty.ToByteArray()), ("$p", "cost"), ("$side", 0L),
             ("$k", index)));
-        Statement("ScanDeleteDescendants", probe.Execute(StateSchema.ScanDeleteDescendants, ("$p", "cost"),
+        Statement("ScanDeleteDescendants", probe.Execute(StateSchema.ScanDeleteDescendants, (StateSchema.ParamScan, Guid.Empty.ToByteArray()), ("$p", "cost"),
             ("$side", 0L), ("$k", index)));
-        Statement("NextScanKey", probe.ExecuteFirst(StateSchema.NextScanKey, ("$p", "cost"), ("$after", ""),
+        Statement("NextScanKey", probe.ExecuteFirst(StateSchema.NextScanKey, (StateSchema.ParamScan, Guid.Empty.ToByteArray()), ("$p", "cost"), ("$after", ""),
             ("$first", true)));
-        Statement("ScanRows", probe.Execute(StateSchema.ScanRows, ("$p", "cost"), ("$k", index)));
+        Statement("ScanRows", probe.Execute(StateSchema.ScanRows, (StateSchema.ParamScan, Guid.Empty.ToByteArray()), ("$p", "cost"), ("$k", index)));
     }
 
     private static void Statement(string name, StatementCost cost) => Console.WriteLine(
@@ -411,16 +411,16 @@ internal static class StorageCostChecks
         foreach (var key in keys)
         {
             probe.Begin();
-            cost += probe.ExecuteFirst(StateSchema.NextScanKey, (StateSchema.ParamPair, "cost"),
+            cost += probe.ExecuteFirst(StateSchema.NextScanKey, (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamPair, "cost"),
                 (StateSchema.ParamAfter, after), (StateSchema.ParamFirst, first));
-            cost += probe.Execute(StateSchema.ScanRows, (StateSchema.ParamPair, "cost"),
+            cost += probe.Execute(StateSchema.ScanRows, (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamPair, "cost"),
                 (StateSchema.ParamTargetKey, key));
             probe.Commit();
             after = key;
             first = false;
         }
         probe.Begin();
-        cost += probe.ExecuteFirst(StateSchema.NextScanKey, (StateSchema.ParamPair, "cost"),
+        cost += probe.ExecuteFirst(StateSchema.NextScanKey, (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamPair, "cost"),
             (StateSchema.ParamAfter, after), (StateSchema.ParamFirst, first));
         probe.Commit();
         return cost;
@@ -455,7 +455,7 @@ internal static class StorageCostChecks
 
         public (string Name, object? Value)[] ScanArguments(int side) =>
         [
-            (StateSchema.ParamPair, "cost"), (StateSchema.ParamSide, (long)side),
+            (StateSchema.ParamPair, "cost"), (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamSide, (long)side),
             (StateSchema.ParamJoinKey, side == 0 ? Key : DropboxKey), (StateSchema.ParamOwnKey, Key),
             (StateSchema.ParamPath, Path),
             (StateSchema.ParamIsFolder, false), (StateSchema.ParamSize, 1L),
@@ -929,7 +929,7 @@ internal static class StorageCostChecks
             probe.Commit();
             var issues = probe.Execute(StateSchema.SelectIssues, (StateSchema.ParamPair, "cost"));
             var held = probe.Execute(StateSchema.SelectHoldingSubjects, (StateSchema.ParamPair, "cost"));
-            var counts = probe.Execute(StateSchema.CountIssues, (StateSchema.ParamPair, "cost"));
+            var counts = probe.Execute(StateSchema.CountIssues, (StateSchema.ParamPair, "cost"), (StateSchema.ParamIgnored, null));
             Row("fixed issue sql " + count, count, issues, 0, 0, 0, 0, 0);
             Check.Require(issues.ProbePrepares == 1 && held.ProbePrepares == 1 && counts.ProbePrepares == 1,
                 "each fixed issue read is one statement");

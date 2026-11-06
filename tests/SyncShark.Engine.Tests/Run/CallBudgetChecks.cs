@@ -56,6 +56,8 @@ public static partial class CallBudgetChecks
 
     public static void Run()
     {
+        foreach (var size in new[] { SmallFiles, LargeFiles })
+            Massdex.SyncShark.Engine.Tests.Storage.ForgetUnreadableChecks.Run(size, budget: true);
         LocalDirtyCosts();
         StorageCostChecks.Run();
         AsciiCosts();
@@ -809,6 +811,7 @@ public static partial class CallBudgetChecks
         {
             var key = PathNames.Key(entry.Path);
             Add("capture", probe.Execute(StateSchema.ScanUpsert,
+            (StateSchema.ParamScan, Guid.Empty.ToByteArray()),
                 (StateSchema.ParamPair, rig.Pair.PairId), (StateSchema.ParamSide, (int)Side.Local),
                 (StateSchema.ParamJoinKey, key), (StateSchema.ParamOwnKey, key), (StateSchema.ParamPath, entry.Path),
                 (StateSchema.ParamIsFolder, entry.IsFolder), (StateSchema.ParamSize, entry.Size),
@@ -823,13 +826,13 @@ public static partial class CallBudgetChecks
         foreach (var entry in entries)
         {
             Add("candidates", probe.ExecuteFirst(StateSchema.PlanPresent,
-                [.. common, (StateSchema.ParamAfter, after)]));
+                ((string Name, object? Value)[])[(StateSchema.ParamScan, Guid.Empty.ToByteArray()), .. common, (StateSchema.ParamAfter, after)]));
             after = PathNames.Key(entry.Path);
         }
         Add("candidates", probe.ExecuteFirst(StateSchema.PlanPresent,
-            [.. common, (StateSchema.ParamAfter, after)]));
+            ((string Name, object? Value)[])[(StateSchema.ParamScan, Guid.Empty.ToByteArray()), .. common, (StateSchema.ParamAfter, after)]));
         Add("anti-join", probe.ExecuteFirst(StateSchema.PlanSaved,
-            [.. common, (StateSchema.ParamAfter, root), (StateSchema.PlanParamSavedOverride, false)]));
+            ((string Name, object? Value)[])[(StateSchema.ParamScan, Guid.Empty.ToByteArray()), .. common, (StateSchema.ParamAfter, root), (StateSchema.PlanParamSavedOverride, false)]));
         var whole = phases.Values.Aggregate(default(StatementCost), (sum, cost) => sum + cost);
         Check.Require(whole.ProbePrepares == 2L * entries.Length + 2 && whole.ChangedRows == entries.Length,
             "executed all-linked plan SQL is 2M+2 statements with M fresh capture inserts");
@@ -938,12 +941,12 @@ public static partial class CallBudgetChecks
         Add("guard pair", probe.ExecuteFirst(StateSchema.PairFence, (StateSchema.ParamPair, rig.Pair.PairId)));
         // shortcut: this guard probe covers plan indexes, not a complete non-empty unreadable traversal; extend with that workload.
         Add("inventory", probe.ExecuteFirst(StateSchema.PlanEntries,
-            [.. common, (StateSchema.ParamAfter, "")]));
+            ((string Name, object? Value)[])[(StateSchema.ParamScan, Guid.Empty.ToByteArray()), .. common, (StateSchema.ParamAfter, "")]));
         Add("saved-only setup", probe.ExecuteFirst(StateSchema.ScanDeleteSelf,
-            (StateSchema.ParamPair, rig.Pair.PairId), (StateSchema.ParamSide, (int)Side.Local),
+            (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamPair, rig.Pair.PairId), (StateSchema.ParamSide, (int)Side.Local),
             (StateSchema.ParamTargetKey, survivorKey)));
         Add("saved-only", probe.ExecuteFirst(StateSchema.PlanSaved,
-            [.. common, (StateSchema.ParamAfter, root), (StateSchema.PlanParamSavedOverride, false)]));
+            ((string Name, object? Value)[])[(StateSchema.ParamScan, Guid.Empty.ToByteArray()), .. common, (StateSchema.ParamAfter, root), (StateSchema.PlanParamSavedOverride, false)]));
         Check.Require(phases["selected pages"].DepthCalls > 0,
             "selected branches execute the owner-backed depth callback");
         foreach (var (phase, cost) in phases)
@@ -1268,8 +1271,7 @@ public static partial class CallBudgetChecks
             {
                 // Capture-only exclusions and frozen removals retain committed scratch until disposal.
                 var path = Directory.EnumerateFiles(Path.GetDirectoryName(rig.Database)!,
-                    Path.GetFileName(rig.Database) + StateSchema.ScanFileSuffix + "*" +
-                    StateSchema.DatabaseExtension + StateSchema.PlanFileSuffix).Single();
+                    Path.GetFileName(rig.Database) + StateSchema.PlanFileSuffix + "*" + StateSchema.DatabaseExtension).Single();
                 var bytes = FileSize(path);
                 Check.Require(bytes > 0, "each folder plan has measurable bytes before deletion");
                 planBytes += bytes;

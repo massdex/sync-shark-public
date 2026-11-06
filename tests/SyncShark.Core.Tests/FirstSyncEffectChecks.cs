@@ -2387,7 +2387,7 @@ internal static class FirstSyncEffectChecks
                         retryOutput, retryError, () => reopenedOperations);
                     return (retryExit, retryError.ToString());
                 }
-                // elapsed-only instrumentation: capture the AUD02 retry aggregate and its SQLite phases,
+                // Elapsed-only instrumentation: capture the AUD02 retry aggregate and its SQLite phases,
                 // Emit in finally even when the fixture's explicit CLI deadline expires. The measured
                 // successful retry took 28.1 seconds; 60 seconds gives this correctness check headroom.
                 // Production deadlines, inputs, authority and exact-effect/no-replay assertions are unchanged.

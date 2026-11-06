@@ -20,6 +20,16 @@ public sealed record ExecutorContext(ISide Local, ISide Dropbox, ILocalRecovery 
     /// <summary>The one Local-evidence cache for this context: every executor part reads the same source capture.</summary>
     internal LocalEvidence Evidence { get; } = new(Store, Pair, ExpectedGeneration);
 
+    /// <summary>The owned listing, or Empty when this operation has no listing evidence.</summary>
+    internal Guid ScanId { get; init; }
+
+    internal string? BatchScope { get; init; }
+    /// <summary>The batch side whose listing ended early; a new row missing there was not listed, not absent.</summary>
+    internal Side? BatchUnlisted { get; init; }
+    /// <summary>PairScan's joined listing was incomplete; no first-run folder may settle in this batch.</summary>
+    internal bool BatchIncomplete { get; init; }
+    internal bool BatchSettlesFirstRun { get; init; }
+
     public ISide For(Side side) => side == Side.Local ? Local : Dropbox;
 
     /// <summary>D33: one operation takes one permit before its first Dropbox observation; its inner steps take none.

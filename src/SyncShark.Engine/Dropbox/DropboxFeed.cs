@@ -20,7 +20,7 @@ internal sealed class DropboxFeed(
         Func<CancellationToken, Task>, IDisposable> scheduleReconnect,
     string sourceIdentity)
 {
-    /// <summary>Establishes the current source base in a finite pass without a reconnect wait.</summary>
+    /// <summary>Establishes the current source base, respecting the shared listener reconnect wait.</summary>
     internal async Task EnsureSourceBaseAsync(CancellationToken ct)
     {
         await EnterFiniteAsync(ct).ConfigureAwait(false);
@@ -169,8 +169,7 @@ internal sealed class DropboxFeed(
         }
         catch (Exception error) when (error is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            if (finite) throw;
-            await WaitForReconnectAsync(error, attempt, api.AdmissionIdentity(DropboxProtocol.ListFolderGetLatestCursor), ct)
+            await WaitForReconnectAsync(error, attempt, api.AdmissionIdentity(DropboxProtocol.ListFolderGetLatestCursor), ct, finite)
                 .ConfigureAwait(false);
             return;
         }
@@ -208,8 +207,7 @@ internal sealed class DropboxFeed(
             catch (Exception error) when (error is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 if (InvalidateReset(error)) return false;
-                if (finite) throw;
-                await WaitForReconnectAsync(error, attempt, api.AdmissionIdentity(DropboxProtocol.ListFolderContinue), ct)
+                await WaitForReconnectAsync(error, attempt, api.AdmissionIdentity(DropboxProtocol.ListFolderContinue), ct, finite)
                     .ConfigureAwait(false);
                 return false;
             }
@@ -315,7 +313,7 @@ internal sealed class DropboxFeed(
     /// <summary>Registers one listener reconnect for a transient failed attempt through the shared owner, after that
     /// attempt's single completion claim; permanent failures and unknown writes are never resent.</summary>
     private async Task WaitForReconnectAsync(Exception error, RequestAttempt attempt,
-        (string AccountId, string RouteName, string SourceIdentity) identity, CancellationToken ct)
+        (string AccountId, string RouteName, string SourceIdentity) identity, CancellationToken ct, bool finite = false)
     {
         ct.ThrowIfCancellationRequested();
         if (attempt.Completion is not { } settled || settled.Result != RequestResult.TransientFailure) throw error;
@@ -323,6 +321,12 @@ internal sealed class DropboxFeed(
         var providerWait = FailureRetryOwner.RemainingProviderObservation(
             settled.ProviderWait, attempt.ProviderWaitStartedTimestamp, time);
         var wait = FailureRetryOwner.AdoptedListenerWait(_session, providerWait, backoff, Random.Shared.NextDouble);
+        if (finite)
+        {
+            // Direct and startup callers have no running listener-deadline dispatcher.
+            await Task.Delay(wait, time, ct).ConfigureAwait(false);
+            return;
+        }
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var registration = scheduleReconnect(identity, wait, _ =>
         {

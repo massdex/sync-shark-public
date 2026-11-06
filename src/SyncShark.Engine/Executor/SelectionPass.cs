@@ -14,10 +14,18 @@ internal sealed class SelectionPass
     private readonly Observer _observer;
     private readonly Parents _parents;
     private readonly Dictionary<string, (Row? Held, SyncedEntry? Before, Issue? Holder)> _visited = new(StringComparer.Ordinal);
+    private readonly Func<WorkSelection?, Side, string, IReadOnlySet<long>?, bool, CancellationToken, Task>? _runBatch;
+    // Roots this selection already batched; a folder notice under one is entry-only.
+    private readonly PrefixSet _batched = new();
+    // D-1105-1: folder batches start after the pair's first Repair, which cannot complete during a selection.
+    private bool _batches;
+    // The selection's counterpart peer once its root is observed; its batch lists that side too.
+    private SelectionPeer? _peer;
 
     internal SelectionPass(ExecutorContext context, ItemSync items, AncestorFence ancestors, ILiveExecutionBoundary liveBoundary,
-        ActionExecutor executor)
+        ActionExecutor executor, Func<WorkSelection?, Side, string, IReadOnlySet<long>?, bool, CancellationToken, Task>? runBatch = null)
     {
+        _runBatch = runBatch;
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _items = items ?? throw new ArgumentNullException(nameof(items));
         _ancestors = ancestors;
@@ -33,6 +41,9 @@ internal sealed class SelectionPass
     internal async Task<bool> RunAsync(WorkSelection selection, CancellationToken ct)
     {
         _visited.Clear();
+        _batched.Clear();
+        _peer = null;
+        _batches = SyncPorts.AdmitsBatch(_context.Store, selection.PairId);
         _rows.ForSelection();
         _context.Store.BeginSelection(selection);
         _ancestors.RunSelection(selection);
@@ -55,7 +66,7 @@ internal sealed class SelectionPass
         LiveEffectScope? selectedScope = null;
         Func<Side, string, string?, bool>? separateWork = null;
         Func<SyncedEntry, long, bool>? localEcho = null;
-        await foreach (var (work, walkFailure, original) in ReadBranchesAsync(selection, ct).ConfigureAwait(false))
+        await foreach (var (work, walkFailure, original, initialPrimary) in ReadBranchesAsync(selection, ct).ConfigureAwait(false))
         {
             ct.ThrowIfCancellationRequested();
             found = true;
@@ -98,6 +109,7 @@ internal sealed class SelectionPass
                 attached |= RetainIssue(selection, effective, residual, own ? before : effective.Synced, issue,
                     retained => { if (own) RememberHeld(effective, before, retained); });
             }
+            var freshPrimary = initialPrimary;
             ItemSync.DirtyProof? echoEvidence = null;
             async ValueTask<Row?> ObserveProjectedAsync(ItemFailedException? failedWalk, Action<Row, string?>? observed)
             {
@@ -106,7 +118,9 @@ internal sealed class SelectionPass
                 try
                 {
                     if (failedWalk is not null) throw failedWalk;
-                    var local = await _observer.ObserveLocalAsync(notice.Side, notice.Path, ct).ConfigureAwait(false);
+                    var suppliedPrimary = freshPrimary;
+                    freshPrimary = null;
+                    var local = await _observer.ObserveLocalAsync(notice.Side, notice.Path, ct, suppliedPrimary).ConfigureAwait(false);
                     if (notice is { Side: Side.Local, Kind: not ChangeKind.Deleted, IdentityDeleted: false })
                     {
                         if (Decide.LocalMatchesBaseline(local.Local, local.Synced) &&
@@ -119,7 +133,7 @@ internal sealed class SelectionPass
                             echoEvidence = new ItemSync.DirtyProof(evidence.Dirty, evidence.Boundary, evidence.Version);
                         }
                     }
-                    raw = await _observer.ObserveDropboxAsync(notice.Side, notice.Path, local, ct).ConfigureAwait(false);
+                    raw = await _observer.ObserveDropboxAsync(notice.Side, notice.Path, local, ct, suppliedPrimary).ConfigureAwait(false);
                     var other = PathNames.Other(notice.Side);
                     var otherKey = original is null || peer is null && throughPeer is not null
                         ? PathNames.KeyFor(other, raw.PathOn(other) ?? _parents.Counterpart(other, notice.Path, raw.Synced)) : null;
@@ -147,7 +161,7 @@ internal sealed class SelectionPass
             {
                 if (throughPeer is { } through)
                 {
-                    peer = new SelectionPeer(otherKey!, through);
+                    _peer = peer = new SelectionPeer(otherKey!, through);
                     _context.Store.ClaimSelectionPeer(selection, peer);
                     _ancestors.RunSelection(selection with { Peer = peer });
                 }
@@ -306,7 +320,8 @@ internal sealed class SelectionPass
         }
     }
 
-    private async IAsyncEnumerable<(PendingChange Work, ItemFailedException? Failure, ChangeNotice? Original)> ReadBranchesAsync(
+    private async IAsyncEnumerable<(PendingChange Work, ItemFailedException? Failure, ChangeNotice? Original,
+        (string Path, Entry? Entry)? FreshPrimary)> ReadBranchesAsync(
         WorkSelection selection, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         await foreach (var branch in EnumerateBranchesAsync(selection, ct).ConfigureAwait(false))
@@ -317,7 +332,8 @@ internal sealed class SelectionPass
         }
     }
 
-    private async IAsyncEnumerable<(PendingChange Work, ItemFailedException? Failure, ChangeNotice? Original)> EnumerateBranchesAsync(
+    private async IAsyncEnumerable<(PendingChange Work, ItemFailedException? Failure, ChangeNotice? Original,
+        (string Path, Entry? Entry)? FreshPrimary)> EnumerateBranchesAsync(
         WorkSelection selection,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
@@ -346,7 +362,12 @@ internal sealed class SelectionPass
                 }
             }
             catch (ItemFailedException error) { readFailure = error; }
-            yield return (work with { Notice = notice, Before = saved }, readFailure, work.Notice);
+            // Classified from this observation, before the entry's own sync records it.
+            var batch = _batches && first && current is { IsFolder: true } && !notice.IdentityDeleted &&
+                NeedsBatch(selection, notice, current, work.IsResidual);
+            yield return (work with { Notice = notice, Before = saved }, readFailure, work.Notice,
+                first && !notice.IdentityDeleted && readFailure is null
+                    ? (notice.Path, current) : null);
             if (readFailure is not null) continue;
             var oldPath = notice.OldPath ?? saved?.PathOn(notice.Side);
             if (oldPath is not null && !string.Equals(oldPath, notice.Path, StringComparison.Ordinal))
@@ -355,8 +376,27 @@ internal sealed class SelectionPass
                     Notice = notice with { Path = oldPath, OldPath = null, Id = null, Observed = null,
                         IdentityDeleted = false, LocalContentDirty = false },
                     Before = notice.Id is null ? saved : _context.Store.SyncedById(selection.PairId, notice.Side, notice.Id)
-                }, null, notice);
+                }, null, notice, null);
             if (!first || current is not { IsFolder: true } || notice.IdentityDeleted) continue;
+            // After the first Repair a folder's contents come from one add-only batch (D-1105-22), not this walk.
+            if (_batches)
+            {
+                if (!batch) continue;
+                ItemFailedException? batchFailure = null;
+                try
+                {
+                    await (_runBatch ?? throw new InvalidOperationException())(selection with { Peer = _peer }, notice.Side, notice.Path, null, false, ct).ConfigureAwait(false);
+                    _batched.Add(PathNames.Key(notice.Path));
+                }
+                catch (InventoryIncompleteException error)
+                {
+                    batchFailure = ActionExecutor.InventoryFailure(error, notice.Path, notice.Side);
+                }
+                catch (ItemFailedException error) { batchFailure = error; }
+                // As a failed walk: the folder keeps one retained failure and its selection retries.
+                if (batchFailure is not null) yield return (work with { Notice = notice }, batchFailure, null, null);
+                continue;
+            }
             // Only a Local walk of a plain folder can prove access; a skipped folder or a Dropbox notice proves nothing.
             var recorded = notice.Side == Side.Local && current.Skip is null
                 ? _context.Store.UnreadableUnder(selection.PairId, PathNames.Key(current.Path)) : [];
@@ -364,7 +404,7 @@ internal sealed class SelectionPass
             if (recorded.Count == 0)
             {
                 await foreach (var branch in ListAsync(work, current.Path, options, ct).ConfigureAwait(false))
-                    yield return (branch.Work, branch.Failure, null);
+                    yield return (branch.Work, branch.Failure, null, null);
                 continue;
             }
             var recordedKeys = recorded.ToHashSet(StringComparer.Ordinal);
@@ -379,7 +419,7 @@ internal sealed class SelectionPass
             }, ct).ConfigureAwait(false))
             {
                 failed |= branch.Failure is not null;
-                yield return (branch.Work, branch.Failure, null);
+                yield return (branch.Work, branch.Failure, null, null);
             }
             if (failed) continue;
             var released = new List<(Side Side, string Key)>();
@@ -400,17 +440,30 @@ internal sealed class SelectionPass
                 if (failure is not null)
                 {
                     yield return (work with { Notice = work.Notice with { Side = Side.Local, Path = path,
-                        Observed = null, Id = acquired[key].Id }, Before = null }, failure, null);
+                        Observed = null, Id = acquired[key].Id }, Before = null }, failure, null, null);
                     continue;
                 }
                 if (entry is null) continue;
                 var root = work with { Notice = ChildNotice(Side.Local, path, entry), Before = null };
-                yield return (root, null, null);
+                yield return (root, null, null, null);
                 if (!entry.IsFolder) continue;
                 await foreach (var branch in ListAsync(root, path, options, ct).ConfigureAwait(false))
-                    yield return (branch.Work, branch.Failure, null);
+                    yield return (branch.Work, branch.Failure, null, null);
             }
         }
+    }
+
+    // From the current observation: a known folder (same id) that was only touched, or that moved under its own rename,
+    // brings no new contents; any other folder is new or replaced and its contents are added.
+    private bool NeedsBatch(WorkSelection selection, ChangeNotice notice, Entry current, bool residual)
+    {
+        if (current.Skip is not null || _batched.Covers(PathNames.Key(notice.Path))) return false;
+        // Retry releases the retained subtree even though its root was recorded before discovery failed.
+        if (residual) return true;
+        var known = _context.Store.SyncedById(selection.PairId, notice.Side, current.Id);
+        return known is not { IsFolder: true } || known.PathOn(notice.Side) == notice.Path &&
+            (notice.Kind != ChangeKind.Changed ||
+                _context.Store.UnreadableUnder(selection.PairId, PathNames.Key(notice.Path)).Count != 0);
     }
 
     private static ChangeNotice ChildNotice(Side side, string path, Entry? entry) =>

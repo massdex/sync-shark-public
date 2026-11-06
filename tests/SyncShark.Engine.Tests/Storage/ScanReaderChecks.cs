@@ -18,6 +18,7 @@ public static class ScanReaderChecks
         {
             var statePath = Path.Combine(folder, "state.db");
             using var connection = Open(statePath);
+            ScopedCases(connection);
             DecoderCases(connection);
             PagingVisibilityCases(connection, statePath);
             ContextCases(connection);
@@ -32,6 +33,26 @@ public static class ScanReaderChecks
         {
             Directory.Delete(folder, recursive: true);
         }
+    }
+
+    private static void ScopedCases(SqliteConnection connection)
+    {
+        RowsCase(connection, "scoped-batch", "subtree containment", pair =>
+        {
+            AddSynced(connection, pair, Synced("OUTSIDE/MISSING", "Outside/Missing", "OUTSIDE/MISSING", "Outside/Missing", "outside-local", "outside-remote"));
+            AddSynced(connection, pair, Synced("PARENT/OLD", "Parent/Old", "PARENT/OLD", "Parent/Old", "inside-local", "inside-remote"));
+            AddSynced(connection, pair, Synced("OUTSIDE/OLD", "Outside/Old", "OUTSIDE/OLD", "Outside/Old", "moved-local", "moved-remote"));
+            AddScan(connection, pair, Side.Local, "PARENT", "Parent", id: "root-local");
+            AddScan(connection, pair, Side.Local, "PARENT/NEW", "Parent/New", id: "inside-local");
+            AddScan(connection, pair, Side.Local, "PARENT/INCOMING", "Parent/Incoming", id: "moved-local");
+            AddScan(connection, pair, Side.Local, "PARENTS/OTHER", "Parents/Other", id: "sibling-local");
+            var rows = ScanReader.Rows(connection, pair, _ => EmptyContext, "Parent").ToArray();
+            Check.Require(rows.Length == 4 && rows.All(row => PathNames.IsSelfOrUnderKey(row.Key, "PARENT")),
+                "scoped scans include their root and inside baseline-only rows, never outside missing or prefix siblings");
+            var incoming = rows.Single(row => row.Key == "PARENT/INCOMING");
+            Check.Require(incoming.Synced is null && incoming.Local?.Id == "moved-local",
+                "cross-boundary move-in is a new in-scope row, not an outside baseline");
+        });
     }
 
     private static void DecoderCases(SqliteConnection connection)
@@ -438,7 +459,7 @@ public static class ScanReaderChecks
         Execute(connection, StateSchema.Create);
         // Fresh creation order in StateStore.InitializeSchema: base schema, additions, version.
         Execute(connection, StateSchema.SchemaAdditions);
-        Execute(connection, StateSchema.DeletedHistorySchema);
+        Execute(connection, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory);
         Execute(connection, StateSchema.PublishVersion);
         Execute(connection, StateSchema.AttachScan, (StateSchema.ParamPath, StateSchema.EmptyScan));
         Execute(connection, StateSchema.ScanPragmas);
@@ -463,6 +484,7 @@ public static class ScanReaderChecks
         string path, bool isFolder = false, long size = 1, long mtime = 100, string id = "id", string rev = "",
         string hash = "", string? skip = null) =>
         Execute(connection, StateSchema.ScanUpsert,
+            (StateSchema.ParamScan, Guid.Empty.ToByteArray()),
             (StateSchema.ParamPair, pairId), (StateSchema.ParamSide, (int)side),
             (StateSchema.ParamJoinKey, key), (StateSchema.ParamOwnKey, PathNames.Key(path)),
             (StateSchema.ParamPath, path), (StateSchema.ParamIsFolder, isFolder),

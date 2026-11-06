@@ -41,6 +41,16 @@ function Get-ProductionFunction([object]$Ast,[string]$Name){
     $node.Extent.Text
 }
 function Get-SqliteFixtureProvider {
+    if($RuntimeFixture){
+        $runtimeDirectory=Split-Path -Parent ([IO.Path]::GetFullPath($RuntimeFixture))
+        $assemblies=@('SQLitePCLRaw.core.dll','SQLitePCLRaw.provider.e_sqlite3.dll','Microsoft.Data.Sqlite.dll','SQLitePCLRaw.batteries_v2.dll')
+        if(@($assemblies | Where-Object { -not [IO.File]::Exists((Join-Path $runtimeDirectory $_)) }).Count -eq 0){
+            [void][Runtime.InteropServices.NativeLibrary]::Load((Join-Path $runtimeDirectory 'runtimes\win-x64\native\e_sqlite3.dll'))
+            foreach($assembly in $assemblies){Add-Type -Path (Join-Path $runtimeDirectory $assembly)}
+            [SQLitePCL.Batteries_V2]::Init()
+            return 'Microsoft.Data.Sqlite'
+        }
+    }
     # A real Microsoft.Data.Sqlite WAL fixture when the pinned packages are
     # already on this machine; otherwise the caller records the exact reason.
     $packages=Join-Path $env:USERPROFILE '.nuget\packages'
@@ -71,12 +81,21 @@ function Get-SqliteFixtureProvider {
     'Microsoft.Data.Sqlite'
 }
 function New-SqliteWalFixture([string]$Path) {
-    $connection=[Microsoft.Data.Sqlite.SqliteConnection]::new('Data Source='+$Path)
+    $connection=[Microsoft.Data.Sqlite.SqliteConnection]::new('Data Source='+$Path+';Pooling=False')
     $connection.Open()
     $command=$connection.CreateCommand()
     $command.CommandText="PRAGMA journal_mode=WAL; CREATE TABLE consume(id INTEGER PRIMARY KEY, note TEXT NOT NULL); INSERT INTO consume(note) VALUES ('first'),('second'),('third');"
     [void]$command.ExecuteNonQuery()
-    # Kept open so the committed WAL frames remain on disk for the backup proof.
+    # Preserve a committed WAL snapshot, then close the writer as the real installer requires.
+    $snapshot=@{}
+    foreach($file in @($Path,($Path+'-wal'),($Path+'-shm'))){
+        if(-not [IO.File]::Exists($file)){continue}
+        $input=[IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+        $copy=[IO.MemoryStream]::new()
+        try{$input.CopyTo($copy);$snapshot[$file]=$copy.ToArray()}finally{$input.Dispose();$copy.Dispose()}
+    }
+    $command.Dispose();$connection.Dispose()
+    foreach($file in $snapshot.Keys){[IO.File]::WriteAllBytes($file,$snapshot[$file])}
     $connection
 }
 function Get-StateFileIdentities([string]$Directory) {
@@ -113,6 +132,7 @@ try {
         . ([scriptblock]::Create((Get-ProductionFunction $moduleAst $name)))
     }
     $script:SyncSharkMaintenanceLease=$null
+    $script:SyncSharkMaintenanceAdmissionFailure = & (Get-Module SyncShark.Release) { $script:SyncSharkMaintenanceAdmissionFailure }
 
     $stateRoot=Join-Path $rootBase ([guid]::NewGuid().ToString('N'))
     $stateDir=Join-Path $stateRoot 'state'
@@ -180,6 +200,16 @@ try {
     Check ($independent.Owned -eq $true) 'Outside the wrapper the exclusion still acquires the independent exclusive lock'
     CheckRefused { [void](Open-SyncSharkInstanceExclusion $stateRoot) } 'The independent exclusive lock still refuses a second holder'
     $independent.Stream.Dispose()
+
+    [IO.File]::WriteAllText((Join-Path $missingRoot 'product-root.txt'),$stateRoot+[Environment]::NewLine)
+    Check ((Resolve-SyncSharkDataRoot $missingRoot) -eq $stateRoot) 'Installer data root follows the installation-side pointer'
+    Invoke-SyncSharkWithInstanceMaintenanceLease $missingRoot {
+        CheckRefused { ([IO.File]::Open($lockPath,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)).Dispose() } 'Redirected maintenance excludes the current data writer'
+        $redirected=Open-SyncSharkInstanceExclusion $missingRoot
+        Check (-not $redirected.Owned) 'Redirected Explorer lifecycle reuses the current data lease'
+    }
+    [IO.File]::WriteAllText((Join-Path $missingRoot 'product-root.txt'),'relative-data')
+    CheckRefused { Invoke-SyncSharkWithInstanceMaintenanceLease $missingRoot {throw 'should not enter'} } 'Malformed data pointer refuses maintenance rather than falling back'
 
     # ---------------------------------------------------------------- SS-A09
     # The completion receipt, the fixed target, the installed executable identity

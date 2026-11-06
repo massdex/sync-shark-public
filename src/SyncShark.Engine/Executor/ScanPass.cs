@@ -24,18 +24,21 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
         _ports.LocalHashSlots);
 
     internal async Task<ScanOutcome> RunAsync(Guid scanToken, ListedSkips listed,
-        IReadOnlySet<long>? retryIssues, CancellationToken ct)
+        IReadOnlySet<long>? retryIssues, CancellationToken ct, WorkSelection? selection = null)
     {
         var scan = _context.Store.ReadScan(_context.Pair.PairId, scanToken);
-        _ancestors.CoverListedWork(scan.ThroughWorkId);
-        Func<string, bool>? deletedName = scan.Discovery && _context.Store.HasDeletedNames(_context.Pair.PairId)
-            ? key => _context.Store.DeletedNameExact(_context.Pair.PairId, key) : null;
+        // Only Repair's whole-pair listing covers acquired work; a folder batch is fenced like any live selection.
+        if (scan.Scope is null) _ancestors.CoverListedWork(scan.ThroughWorkId);
+        Func<string, bool>? deletedName = _context.BatchScope is not null
+            ? key => _context.Store.SavedDeletedNameExact(_context.Pair.PairId, key)
+            : scan.Discovery && _context.Store.HasDeletedNames(_context.Pair.PairId, _context.ScanId)
+                ? key => _context.Store.DeletedNameExact(_context.Pair.PairId, _context.ScanId, key) : null;
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var tasks = new TaskSet(cancel);
         Exception? failure = null;
         try
         {
-            await RunRowsAsync(listed, scanToken, scan.FirstRun, deletedName, retryIssues, tasks, cancel.Token, ct);
+            await RunRowsAsync(listed, scanToken, scan.Scope is null && scan.FirstRun, deletedName, retryIssues, tasks, cancel.Token, ct, selection);
         }
         catch (Exception error) { failure = error; }
         try
@@ -55,15 +58,16 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
 
     private async Task RunRowsAsync(ListedSkips scan, Guid scanToken, bool firstRun,
         Func<string, bool>? deletedName, IReadOnlySet<long>? retryIssues, TaskSet tasks,
-        CancellationToken runToken, CancellationToken callerToken)
+        CancellationToken runToken, CancellationToken callerToken, WorkSelection? selection)
     {
         var pair = _context.Pair;
         var store = _context.Store;
         var scope = _context.Scope;
-        var earlier = store.ActiveFolderRemovals(pair.PairId, runToken).Select(operation => operation.OperationId)
-            .ToHashSet(StringComparer.Ordinal);
+        var batch = _context.BatchScope is not null;
+        var earlier = batch ? new HashSet<string>(StringComparer.Ordinal) :
+            store.ActiveFolderRemovals(pair.PairId, runToken).Select(operation => operation.OperationId).ToHashSet(StringComparer.Ordinal);
         Stage(TextKey.StageAfterListing);
-        store.ReplaceSkipped(pair.PairId, scanToken, scan.Local.Concat(scan.Dropbox));
+        if (!batch) store.ReplaceSkipped(pair.PairId, scanToken, scan.Local.Concat(scan.Dropbox));
         var localUntrusted = new PrefixSet();
         long skipped = 0;
         foreach (var item in scan.Local)
@@ -72,34 +76,53 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
             _context.Events(RunEvent.Stage(TextKey.StageAfterListing, count: ++skipped,
                 inProgress: true, path: item.Path));
         }
-        var allPairs = store.Pairs();
-        var stages = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var storedPair in allPairs)
+        if (!batch)
         {
-            _context.Events(RunEvent.Stage(TextKey.StageAfterListing, inProgress: true));
-            var path = store.Pending(storedPair.PairId) switch
+            var allPairs = store.Pairs();
+            var stages = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var storedPair in allPairs)
             {
-                CurrentPending current => current.Value.Stage?.Path,
-                LegacyPending legacy => legacy.StagePath,
-                NoPending => null,
-                _ => throw new InvalidDataException()
-            };
-            if (path is not null) stages.Add(Path.GetFileName(path));
+                _context.Events(RunEvent.Stage(TextKey.StageAfterListing, inProgress: true));
+                var path = store.Pending(storedPair.PairId) switch
+                {
+                    CurrentPending current => current.Value.Stage?.Path,
+                    LegacyPending legacy => legacy.StagePath,
+                    NoPending => null,
+                    _ => throw new InvalidDataException()
+                };
+                if (path is not null) stages.Add(Path.GetFileName(path));
+            }
+            foreach (var (path, error) in _context.Recovery.RemoveStaleStages(stages))
+                _context.Events(RunEvent.Failed(error, TextKey.StageCleanupFailed, path));
         }
-        foreach (var (path, error) in _context.Recovery.RemoveStaleStages(stages))
-            _context.Events(RunEvent.Failed(error, TextKey.StageCleanupFailed, path));
         var applied = new PrefixSet();
         var pending = new PrefixSet();
-        if (pair.Exclusions.Count != 0)
+        var batchKey = batch ? PathNames.Key(_context.BatchScope!) : null;
+        foreach (var exclusion in pair.Exclusions)
         {
-            foreach (var exclusion in pair.Exclusions)
+            var key = PathNames.KeyFor(exclusion.Side, exclusion.Path);
+            if (batch)
+            {
+                if (exclusion.Keep || !PathNames.IsSelfOrUnderKey(key, batchKey!) &&
+                    !PathNames.IsSelfOrUnderKey(batchKey!, key)) continue;
+                try
+                {
+                    await using var permit = await _context.EnterOperationAsync(runToken);
+                    if (await _exclusions.ReadTargetAsync(exclusion, runToken) is not null) pending.Add(key);
+                }
+                catch (Exception error) when (ActionExecutor.IsItemError(error) || error is InventoryIncompleteException)
+                {
+                    pending.Add(key);
+                    _context.Events(RunEvent.Failed(error, path: exclusion.Path));
+                }
+            }
+            else
             {
                 _context.Events(RunEvent.Stage(TextKey.StageAfterListing, inProgress: true, path: exclusion.Path));
-                (await _exclusions.ApplyAsync(exclusion, retryIssues, runToken) ? applied : pending)
-                    .Add(PathNames.KeyFor(exclusion.Side, exclusion.Path));
+                (await _exclusions.ApplyAsync(exclusion, retryIssues, runToken) ? applied : pending).Add(key);
             }
         }
-        var proofs = ReconcileIssues(localUntrusted, scan.Dropbox, applied, pending);
+        var proofs = batch ? null : ReconcileIssues(localUntrusted, scan.Dropbox, applied, pending);
         var contexts = _items.ScanContexts(firstRun, retryIssues, proofs, deletedName);
         // The eligible in-use issues' own paths, from the state Repair already reads; one read per run, not per row.
         var itemRetries = new PrefixSet();
@@ -111,13 +134,16 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
         _context.Events(RunEvent.Stage(TextKey.StageAfterListing, ended: true, count: scan.Local.Count + scan.Dropbox.Count));
         Stage(TextKey.StageRenames);
         long renames = 0;
-        var renameGroups = store.ScanRenames(pair.PairId).ToLookup(candidate => candidate.Synced);
+        // A batch only adds: a listed rename would move a saved item away from its saved path.
+        var renameGroups = (batch ? [] : store.ScanRenames(pair.PairId, _context.ScanId)).ToLookup(candidate => candidate.Synced);
         var renameOrder = new PathLocks();
         var renamer = _items.Renamer();
         async Task Rename(IReadOnlyList<RenameCandidate> candidates, Entry? localById, IAsyncDisposable order)
         {
             await using (order)
             {
+                _context.Events(RunEvent.Stage(TextKey.StageRenames, count: Interlocked.Read(ref renames),
+                    total: renameGroups.Count, inProgress: true, path: candidates[0].Synced.LocalKey));
                 if (!contexts.HoldsRename(candidates))
                     await _items.RenameAsync(candidates, localById, runToken, completedScan: true);
                 _context.Events(RunEvent.Stage(TextKey.StageRenames, count: Interlocked.Increment(ref renames),
@@ -131,7 +157,7 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
             // Folder rebasing changes later groups' mapped footprints; finish it before scheduling those groups.
             if (group.Key.IsFolder) await tasks.WhenAllAsync();
             var localById = Renames.FirstOn(group, Side.Local)?.Moved;
-            if (localById is null && store.ScanEntry(pair.PairId, Side.Local, group.Key.LocalKey) is { } local &&
+            if (localById is null && store.ScanEntry(pair.PairId, _context.ScanId, Side.Local, group.Key.LocalKey) is { } local &&
                 local.Id == group.Key.LocalId) localById = local;
             var scopes = LockKeys.ForPaths(pair, renamer.Footprint(candidates, localById))
                 .Select(key => new PathLockScope(key, true)).ToArray();
@@ -163,8 +189,16 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
                 if (row.Context.UnderFolderDelete is not null && outcome.Effect is not null) restored.Add(row.Key);
                 // An ignored completion gives no answer; only a real one may add or clear this row's keys.
                 if (outcome.OwesWork(row, store, pair.PairId) is not { } owes) return;
+                if (owes && selection is not null && store.HoldingIssue(pair.PairId, row) is { } holder)
+                {
+                    // A failed batch child stays under its issue in this selection, so its Retry reaches that child alone.
+                    var path = row.PathOn(selection.Side) ?? row.Key;
+                    var entry = row.EntryOn(selection.Side);
+                    var notice = new ChangeNotice(selection.Side, ChangeKind.Changed, path, null, entry?.Id, entry, false, false);
+                    store.AttachIssueWork(selection, holder, [(notice, row.IsFolder(), row.Synced)]);
+                }
                 if (!owes && unresolved.Count == 0) return;
-                foreach (var key in RowKeys(row))
+                foreach (var key in Row.Keys(row))
                 {
                     if (owes) unresolved.Add(key);
                     else unresolved.Remove(key);
@@ -191,21 +225,33 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
                 firstFolders.Add((original, PathNames.Depth(original.Key)));
         }
         long completedRows = 0;
+        var held = new PrefixSet();
         async Task RunRow(Row original, Action? release)
         {
             _context.Events(RunEvent.Stage(TextKey.StageRows, count: Interlocked.Read(ref completedRows),
                 inProgress: true, path: original.Key));
             var outcome = await _items.RunRowAttemptAsync(contexts.WithProof(original),
-                runToken, release, Completed, itemRetries);
-            if (FolderRow(original)) Note(original, outcome);
+                runToken, release, Completed, itemRetries, selection);
+            if (FolderRow(original))
+            {
+                Note(original, outcome);
+                // A batch folder that did not succeed holds its subtree; folder rows run inline, before any child is read.
+                if (batch && !outcome.Succeeded() && !outcome.Deferred) held.Add(original.Key);
+            }
             _context.Events(RunEvent.Stage(TextKey.StageRows, count: Interlocked.Increment(ref completedRows),
                 inProgress: true, path: original.Key));
         }
         Stage(TextKey.StageRows);
         long rows = 0;
-        foreach (var row in store.ScanRows(pair.PairId, contexts.For))
+        foreach (var row in store.ScanRows(pair.PairId, _context.ScanId, contexts.For))
         {
             if (runToken.IsCancellationRequested) break;
+            if (batch && held.Covers(row.Key)) continue;
+            if (batch && !_ancestors.BatchAdmits(row))
+            {
+                Completed(row, new SyncOutcome(ActionKind.None, NoneReason.OutOfScope, null, null, false));
+                continue;
+            }
             rows++;
             if (FolderRow(row)) await RunRow(row, null);
             else
@@ -221,12 +267,15 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
         _context.Events(RunEvent.Stage(TextKey.StageRows, ended: true, count: rows));
         _completedFolders = 0;
         Stage(TextKey.StageFolderPlans);
-        var continued = await ContinueFolderFollowUpsAsync(earlier, Completed, unresolved, runToken);
+        var continued = batch ? new HashSet<string>(StringComparer.Ordinal) :
+            await ContinueFolderFollowUpsAsync(earlier, Completed, unresolved, runToken);
         _context.Events(RunEvent.Stage(TextKey.StageFolderPlans, count: _completedFolders,
             inProgress: true, total: folderPlans.Count + firstFolders.Count + continued.Count));
         var restoredAncestors = new HashSet<string>(restored.SelectMany(PathNames.Ancestors), PathNames.Comparer);
         await RunFolderPlansAsync(folderPlans, continued, restored, restoredAncestors, Completed, unresolved, runToken);
-        await FinalizeFoldersAsync(firstFolders, pending, unresolved, tasks, Completed, runToken, callerToken);
+        if (firstFolders.Count != 0 && (!batch || !_context.BatchIncomplete && _context.BatchUnlisted is null))
+            await _firstRunFolders.FinalizeFoldersAsync(firstFolders, pending, unresolved, tasks, Completed,
+                () => RowCapacity, FolderProgress, runToken, callerToken);
         runToken.ThrowIfCancellationRequested();
         _context.Events(RunEvent.Stage(TextKey.StageFolderPlans, ended: true,
             count: folderPlans.Count + firstFolders.Count + continued.Count));
@@ -237,7 +286,7 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
         var retained = _context.Store.RetainedFirstRun(_context.Pair.PairId);
         foreach (var (_, key) in scan.LocalFolders)
         {
-            var entry = _context.Store.ScanEntry(_context.Pair.PairId, Side.Local, key);
+            var entry = _context.Store.ScanEntry(_context.Pair.PairId, _context.ScanId, Side.Local, key);
             if (entry is not { IsFolder: true } || !IssuePolicy.ProtectsSubtree(entry.Skip)) continue;
             var row = Row.ForOneSide(Side.Local, key, entry, null, [], null, RowContext.Neutral);
             var kind = IssuePolicy.FirstRunKind(row, retained, false);
@@ -296,62 +345,12 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
                 FolderProgress(folder.Key);
                 var result = await _folders.FinishFolderRemovalAsync(id, null, ct, completed);
                 FolderProgress(folder.Key, completed: true);
-                foreach (var key in RowKeys(folder))
+                foreach (var key in Row.Keys(folder))
                 {
                     if (result.Status == FolderRemovalStatus.Complete) unresolved.Remove(key);
                     else unresolved.Add(key);
                 }
             }
-        }
-    }
-
-    private async Task FinalizeFoldersAsync(List<(Row Folder, int Depth)> folders,
-        PrefixSet pendingExclusions, HashSet<string> unresolved, TaskSet tasks,
-        Action<Row, SyncOutcome> completed, CancellationToken ct, CancellationToken callerToken)
-    {
-        if (folders.Count == 0) return;
-        var queued = new HashSet<string>(folders.SelectMany(folder => RowKeys(folder.Folder)), PathNames.Comparer);
-        var unfinished = new HashSet<string>(PathNames.Comparer);
-        void Seed(string key)
-        {
-            if (queued.Contains(key)) return;
-            foreach (var ancestor in PathNames.Ancestors(key)) unfinished.Add(ancestor);
-        }
-        foreach (var key in unresolved) Seed(key);
-        foreach (var key in pendingExclusions.Keys) Seed(key);
-        foreach (var issue in _context.Store.Issues(_context.Pair.PairId, IssueClosure.AfterHeldInSync))
-        {
-            if (issue.Subject.Items.Count == 0) Seed(PathNames.Key(issue.Path));
-            else foreach (var item in issue.Subject.Items)
-            {
-                if (item.Side != Side.Local) continue;
-                if (!_context.Scope.Excludes(item.Path, null, false) ||
-                    !_context.Scope.Excludes(item.Path, null, true)) Seed(PathNames.Key(item.Path));
-            }
-        }
-        foreach (var level in folders.GroupBy(folder => folder.Depth).OrderByDescending(level => level.Key))
-        {
-            var failed = new HashSet<string>(PathNames.Comparer);
-            async Task Finalize(Row folder, bool blocked)
-            {
-                FolderProgress(folder.Key);
-                var outcome = await _firstRunFolders.FinalizeFirstRunFolderAsync(folder, blocked, ct, completed);
-                FolderProgress(folder.Key, completed: true);
-                if (outcome.Succeeded()) return;
-                lock (failed)
-                    foreach (var key in RowKeys(folder)) failed.Add(key);
-            }
-            foreach (var (folder, _) in level)
-            {
-                var blocked = RowKeys(folder).Any(unfinished.Contains) || pendingExclusions.Overlaps(folder.Key);
-                tasks.Add(Finalize(folder, blocked));
-                await tasks.WaitForCapacityAsync(() => RowCapacity, callerToken,
-                    _context.Admission.WorkCapacity);
-            }
-            await tasks.WhenAllAsync();
-            ct.ThrowIfCancellationRequested();
-            foreach (var key in failed)
-                foreach (var ancestor in PathNames.Ancestors(key)) unfinished.Add(ancestor);
         }
     }
 
@@ -375,7 +374,7 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
         Entry? Scanned(Side side, string path)
         {
             if (!entries.TryGetValue((side, path), out var entry))
-                entries.Add((side, path), entry = store.ScanEntry(pair.PairId, side, PathNames.KeyFor(side, path)));
+                entries.Add((side, path), entry = store.ScanEntry(pair.PairId, _context.ScanId, side, PathNames.KeyFor(side, path)));
             return entry;
         }
         foreach (var issue in store.Issues(pair.PairId, IssueClosure.AfterHeldInSync))
@@ -387,12 +386,7 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
             if (IssuePolicy.Obsolete(issue, Scanned, localUntrusted, remoteUntrusted, appliedExclusions,
                 pendingExclusions, _context.Scope, protectedByOwner))
             {
-                store.Commit(pair.PairId, StateChange.Empty with
-                {
-                    FirstRunAcknowledged = issue.Subject.FirstRunDeletion == IssueSubject.FirstRunDeletionKind.None
-                        ? [] : issue.Subject.Items.Where(item => item.Side == Side.Local).ToArray(),
-                    Close = [(issue.Path, new[] { issue.Kind })]
-                });
+                store.CloseScanIssue(pair.PairId, _context.ScanId, issue);
                 continue;
             }
             if (issue.Kind is not (IssueKind.Tie or IssueKind.NameClash) || issue.Subject.LocalHash is null) continue;
@@ -410,18 +404,6 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
         _context.Events(RunEvent.Stage(TextKey.StageFolderPlans,
             count: completed ? Interlocked.Increment(ref _completedFolders) : Interlocked.Read(ref _completedFolders),
             inProgress: true, path: path));
-
-    private static IEnumerable<string> RowKeys(Row row)
-    {
-        yield return row.Key;
-        if (row.Local is { } local) yield return PathNames.KeyFor(Side.Local, local.Path);
-        if (row.Dropbox is { } remote) yield return PathNames.KeyFor(Side.Dropbox, remote.Path);
-        if (row.Synced is { } saved)
-        {
-            yield return saved.LocalKey;
-            yield return saved.DropboxKey;
-        }
-    }
 
     private static bool FolderRow(Row row) =>
         row.Local?.IsFolder == true || row.Dropbox?.IsFolder == true || row.Synced?.IsFolder == true;

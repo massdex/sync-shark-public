@@ -44,7 +44,266 @@ public static class ScanPassChecks
         foreach (var refusal in new[] { "identity", "no-effect", "saved-only" })
             await RefusedBranchReplansAsync(refusal);
         await ListingCountAsync();
+        await FirstRunFinalizerFailureAsync();
+        await BatchExclusionProbeAsync();
+        await BatchAncestorAdmissionAsync();
+        await FirstRunBothSideBarriersAsync();
     }
+
+    public static void FreshIssuesSurviveReconciliation() => FreshIssuesAsync().GetAwaiter().GetResult();
+
+    private static Task FreshIssuesAsync() => WithFolder("fresh-issues", async folder =>
+    {
+        using var rig = NewRig(Pair());
+        var store = rig.Store;
+        var pairId = rig.Pair.PairId;
+        void Raise(string path, string id, bool retained) => store.Commit(pairId, StateChange.Empty with
+        {
+            Raise = [(IssueKind.Failure, TextKey.FailChanged, path, new IssueSubject(
+                [new IssueItem(Side.Local, path, id)], null, FirstRunDeletion: retained
+                    ? IssueSubject.FirstRunDeletionKind.Item : IssueSubject.FirstRunDeletionKind.None))]
+        });
+        Raise("Old", "old", false);
+        Raise("Updated", "old", true);
+        var token = store.BeginScan(pairId, store.ReadPairExecution(pairId)!.Value.Generation, false);
+        await store.OpenScan(pairId, Side.Local, ScanTestSettings.BatchRows).CompleteAsync();
+        await store.OpenScan(pairId, Side.Dropbox, ScanTestSettings.BatchRows).CompleteAsync();
+        // A live batch publishes these failures after Repair has completed its empty listing.
+        Raise("Updated", "new", true);
+        Raise("New", "new", true);
+        using var log = Log(rig, folder, "reconcile");
+        var context = Context(rig, store, log, rig.Local, rig.Dropbox, Settings, null, null);
+        var syncer = new Syncer(context, new SyncPorts(new LeaseBoundary(),
+            RefusingExecutionBoundary.Instance, new LeaseBoundary(), LocalSide.HashSlots));
+        await syncer.SyncScannedAsync(token, new ListedSkips([], [], [], []), null, default);
+        Check.Require(store.Issues(pairId).Select(issue => issue.Path).Order().SequenceEqual(new[] { "New", "Updated" }) &&
+            store.RetainedFirstRun(pairId).Count == 2,
+            "S-G2 actual reconciliation closes covered old evidence but preserves newer failures and first-run subjects");
+        await store.EndScanAsync(pairId, token, Settings.StoragePageSize);
+    });
+
+    private static Task FirstRunBothSideBarriersAsync() => WithFolder("both-side-barrier", async directory =>
+    {
+        const string child = "Parent/G/Child";
+        foreach (var batch in new[] { false, true })
+        foreach (var subjectSide in new Side?[] { Side.Local, Side.Dropbox, null })
+        foreach (var excluded in new[] { false, true })
+        {
+            var pair = Pair() with
+            {
+                Exclusions = excluded ? [new Exclusion(subjectSide ?? Side.Local, child, true)] : []
+            };
+            using var rig = NewRig(pair);
+            var roots = new List<(Entry Local, Entry Remote)>();
+            foreach (var path in new[] { "Parent/G", "Parent/H" })
+            {
+                var local = await rig.Local.EnsureFolderAsync(path, default);
+                var remote = await rig.Dropbox.EnsureFolderAsync(path, default);
+                roots.Add((local, remote));
+                rig.Store.Commit(pair.PairId, StateChange.Empty with
+                {
+                    Raise = [(IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, path,
+                        new IssueSubject([new IssueItem(Side.Local, path, local.Id)], null,
+                            FirstRunDeletion: IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice))]
+                });
+            }
+            using var log = Log(rig, directory, Guid.NewGuid().ToString("N"));
+            var injected = false;
+            var context = Context(rig, rig.Store, log, rig.Local, rig.Dropbox, Settings, null, null) with
+            {
+                BatchScope = batch ? "Parent" : null,
+                Events = item =>
+                {
+                    if (injected || item.StageKey != TextKey.StageFolderPlans) return;
+                    injected = true;
+                    rig.Store.Commit(pair.PairId, StateChange.Empty with
+                    {
+                        Raise = [(IssueKind.Failure, TextKey.ReadLocalFailed, child,
+                            new IssueSubject(subjectSide is { } side ? [new IssueItem(side, child, "child-id")] : [], null))]
+                    });
+                }
+            };
+            var token = rig.Store.BeginScan(pair.PairId, context.ExpectedGeneration, false, batch ? "Parent" : null);
+            foreach (var side in Enum.GetValues<Side>())
+            {
+                var sink = rig.Store.OpenScan(pair.PairId, side, ScanTestSettings.BatchRows);
+                foreach (var entries in roots)
+                {
+                    var entry = side == Side.Local ? entries.Local : entries.Remote;
+                    await sink.AddAsync(new Listed(entry.Path, entry), default);
+                }
+                await sink.CompleteAsync();
+            }
+            await new Syncer(context, new SyncPorts(new LeaseBoundary(), RefusingExecutionBoundary.Instance,
+                new LeaseBoundary(), 0)).SyncScannedAsync(token, new ListedSkips([], [], [], []), null, default);
+            var issues = rig.Store.Issues(pair.PairId);
+            Check.Require(injected && issues.Any(issue => issue.Path == "Parent/G" && issue.Kind == IssueKind.Failure)
+                == (!excluded || subjectSide is null),
+                "both-side and item-less issues hold ancestor settlement; subject exclusion uses its actual side");
+            Check.Require(issues.All(issue => issue.Path != "Parent/H" || issue.Kind != IssueKind.Failure),
+                "an issue in one subtree never holds an independent sibling");
+        }
+    });
+
+    private static Task BatchAncestorAdmissionAsync() => WithFolder("batch-ancestor", async directory =>
+    {
+        foreach (var later in new[] { false, true })
+        {
+            using var rig = NewRig(Pair());
+            var store = rig.Store;
+            var pair = rig.Pair.PairId;
+            var generation = store.ReadPairExecution(pair)!.Value.Generation;
+            foreach (var side in Enum.GetValues<Side>())
+            {
+                var source = store.ReadSource(pair, side)!.Value;
+                store.AdvanceSource(pair, side, generation, source.Epoch, source.Revision,
+                    source.Provenance, source.Cursor, source.Epoch, source.Revision, source.Provenance,
+                    source.Cursor, null);
+            }
+            var parent = await rig.Local.EnsureFolderAsync("Parent", default);
+            var child = await PutAsync(rig.Local, "Parent/Child");
+            var domain = rig.Pair.Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            long Acquire(Entry entry)
+            {
+                var source = store.ReadSource(pair, Side.Local)!.Value;
+                var position = store.ReadJournal(domain)!;
+                return store.AcquireJournalPage(domain, position, position with { NextUsn = position.NextUsn + 1 },
+                    [(pair, generation, source.Epoch, source.Revision, false)],
+                    [(pair, new ChangeNotice(Side.Local, ChangeKind.Changed, entry.Path, null, entry.Id, entry, false, false))])!.Value;
+            }
+            if (!later) Acquire(parent);
+            var through = Acquire(child);
+            var selection = new WorkSelection(pair, generation, store.ReadSource(pair, Side.Local)!.Value.Epoch,
+                Side.Local, domain, child.Id, PathNames.Key(child.Path), through, through);
+            if (later) Acquire(parent);
+            var token = store.BeginScan(pair, generation, false, "Parent");
+            var sink = store.OpenScan(pair, Side.Local, ScanTestSettings.BatchRows);
+            await sink.AddAsync(new Listed(child.Path, child), default);
+            await sink.CompleteAsync();
+            await store.OpenScan(pair, Side.Dropbox, ScanTestSettings.BatchRows).CompleteAsync();
+            using var log = Log(rig, directory, Guid.NewGuid().ToString("N"));
+            var local = new CountingSide(rig.Local);
+            var remote = new CountingSide(rig.Dropbox);
+            var context = Context(rig, store, log, local, remote, Settings, null, null) with { BatchScope = "Parent" };
+            LiveAdmissionStaleException? refusal = null;
+            try
+            {
+                await new Syncer(context, new SyncPorts(new LeaseBoundary(), RefusingExecutionBoundary.Instance,
+                    new LeaseBoundary(), 0)).SyncScannedAsync(token, new ListedSkips([], [], [], []), null, default, selection);
+            }
+            catch (LiveAdmissionStaleException error) { refusal = error; }
+            Check.Require((refusal is not null) == later,
+                "a batch leaves an older pending ancestor's child but throws Stale for a later owner");
+            Check.Require(local.Reads + remote.Reads + local.Work + remote.Work == 0 &&
+                store.SyncedByKey(pair, Side.Local, PathNames.Key(child.Path)) is null &&
+                store.Issues(pair).Count == 0 && store.ReadWork(selection).Any(),
+                "a batch leaves the child unobserved, unsucceeded and undeferred, with its acquired work still owed");
+            await store.EndScanAsync(pair, token, Settings.StoragePageSize);
+        }
+    });
+
+    private static Task BatchExclusionProbeAsync() => WithFolder("batch-exclusion", async directory =>
+    {
+        const string root = "Parent/Root";
+        foreach (var side in Enum.GetValues<Side>())
+        foreach (var location in new[] { "above", "below", "outside" })
+        foreach (var state in new[] { "present", "absent", "keep", "failed" })
+        {
+            var path = location == "above" ? "Parent" : location == "below" ? root + "/Excluded" : "Elsewhere";
+            var exclusion = new Exclusion(side, path, state == "keep");
+            using var rig = NewRig(Pair() with { Exclusions = [exclusion] });
+            var localRoot = await rig.Local.EnsureFolderAsync(root, default);
+            var remoteRoot = await rig.Dropbox.EnsureFolderAsync(root, default);
+            if (state != "absent") await (side == Side.Local ? rig.Local : rig.Dropbox).EnsureFolderAsync(path, default);
+            rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with
+            {
+                Raise = [(IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, root,
+                    new IssueSubject([new IssueItem(Side.Local, root, localRoot.Id)], null,
+                        FirstRunDeletion: IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice))]
+            });
+            var fault = new ItemFailedException(path, Text.ReadFailedOn(side), null);
+            var reads = 0;
+            var source = new ProxySide(side == Side.Local ? rig.Local : rig.Dropbox)
+            {
+                OnRead = value => { if (value == path) reads++; },
+                ReadFault = value => value == path && state == "failed" ? fault : null
+            };
+            var local = new CountingSide(side == Side.Local ? source : rig.Local);
+            var remote = new CountingSide(side == Side.Dropbox ? source : rig.Dropbox);
+            using var log = Log(rig, directory, Guid.NewGuid().ToString("N"));
+            var events = new List<RunEvent>();
+            var context = Context(rig, rig.Store, log, local, remote, Settings, null, null) with
+            {
+                BatchScope = root, Events = item => events.Add(item)
+            };
+            var token = rig.Store.BeginScan(rig.Pair.PairId, context.ExpectedGeneration, false, root);
+            var localSink = rig.Store.OpenScan(rig.Pair.PairId, Side.Local, ScanTestSettings.BatchRows);
+            await localSink.AddAsync(new Listed(root, localRoot), default);
+            await localSink.CompleteAsync();
+            var remoteSink = rig.Store.OpenScan(rig.Pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows);
+            await remoteSink.AddAsync(new Listed(root, remoteRoot), default);
+            await remoteSink.CompleteAsync();
+            await new Syncer(context, new SyncPorts(new LeaseBoundary(), RefusingExecutionBoundary.Instance,
+                new LeaseBoundary(), 0)).SyncScannedAsync(token, new ListedSkips([], [], [], []), null, default);
+            var probed = location != "outside" && state != "keep";
+            Check.Require(reads == (probed ? 1 : 0) &&
+                events.Count(item => ReferenceEquals(item.Error, fault)) == (probed && state == "failed" ? 1 : 0),
+                "batch probes only overlapping non-Keep targets once, and diagnoses a failed read");
+            Check.Require(local.Work + remote.Work + local.Hashes + remote.Hashes == 0,
+                "batch exclusion probes never copy, hash, rename or remove their target");
+            if (location == "below")
+                Check.Require(rig.Store.Issues(rig.Pair.PairId).Any(issue =>
+                    issue.Path == root && issue.Kind == IssueKind.Failure) == (state is "present" or "failed"),
+                    "present or unreadable descendants hold first-run settlement; absent and Keep targets do not");
+        }
+    });
+
+    private static Task FirstRunFinalizerFailureAsync() => WithFolder("finalizer-failure", async directory =>
+    {
+        using var rig = NewRig(Pair());
+        foreach (var path in new[] { "Parent", "Parent/G", "Parent/H" })
+        {
+            var local = await rig.Local.EnsureFolderAsync(path, default);
+            await rig.Dropbox.EnsureFolderAsync(path, default);
+            rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with
+            {
+                Raise = [(IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, path,
+                    new IssueSubject([new IssueItem(Side.Local, path, local.Id)], null,
+                        FirstRunDeletion: IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice))]
+            });
+        }
+        var finalizing = false;
+        var reads = 0;
+        var remote = new ProxySide(rig.Dropbox)
+        {
+            ReadFault = path => finalizing && path == "Parent/G"
+                ? new ItemFailedException(path, TextKey.FailDropboxNoPermission, null) : null,
+            OnRead = path => { if (finalizing && path == "Parent/G") reads++; }
+        };
+        using var log = Log(rig, directory, "run");
+        var token = rig.Store.BeginScan(rig.Pair.PairId, rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation, false);
+        await ListAsync(rig.Local, rig.Store.OpenScan(rig.Pair.PairId, Side.Local, ScanTestSettings.BatchRows), [], [], false, default);
+        await ListAsync(remote, rig.Store.OpenScan(rig.Pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows), [], [], false, default);
+        var context = Context(rig, rig.Store, log, rig.Local, remote, Settings, null, null) with
+        {
+            Events = item =>
+            {
+                log.Event(item);
+                if (item.StageKey == TextKey.StageFolderPlans) finalizing = true;
+            }
+        };
+        await new Syncer(context, new SyncPorts(new LeaseBoundary(), RefusingExecutionBoundary.Instance,
+            new LeaseBoundary(), LocalSide.HashSlots)).SyncScannedAsync(token, new ListedSkips([], [], [], []), null, default);
+        var issues = rig.Store.Issues(rig.Pair.PairId);
+        Check.Require(reads > 0 && issues.Any(issue => issue.Path == "Parent/G" &&
+            issue.Kind == IssueKind.Failure && issue.Cause == TextKey.FailDropboxNoPermission),
+            "A finalizer observation failure remains on its own folder.");
+        Check.Require(issues.Any(issue => issue.Path == "Parent" && issue.Kind == IssueKind.Failure &&
+            issue.Subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None) &&
+            issues.All(issue => issue.Path != "Parent/H" || issue.Kind != IssueKind.Failure) &&
+            issues.Any(issue => issue.Path == "Parent/H" && issue.Cause == TextKey.InfoDropboxHistoryUnchecked),
+            "The failed folder holds its parent while the independent sibling finishes and closes its failure.");
+    });
 
     private static Task StaleListedAdoptionAsync() => WithFolder("stale-listed-adoption", async folder =>
     {
@@ -843,6 +1102,10 @@ public static class ScanPassChecks
         Check.Require(messages.Any(message => message.Contains("progress; count 1 of 2;") &&
             message.Contains("elapsed") && message.Contains(".TXT")),
             "a rename blocked at its provider boundary reports completed groups, exact total, current path and elapsed time");
+        if (!held)
+            Check.Require(messages.Any(message => message.Contains("progress; count 0 of 2;") &&
+                message.Contains("A.TXT")),
+                "the first rename publishes its path and total before its first provider read completes");
         log.Dispose();
         Check.Require(File.ReadLines(log.Path).Count(line => line.Contains(nameof(TextKey.StageRenames))) == quietSignals + 2,
             "rename stage writes only begin, one snapshot per provider-boundary quiet signal, and end");
@@ -857,9 +1120,9 @@ public static class ScanPassChecks
 
     private sealed class QuietRowsStore(IStateStore inner, RunLog log) : ForwardingStateStore(inner)
     {
-        public override IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context)
+        public override IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context)
         {
-            foreach (var row in base.ScanRows(pairId, context))
+            foreach (var row in base.ScanRows(pairId, scanId, context))
             {
                 yield return row;
                 log.ReportProgress();
@@ -1013,6 +1276,7 @@ public static class ScanPassChecks
             ItemAttempts: itemAttempts ?? new FakeItemAttempts(), Opportunity: new object(),
             ExpectedGeneration: store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation)
         {
+            ScanId = ScanFixture.TokenOrNone(store, rig.Pair.PairId),
             CaptureFolderCursorAsync = _ => Task.FromResult("fixture-cursor"),
             ReadFolderChangesAsync = (_, ct) => NoFolderChangesAsync(ct)
         };
@@ -1127,6 +1391,7 @@ public static class ScanPassChecks
         {
             public void Require(string pairId, long generation, IReadOnlyList<string> requiredLockKeys) { }
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) { }
+            public void Revalidate() { }
             public ValueTask ReleaseAdmissionAsync() => default;
             public ValueTask DisposeAsync() => default;
         }

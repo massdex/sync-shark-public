@@ -23,6 +23,33 @@ AppDomain.CurrentDomain.ProcessExit += (_, _) =>
 if (args is ["--setup-update-checks"])
     return SetupUpdateChecks.Run();
 
+if (args is ["--data-location-crash-child", var moveAllocation, var moveToken, var moveHome,
+    var moveSource, var moveTarget, var movePhase, var moveDirection])
+{
+    await DataLocationChecks.CrashChildAsync(moveAllocation, moveToken, moveHome, moveSource, moveTarget, movePhase, moveDirection);
+    return 0;
+}
+if (args is ["--data-location-recovery-checks", var moveRecoveryRoot])
+{
+    await DataLocationChecks.RecoveryAsync(moveRecoveryRoot);
+    return 0;
+}
+if (args is ["--data-location-targeted-checks"])
+{
+    await DataLocationChecks.TargetedRecoveryAsync();
+    return 0;
+}
+if (args is ["--data-location-targeted-checks", var targetedCase])
+{
+    await DataLocationChecks.TargetedRecoveryAsync(targetedCase);
+    return 0;
+}
+if (args is ["--data-location-destination-hold", var holdAllocation, var holdToken, var holdHome, var holdTarget])
+{
+    await DataLocationChecks.DestinationHoldChildAsync(holdAllocation, holdToken, holdHome, holdTarget);
+    return 0;
+}
+
 if (args is ["--engine-layout-checks"])
     return Massdex.SyncShark.EngineChecks.DependencyChecks.Run();
 
@@ -104,6 +131,12 @@ if (args is ["--v2-gap-promotion-bound-checks", var gapPromotionRoot])
     return 0;
 }
 
+if (args is ["--data-location-checks"])
+{
+    await DataLocationChecks.RunAsync(Path.Combine(Path.GetTempPath(), "sync-shark-data-location-tests", Guid.NewGuid().ToString("N")));
+    return 0;
+}
+
 if (args is ["--directory-lease-checks"])
 {
     await DirectoryLeaseChecks.RunAsync();
@@ -145,7 +178,6 @@ if (args is ["--v2-autosync-phase3-checks"])
 }
 if (args is ["--v2-autosync-process-checks"])
 {
-    await DataLocationChecks.RunAsync();
     await Massdex.SyncShark.V2.AutoSyncProcessChecks.RunAsync();
     return 0;
 }
@@ -1950,6 +1982,12 @@ if (args is ["--exact-file-upload-checks", var exactFileUploadRoot])
     return 0;
 }
 
+if (args is ["--atomic-file-checks"])
+{
+    AtomicFileChecks.Run();
+    return 0;
+}
+
 if (args is ["--installed-identity-checks"])
 {
     InstalledRuntimeIdentityChecks.Run();
@@ -2152,8 +2190,18 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
         policy_revision = pair.PolicyRevision
     }).ToArray();
     var rootsOwned = verdicts.All(item => item.local_inside_owned_allocation);
-    // Root sshark:755-r1 - READ-ONLY exact lookup of the originally bound pending operation, parameterised by
-    // its explicit id. No ORDER BY latest fallback, no new apply for discovery.
+    // The retained identities belong to the operator's captured clone, not to this repository. A step that
+    // needs one reports itself skipped when the manifest does not carry it.
+    using var journeyManifest = DiagnosticPaths.JourneyManifest();
+    string? ManifestValue(string name) => journeyManifest is { } manifest &&
+        manifest.RootElement.TryGetProperty(name, out var value) ? value.GetString() : null;
+    var retainedPairId = ManifestValue("pairId") ??
+        (journeyPairs.Count == 1 ? journeyPairs.Single().Id : null);
+    if (retainedPairId is null)
+        throw new InvalidOperationException("Set " + DiagnosticPaths.JourneyManifestVariable +
+            " with the retained pairId: the clone carries " + journeyPairs.Count + " pairs.");
+    // READ-ONLY exact lookup of the originally bound pending operation, parameterised by its explicit id.
+    // No ORDER BY latest fallback, no new apply for discovery.
     List<Dictionary<string, string?>> ReadRows(SqliteConnection readConnection, string sql,
         params (string Name, string Value)[] readParameters)
     {
@@ -2172,7 +2220,9 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
         }
         return readResult;
     }
-    const string boundOperationId = "operation-f00d0000000000000000000000000022";
+    var boundOperationId = ManifestValue("boundOperationId");
+    // A skipped bound-operation lookup is missing required evidence: it can never be part of a COMPLETE run.
+    var boundOperationSkipped = boundOperationId is null;
     // Per-path accepted-effect observability from the product's OWN retained evidence: known-success effect
     // receipts for this pair. No JSON substring and no HTTP request counting.
     long ReadAcceptedReceiptCount(string databasePath, string pairId)
@@ -2188,6 +2238,10 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
         receiptCommand.Parameters.AddWithValue("$pair", pairId);
         return Convert.ToInt64(receiptCommand.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
+    if (boundOperationId is null)
+        Console.WriteLine("SKIP bound-operation lookup: the manifest names no captured bound operation; set " +
+                          DiagnosticPaths.JourneyManifestVariable + " for this retained clone.");
+    else
     using (var boundLookup = new SqliteConnection("Data Source=" + database + ";Mode=ReadOnly;Pooling=False"))
     {
         boundLookup.Open();
@@ -2219,26 +2273,28 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
                 "(SELECT group_concat(m.role || '=' || coalesce(m.expected_path_key,'')) FROM operation_member m " +
                 " WHERE m.operation_id=o.operation_id) AS members " +
                 "FROM operation o WHERE o.pair_id=$pair AND o.status NOT IN ('completed','superseded') " +
-                "ORDER BY o.rowid;", ("$pair", "f00d000000000000001f"));
+                "ORDER BY o.rowid;", ("$pair", retainedPairId));
             var attempts = ReadRows(staleLookup,
                 "SELECT a.operation_id, a.attempt_id, a.status AS attempt_status, a.effect_kind, " +
                 "(SELECT count(*) FROM effect_receipt r WHERE r.attempt_id=a.attempt_id) AS receipts " +
                 "FROM operation_attempt a JOIN operation o ON o.operation_id=a.operation_id " +
                 "WHERE o.pair_id=$pair AND o.status NOT IN ('completed','superseded') ORDER BY a.rowid;",
-                ("$pair", "f00d000000000000001f"));
+                ("$pair", retainedPairId));
             var owners = ReadRows(staleLookup,
                 "SELECT DISTINCT json_extract(h.detail_json,'$.RunId') AS run_id, " +
                 "json_extract(h.detail_json,'$.OperationId') AS operation_id " +
                 "FROM history_event h JOIN operation o ON o.operation_id=json_extract(h.detail_json,'$.OperationId') " +
                 "WHERE h.event_kind='presentation' AND json_valid(h.detail_json) AND o.pair_id=$pair " +
-                "AND o.status NOT IN ('completed','superseded');", ("$pair", "f00d000000000000001f"));
+                "AND o.status NOT IN ('completed','superseded');", ("$pair", retainedPairId));
             Console.WriteLine(JsonSerializer.Serialize(new { schema = "r697-nonterminal-operations/1",
                 nonterminal_operations = nonterminal, attempts, owning_runs = owners },
                 new JsonSerializerOptions { WriteIndented = true }));
         }
-        Console.WriteLine("PARTIAL cloned-state journey (read-only): host opened and the originally bound " +
-                          "operation was looked up by explicit id; the apply/retry effects path was NOT started " +
-                          "(pass --journey-effects to enable it)");
+        Console.WriteLine("PARTIAL cloned-state journey (read-only): host opened" +
+                          (boundOperationSkipped
+                              ? "; the bound-operation lookup was SKIPPED (the manifest names no captured id)"
+                              : " and the originally bound operation was looked up by explicit id") +
+                          "; the apply/retry effects path was NOT started (pass --journey-effects to enable it)");
         return 3;
     }
     var steps = new List<object>();
@@ -2263,7 +2319,7 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
     {
         if (journeyPairs.Count != 1 && !(mixedOverlap && journeyPairs.Count == 2))
             throw new InvalidDataException("The journey rebinds exactly one retained published pair; found " + journeyPairs.Count);
-        var retainedPair = journeyPairs.Single(pair => pair.Id == "f00d000000000000001f");
+        var retainedPair = journeyPairs.Single(pair => pair.Id == retainedPairId);
         var isolatedRoot = Path.Combine(full, "journey", "local");
         Directory.CreateDirectory(isolatedRoot);
         if ((File.GetAttributes(isolatedRoot) & FileAttributes.ReparsePoint) != 0)
@@ -2329,7 +2385,7 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
                 bool IsRetainedJourneyPath(string path) =>
                     !path.Contains('/') && (path == "clash.txt" || path.StartsWith("journey-", StringComparison.Ordinal)) ||
                     mixedOverlap && (path is "Child/journey-mixed-download.txt" or "Child/journey-mixed-conflict.txt");
-                if (rebound.Id != "f00d000000000000001f" ||
+                if (rebound.Id != retainedPair.Id ||
                     !string.Equals(Path.GetFullPath(rebound.LocalRoot), isolatedRoot, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException("Retained retry proof requires the exact already-isolated fixture pair.");
                 var seeds = ReadRows(connection, """
@@ -2402,17 +2458,28 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
                 {
                     await MixedClonedJourneyChecks.RunAsync(journeyHost, journeyDatabase, providerWire,
                         binding, rebound, isolatedRoot, JourneyCli);
-                    complete = true;
+                    complete = !boundOperationSkipped;
                 }
                 else
                 {
-                var retainedRetries = new[]
-                {
-                    (Run: "command-f00d000000000000000000000000000b", Operation: "operation-f00d0000000000000000000000000011", Path: "journey-fail-1791571766.txt"),
-                    (Run: "command-f00d0000000000000000000000000018", Operation: "operation-f00d0000000000000000000000000003", Path: "journey-fail-1791572666.txt"),
-                    (Run: "command-f00d0000000000000000000000000019", Operation: "operation-f00d000000000000000000000000000c", Path: "journey-fail-1791573296.txt"),
-                    (Run: "command-f00d0000000000000000000000000010", Operation: "operation-f00d0000000000000000000000000024", Path: "journey-fail-1791576013.txt")
-                };
+                var retainedRetries = new List<(string Run, string Operation, string Path)>();
+                if (journeyManifest is { } retryManifest &&
+                    retryManifest.RootElement.TryGetProperty("retainedRetries", out var retryItems))
+                    foreach (var retryItem in retryItems.EnumerateArray())
+                        retainedRetries.Add((retryItem.GetProperty("run").GetString()!,
+                            retryItem.GetProperty("operation").GetString()!, retryItem.GetProperty("path").GetString()!));
+                // The original proof covers exactly four distinct retained retry SELECTIONS: the (run, path)
+                // pair is the coverage identity, so a differing operation id cannot pad the count. The
+                // per-target assertions below still pin each exact operation id.
+                var distinctRetryTargets = retainedRetries
+                    .Select(item => (item.Run, item.Path))
+                    .Distinct().Count();
+                var retainedRetriesProven = retainedRetries.Count == 4 && distinctRetryTargets == 4;
+                if (!retainedRetriesProven)
+                    steps.Add(new { step = "retained_retry", skipped = true,
+                        reason = "The retained retry proof requires exactly four distinct captured targets; found " +
+                            retainedRetries.Count + " entries and " + distinctRetryTargets +
+                            " distinct. Set " + DiagnosticPaths.JourneyManifestVariable + " with them." });
                 foreach (var target in retainedRetries)
                 {
                     var preview = await journeyHost.LoadRunRetryAsync(target.Run, selectedPairId: rebound.Id);
@@ -2465,9 +2532,9 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
                     Console.WriteLine(JsonSerializer.Serialize(steps[^1]));
                     if (!exact) throw new InvalidDataException("Selected retained retry did not complete exactly once: " + retry.Err);
                 }
-                complete = true;
+                complete = retainedRetriesProven && !boundOperationSkipped;
                 steps.Add(new { step = "retained_retry_scope", restored_fixture_files = seeds.Count,
-                    selected_retries_complete = true, whole_pair_first_sync_not_claimed = true,
+                    selected_retries_complete = retainedRetriesProven, whole_pair_first_sync_not_claimed = true,
                     reason = "Earlier reviews deliberately skipped other paths; their consent is not expanded by retry." });
                 if (completeRetainedReview)
                 {
@@ -2582,7 +2649,7 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
                         delta = new { db = afterReview.Db - beforeReview.Db, wal = afterReview.Wal - beforeReview.Wal,
                             shm = afterReview.Shm - beforeReview.Shm } });
                     Console.WriteLine(JsonSerializer.Serialize(steps[^1]));
-                    complete = true;
+                    complete = retainedRetriesProven && !boundOperationSkipped;
                 }
             }
                 }
@@ -2843,6 +2910,8 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
             if (retryRun is null) missing.Add("no retained retry run links to the origin run");
             if (!retryMentionsFail) missing.Add("the retry run does not retain the previously failed file");
             if (retryMentionsOk) missing.Add("the retry run re-touched the previously completed file (retransfer risk)");
+            if (boundOperationSkipped)
+                missing.Add("the bound-operation lookup was skipped: the manifest names no captured id");
             complete = missing.Count == 0;
             if (!complete) firstFailure = string.Join(" | ", missing);
             }
@@ -2860,6 +2929,9 @@ static async Task<int> RunClonedStateJourney(string cloneRoot, bool allowEffects
     {
         firstFailure = journeyError.GetType().Name + ": " + journeyError.Message + "\n" + journeyError.StackTrace;
     }
+    // Missing manifest evidence is never a silent pass: a skipped bound-operation lookup cannot end COMPLETE.
+    if (!complete && firstFailure is null && boundOperationSkipped)
+        firstFailure = "the bound-operation lookup was skipped: the manifest names no captured id";
     if (!settled)
     {
         journeyHost.Dispose();

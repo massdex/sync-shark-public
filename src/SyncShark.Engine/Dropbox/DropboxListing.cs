@@ -6,6 +6,10 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// <summary>Dropbox listing and single-item read (section 5.3).</summary>
 public sealed partial class DropboxListing(DropboxApi api, PairConfig pair, PathScope scope)
 {
+    // One queued spelling entry enters or leaves its ancestor accounting.
+    private const int SpellingQueued = 1;
+    private const int SpellingReleased = -1;
+
     // The listing envelope's field names, readable only through this owner (F23).
     internal static string EntriesName => DropboxProtocol.Entries;
     internal static string CursorName => DropboxProtocol.Cursor;
@@ -27,7 +31,8 @@ public sealed partial class DropboxListing(DropboxApi api, PairConfig pair, Path
         try
         {
         ct.ThrowIfCancellationRequested();
-        var spelling = new Spelling(under);
+        // History live rows are replaced by a fresh listing in PairScan; replay needs provider order, not spelling.
+        var spelling = options.Cursor is null ? new Spelling(under) : null;
         var released = new List<Listed>();
         long pages = 0;
         var currentPath = under;
@@ -90,8 +95,10 @@ public sealed partial class DropboxListing(DropboxApi api, PairConfig pair, Path
                     throw Incomplete(under, error);
                 }
                 currentPath = entries.Current.Path;
-                spelling.Add(PathNames.Same(entries.Current.Path, under)
-                    ? Requested(entries.Current, under) : entries.Current, released);
+                var item = PathNames.Same(entries.Current.Path, under)
+                    ? Requested(entries.Current, under) : entries.Current;
+                if (spelling is null) released.Add(item);
+                else spelling.Add(item, released);
                 for (var index = 0; index < released.Count; index++)
                 {
                     ct.ThrowIfCancellationRequested();
@@ -113,7 +120,7 @@ public sealed partial class DropboxListing(DropboxApi api, PairConfig pair, Path
             arg = new { cursor = page.Cursor };
         }
         options.Events?.Invoke(RunEvent.Stage(TextKey.StageDropboxFlush));
-        var retained = spelling.Flush();
+        var retained = spelling?.Flush() ?? [];
         var flushed = 0;
         foreach (var item in retained)
         {
@@ -179,12 +186,14 @@ public sealed partial class DropboxListing(DropboxApi api, PairConfig pair, Path
     private static InventoryIncompleteException Incomplete(string path, Exception error) =>
         new(Text.Get(TextKey.ReadDropboxFailed, (TextArg.Path, path), (TextArg.Message, error.Message)), error);
 
-    /// <summary>A folder's displayed path → its true path; entries wait until their parent folder is known.</summary>
+    /// <summary>A folder's displayed path → its true path; live entries wait until their parent folder is known.</summary>
     private sealed class Spelling
     {
         private readonly Dictionary<string, string> _true = new(PathNames.Comparer);
-        private readonly Dictionary<string, List<Listed>> _waiting = new(PathNames.Comparer);
-        private readonly List<string> _order = new();
+        private readonly Dictionary<string, List<(long Seq, Listed Listed)>> _waiting = new(PathNames.Comparer);
+        private readonly Dictionary<string, (int At, int Below, long Tomb, long File)> _held = new(PathNames.Comparer);
+        private readonly Queue<(string Path, string True)> _cascade = new();
+        private long _next;
 
         /// <summary>Seeds the pair root and every ancestor of the listing root, so the returned root entry
         /// and its descendants take the caller's true spelling.</summary>
@@ -197,45 +206,103 @@ public sealed partial class DropboxListing(DropboxApi api, PairConfig pair, Path
             }
         }
 
-        /// <summary>Releases this entry and, for a folder, its waiting children once the parent's true path
-        /// is known; otherwise queues it.</summary>
+        /// <summary>Streams tombstones immediately; live entries wait for their parent's spelling and release
+        /// in whole-parent-bucket FIFO order.</summary>
         public void Add(Listed listed, List<Listed> released)
         {
+            var seq = ++_next;
+            Mark(listed, seq);
             var parent = PathNames.Parent(listed.Path);
-            if (_true.TryGetValue(parent, out var parentTrue)) Release(listed, parentTrue, released);
-            else Wait(parent, listed);
+            if (listed.Entry is null)
+            {
+                released.Add(_true.TryGetValue(parent, out var known) ? Correct(listed, known) : listed);
+                return;
+            }
+            if (!_true.TryGetValue(parent, out var parentTrue))
+            {
+                Wait(parent, (seq, listed));
+                return;
+            }
+            Release(listed, parentTrue, false, released);
+            while (_cascade.TryDequeue(out var opened))
+            {
+                if (!_waiting.Remove(opened.Path, out var waiting)) continue;
+                foreach (var child in waiting)
+                {
+                    var gone = Gone(child);
+                    Count(child.Listed.Path, SpellingReleased);
+                    Release(child.Listed, opened.True, gone, released);
+                }
+            }
         }
 
-        /// <summary>Entries whose parent folder never appeared: an anomaly, so their displayed path stands.</summary>
+        /// <summary>Unresolved live entries keep displayed spelling, shallowest first and then in arrival order.</summary>
         public List<Listed> Flush()
         {
             var released = new List<Listed>();
-            foreach (var parent in _order)
-                if (_waiting.TryGetValue(parent, out var waiting)) released.AddRange(waiting);
+            foreach (var item in _waiting.Values.SelectMany(bucket => bucket)
+                .OrderBy(item => PathNames.Depth(item.Listed.Path)).ThenBy(item => item.Seq))
+            {
+                if (!Gone(item)) released.Add(item.Listed);
+                Count(item.Listed.Path, SpellingReleased);
+            }
             _waiting.Clear();
-            _order.Clear();
+            _held.Clear();
+            _cascade.Clear();
             return released;
         }
 
-        private void Release(Listed listed, string parentTrue, List<Listed> released)
+        private void Mark(Listed listed, long seq)
         {
-            var corrected = Correct(listed, parentTrue);
-            released.Add(corrected);
-            if (corrected.Entry is not { IsFolder: true }) return;
-            _true[listed.Path] = corrected.Path;
-            if (!_waiting.Remove(listed.Path, out var waiting)) return;
-            foreach (var child in waiting) Release(child, corrected.Path, released);
+            if (!_held.TryGetValue(listed.Path, out var held)) return;
+            if (listed.Entry is null) held.Tomb = seq;
+            else if (!listed.Entry.IsFolder && held.Below > 0) held.File = seq;
+            else return;
+            _held[listed.Path] = held;
         }
 
-        private void Wait(string parent, Listed listed)
+        private bool Gone((long Seq, Listed Listed) item)
+        {
+            for (var path = item.Listed.Path; ; path = PathNames.Parent(path))
+            {
+                if (_held.TryGetValue(path, out var held) &&
+                    (held.Tomb > item.Seq || path != item.Listed.Path && held.File > item.Seq)) return true;
+                if (path.Length == 0) return false;
+            }
+        }
+
+        private void Count(string own, int delta)
+        {
+            for (var path = own; ; path = PathNames.Parent(path))
+            {
+                _held.TryGetValue(path, out var held);
+                if (path == own) held.At += delta;
+                else held.Below += delta;
+                if (held.At == 0 && held.Below == 0) _held.Remove(path);
+                else _held[path] = held;
+                if (path.Length == 0) break;
+            }
+        }
+
+        private void Release(Listed listed, string parentTrue, bool gone, List<Listed> released)
+        {
+            var corrected = Correct(listed, parentTrue);
+            if (!gone) released.Add(corrected);
+            if (corrected.Entry is not { IsFolder: true }) return;
+            // Gone folders still supply spelling; finish this bucket before opening any child bucket.
+            _true[listed.Path] = corrected.Path;
+            _cascade.Enqueue((listed.Path, corrected.Path));
+        }
+
+        private void Wait(string parent, (long Seq, Listed Listed) item)
         {
             if (!_waiting.TryGetValue(parent, out var waiting))
             {
-                waiting = new List<Listed>();
+                waiting = new();
                 _waiting[parent] = waiting;
-                _order.Add(parent);
             }
-            waiting.Add(listed);
+            waiting.Add(item);
+            Count(item.Listed.Path, SpellingQueued);
         }
     }
 

@@ -57,10 +57,11 @@ function Write-Observation([string]$Path,[string]$Status='Valid',[string[]]$Sign
 
 function New-TestRoot([string]$Name) {
     $root=Join-Path $testBase ($Name+'-'+[guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path (Join-Path $root ('versions\'+$predecessorVersion)),(Join-Path $root 'state'),(Join-Path $root 'vNext\state') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $root ('versions\'+$predecessorVersion)),(Join-Path $root 'state'),(Join-Path $root 'vNext\state'),(Join-Path $root 'engine') -Force | Out-Null
     Get-ChildItem -LiteralPath $predecessorRuntime -Force | Copy-Item -Destination (Join-Path $root ('versions\'+$predecessorVersion)) -Recurse
     [IO.File]::WriteAllText((Join-Path $root 'state\state.txt'),'predecessor-state',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $root 'vNext\state\state.txt'),'predecessor-vnext-state',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $root 'engine\state.db-wal'),'predecessor-engine-wal',[Text.UTF8Encoding]::new($false))
     # The release transaction holds the application's own state lock for the whole
     # install, so the isolated root supplies the same lock file.
     [IO.File]::WriteAllText((Join-Path $root 'state\instance.lock'),'4242',[Text.UTF8Encoding]::new($false))
@@ -130,18 +131,22 @@ function Invoke-Exact([string]$Script,[string]$Root,[string]$Observation,[string
 function Assert-Installed([string]$Root) {
     $active=Get-Item -LiteralPath (Join-Path $Root 'active') -Force
     if($active.LinkType -cne 'Junction' -or [IO.Path]::GetFullPath([string]$active.Target) -cne [IO.Path]::GetFullPath((Join-Path $Root ('versions\'+$candidateVersion)))){throw 'Successor is not exactly active.'}
-    if((Get-Content -LiteralPath (Join-Path $Root 'state\state.txt') -Raw) -cne 'predecessor-state'){throw 'Install changed live predecessor state.'}
+    if((Get-Content -LiteralPath (Join-Path $Root 'state\state.txt') -Raw) -cne 'predecessor-state' -or
+       (Get-Content -LiteralPath (Join-Path $Root 'engine\state.db-wal') -Raw) -cne 'predecessor-engine-wal'){throw 'Install changed live predecessor state.'}
 }
 function Assert-RolledBack([string]$Root) {
     $active=Get-Item -LiteralPath (Join-Path $Root 'active') -Force
     if($active.LinkType -cne 'Junction' -or [IO.Path]::GetFullPath([string]$active.Target) -cne [IO.Path]::GetFullPath((Join-Path $Root ('versions\'+$predecessorVersion)))){throw 'Predecessor is not exactly active.'}
     if((Get-Content -LiteralPath (Join-Path $Root 'state\state.txt') -Raw) -cne 'predecessor-state' -or
-       (Get-Content -LiteralPath (Join-Path $Root 'vNext\state\state.txt') -Raw) -cne 'predecessor-vnext-state'){throw 'Predecessor state was not restored.'}
+       (Get-Content -LiteralPath (Join-Path $Root 'vNext\state\state.txt') -Raw) -cne 'predecessor-vnext-state' -or
+       (Get-Content -LiteralPath (Join-Path $Root 'engine\state.db-wal') -Raw) -cne 'predecessor-engine-wal'){throw 'Predecessor state was not restored.'}
     $transactions=@(Get-ChildItem -LiteralPath (Join-Path $Root 'replacement-staging\transactions') -Directory)
     if($transactions.Count -ne 1){throw "Expected exactly one release transaction; observed $($transactions.Count)."}
     $transaction=$transactions[0]
-    if((Get-Content -LiteralPath (Join-Path $transaction.FullName 'state.successor\state\state.txt') -Raw) -cne 'successor-state' -or
-       (Get-Content -LiteralPath (Join-Path $transaction.FullName 'state.successor\vNext\state\state.txt') -Raw) -cne 'successor-vnext-state'){throw 'Successor state was not preserved.'}
+    $retained=Join-Path $Root ('replacement-staging\rollback-'+$transaction.Name)
+    if((Get-Content -LiteralPath (Join-Path $retained 'state.successor\state\state.txt') -Raw) -cne 'successor-state' -or
+       (Get-Content -LiteralPath (Join-Path $retained 'state.successor\vNext\state\state.txt') -Raw) -cne 'successor-vnext-state' -or
+       (Get-Content -LiteralPath (Join-Path $retained 'state.successor\engine\state.db-wal') -Raw) -cne 'successor-engine-wal'){throw 'Successor state was not preserved.'}
 }
 
 function Remove-TestFixture([object]$Fixture) {
@@ -161,7 +166,7 @@ function Remove-TestFixture([object]$Fixture) {
 
 $realRoot=Join-Path $env:LOCALAPPDATA 'Massdex\SyncShark'
 $realBefore=Get-InstalledRuntimeManifest $realRoot
-$installSteps=@('stage-package','publish-runtime','backup-state','create-next-link','retain-predecessor','publish-successor','verify-complete')
+$installSteps=@('stage-package','publish-runtime','backup-state','create-next-link','retain-predecessor','publish-successor','register-explorer-package','register-application','verify-complete')
 $installPoints=[Collections.Generic.List[string]]::new()
 @('journal-created','journal-created-mid-write','journal-created-after-temp-write') | ForEach-Object { $installPoints.Add($_) }
 foreach($step in $installSteps){
@@ -182,13 +187,13 @@ foreach($point in $installPoints){
     Remove-TestFixture $fixture
 }
 
-$rollbackSteps=@('preserve-state','preserve-vnext-state','restore-state','restore-vnext-state','retain-successor','publish-predecessor','verify-complete')
+$rollbackSteps=@('remove-successor-explorer','retain-successor','preserve-state','preserve-vnext-state','preserve-engine-state','restore-engine-state','restore-state','restore-vnext-state','publish-predecessor','restore-predecessor-explorer','verify-complete')
 $rollbackPoints=[Collections.Generic.List[string]]::new()
 @('journal-created','journal-created-mid-write','journal-created-after-temp-write') | ForEach-Object { $rollbackPoints.Add($_) }
 foreach($step in $rollbackSteps){
     foreach($suffix in @('after-pending','after-effect','after-journal','pending-journal-mid-write','pending-journal-after-temp-write','complete-journal-mid-write','complete-journal-after-temp-write')){$rollbackPoints.Add("$step-$suffix")}
 }
-@('restore-state-mid-copy','restore-vnext-state-mid-copy') | ForEach-Object { $rollbackPoints.Add($_) }
+@('preserve-state-mid-copy','restore-state-mid-copy','restore-vnext-state-mid-copy','restore-engine-state-mid-copy') | ForEach-Object { $rollbackPoints.Add($_) }
 if ($SmokeOnly) { $rollbackPoints.Clear(); $rollbackPoints.Add('preserve-state-after-effect') }
 foreach($point in $rollbackPoints){
     $fixture=New-TestRoot ('rollback-'+$point.Replace(':','-'))
@@ -196,6 +201,7 @@ foreach($point in $rollbackPoints){
     if($installed.ExitCode -ne 0){throw "Rollback fixture install failed: $($installed.Stderr)"}
     [IO.File]::WriteAllText((Join-Path $fixture.Root 'state\state.txt'),'successor-state',[Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $fixture.Root 'vNext\state\state.txt'),'successor-vnext-state',[Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $fixture.Root 'engine\state.db-wal'),'successor-engine-wal',[Text.UTF8Encoding]::new($false))
     $first=Invoke-Exact $rollback $fixture.Root $fixture.Observation $point
     if($first.ExitCode -eq 0){throw "Rollback crash point did not terminate: $point"}
     $replay=Invoke-Exact $rollback $fixture.Root $fixture.Observation

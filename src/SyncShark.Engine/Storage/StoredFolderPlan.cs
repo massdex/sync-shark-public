@@ -8,6 +8,7 @@ internal sealed class StoredFolderPlan : FolderPlan
     private readonly SqliteConnection _connection;
     private readonly string _path;
     private readonly string _pairId;
+    private readonly byte[] _scanId = Guid.Empty.ToByteArray();
     private readonly string _rootKey;
     private readonly string _rootNativeKey;
     private StateStore? _registration;
@@ -118,7 +119,7 @@ internal sealed class StoredFolderPlan : FolderPlan
             try
             {
                 using var command = Command(StateSchema.PlanEntries,
-                    (StateSchema.ParamPair, _pairId), (StateSchema.ParamSide, (int)DeletingFrom),
+                    (StateSchema.ParamPair, _pairId), (StateSchema.ParamScan, _scanId), (StateSchema.ParamSide, (int)DeletingFrom),
                     (StateSchema.ParamAfter, after));
                 using var reader = command.ExecuteReader();
                 if (reader.Read())
@@ -155,9 +156,9 @@ internal sealed class StoredFolderPlan : FolderPlan
                     ct.ThrowIfCancellationRequested();
                     var candidate = ReadCandidate(sql, hasCursor: true, hasBranch: false,
                         sql == StateSchema.PlanPresent
-                            ? [(StateSchema.ParamPair, _pairId), (StateSchema.ParamSide, (int)DeletingFrom),
+                            ? [(StateSchema.ParamPair, _pairId), (StateSchema.ParamScan, _scanId), (StateSchema.ParamSide, (int)DeletingFrom),
                                 (StateSchema.ParamOwnKey, _rootNativeKey), (StateSchema.ParamAfter, after)]
-                            : [(StateSchema.ParamPair, _pairId), (StateSchema.ParamSide, (int)DeletingFrom),
+                            : [(StateSchema.ParamPair, _pairId), (StateSchema.ParamScan, _scanId), (StateSchema.ParamSide, (int)DeletingFrom),
                                 (StateSchema.ParamTargetKey, _rootKey), (StateSchema.ParamAfter, after),
                                 (StateSchema.PlanParamSavedOverride, savedOverride)]);
                     if (candidate is not { } current) break;
@@ -547,15 +548,17 @@ internal sealed class StoredFolderPlan : FolderPlan
             _transaction = null;
             _connection.Dispose();
         }
-        // The path stays owned when cleanup is refused; the next same-pair open retries and surfaces the failure.
+        // A refused cleanup leaves this unique scratch file; another plan never reuses or sweeps it.
         try { File.Delete(_path); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            _registration = null;
-            return;
+            // A scratch cleanup failure must not revoke completed work.
         }
-        _registration = null;
-        registration.ReleasePlan(_path);
+        finally
+        {
+            _registration = null;
+            registration.ReleasePlan(_path);
+        }
     }
 
     private void Discard()

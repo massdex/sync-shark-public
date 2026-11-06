@@ -26,6 +26,13 @@ public static class IssueFactsChecks
             var subject = new IssueSubject([new IssueItem(Side.Local, "Parent", "item")], null,
                 FirstRunDeletion: IssueSubject.FirstRunDeletionKind.UnscannedSubtree);
             Raise(IssueKind.Failure, TextKey.FailDropboxNameRejected, subject);
+            var hidden = store.Issues("pair").Single();
+            var heldBefore = store.RetainedFirstRun("pair");
+            store.SetIssueIgnored("pair", hidden.Id, true);
+            Check.Require(store.RetainedFirstRun("pair") == heldBefore && store.HeldCovers("pair", PathNames.Key("Parent/Child"), null),
+                "Ignore preserves held and first-run responsibility projections");
+            store.SetIssueIgnored("pair", hidden.Id, false);
+            AssertFacts(store);
             var callbackFailure = new IOException("committed callback");
             try
             {

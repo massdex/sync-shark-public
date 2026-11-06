@@ -13,6 +13,9 @@
     <!-- M7 is retained source/proof only pending its mandatory destructive-history review.
          Ordinary app releases must not contain either planning or expiration entry point. -->
     <Compile Remove="SyncAuthorityDatabase.HistoryRetention.cs;SyncAuthorityRuntimeHost.HistoryRetention.cs" />
+    <EmbeddedResource Include="../../Installer/cleanup.ps1" LogicalName="SyncShark.SetupCleanup.ps1" />
+    <EmbeddedResource Include="../../Installer/setup-strings.xml" LogicalName="setup-strings.xml" />
+    <Compile Include="../../Installer/SetupMessages.cs" Link="SetupMessages.cs" />
     <EmbeddedResource Include="../../tools/SyncShark.SignerIdentity.json" LogicalName="SyncShark.SignerIdentity.json" />
     <EmbeddedResource Include="..\..\apps\SyncShark\Assets\sync-shark-mark.svg" LogicalName="SyncShark.BrandMark.svg" />
     <EmbeddedResource Include="Dropbox\dropbox-routes.json" LogicalName="SyncShark.DropboxRoutes.json" />

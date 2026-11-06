@@ -140,7 +140,7 @@ internal static class SyncSharkUpdaterData
         var discovery=Object(update["discovery"],"enabled","beforeWorkerSha256","beforeManifestSha256","afterWorkerSha256","afterManifestSha256","recovery");
         SyncSharkUpdaterContract.Require(Text(data["product"])==SyncSharkUpdaterContract.Product && Integer(update["schemaVersion"])==1,
             "Unrecognised signed updater contract.");
-        var members=Array(data["runtimeMembers"],16).Select(row=>
+        var members=Array(data["runtimeMembers"],SyncSharkProtectedRuntimeTransaction.Members.Length).Select(row=>
         {
             var member=Object(row,"path","bytes","sha256");
             return new SyncSharkUpdaterContract.Member(Text(member["path"]),Text(member["sha256"]),Integer(member["bytes"]));
@@ -187,9 +187,9 @@ internal static class SyncSharkUpdaterData
     internal static bool PublicationStepPending(string json,SyncSharkUpdaterContract contract,string productRoot)
     {
         var journal=Object(Read(json,65536),"schema","operation","version","commit","product_root","status","pending","completed","allowed_steps","artifacts");
-        string[] steps={"stage-package","publish-runtime","backup-state","create-next-link","retain-predecessor","publish-successor","register-explorer-package","verify-complete"};
-        var allowed=Array(journal["allowed_steps"],8).Select(Text).ToArray();
-        var completed=Array(journal["completed"],8).Select(Text).ToArray();
+        string[] steps={"stage-package","publish-runtime","backup-state","create-next-link","retain-predecessor","publish-successor","register-explorer-package","register-application","verify-complete"};
+        var allowed=Array(journal["allowed_steps"],steps.Length).Select(Text).ToArray();
+        var completed=Array(journal["completed"],steps.Length).Select(Text).ToArray();
         var artifacts=Object(journal["artifacts"],"state_predecessor_sha256");
         string stateHash=NullableText(artifacts["state_predecessor_sha256"]);
         SyncSharkUpdaterContract.Require(Integer(journal["schema"])==1 && Text(journal["operation"])=="install" &&

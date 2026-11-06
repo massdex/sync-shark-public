@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
@@ -14,6 +15,97 @@ namespace Massdex.SyncShark.Engine.Storage;
 /// <summary>Lossless compact values at the Storage boundary; opaque contract values stay opaque.</summary>
 internal static class StateEncoding
 {
+    // Windows supports 32,768 UTF-16 units; UTF-8 needs at most three bytes per unit.
+    internal const int MaximumDeletedKeyBytes = SyncEndpointContext.MaximumPathLength * StateSchema.DeletedKeyUtf8BytesPerUnit;
+    private static readonly UTF8Encoding HistoryUtf8 = new(false, true);
+
+    internal static byte[] EncodeDeletedNames(IReadOnlyList<string> keys)
+    {
+        if (keys.Count is <= 0 or > StateSchema.DeletedHistoryBatchSize) throw new InvalidDataException();
+        using var output = new MemoryStream();
+        using (var compressed = new ZLibStream(output, CompressionLevel.Optimal, leaveOpen: true))
+        using (var writer = new BinaryWriter(compressed, HistoryUtf8))
+        {
+            byte[]? previous = null;
+            foreach (var key in keys)
+            {
+                if (HistoryUtf8.GetByteCount(key) is <= 0 or > MaximumDeletedKeyBytes) throw new InvalidDataException();
+                var bytes = HistoryUtf8.GetBytes(key);
+                ValidateDeletedKey(bytes, previous);
+                writer.Write7BitEncodedInt(bytes.Length);
+                writer.Write(bytes);
+                previous = bytes;
+            }
+        }
+        return output.ToArray();
+    }
+
+    // Yield one bounded key at a time, never allocate a corrupt declared length or a decoded block.
+    internal static IEnumerable<string> DecodeDeletedNames(Stream input, int count, string lastKey, string? after)
+    {
+        if (count is <= 0 or > StateSchema.DeletedHistoryBatchSize) throw new InvalidDataException();
+        // ZLibStream accepts a missing trailer; verify its Adler-32 explicitly before publishing any restored set.
+        if (input.Length < StateSchema.DeletedZlibMinimumBytes) throw new InvalidDataException();
+        var start = input.Position;
+        input.Seek(-StateSchema.DeletedChecksumBytes, SeekOrigin.End);
+        var trailer = new byte[StateSchema.DeletedChecksumBytes];
+        try { input.ReadExactly(trailer); }
+        catch (EndOfStreamException error) { throw new InvalidDataException(null, error); }
+        input.Position = start;
+        var expectedChecksum = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(trailer);
+        uint checksum = StateSchema.DeletedChecksumInitial;
+        using var compressed = new ZLibStream(input, CompressionMode.Decompress, leaveOpen: true);
+        using var reader = new BinaryReader(compressed, HistoryUtf8, leaveOpen: true);
+        byte[]? previous = after is null ? null : HistoryUtf8.GetBytes(after);
+        string? last = null;
+        for (var index = 0; index < count; index++)
+        {
+            int length;
+            try { length = reader.Read7BitEncodedInt(); }
+            catch (Exception error) when (error is EndOfStreamException or FormatException)
+            { throw new InvalidDataException(null, error); }
+            if (length is <= 0 or > MaximumDeletedKeyBytes) throw new InvalidDataException();
+            var bytes = reader.ReadBytes(length);
+            if (bytes.Length != length) throw new InvalidDataException();
+            ValidateDeletedKey(bytes, previous);
+            checksum = DeletedChecksum(checksum, bytes);
+            try { last = HistoryUtf8.GetString(bytes); }
+            catch (DecoderFallbackException error) { throw new InvalidDataException(null, error); }
+            previous = bytes;
+            yield return last;
+        }
+        if (last != lastKey || compressed.ReadByte() != StateSchema.DeletedStreamEnd || checksum != expectedChecksum) throw new InvalidDataException();
+    }
+
+    private static uint DeletedChecksum(uint checksum, byte[] bytes)
+    {
+        var a = checksum & StateSchema.DeletedChecksumMask;
+        var b = checksum >> StateSchema.DeletedChecksumShift;
+        // The persisted length prefix is the canonical BinaryWriter seven-bit encoding.
+        var remaining = bytes.Length;
+        do
+        {
+            var value = (byte)(remaining & StateSchema.DeletedLengthMask);
+            remaining >>= StateSchema.DeletedLengthShift;
+            Add(remaining == 0 ? value : (byte)(value | StateSchema.DeletedLengthContinuation));
+        } while (remaining != 0);
+        foreach (var value in bytes) Add(value);
+        return (b << StateSchema.DeletedChecksumShift) | a;
+
+        void Add(byte value)
+        {
+            a = (a + value) % StateSchema.DeletedChecksumModulus;
+            b = (b + a) % StateSchema.DeletedChecksumModulus;
+        }
+    }
+
+    private static void ValidateDeletedKey(byte[] key, byte[]? previous)
+    {
+        if (key.Length is <= 0 or > MaximumDeletedKeyBytes ||
+            previous is not null && previous.AsSpan().SequenceCompareTo(key) >= 0)
+            throw new InvalidDataException();
+    }
+
     // Lowercase hexadecimal is the existing packed-hash representation, not a tunable alphabet.
     private const char FirstHexDigit = '0';
     private const char LastHexDigit = '9';

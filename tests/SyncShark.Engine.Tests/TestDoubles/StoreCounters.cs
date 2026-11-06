@@ -190,6 +190,9 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         inner.FinishRepair(pairId, summary, expectedGeneration, scanToken, local, dropbox);
     }
 
+    internal IStateStore FixtureInner => inner;
+    public Task EndScanAsync(string pairId, Guid scanId, int pageSize) => inner.EndScanAsync(pairId, scanId, pageSize);
+    public bool CloseScanIssue(string pairId, Guid scanId, Issue expected) => inner.CloseScanIssue(pairId, scanId, expected);
     public ScanRecord ReadScan(string pairId, Guid scanToken)
     {
         Command();
@@ -333,7 +336,7 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
 
     public long? AcquireJournalPage(string volumeKey, JournalPosition? expected, JournalPosition next,
         IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision,
-            bool Suspended, bool LostInterval)> members,
+            bool LostInterval)> members,
         IEnumerable<(string PairId, ChangeNotice Notice)> notices)
     {
         Command();
@@ -712,11 +715,11 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
     }
 
     public (IReadOnlyList<(string PairId, Issue Issue)> Page, int Total) OpenIssuePage(string? pairId,
-        string? account, string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset)
+        string? account, string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset, bool ignored = false)
     {
         Command();
         if (kinds is not null) Interlocked.Increment(ref _filteredIssues);
-        return inner.OpenIssuePage(pairId, account, search, kinds, limit, offset);
+        return inner.OpenIssuePage(pairId, account, search, kinds, limit, offset, ignored);
     }
 
     public (IReadOnlyList<(string PairId, Issue Issue)> Rows, int Total) OpenIssueSnapshot(
@@ -725,6 +728,15 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         Command();
         if (kinds is not null) Interlocked.Increment(ref _filteredIssues);
         return inner.OpenIssueSnapshot(kinds, pageSize);
+    }
+
+    public bool SetIssueIgnored(string pairId, long id, bool ignored) => inner.SetIssueIgnored(pairId, id, ignored);
+
+    public IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null)
+    {
+        Command();
+        if (kinds is not null) Interlocked.Increment(ref _filteredIssues);
+        return inner.OpenIssuesUnder(pairId, scopeKey, kinds);
     }
 
     public Issue? IssueById(string pairId, long id)
@@ -769,10 +781,10 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         return inner.SyncedCount(pairId);
     }
 
-    public IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId)
+    public IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId, bool? ignored = null)
     {
         Command();
-        return inner.IssueCounts(pairId);
+        return inner.IssueCounts(pairId, ignored);
     }
 
     public void ReplaceSkipped(string pairId, Guid scanToken,
@@ -808,31 +820,46 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         inner.KeepFolderAlways(pairId, expectedGeneration, expected, keepRules);
     }
 
-    public Guid BeginScan(string pairId, long expectedGeneration, bool includeDeleted)
+    public Guid BeginScan(string pairId, Guid scanId, long expectedGeneration, bool includeDeleted, string? scope = null)
     {
         Command();
-        return inner.BeginScan(pairId, expectedGeneration, includeDeleted);
+        return inner.BeginScan(pairId, scanId, expectedGeneration, includeDeleted, scope);
     }
 
-    public bool HasDeletedNames(string pairId)
+    public bool HasDeletedNames(string pairId, Guid scanId)
     {
         Command();
-        return inner.HasDeletedNames(pairId);
+        return inner.HasDeletedNames(pairId, scanId);
     }
 
-    public bool DeletedNameExact(string pairId, string key)
+    public bool DeletedNameExact(string pairId, Guid scanId, string key)
     {
         Command();
-        return inner.DeletedNameExact(pairId, key);
+        return inner.DeletedNameExact(pairId, scanId, key);
     }
+
+    public bool SavedDeletedNameExact(string pairId, string key)
+    {
+        Command();
+        return inner.SavedDeletedNameExact(pairId, key);
+    }
+
+    public bool DeletedNameSpent(string pairId, string key)
+    {
+        Command();
+        return inner.DeletedNameSpent(pairId, key);
+    }
+
+    public bool DeletedHistoryOwed(string pairId) => inner.DeletedHistoryOwed(pairId);
+    public string? ContinueDeletedHistory(string pairId, Guid scanToken) => inner.ContinueDeletedHistory(pairId, scanToken);
 
     public string? RestoreDeletedHistory(string pairId, Guid scanToken) => inner.RestoreDeletedHistory(pairId, scanToken);
     public void ResetDeletedHistory(string pairId, Guid scanToken, bool discardNames) => inner.ResetDeletedHistory(pairId, scanToken, discardNames);
     public void SaveDeletedHistory(string pairId, Guid scanToken, string cursor) => inner.SaveDeletedHistory(pairId, scanToken, cursor);
-    public IScanSink OpenScan(string pairId, Side side, int batchRows)
+    public IScanSink OpenScan(string pairId, Guid scanId, Side side, int batchRows)
     {
         Command();
-        return new CountedScan(this, inner.OpenScan(pairId, side, batchRows));
+        return new CountedScan(this, inner.OpenScan(pairId, scanId, side, batchRows));
     }
 
     public FolderPlan OpenFolderPlan(string pairId, Row folder, Side deletingFrom)
@@ -866,34 +893,34 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         return inner.ForgetTouchesUnreadable(pairId, roots, ct);
     }
 
-    public IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context)
+    public IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context)
     {
         Command();
         Interlocked.Increment(ref _readConnections);
-        foreach (var row in inner.ScanRows(pairId, context))
+        foreach (var row in inner.ScanRows(pairId, scanId, context))
         {
             Interlocked.Increment(ref _rowsRead);
             yield return row;
         }
     }
 
-    public IReadOnlyList<RenameCandidate> ScanRenames(string pairId)
+    public IReadOnlyList<RenameCandidate> ScanRenames(string pairId, Guid scanId)
     {
         Command();
         Interlocked.Increment(ref _readConnections);
-        return inner.ScanRenames(pairId);
+        return inner.ScanRenames(pairId, scanId);
     }
 
-    public Entry? ScanEntry(string pairId, Side side, string key)
+    public Entry? ScanEntry(string pairId, Guid scanId, Side side, string key)
     {
         Command();
-        return inner.ScanEntry(pairId, side, key);
+        return inner.ScanEntry(pairId, scanId, side, key);
     }
 
-    public bool InScan(string pairId, Side side, string key)
+    public bool InScan(string pairId, Guid scanId, Side side, string key)
     {
         Command();
-        return inner.InScan(pairId, side, key);
+        return inner.InScan(pairId, scanId, side, key);
     }
 
     public void Dispose() => inner.Dispose();

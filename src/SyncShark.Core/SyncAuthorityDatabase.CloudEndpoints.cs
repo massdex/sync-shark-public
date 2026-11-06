@@ -683,7 +683,7 @@ public sealed partial class SyncAuthorityDatabase
     }
 
     /// <summary>
-    /// OV637-6 (): the ONE narrow internal, guarded, ATOMIC two-sided cloud-root
+    /// OV637-6: the ONE narrow internal, guarded, ATOMIC two-sided cloud-root
     /// registration for an unpublished cloud/cloud candidate. Both own exact root rows are provisioned inside
     /// this single WriteAsync transaction BEFORE the two unchanged typed guards run, so the unchanged
     /// ReadPairOpaqueProofsAsync can resolve both genuine DB-held identities for an opaque corresponding pair.
@@ -738,7 +738,7 @@ public sealed partial class SyncAuthorityDatabase
                 cancellationToken);
             await RequireTwoSidedPreimageAsync(connection, transaction, pairId, left.RootBindingId, cancellationToken);
             await RequireTwoSidedPreimageAsync(connection, transaction, pairId, right.RootBindingId, cancellationToken);
-            // the two-sided operation must UNCONDITIONALLY bind the carried candidate to this
+            // The two-sided operation must UNCONDITIONALLY bind the carried candidate to this
             // registration BEFORE it writes either row, regardless of any comparator relation. A row-level pair
             // id/revision match is not that binding: the carried definition, its immutable policy and BOTH own
             // typed endpoint identities must each be exactly bound here, or a foreign/stale carried definition
@@ -756,7 +756,7 @@ public sealed partial class SyncAuthorityDatabase
                     "The carried candidate pair is not exactly bound to BOTH of this registration's own logical " +
                     "cloud root identities at their exact ports; the two-sided registration is refused rather than " +
                     "committing unbound roots.");
-            // each own logical side must carry exactly ONE complete provider-produced hierarchy bound to
+            // Each own logical side must carry exactly ONE complete provider-produced hierarchy bound to
             // its own exact identity before commit, even when no comparator runs. Missing, duplicate or wrong-own
             // evidence is refused rather than assumed disjoint.
             RequireTwoSidedOwnHierarchy(leftIdentity, supplied, "left");

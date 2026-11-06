@@ -10,6 +10,8 @@ public static class Resolutions
     /// Run transaction. For's dismiss path and EngineOperations both refuse a choice this rejects.</summary>
     internal static bool Allows(IssueKind kind, TextKey cause, ResolutionChoice choice) => (kind, choice) switch
     {
+        (IssueKind.RootIdentity, ResolutionChoice.BindRoots) => true,
+        (_, ResolutionChoice.Ignore or ResolutionChoice.Unignore) => Enum.IsDefined(kind),
         (IssueKind.Failure, ResolutionChoice.Retry) => true,
         (IssueKind.DriveChange, ResolutionChoice.FirstSync or ResolutionChoice.SyncNormally) => true,
         (IssueKind.NameClash, ResolutionChoice.RenameIncoming or ResolutionChoice.ReplaceExisting
@@ -25,6 +27,7 @@ public static class Resolutions
     /// first-run with FirstSync; rules, and no name, with keep-folder-always, its one choice with rules.</summary>
     public static bool RequestValid(bool hasIssue, bool all, ResolutionChoice choice, bool hasName, bool hasFirstRun,
         string? rules) =>
+        (choice is not (ResolutionChoice.Ignore or ResolutionChoice.Unignore) || !hasName && !hasFirstRun && rules is null && !all) &&
         hasIssue != all && (!all || choice == ResolutionChoice.Retry) &&
         (!hasFirstRun || choice == ResolutionChoice.FirstSync) &&
         (rules is null || choice == ResolutionChoice.KeepFolderAlways) &&
@@ -35,7 +38,7 @@ public static class Resolutions
     /// saves the rules.</summary>
     public static IReadOnlyList<SyncAction> For(Issue issue, ResolutionChoice choice)
     {
-        if (choice is not (ResolutionChoice.Dismiss or ResolutionChoice.KeepFolderAlways)) throw Bad();
+        if (choice is not (ResolutionChoice.Dismiss or ResolutionChoice.KeepFolderAlways or ResolutionChoice.Ignore or ResolutionChoice.Unignore)) throw Bad();
         if (!Allows(issue.Kind, issue.Cause, choice)) throw Bad();
         return [];
     }
@@ -45,7 +48,7 @@ public static class Resolutions
     public static IReadOnlyList<SyncAction> For(Issue issue, ResolutionChoice choice, string? newName, Row localRow,
         Row dropboxRow)
     {
-        if (choice is ResolutionChoice.Dismiss or ResolutionChoice.KeepFolderAlways) throw Bad();
+        if (choice is ResolutionChoice.Dismiss or ResolutionChoice.KeepFolderAlways or ResolutionChoice.Ignore or ResolutionChoice.Unignore) throw Bad();
         if (issue.Kind == IssueKind.NameClash) return Clash(issue, choice, newName, localRow, dropboxRow);
         if (!StillMatches(issue.Subject, localRow, dropboxRow)) throw Stale();
         if (issue.Kind == IssueKind.Tie) return Tie(issue.Cause, choice, localRow, dropboxRow);

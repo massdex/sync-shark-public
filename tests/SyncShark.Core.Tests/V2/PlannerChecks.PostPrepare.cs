@@ -1,7 +1,7 @@
 namespace Massdex.SyncShark.V2;
 
 /// <summary>
-/// prepare-matched planning plus Astra-review fixes of 96aa8b2: collapse provenance includes
+/// prepare-matched planning plus review fixes of 96aa8b2: collapse provenance includes
 /// NeedsReview, and the prepare-matched comparison runs before first-sync winners/choices.
 /// </summary>
 internal static partial class PlannerChecks

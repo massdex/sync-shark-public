@@ -99,7 +99,7 @@ public sealed partial class SyncAuthorityRuntimeHost(
     private int _disposed;
 
     public SyncAuthorityDatabase Authority => _authority;
-    // Approved by root sshark:391-r3: one internal read-only fixture accessor that returns the SAME
+    // One internal read-only fixture accessor returns the SAME
     // capability-profile identity the initializer computes. INPUT identity only - it creates no profile,
     // calls no initializer, bypasses no authority check and does not manufacture queue output.
     internal string CapabilityProfileIdForTest => Id("profile", BuildIdentity.SourceRevision, CapabilityJson);

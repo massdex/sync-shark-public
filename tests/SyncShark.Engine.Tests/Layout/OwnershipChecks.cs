@@ -495,7 +495,7 @@ public static class OwnershipChecks
     {
         var names = unit.DescendantNodes().OfType<IdentifierNameSyntax>().Where(name =>
             name.Identifier.ValueText is "SkipUnreadable" or "ScanUpsert" or "ScanDeleteSelf" or
-                "ScanDeleteDescendants" or "Hash" or "PathCase" or "Of" or "Same" or "IsSelfOrUnder" or
+                "ScanDeleteDescendants" or "ScanHasDescendants" or "Hash" or "PathCase" or "Of" or "Same" or "IsSelfOrUnder" or
                 "IsUnder" or "SameLeafLocation" or "CoveredBy" or "Observed" or "Rebase" or
                 "ToUpperInvariant" or "EqualsIgnoreCase").ToArray();
         if (names.Length == 0) yield break;
@@ -521,12 +521,14 @@ public static class OwnershipChecks
                 yield return (Line(name), "unreadable policy outside producer or IssuePolicy.ProtectsSubtree");
             }
             else if (type == "Massdex.SyncShark.Engine.Storage.StateSchema" &&
-                     member is "ScanUpsert" or "ScanDeleteSelf" or "ScanDeleteDescendants")
+                     member is "ScanUpsert" or "ScanDeleteSelf" or "ScanDeleteDescendants" or "ScanHasDescendants")
             {
+                // The delete statements belong to Apply; the #129 existence probe has its own owner member.
+                var allowed = member == "ScanHasDescendants" ? "HasDescendants" : "Apply";
                 if (Owner(name, relative, Engine + "Storage/ScanEntries.cs", "ScanEntries") &&
-                    MethodNameFor(name) == "Apply")
+                    MethodNameFor(name) == allowed)
                     continue;
-                yield return (Line(name), "scan ingestion outside ScanEntries.Apply");
+                yield return (Line(name), "scan ingestion outside ScanEntries." + allowed);
             }
             else if (type == "Massdex.SyncShark.Engine.PathNames" && member == "Hash")
             {
@@ -836,6 +838,9 @@ public static class OwnershipChecks
         new("repair", Engine + "IssuePolicy.cs", "using Massdex.SyncShark.Engine; static class Other { static bool ProtectsSubtree(string skip) => skip == TextKey.SkipUnreadable.ToString(); }", "unreadable policy"),
         new("repair", Engine + "Planner/Decide.cs", "static class Decide { enum Other { SkipUnreadable } static object M() => Other.SkipUnreadable; }", null),
         new("repair", Engine + "Storage/ScanEntries.cs", "using Massdex.SyncShark.Engine.Storage; static class ScanEntries { static string Apply() => StateSchema.ScanUpsert + StateSchema.ScanDeleteSelf + StateSchema.ScanDeleteDescendants; }", null),
+        new("repair", Engine + "Storage/ScanEntries.cs", "using Massdex.SyncShark.Engine.Storage; static class ScanEntries { static string HasDescendants() => StateSchema.ScanHasDescendants; }", null),
+        new("repair", Engine + "Storage/ScanEntries.cs", "using Massdex.SyncShark.Engine.Storage; static class ScanEntries { static string Apply() => StateSchema.ScanHasDescendants; }", "scan ingestion"),
+        new("repair", Engine + "Storage/ScanWriter.cs", "using Massdex.SyncShark.Engine.Storage; static class ScanWriter { static string HasDescendants() => StateSchema.ScanHasDescendants; }", "scan ingestion"),
         new("repair", Engine + "Storage/ScanWriter.cs", "using Massdex.SyncShark.Engine.Storage; static class ScanWriter { static string Apply() => StateSchema.ScanUpsert; }", "scan ingestion"),
         new("repair", Engine + "Storage/StoredFolderPlan.cs", "using Massdex.SyncShark.Engine.Storage; static class StoredFolderPlan { static string CaptureAsync() => StateSchema.ScanDeleteSelf; }", "scan ingestion"),
         new("repair", Engine + "Storage/StoredFolderPlan.cs", "using Massdex.SyncShark.Engine.Storage; static class StoredFolderPlan { static string CaptureAsync() => StateSchema.ScanDeleteDescendants; }", "scan ingestion"),

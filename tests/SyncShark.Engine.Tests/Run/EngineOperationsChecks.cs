@@ -15,6 +15,9 @@ namespace Massdex.SyncShark.Engine.Tests.Run;
 /// <summary>Checks for EngineOperations (`--engine-checks repair`), written by EngineOperations's writer.</summary>
 public static class EngineOperationsChecks
 {
+    // Fixture writes need no retry window.
+    private static readonly AtomicReplacePolicy ImmediatePolicy = new([TimeSpan.Zero]);
+
     public static void Run()
     {
         var root = Path.Combine(Path.GetTempPath(), "syncshark-engine-operations-" + Guid.NewGuid().ToString("N"));
@@ -40,6 +43,7 @@ public static class EngineOperationsChecks
             TransportConstruction(root);
             PreviewModeAuthority(root);
             BindRootsRefusals(root);
+            BindingIdentityGuards(root);
             FolderKeepRules(root);
             RetryViews(root);
             RecoveryReads(root);
@@ -55,12 +59,12 @@ public static class EngineOperationsChecks
     {
         var operations = new EngineOperations(root, _ => { });
         var settings = operations.Settings();
-        Check.Require(settings.Count == 19, "the settings list holds every EngineSettings value");
+        Check.Require(settings.Count == 21, "the settings list holds every EngineSettings value");
         Check.Require(Value(settings, "DefaultFirstRunPolicy") == FirstRunPolicy.NewestWins.ToString(),
             "the embedded defaults are listed");
         Check.Require(!Overridden(settings, "DefaultFirstRunPolicy"), "an untouched value is not overridden");
 
-        SettingsFile.Write(root, "{\"LogRetentionDays\":7}");
+        SettingsFile.Write(root, "{\"LogRetentionDays\":7}", ImmediatePolicy);
         settings = operations.Settings();
         Check.Require(Value(settings, "LogRetentionDays") == "7", "a user value applies to the composition");
         Check.Require(Overridden(settings, "LogRetentionDays"), "a user value is marked overridden");
@@ -84,7 +88,7 @@ public static class EngineOperationsChecks
         var settingsPath = Path.Combine(productRoot, ResourceNames.EngineFolder, ResourceNames.UserSettingsFile);
 
         // The file can be edited by hand; an override merged onto a value the engine refuses must not be saved.
-        SettingsFile.Write(productRoot, "{ \"LogRetentionDays\": \"many\" }");
+        SettingsFile.Write(productRoot, "{ \"LogRetentionDays\": \"many\" }", ImmediatePolicy);
         var original = File.ReadAllBytes(settingsPath);
         var mergedRefused = false;
         try { operations.SetSetting("ConflictLabelFormat", "{name}"); }
@@ -96,6 +100,15 @@ public static class EngineOperationsChecks
         Check.Require(mergedRefused, "an override that makes the merged document invalid is refused");
         Check.Require(File.ReadAllBytes(settingsPath).SequenceEqual(original),
             "a refused merged document leaves the settings file byte-identical");
+
+        // The invalid value itself is still correctable: the publication policy comes from the merged
+        // replacement, so the old document is never parsed again (#135).
+        var corrected = operations.SetSetting(nameof(EngineSettings.LogRetentionDays), "7");
+        Check.Require(Value(corrected, nameof(EngineSettings.LogRetentionDays)) == "7"
+            && Value(operations.Settings(), nameof(EngineSettings.LogRetentionDays)) == "7",
+            "an invalid saved value is corrected through SetSetting");
+        Check.Require(!File.ReadAllBytes(settingsPath).SequenceEqual(original),
+            "a corrected setting replaces the invalid document");
     }
 
     // CV-SPEED / D1-Z: a settings edit is a durable file publication only; it opens no state, generation or provider.
@@ -290,6 +303,13 @@ public static class EngineOperationsChecks
                 Raise = [(IssueKind.DriveChange, TextKey.DriveRestored, "", new IssueSubject([], null))]
             });
         }
+        using (var visibility = StateStore.Open(StateStore.DatabasePath(root)))
+        {
+            var drive = visibility.Issues(pair.PairId).Single(issue => issue.Kind == IssueKind.DriveChange);
+            Check.Require(visibility.SetIssueIgnored(pair.PairId, drive.Id, true), "hide the pair blocker");
+            Check.Require(visibility.OpenIssuePage(pair.PairId, null, null, null, 10, 0, true).Page.Single().Issue.Id == drive.Id,
+                "hidden blocker remains available for Restore");
+        }
         var openingObserved = false;
         var stages = new List<string>();
         var operations = new EngineOperations(root, message =>
@@ -483,7 +503,7 @@ public static class EngineOperationsChecks
         var before = DecisionState(productRoot, pair.PairId);
         foreach (var choice in Enum.GetValues<ResolutionChoice>())
         {
-            if (choice is ResolutionChoice.FirstSync or ResolutionChoice.SyncNormally) continue;
+            if (choice is ResolutionChoice.FirstSync or ResolutionChoice.SyncNormally or ResolutionChoice.Ignore or ResolutionChoice.Unignore) continue;
             Check.Require(RefusedWith(() => operations.ResolveAsync(pair.PairId, driveId, choice, null, null, false,
                     null, CancellationToken.None).GetAwaiter().GetResult(), TextKey.ResolveBadChoice,
                     (TextArg.Id, driveId.ToString(CultureInfo.InvariantCulture)), (TextArg.Choice, choice.ToString())),
@@ -519,7 +539,7 @@ public static class EngineOperationsChecks
         foreach (var issue in operations.Issues(pair.PairId, null)
             .Where(issue => issue.Kind is IssueKind.Info or IssueKind.Skipped))
         foreach (var choice in Enum.GetValues<ResolutionChoice>().Where(choice => choice is not
-            (ResolutionChoice.Dismiss or ResolutionChoice.Retry or ResolutionChoice.FirstSync or ResolutionChoice.SyncNormally)))
+            (ResolutionChoice.Dismiss or ResolutionChoice.Retry or ResolutionChoice.FirstSync or ResolutionChoice.SyncNormally or ResolutionChoice.Ignore or ResolutionChoice.Unignore)))
         {
             Check.Require(RefusedWith(() => operations.ResolveAsync(pair.PairId, issue.Id, choice, null, null,
                     false, null, CancellationToken.None).GetAwaiter().GetResult(), TextKey.ResolveBadChoice,
@@ -873,6 +893,84 @@ public static class EngineOperationsChecks
         {
             host.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
+    }
+
+    private static void BindingIdentityGuards(string root)
+    {
+        using var store = StateStore.Open(StateStore.DatabasePath(Path.Combine(root, "binding-guards")));
+        var pair = TestDoubles.SourceFixture.Bound(new PairConfig("binding", "Pair A",
+            Path.Combine(root, "binding-local"), "/Pair", "connection", [], [],
+            FirstRunPolicy.NewestWins, true, null));
+        store.SavePair(pair);
+        var saved = new SyncedEntry(PathNames.Key("Saved"), "Saved", PathNames.DropboxKey("Saved"),
+            "Saved", false, "1", 1, DateTimeOffset.UnixEpoch.UtcTicks, "remote-saved", "hash");
+        store.Commit(pair.PairId, StateChange.Empty with { Record = [saved] });
+        var losing = new Entry("Saved", false, 1, DateTimeOffset.UnixEpoch, "1", "", "hash", null);
+        store.ArmPending(pair.PairId, new PendingEffect(1, "pending", 0, PendingKind.LocalDelete,
+            PendingPhase.Armed, "Saved", new RemovalProof(losing, "1", "hash"), saved,
+            null, null, null, null, false, null));
+        var generation = store.ReadPairExecution(pair.PairId)!.Value.Generation;
+        var binding = pair.Roots!;
+        var beforeSource = store.ReadSource(pair.PairId, Side.Local);
+        var beforeRemote = store.ReadSource(pair.PairId, Side.Dropbox);
+        var beforePending = store.Pending(pair.PairId);
+        var beforeFirst = store.FirstRepairDone(pair.PairId);
+        var beforeCount = store.SyncedCount(pair.PairId);
+        foreach (var changed in new[]
+        {
+            binding with { Local = binding.Local with { VolumeSerialNumber = 2 } },
+            binding with { Local = binding.Local with { FileId = 2 } },
+            binding with { Dropbox = binding.Dropbox with { FolderId = "other-folder" } },
+            binding with { Dropbox = binding.Dropbox with { AccountId = "other-account" } },
+            binding with { Dropbox = binding.Dropbox with { RootNamespaceId = "other-root" } },
+            binding with { Dropbox = binding.Dropbox with { HomeNamespaceId = "other-home" } },
+            binding with { LocalRoot = Path.Combine(root, "other") },
+            binding with { DropboxRoot = "/Other" },
+            binding with { ConnectionId = "other-connection" }
+        })
+        {
+            Check.Require(Threw<EngineRequestException>(() => PairSafety.ValidateConfigurationRoots(
+                store, pair, generation, changed, true)), "explicit binding refuses every changed identity or scope");
+            Check.Require(store.ReadPairExecution(pair.PairId)!.Value.Generation == generation &&
+                store.ReadPairExecution(pair.PairId)!.Value.Pair.Roots == binding &&
+                store.ReadSource(pair.PairId, Side.Local) == beforeSource &&
+                store.ReadSource(pair.PairId, Side.Dropbox) == beforeRemote &&
+                store.Pending(pair.PairId) == beforePending && store.FirstRepairDone(pair.PairId) == beforeFirst &&
+                store.SyncedCount(pair.PairId) == beforeCount &&
+                store.SyncedByKey(pair.PairId, Side.Local, saved.LocalKey) == saved,
+                "a refused binding preserves roots, generation, history, first-run state and pending custody");
+        }
+        var notice = store.Issues(pair.PairId, [IssueKind.RootIdentity]).Single();
+        Check.Require(EngineOperations.ResolutionChoices(notice).SequenceEqual([ResolutionChoice.BindRoots, ResolutionChoice.Ignore]) &&
+            Massdex.SyncShark.Engine.Edge.IssuePresentation.Options(notice).Single(option => option.Choice == ResolutionChoice.BindRoots.ToString()).Label == Text.Get(TextKey.ResolutionBindRootsLabel) &&
+            Massdex.SyncShark.Engine.Edge.IssuePresentation.ResolutionConfirmation(notice, ResolutionChoice.BindRoots) ==
+                Text.Get(TextKey.ResolutionBindRootsConsequence), "root notices share their one label and confirmation");
+        PairSafety.ValidateConfigurationRoots(store, pair, generation, binding, true);
+        var close = StateChange.Empty with { Close = [(string.Empty, new[] { IssueKind.RootIdentity })] };
+        Check.Require(Threw<LiveAdmissionStaleException>(() => store.ReconcileRootIdentity(pair.PairId,
+            generation + 1, binding, notice, close)), "stale generation cannot close a root notice");
+        store.ReconcileRootIdentity(pair.PairId, generation, binding, notice,
+            StateChange.Empty with { Raise = [(IssueKind.RootIdentity, TextKey.RootUnavailable, string.Empty,
+                new IssueSubject([], null))] });
+        var successor = store.Issues(pair.PairId, [IssueKind.RootIdentity]).Single();
+        Check.Require(Threw<LiveAdmissionStaleException>(() => store.ReconcileRootIdentity(pair.PairId,
+            generation, binding, notice, close)) && store.IssueById(pair.PairId, successor.Id)?.Cause == successor.Cause,
+            "a stale selected notice cannot close its successor");
+        store.ReconcileRootIdentity(pair.PairId, generation, binding, successor, close);
+        Check.Require(store.Issues(pair.PairId, [IssueKind.RootIdentity]).Count == 0,
+            "restored matching identities close the exact current root notice");
+        var misconfigured = pair with { PairId = "saved-scope", Roots = binding with { DropboxRoot = "/Other" } };
+        store.SavePair(misconfigured);
+        Check.Require(Threw<EngineRequestException>(() => PairSafety.ValidateConfigurationRoots(store,
+            misconfigured, store.ReadPairExecution(misconfigured.PairId)!.Value.Generation, binding, true)),
+            "binding refuses a saved scope that differs from the configured roots");
+        var unbound = pair with { PairId = "unbound", Roots = null };
+        store.SavePair(unbound);
+        var unboundGeneration = store.ReadPairExecution(unbound.PairId)!.Value.Generation;
+        PairSafety.ValidateConfigurationRoots(store, unbound, unboundGeneration, binding, true);
+        store.SavePairDecision(unbound, unboundGeneration, unbound with { Roots = binding }, null, false, null);
+        Check.Require(store.ReadPairExecution(unbound.PairId)!.Value.Pair.Roots == binding,
+            "an unbound pair can save its initial observed identities");
     }
 
     // V13-C48 / ROOTID T02: bind refuses an unknown pair or an unobservable configured account before any write, and

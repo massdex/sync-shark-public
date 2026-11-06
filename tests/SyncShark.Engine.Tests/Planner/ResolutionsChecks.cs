@@ -12,6 +12,30 @@ public static class ResolutionsChecks
 
     public static void Run()
     {
+        foreach (var choice in Enum.GetValues<ResolutionChoice>())
+            Check.Require(Resolutions.Allows(IssueKind.RootIdentity, TextKey.RootUnavailable, choice) ==
+                (choice is ResolutionChoice.BindRoots or ResolutionChoice.Ignore or ResolutionChoice.Unignore), "root identity offers explicit binding and visibility choices");
+        foreach (var kind in Enum.GetValues<IssueKind>())
+            Check.Require(Resolutions.Allows(kind, TextKey.RootUnavailable, ResolutionChoice.BindRoots) ==
+                (kind == IssueKind.RootIdentity), "binding belongs only to root identity notices");
+        foreach (var kind in Enum.GetValues<IssueKind>())
+        foreach (var choice in new[] { ResolutionChoice.Ignore, ResolutionChoice.Unignore })
+        {
+            var issue = new Issue(1, kind, TextKey.FailChanged, "a", new IssueSubject([], null), T0, false);
+            Check.Require(Resolutions.For(issue, choice).Count == 0, "every kind accepts row-free visibility choices");
+            Check.Require(Resolutions.RequestValid(true, false, choice, false, false, null) &&
+                !Resolutions.RequestValid(true, false, choice, true, false, null) &&
+                !Resolutions.RequestValid(true, false, choice, false, true, null) &&
+                !Resolutions.RequestValid(true, false, choice, false, false, "rule") &&
+                !Resolutions.RequestValid(false, true, choice, false, false, null), "visibility request shape is exact");
+        }
+        foreach (var kind in new[] { IssueKind.DriveChange, IssueKind.RootIdentity })
+        {
+            var issue = new Issue(1, kind, TextKey.FailChanged, "", new IssueSubject([], null), T0, false);
+            Check.Require(Massdex.SyncShark.Engine.Edge.IssuePresentation.ResolutionConfirmation(issue, ResolutionChoice.Ignore)
+                .Contains(Text.Get(TextKey.ResolutionIgnorePairConsequence), StringComparison.Ordinal),
+                "pair-blocking Ignore confirmation describes the retained stop");
+        }
         ContentTies();
         CaseTie();
         KindTie();

@@ -5,9 +5,8 @@ namespace Massdex.SyncShark.Engine.Local;
 /// The lifecycle stays together because its phases share one durable position and one uncommitted interval.</summary>
 public sealed class JournalSource
 {
-    /// <summary>The immutable acquisition fences and generation-lived classification resources of one member.
-    /// A suspended member contributes skipped-coverage responsibility without per-record work.</summary>
-    public sealed record Member(PairConfig Pair, long Generation, long Epoch, long Revision, bool Suspended,
+    /// <summary>The immutable acquisition fences and generation-lived classification resources of one member.</summary>
+    public sealed record Member(PairConfig Pair, long Generation, long Epoch, long Revision,
         UsnPaths Paths, DriveEvidence? Drive = null);
 
     private enum PageOutcome
@@ -57,7 +56,7 @@ public sealed class JournalSource
         lock (_membershipGate)
         {
             var member = _members()?.SingleOrDefault(value => value.Pair.PairId == pairId);
-            if (member is null || member.Generation != generation || member.Suspended || !Available)
+            if (member is null || member.Generation != generation || !Available)
                 throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
             return new LocalCatchUp(pairId, generation, member.Epoch,
                 new NtfsUsnCheckpoint(position.JournalId, checked((long)_firstUsn), checked((long)position.NextUsn),
@@ -204,7 +203,7 @@ public sealed class JournalSource
         lock (_membershipGate)
         {
             var member = _members()?.SingleOrDefault(value => value.Pair.PairId == pairId);
-            if (member is null || member.Generation != generation || member.Suspended || !Available)
+            if (member is null || member.Generation != generation || !Available)
                 throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
             return new LocalCatchUp(pairId, generation, member.Epoch,
                 new NtfsUsnCheckpoint(position.JournalId, checked((long)_firstUsn), checked((long)position.NextUsn),
@@ -354,7 +353,7 @@ public sealed class JournalSource
         if ((_read ?? _position) is not { } reading)
             return frozen is null ? Restart(ct) : PageOutcome.Stopped;
         foreach (var member in classified)
-            if (!member.Suspended) member.Paths.BeginPage();
+            member.Paths.BeginPage();
 
         var page = await NtfsUsnJournal.ReadChangePageAsync(_rootPath, reading.JournalId, reading.NextUsn,
             throughNextUsn, waitForChange: blocking,
@@ -362,8 +361,7 @@ public sealed class JournalSource
             {
                 ++_entryObservations;
                 foreach (var member in classified)
-                    if (!member.Suspended)
-                        member.Paths.Observe(fileId, parentFileId, usn, timestamp, reason, attributes);
+                    member.Paths.Observe(fileId, parentFileId, usn, timestamp, reason, attributes);
             }, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         switch (page.Status)
@@ -421,7 +419,6 @@ public sealed class JournalSource
     {
         foreach (var member in members)
         {
-            if (member.Suspended) continue;
             var failures = new List<ItemFailedException>();
             foreach (var notice in member.Paths.Resolve(ct, failures.Add)) notices.Add((member.Pair.PairId, notice));
             foreach (var failed in failures)
@@ -489,7 +486,7 @@ public sealed class JournalSource
             var installed = _members();
             if (!SameAcquisition(classified, installed)) return false;
             var fences = classified.Select(member => (member.Pair.PairId, member.Generation, member.Epoch,
-                member.Revision, member.Suspended,
+                member.Revision,
                 LostInterval: repair?.Contains(member.Pair.PairId) == true)).ToArray();
             long? result;
             try
@@ -512,7 +509,7 @@ public sealed class JournalSource
             _position = next;
             _acknowledged = true;
             DiscardRead();
-            var candidates = fences.Where(member => member.Suspended || member.LostInterval)
+            var candidates = fences.Where(member => member.LostInterval)
                 .Select(member => member.PairId).ToArray();
             if (candidates.Length == 0) return true;
             try
@@ -579,8 +576,7 @@ public sealed class JournalSource
         {
             if (!byPair.Remove(before.Pair.PairId, out var after)) return false;
             if (after.Generation != before.Generation || after.Epoch != before.Epoch ||
-                after.Revision != before.Revision || after.Suspended != before.Suspended ||
-                !ReferenceEquals(after.Paths, before.Paths) || !ReferenceEquals(after.Pair, before.Pair) ||
+                after.Revision != before.Revision || !ReferenceEquals(after.Paths, before.Paths) || !ReferenceEquals(after.Pair, before.Pair) ||
                 !ReferenceEquals(after.Drive, before.Drive)) return false;
         }
         return true;

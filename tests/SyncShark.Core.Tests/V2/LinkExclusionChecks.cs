@@ -46,7 +46,7 @@ internal static class LinkExclusionChecks
         return (pair, store, a, b, run);
     }
 
-    // Astra (dfab3c5) 1: a remote-only folder p is reviewed for removal; then local p appears with a junction inside.
+    // dfab3c5 item 1: a remote-only folder p is reviewed for removal; then local p appears with a junction inside.
     // The collapsed remote folder delete would be expanded from stored descendants, so it is dropped: p is no longer
     // one-sided and the next run re-plans it.
     private static async Task ApplyDropsRemoteRemovalWhenLocalAppearsAsync()
@@ -77,7 +77,7 @@ internal static class LinkExclusionChecks
         }
     }
 
-    // Astra (dfab3c5) 2: a local path that cannot be inspected is never "nothing there": the effect is dropped.
+    // dfab3c5 item 2: a local path that cannot be inspected is never "nothing there": the effect is dropped.
     [SupportedOSPlatform("windows")]
     private static async Task ApplyDropsEffectWhenLocalPathUncheckableAsync(bool changed)
     {
@@ -149,7 +149,7 @@ internal static class LinkExclusionChecks
         }
     }
 
-    // Astra (cec2a29) 1: the one-sided fact is captured in the plan. A second preview after the local item appears
+    // cec2a29 item 1: the one-sided fact is captured in the plan. A second preview after the local item appears
     // updates the store, but the reviewed delete still carries OppositeAbsent and is dropped.
     private static async Task InterleavedPreviewCannotPassStaleDeleteAsync()
     {
@@ -176,7 +176,7 @@ internal static class LinkExclusionChecks
             "a superseded delete retains immediately due ordinary replan input, never replay authority");
     }
 
-    // Astra fix 3: a known link tag wins over online-only bits; a cloud stub is still an online-only file.
+    // fix 3: a known link tag wins over online-only bits; a cloud stub is still an online-only file.
     private static void Classification()
     {
         const FileAttributes recall = (FileAttributes)0x00400000;
@@ -192,7 +192,7 @@ internal static class LinkExclusionChecks
             "cloud placeholders keep their stub / fully-local classification");
     }
 
-    // Astra fix 2: the store forgets the baselines at or under a link in the same write that records the link, so an
+    // fix 2: the store forgets the baselines at or under a link in the same write that records the link, so an
     // interruption right after link discovery cannot leave them behind (both store implementations).
     private static void StoreForgetsBaselinesWhenLinkIsWritten()
     {
@@ -228,7 +228,7 @@ internal static class LinkExclusionChecks
         }
     }
 
-    // Astra fix 1: a junction created on the local side between the preview and the apply. The store has never seen
+    // fix 1: a junction created on the local side between the preview and the apply. The store has never seen
     // it, so the apply re-checks each destructive effect's path and ancestors on the local disk and drops the remote
     // delete under it.
     private static async Task ApplyDropsEffectsUnderNewLocalLinkAsync()
@@ -271,7 +271,7 @@ internal static class LinkExclusionChecks
         {
             LocalChecks.RemoveJunction(junction);
         }
-        Console.WriteLine("PASS Astra fix 1: link created between preview and apply blocks the remote delete");
+        Console.WriteLine("PASS link created between preview and apply blocks the remote delete");
     }
 
     // Finding 1: a synced folder becomes a junction, then its parent is deleted locally. The old content under the

@@ -92,7 +92,8 @@ public static class RowContextsChecks
             var context = new ExecutorContext(new FakeSide(Side.Local), new FakeSide(Side.Dropbox),
                 new FakeRecovery(), store, Pair, Scope, settings, new ReplaceTurn(), new FakeAdmission(),
                 false, _ => { }, RefuseReserve, TimeProvider.System, RefuseEvidence, RefuseBegin, RefuseComplete,
-                ("", "", ""), new RefusingItemAttempts(), new object(), 0);
+                ("", "", ""), new RefusingItemAttempts(), new object(), 0)
+            { ScanId = ScanFixture.TokenOrNone(store, Pair.PairId) };
             return new RowContexts(context, firstRun, completeInventory, retryIssues, subjects, deletedName);
         }
     }

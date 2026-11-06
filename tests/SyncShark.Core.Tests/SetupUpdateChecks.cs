@@ -29,6 +29,42 @@ internal static class SetupUpdateChecks
         var invocation = SyncCliParser.Parse(["--cli", "setup", "apply", "--update", "1.2.3", "--yes"]);
         if (invocation.Update != "1.2.3" || !SyncCli.IsStateFreeInvocation(["--cli", "setup", "check"]))
             throw new Exception("Setup CLI routing changed.");
+        var named = false;
+        try { SyncCliParser.Parse(["--cli", "setup", "apply", "--yes"]); }
+        catch (SyncCliUsageException error)
+        {
+            if (error.Message != "setup apply requires --update <exact-version>, for example 0.3.35.") throw;
+            named = true;
+        }
+        if (!named) throw new Exception("Setup apply accepted a missing version.");
+        var temporary = Directory.GetDirectories(Path.GetTempPath(), "SyncShark-Update-*");
+        var downloaded = false;
+        try
+        {
+            SetupUpdates.ApplyAsync(new SetupRelease("9.9.9",
+                new Uri("https://127.0.0.1:1/SyncShark-Setup-v9.9.9.exe"), 1, new string('0', 64)),
+                CancellationToken.None).GetAwaiter().GetResult();
+            downloaded = true;
+        }
+        catch (Exception) { }
+        if (downloaded) throw new Exception("An unreachable setup download was accepted.");
+        if (Directory.GetDirectories(Path.GetTempPath(), "SyncShark-Update-*").Except(temporary).Any())
+            throw new Exception("A failed setup download retained its temporary folder.");
+        var retained = Path.Combine(Path.GetTempPath(), "SyncShark-Update-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(retained);
+        try
+        {
+            using (var held = new FileStream(Path.Combine(retained, "locked.exe"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+            {
+                var diagnostics = new StringWriter();
+                SetupDownloadCleanup.Delete(retained, diagnostics);
+                if (!diagnostics.ToString().Contains(retained) || !File.ReadAllText(SetupDownloadCleanup.LogPath).Contains(retained))
+                    throw new Exception("Immediate cleanup failure was not reported in output and log.");
+            }
+            SetupDownloadCleanup.Delete(retained, new StringWriter());
+            if (Directory.Exists(retained)) throw new Exception("Cleanup did not remove the unlocked download.");
+        }
+        finally { if (Directory.Exists(retained)) Directory.Delete(retained, true); }
         try { SyncCliParser.Parse(["--cli", "setup", "apply", "--update", "1.2.3"]); }
         catch (SyncCliUsageException) { return 0; }
         throw new Exception("Setup apply accepted missing confirmation.");

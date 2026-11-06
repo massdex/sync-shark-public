@@ -112,7 +112,7 @@ public sealed class StateStore : IStateStore
             (StateSchema.ParamPair, pairId), (StateSchema.ParamPath, string.Empty),
             (StateSchema.ParamKind, (int)IssueKind.RootIdentity));
         if (expectedIssue is null ? stored is not null : stored is null ||
-            stored with { Subject = expectedIssue.Subject } != expectedIssue ||
+            stored with { Subject = expectedIssue.Subject, Ignored = expectedIssue.Ignored } != expectedIssue ||
             stored.Subject.Incoming != expectedIssue.Subject.Incoming ||
             !stored.Subject.HasSameItems(expectedIssue.Subject) ||
             stored.Subject.LocalHash != expectedIssue.Subject.LocalHash ||
@@ -124,7 +124,7 @@ public sealed class StateStore : IStateStore
             if (!IssueTable.CloseExact(_connection, transaction, pairId, stored))
                 throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged);
         }
-        StateCommitter.Commit(_connection, transaction, pairId,
+        StateCommitter.Commit(_connection, transaction, _changes, pairId,
             issueOnlyChange with { Close = [] }, DateTimeOffset.UtcNow, narrowRecordUpdates: true, raised: null);
         transaction.Commit();
     });
@@ -169,10 +169,7 @@ public sealed class StateStore : IStateStore
     private Func<Guid, string, long, IssueSubject, ItemRetryToken?, bool>? _isRegisteredItemAttempt;
     private readonly Dictionary<object, (string PairId, long Generation, Issue Notice)> _pageWaits =
         new(ReferenceEqualityComparer.Instance);
-    private readonly HashSet<string> _freshScans = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _resumedHistory = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, (ScanRecord Record, long PairRow)> _scans =
-        new(StringComparer.Ordinal);
+    private readonly Dictionary<(string PairId, Guid ScanId), ScanPartition> _scans = [];
     private readonly HashSet<string> _plans = new(StringComparer.Ordinal);
     private string? _scanPair;
     private bool _scanOnDisk;
@@ -180,6 +177,7 @@ public sealed class StateStore : IStateStore
     // Bounded by Repair's outstanding row-task capacity: each submitter awaits its completion.
     private List<(string PairId, StateChange Change, TaskCompletionSource Completion, bool Narrow, Exception? Failure)>? _records;
     private bool _flushing;
+    private bool _disposed;
     private readonly object _queueLock = new();
 
     private StateStore(SqliteConnection connection, string path, bool legacy, bool writable)
@@ -211,7 +209,7 @@ public sealed class StateStore : IStateStore
 
     /// <summary>The engine database path under the product root; opening and creation stay with the caller.</summary>
     public static string DatabasePath(string productRoot) =>
-        SyncDataLocation.EngineDatabasePath(productRoot);
+        Path.Combine(productRoot, ResourceNames.EngineFolder, ResourceNames.DatabaseFile);
 
     private static StateStore? OpenStore(string path, bool writable, IProgress<RunEvent>? progress = null)
     {
@@ -254,10 +252,17 @@ public sealed class StateStore : IStateStore
     public void SavePair(PairConfig pair) => Write(pair, static (store, pair) =>
     {
         using var transaction = store._connection.BeginTransaction();
+        var before = store.ReadOne(transaction, StateSchema.SelectPair,
+            static reader => StateEncoding.DecodePair(reader.GetString(StateSchema.FirstColumn)),
+            (StateSchema.ParamPair, pair.PairId));
+        var replaceIdentity = before is not null && RootBinding.HistoryIdentityChanged(before, pair);
+        if (replaceIdentity)
+            Execute(store._connection, transaction, StateSchema.ReplaceDeletedHistoryIdentity, (StateSchema.ParamPair, pair.PairId));
         Execute(store._connection, transaction, StateSchema.UpsertPair,
             (StateSchema.ParamPair, pair.PairId), (StateSchema.ParamDef, JsonSerializer.Serialize(pair, PairEncoding)));
         store._changes.SeedPairSources(transaction, pair.PairId);
         transaction.Commit();
+        if (replaceIdentity) store.ResetScan(pair.PairId);
     });
 
     /// <summary>Removes the pair, its scan and its rows (cascade), then reclaims pages.</summary>
@@ -273,7 +278,7 @@ public sealed class StateStore : IStateStore
         }
         store._closureKeys?.Remove(pairId);
         store._issueFacts.Remove(pairId);
-        store.ResetScan(pairId);
+        store.InvalidateScans(pairId);
         store.Reclaim();
     });
 
@@ -358,15 +363,17 @@ public sealed class StateStore : IStateStore
         List<Issue>? raised = committedIssue is null ? null : [];
         Write((pairId, change, selection, raised), static (store, state) =>
         {
+            ObjectDisposedException.ThrowIf(store._disposed, store);
             var (pairId, change, selection, raised) = state;
             if (change.Record.Count == 0 && change.StaleBindings.Count == 0 && change.ForgetBothSubtrees.Count == 0 && change.Renames.Count == 0 && change.FirstRunAcknowledged.Count == 0 &&
                 change.ForgetSelf.Count == 0 && change.ForgetSubtrees.Count == 0 && change.Raise.Count == 0 &&
                 !store.NeedsClosure(pairId, change.Close)) return;
             if (change.Renames.Count != 0) store.AttachScan(pairId, create: false);
+            var scans = change.Renames.Count == 0 ? [] : store.ActiveScanKeys(pairId).ToArray();
             using var transaction = store._connection.BeginTransaction();
             if (selection is not null) store._changes.AdvanceBefore(transaction, pairId, selection, change);
-            StateCommitter.Commit(store._connection, transaction, pairId, change, DateTimeOffset.UtcNow,
-                narrowRecordUpdates: true, raised);
+            StateCommitter.Commit(store._connection, transaction, store._changes, pairId, change, DateTimeOffset.UtcNow,
+                narrowRecordUpdates: true, raised, scans);
             transaction.Commit();
             store.UpdateClosures(pairId, change);
         });
@@ -394,6 +401,7 @@ public sealed class StateStore : IStateStore
         bool flush;
         lock (_queueLock)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             (_records ??= []).Add((pairId, change, completion, narrow, null));
             flush = !_flushing;
             if (flush) _flushing = true;
@@ -447,6 +455,31 @@ public sealed class StateStore : IStateStore
         return raw!;
     }
 
+    private void RequirePendingSaved(SqliteTransaction transaction, string pairId, PendingEffect effect)
+    {
+        if (!IsCrossedLocalReplace(effect))
+        {
+            RequireSaved(transaction, pairId, effect.Losing.Expected, effect.Saved);
+            return;
+        }
+        // The losing file was unbound; custody retains the distinct, still-current source binding.
+        RequireSaved(transaction, pairId, effect.Losing.Expected, null);
+        var saved = effect.Saved!;
+        if (ReadOne(transaction, StateSchema.SelectSyncedByDropboxKey, DecodeSynced,
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, saved.DropboxKey)) != saved ||
+            ReadOne(transaction, StateSchema.SelectSyncedByDropboxId, DecodeSynced,
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamId, saved.DropboxId)) != saved)
+            throw new InvalidOperationException();
+    }
+
+    internal static bool IsCrossedLocalReplace(PendingEffect effect) =>
+        effect.Kind == PendingKind.LocalReplace &&
+        effect.Saved is { IsFolder: false } saved && saved.LocalKey != saved.DropboxKey &&
+        effect.Losing.Expected is { IsFolder: false, Skip: null } local &&
+        effect.Source is { IsFolder: false, Skip: null } source &&
+        effect.Path == local.Path && PathNames.Same(local.Path, PathNames.LocalSpelling(source.Path)) &&
+        PathNames.Same(source.Path, saved.DropboxKey) && source.Id == saved.DropboxId && local.Id != saved.LocalId;
+
     private void RequireSaved(SqliteTransaction transaction, string pairId, Entry expected, SyncedEntry? saved)
     {
         if (ReadBinding(StateSchema.SelectSyncedByLocalKey, StateSchema.ParamTargetKey,
@@ -472,7 +505,7 @@ public sealed class StateStore : IStateStore
             throw new ArgumentException(null, nameof(effect));
         using var transaction = store._connection.BeginTransaction();
         var pair = store.RequirePairRow(transaction, state.pairId);
-        store.RequireSaved(transaction, state.pairId, state.effect.Losing.Expected, state.effect.Saved);
+        store.RequirePendingSaved(transaction, state.pairId, state.effect);
         RequireOne(Execute(store._connection, transaction, StateSchema.PendingArm,
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamNext, json)));
         transaction.Commit();
@@ -482,6 +515,25 @@ public sealed class StateStore : IStateStore
     public IReadOnlyList<Issue> Issues(string pairId, IReadOnlyList<IssueKind>? kinds = null)
     {
         lock (_lock) return IssueTable.List(_connection, pairId, kinds);
+    }
+
+    /// <inheritdoc />
+    public IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null) =>
+        ReadOrdered(ReadIssuesUnder(pairId, scopeKey, kinds));
+
+    private IEnumerable<Issue> ReadIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds)
+    {
+        using var command = StorageCommand.Create(_connection, null,
+            kinds is null ? StateSchema.SelectIssues : StateSchema.SelectIssuesByKinds,
+            (StateSchema.ParamPair, pairId));
+        if (kinds is not null)
+            command.Parameters.AddWithValue(StateSchema.ParamKinds, JsonSerializer.Serialize(kinds));
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var issue = IssueTable.ReadIssue(reader);
+            if (issue.IsUnder(scopeKey)) yield return issue;
+        }
     }
 
     /// <summary>Counts matched baseline items once through the pair index, without decoding entries.</summary>
@@ -495,19 +547,26 @@ public sealed class StateStore : IStateStore
         }
     }
 
-    /// <summary>Counts non-dismissed issues without decoding their subjects.</summary>
-    public IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId)
+    /// <summary>Changes visibility of one exact notice without changing its responsibility or retry state.</summary>
+    public bool SetIssueIgnored(string pairId, long id, bool ignored)
     {
-        lock (_lock) return IssueTable.Counts(_connection, pairId);
+        lock (_lock) return Execute(_connection, null, StateSchema.SetIssueIgnored,
+            (StateSchema.ParamPair, pairId), (StateSchema.ParamId, id), (StateSchema.ParamIgnored, ignored)) != 0;
+    }
+
+    /// <summary>Counts without decoding subjects; null visibility includes ignored safety obligations.</summary>
+    public IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId, bool? ignored = null)
+    {
+        lock (_lock) return IssueTable.Counts(_connection, pairId, ignored);
     }
 
     /// <summary>Reads one bounded page of open issues and the filtered total through a short-lived read-only
     /// connection, so a CLI page never queues behind or holds the host's writer connection.</summary>
     public (IReadOnlyList<(string PairId, Issue Issue)> Page, int Total) OpenIssuePage(string? pairId, string? account,
-        string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset)
+        string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset, bool ignored = false)
     {
         using var read = Connect(_path, SqliteOpenMode.ReadOnly);
-        return IssueTable.OpenPage(read, pairId, account, search, kinds, limit, offset);
+        return IssueTable.OpenPage(read, pairId, account, search, kinds, limit, offset, ignored: ignored);
     }
 
     /// <summary>Reads every open issue of the requested kinds and its total through one short-lived read-only
@@ -561,84 +620,214 @@ public sealed class StateStore : IStateStore
         IEnumerable<(string Path, TextKey Cause, IssueSubject Subject)> skipped) =>
         Write(() =>
         {
-            if (!_scans.TryGetValue(pairId, out var scan) || scan.Record.Token != scanToken)
-                throw new InvalidOperationException();
+            var scan = RequireScan(pairId, scanToken);
+            if (scan.Record.Scope is not null) throw new InvalidOperationException();
             AttachScan(pairId, create: false);
             using var transaction = _connection.BeginTransaction();
             RequireGeneration(transaction, pairId, scan.Record.Generation);
-            IssueTable.ReplaceSkipped(_connection, transaction, pairId, scan.PairRow, skipped, DateTimeOffset.UtcNow);
+            IssueTable.ReplaceSkipped(_connection, transaction, pairId, scan.PairRow, scan.Key, skipped, DateTimeOffset.UtcNow);
             transaction.Commit();
         });
 
     public void DismissIssue(string pairId, long id) => Write((pairId, id), static (store, state) =>
         IssueTable.Dismiss(store._connection, state.pairId, state.id));
 
-    /// <summary>Discards only this pair's previous disposable scan.</summary>
-    public Guid BeginScan(string pairId, long expectedGeneration, bool includeDeleted) => Ordered(() =>
+    /// <summary>Creates one operation's partition without disturbing another active scan.</summary>
+    public Guid BeginScan(string pairId, Guid scanId, long expectedGeneration, bool includeDeleted, string? scope = null) => Ordered(() =>
     {
         var pair = RequireGeneration(null, pairId, expectedGeneration);
-        var local = ReadSource(pairId, Side.Local) ??
-            throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
-        var dropbox = ReadSource(pairId, Side.Dropbox) ??
-            throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
-        var gap = ReadLocalGap(pairId, local.Epoch);
-        var through = ReadWorkWatermark();
-        var firstRun = !FirstRepairDone(pairId);
-        ResetScan(pairId);
-        var token = ResourceNames.NewScanToken();
-        _scans.Add(pairId, (new ScanRecord(token, expectedGeneration, includeDeleted, firstRun, through,
-            local.Epoch, local.Revision, dropbox.Epoch, dropbox.Revision, gap), pair));
-        _freshScans.Add(pairId);
+        var local = ReadSource(pairId, Side.Local) ?? throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
+        var dropbox = ReadSource(pairId, Side.Dropbox) ?? throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
+        if (scanId == Guid.Empty || _scans.ContainsKey((pairId, scanId)) || includeDeleted && scope is not null ||
+            scope is null && _scans.Any(item => item.Key.PairId == pairId && item.Value.Active && item.Value.Record.Scope is null))
+            throw new InvalidOperationException();
+        if (!_scans.Keys.Any(key => key.PairId == pairId)) ResetScan(pairId);
         AttachScan(pairId, create: true);
-        Execute(_connection, null, StateSchema.CreateSkipTouched);
-        if (includeDeleted) Execute(_connection, null, StateSchema.CreateDeletedName);
-        return token;
+        var scan = new ScanPartition(new ScanRecord(scanId, expectedGeneration, includeDeleted, !FirstRepairDone(pairId),
+            ReadWorkWatermark(), local.Epoch, local.Revision, dropbox.Epoch, dropbox.Revision,
+            ReadLocalGap(pairId, local.Epoch)) { Scope = scope }, pair);
+        using (var transaction = _connection.BeginTransaction())
+        {
+            Execute(_connection, transaction, StateSchema.CreateSkipTouched);
+            Execute(_connection, transaction, StateSchema.CreateScanIssues);
+            if (scope is null)
+                Execute(_connection, transaction, StateSchema.CaptureScanIssues,
+                    (StateSchema.ParamPairRow, pair), (StateSchema.ParamScan, scan.Key));
+            if (includeDeleted)
+            {
+                Execute(_connection, transaction, StateSchema.CreateDeletedName);
+                Execute(_connection, transaction, StateSchema.ClearDeletedNames, (StateSchema.ParamPairRow, pair));
+            }
+            transaction.Commit();
+        }
+        _scans.Add((pairId, scanId), scan);
+        return scanId;
     });
 
-    /// <inheritdoc />
     public ScanRecord ReadScan(string pairId, Guid scanToken)
+    {
+        lock (_lock) return RequireScan(pairId, scanToken).Record;
+    }
+
+    private ScanPartition RequireScan(string pairId, Guid scanId)
+    {
+        if (!_scans.TryGetValue((pairId, scanId), out var scan) || !scan.Active)
+            throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
+        RequireGeneration(null, pairId, scan.Record.Generation);
+        return scan;
+    }
+
+    /// <summary>Opens a token-fenced writer and tracks it until its save loop has exited.</summary>
+    public IScanSink OpenScan(string pairId, Guid scanId, Side side, int batchRows)
     {
         lock (_lock)
         {
-            if (!_scans.TryGetValue(pairId, out var scan) || scan.Record.Token != scanToken)
-                throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
-            return scan.Record;
+            var scan = RequireScan(pairId, scanId);
+            var fresh = side == Side.Local && scan.FreshLocal;
+            if (side == Side.Local) scan.FreshLocal = false;
+            scan.Borrowers++;
+            try
+            {
+                return new ScanWriter(_connection, _lock, pairId, side, () => scan.Active = false,
+                    batchRows, fresh, () => { RequireScan(pairId, scanId); AttachScan(pairId, create: false); },
+                    side == Side.Dropbox && scan.Record.Discovery ? scan.PairRow : null,
+                    liveOverrides: side == Side.Dropbox && scan.ResumedHistory,
+                    deletedDeltaPairRow: side == Side.Dropbox && scan.IncrementalHistory ? scan.PairRow : null,
+                    scanId: scan.Key, release: () => scan.Borrowers--);
+            }
+            catch { scan.Borrowers--; throw; }
         }
     }
 
-    /// <summary>Opens a side writer, switching the pair attachment under the shared write lock.</summary>
-    public IScanSink OpenScan(string pairId, Side side, int batchRows)
+    public async Task EndScanAsync(string pairId, Guid scanId, int pageSize)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pageSize);
+        ScanPartition? scan = null;
+        var removed = Ordered(() =>
+        {
+            if (!_scans.TryGetValue((pairId, scanId), out scan)) return true;
+            if (scan.Borrowers != 0) throw new InvalidOperationException();
+            scan.Active = false;
+            if (_scans.Keys.Any(key => key.PairId == pairId && key.ScanId != scanId)) return false;
+            ResetScan(pairId);
+            return true;
+        });
+        if (removed) return;
+        Exception? failure = null;
+        try
+        {
+            foreach (var sql in new[] { StateSchema.DeleteScanBatch, StateSchema.DeleteTouchBatch, StateSchema.DeleteScanIssueBatch })
+            {
+                while (Ordered(() =>
+                {
+                    AttachScan(pairId, create: false);
+                    using var transaction = _connection.BeginTransaction();
+                    var count = Execute(_connection, transaction, sql, (StateSchema.ParamPairRow, scan!.PairRow),
+                        (StateSchema.ParamScan, scan.Key), (StateSchema.ParamTake, pageSize));
+                    transaction.Commit();
+                    return count;
+                }) != 0) await Task.Yield();
+            }
+        }
+        catch (Exception cleanup) { failure = cleanup; }
+        try
+        {
+            Write(() =>
+            {
+                _scans.Remove((pairId, scanId));
+                if (!_scans.Keys.Any(key => key.PairId == pairId)) ResetScan(pairId);
+            });
+        }
+        catch (Exception cleanup)
+        {
+            if (failure is not null) throw new AggregateException(failure, cleanup);
+            throw;
+        }
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    /// <inheritdoc />
+    public bool DeletedHistoryOwed(string pairId)
     {
         lock (_lock)
-        {
-            if (!_scans.TryGetValue(pairId, out var scan)) throw new InvalidOperationException();
-            RequireGeneration(null, pairId, scan.Record.Generation);
-            return new ScanWriter(_connection, _lock, pairId, side, () =>
-                {
-                    if (_scans.TryGetValue(pairId, out var current) && current.Record.Token == scan.Record.Token)
-                        _scans.Remove(pairId);
-                }, batchRows, side == Side.Local && _freshScans.Remove(pairId), () =>
-                {
-                    if (!_scans.TryGetValue(pairId, out var current) || current.Record.Token != scan.Record.Token)
-                        throw new InvalidOperationException();
-                    AttachScan(pairId, create: false);
-                }, side == Side.Dropbox && scan.Record.Discovery ? scan.PairRow : null,
-                liveOverrides: side == Side.Dropbox && _resumedHistory.Contains(pairId));
-        }
+            return ReadOne(null, StateSchema.ReadDeletedHistoryOwed,
+                static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn), (StateSchema.ParamPair, pairId));
     }
 
     /// <inheritdoc />
     public string? RestoreDeletedHistory(string pairId, Guid scanToken) => Ordered(() =>
     {
         var scan = ReadScan(pairId, scanToken);
-        RequireGeneration(null, pairId, scan.Generation);
-        if (!scan.FirstRun || !scan.Discovery) return null;
+        var pair = RequireGeneration(null, pairId, scan.Generation);
+        if (!scan.Discovery) return null;
         AttachScan(pairId, create: false);
         if (DeletedHistoryCursor(pairId) is not { } cursor) return null;
-        Execute(_connection, null, StateSchema.RestoreDeletedHistory, (StateSchema.ParamPair, pairId));
-        _resumedHistory.Add(pairId);
+        try
+        {
+            using var transaction = _connection.BeginTransaction();
+            using var insert = StorageCommand.Create(_connection, transaction, StateSchema.DeletedNameInsert,
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamPath, string.Empty));
+            string? after = null;
+            long count = 0;
+            while (true)
+            {
+                using var block = StorageCommand.Create(_connection, transaction, StateSchema.ReadDeletedBlock,
+                    (StateSchema.ParamPairRow, pair), (StateSchema.ParamAfter, after));
+                using var reader = block.ExecuteReader();
+                if (!reader.Read()) break;
+                var last = reader.GetString(StateSchema.DeletedBlockLast);
+                using var names = new SqliteBlob(_connection, StateSchema.DeletedBlockTable, StateSchema.DeletedBlockPayload,
+                    reader.GetInt64(StateSchema.DeletedBlockRow), readOnly: true);
+                foreach (var key in StateEncoding.DecodeDeletedNames(names, reader.GetInt32(StateSchema.DeletedBlockCount), last, after))
+                {
+                    insert.Parameters[StateSchema.ParamPath].Value = key;
+                    count += insert.ExecuteNonQuery();
+                }
+                after = last;
+            }
+            using var total = StorageCommand.Create(_connection, transaction, StateSchema.DeletedHistoryCount,
+                (StateSchema.ParamPairRow, pair));
+            if ((long)total.ExecuteScalar()! != count) throw new InvalidDataException();
+            transaction.Commit();
+        }
+        catch (InvalidDataException)
+        {
+            InvalidateCorruptDeletedHistory(pairId);
+            return null;
+        }
+        RequireScan(pairId, scanToken).ResumedHistory = true;
         return cursor;
     });
+
+    /// <inheritdoc />
+    public string? ContinueDeletedHistory(string pairId, Guid scanToken) => Ordered(() =>
+    {
+        var scan = ReadScan(pairId, scanToken);
+        RequireGeneration(null, pairId, scan.Generation);
+        var cursor = DeletedHistoryCursor(pairId);
+        if (!scan.Discovery) return null;
+        if (cursor is not null) RequireScan(pairId, scanToken).IncrementalHistory = true;
+        return cursor;
+    });
+
+    private void InvalidateCorruptDeletedHistory(string pairId)
+    {
+        Execute(_connection, null, StateSchema.ClearDeletedHistory, (StateSchema.ParamPair, pairId));
+        if (_scans.Any(item => item.Key.PairId == pairId && item.Value.Active && item.Value.Record.Discovery))
+        {
+            AttachScan(pairId, create: false);
+            Execute(_connection, null, StateSchema.ClearScanDeletedNames, (StateSchema.ParamPair, pairId));
+        }
+        foreach (var partition in _scans.Where(item => item.Key.PairId == pairId).Select(item => item.Value))
+        {
+            partition.ResumedHistory = false;
+            partition.IncrementalHistory = false;
+        }
+        Commit(pairId, StateChange.Empty with
+        {
+            Raise = [(IssueKind.Info, TextKey.DeletedHistoryCorrupt, string.Empty, new IssueSubject([], null))]
+        });
+    }
 
     private string? DeletedHistoryCursor(string pairId)
     {
@@ -650,14 +839,16 @@ public sealed class StateStore : IStateStore
     /// <inheritdoc />
     public void ResetDeletedHistory(string pairId, Guid scanToken, bool discardNames) => Write(() =>
     {
-        var scan = ReadScan(pairId, scanToken);
-        RequireGeneration(null, pairId, scan.Generation);
+        var scan = RequireScan(pairId, scanToken);
+        if (!scan.Record.Discovery) throw new InvalidOperationException();
         AttachScan(pairId, create: false);
         using var transaction = _connection.BeginTransaction();
-        Execute(_connection, transaction, StateSchema.ClearScanDropbox, (StateSchema.ParamPair, pairId));
+        Execute(_connection, transaction, StateSchema.ClearScanDropbox, (StateSchema.ParamPair, pairId),
+            (StateSchema.ParamScan, scanToken.ToByteArray()));
         if (discardNames)
         {
-            _resumedHistory.Remove(pairId);
+            scan.ResumedHistory = false;
+            scan.IncrementalHistory = false;
             Execute(_connection, transaction, StateSchema.ClearScanDeletedNames, (StateSchema.ParamPair, pairId));
             Execute(_connection, transaction, StateSchema.ClearDeletedHistory, (StateSchema.ParamPair, pairId));
         }
@@ -672,7 +863,13 @@ public sealed class StateStore : IStateStore
         {
             var scan = ReadScan(pairId, scanToken);
             var row = RequireGeneration(null, pairId, scan.Generation);
-            if (!scan.FirstRun || !scan.Discovery || FirstRepairDone(pairId)) return (long?)null;
+            if (RequireScan(pairId, scanToken).IncrementalHistory)
+            {
+                Execute(_connection, null, StateSchema.PublishDeletedHistory,
+                    (StateSchema.ParamPair, pairId), (StateSchema.ParamCursor, cursor));
+                return (long?)null;
+            }
+            if (!scan.Discovery) return (long?)null;
             Execute(_connection, null, StateSchema.ClearDeletedHistory, (StateSchema.ParamPair, pairId));
             return row;
         });
@@ -689,45 +886,93 @@ public sealed class StateStore : IStateStore
 
     private void CopyDeletedHistory(string pairId, Guid scanToken, string cursor)
     {
+        FoldDeletedHistory(pairId, scanToken);
         string? after = null;
         while (Ordered(() =>
         {
             var scan = ReadScan(pairId, scanToken);
             var pair = RequireGeneration(null, pairId, scan.Generation);
-            if (FirstRepairDone(pairId) || DeletedHistoryCursor(pairId) is not null)
+            if (DeletedHistoryCursor(pairId) is not null)
                 throw new InvalidOperationException();
             AttachScan(pairId, create: false);
             using var transaction = _connection.BeginTransaction();
-            var copied = Execute(_connection, transaction,
-                StateSchema.SaveDeletedHistory,
-                (StateSchema.ParamPairRow, pair), (StateSchema.ParamAfter, after), (StateSchema.ParamTake, StateSchema.DeletedHistoryBatchSize));
-            using var key = StorageCommand.Create(_connection, transaction,
-                StateSchema.SavedDeletedHistoryKey,
-                (StateSchema.ParamPairRow, pair));
-            after = key.ExecuteScalar() as string;
+            var keys = new List<string>();
+            using (var command = StorageCommand.Create(_connection, transaction, StateSchema.SaveDeletedHistory,
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamAfter, after),
+                (StateSchema.ParamTake, StateSchema.DeletedHistoryBatchSize)))
+            using (var reader = command.ExecuteReader())
+                while (reader.Read()) keys.Add(reader.GetString(0));
+            if (keys.Count == 0) return false;
+            WriteDeletedBlock(_connection, transaction, pair, keys);
+            after = keys[^1];
             transaction.Commit();
-            return copied != 0;
+            return true;
         })) { }
         Write(() =>
         {
             var scan = ReadScan(pairId, scanToken);
-            RequireGeneration(null, pairId, scan.Generation);
-            if (FirstRepairDone(pairId) || DeletedHistoryCursor(pairId) is not null)
+            var pair = RequireGeneration(null, pairId, scan.Generation);
+            AttachScan(pairId, create: false);
+            if (DeletedHistoryCursor(pairId) is not null)
                 throw new InvalidOperationException();
-            Execute(_connection, null, StateSchema.PublishDeletedHistory,
+            using var transaction = _connection.BeginTransaction();
+            Execute(_connection, transaction, StateSchema.RetireFoldedDeletedNames, (StateSchema.ParamPairRow, pair));
+            Execute(_connection, transaction, StateSchema.PublishDeletedHistory,
                 (StateSchema.ParamPair, pairId), (StateSchema.ParamCursor, cursor));
+            transaction.Commit();
         });
     }
+
+    private void FoldDeletedHistory(string pairId, Guid scanToken)
+    {
+        string? after = null;
+        while (Ordered(() =>
+        {
+            var scan = ReadScan(pairId, scanToken);
+            var pair = RequireGeneration(null, pairId, scan.Generation);
+            AttachScan(pairId, create: false);
+            using var transaction = _connection.BeginTransaction();
+            var delta = new List<string>();
+            using (var page = StorageCommand.Create(_connection, transaction, StateSchema.DeletedDeltaPage,
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamAfter, after),
+                (StateSchema.ParamTake, StateSchema.DeletedHistoryBatchSize)))
+            using (var reader = page.ExecuteReader())
+                while (reader.Read()) delta.Add(reader.GetString(0));
+            if (delta.Count == 0) return false;
+            using var mark = StorageCommand.Create(_connection, transaction, StateSchema.DeletedNameInsert,
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamPath, string.Empty));
+            foreach (var key in delta)
+            {
+                mark.Parameters[StateSchema.ParamPath].Value = key;
+                mark.ExecuteNonQuery();
+            }
+            after = delta[^1];
+            transaction.Commit();
+            return true;
+        })) { }
+    }
+
+    public bool CloseScanIssue(string pairId, Guid scanId, Issue expected) => Ordered(() =>
+    {
+        var scan = RequireScan(pairId, scanId);
+        if (scan.Record.Scope is not null) throw new InvalidOperationException();
+        AttachScan(pairId, create: false);
+        using var transaction = _connection.BeginTransaction();
+        using var unchanged = StorageCommand.Create(_connection, transaction, StateSchema.ScanIssueUnchanged,
+            (StateSchema.ParamScan, scan.Key), (StateSchema.ParamPairRow, scan.PairRow), (StateSchema.ParamIssue, expected.Id));
+        if ((long)unchanged.ExecuteScalar()! == 0 ||
+            !IssueTable.CloseExact(_connection, transaction, pairId, expected, acknowledgeFirstRun: true)) return false;
+        transaction.Commit();
+        _closureKeys?.Remove(pairId);
+        return true;
+    });
 
     /// <summary>Opens fresh disposable plan scratch, including for read-only exclusion preview.</summary>
     public FolderPlan OpenFolderPlan(string pairId, Row folder, Side deletingFrom)
     {
         lock (_lock)
         {
-            var path = ScanPath(pairId) + StateSchema.PlanFileSuffix;
-            // A failed prior disposal leaves owned scratch; preparation deletes it before every open.
-            File.Delete(path);
-            _plans.Remove(path);
+            var path = _path + StateSchema.PlanFileSuffix + ResourceNames.NewId() + StateSchema.DatabaseExtension;
             using (Stream scratch = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)) { }
             _plans.Add(path);
             SqliteConnection? connection = null;
@@ -780,13 +1025,15 @@ public sealed class StateStore : IStateStore
     /// <inheritdoc />
     public bool ReleaseUnreadable(string pairId, long expectedGeneration, string localKey, string acquiredId) => Ordered(() =>
     {
-        var touched = _scans.TryGetValue(pairId, out var scan) && scan.Record.Generation == expectedGeneration;
-        if (touched) AttachScan(pairId, create: false);
+        var touched = _scans.Where(item => item.Key.PairId == pairId && item.Value.Active &&
+            item.Value.Record.Generation == expectedGeneration).Select(item => item.Value).ToArray();
+        if (touched.Length != 0) AttachScan(pairId, create: false);
         using var transaction = _connection.BeginTransaction();
         var pair = RequireGeneration(transaction, pairId, expectedGeneration);
         if (!IssueTable.ReleasableMember(_connection, transaction, pair, localKey, acquiredId)) return false;
-        if (touched)
-            Execute(_connection, transaction, StateSchema.TouchSkip, (StateSchema.ParamPairRow, pair),
+        foreach (var scan in touched)
+            if (scan.Record.Scope is null || PathNames.IsSelfOrUnderKey(localKey, PathNames.Key(scan.Record.Scope)))
+                Execute(_connection, transaction, StateSchema.TouchSkip, (StateSchema.ParamPairRow, pair), (StateSchema.ParamScan, scan.Key),
                 (StateSchema.ParamSide, (int)Side.Local), (StateSchema.ParamPath, localKey));
         IssueTable.RemoveLocalSkip(_connection, transaction, pairId, pair, localKey, DateTimeOffset.UtcNow);
         transaction.Commit();
@@ -814,58 +1061,90 @@ public sealed class StateStore : IStateStore
                 continue;
             }
             if (side != Side.Dropbox) throw new ArgumentOutOfRangeException(nameof(roots));
-            if (Probe(StateSchema.SelectSyncedByDropboxKey, key) ||
-                Probe(StateSchema.SelectSyncedUnderDropboxKey, key)) return true;
+            string? mapped = null;
+            if (Probe(StateSchema.SelectSyncedByDropboxKey, key, cover: null) ||
+                Probe(StateSchema.SelectSyncedUnderDropboxKey, key, cover: mapped)) return true;
+
+            bool Probe(string sql, string target, string? cover)
+            {
+                using var command = StorageCommand.Create(connection, null, sql,
+                    (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, target));
+                using var reader = command.ExecuteReader();
+                var proved = new PrefixSet();
+                while (reader.Read())
+                {
+                    ct.ThrowIfCancellationRequested();
+                    // The reader holds one snapshot; a nested check sees what the per-row checks it replaces would see.
+                    if (cover is not null)
+                    {
+                        if (!cleared.Covers(cover) && !IssueTable.UnreadableTouches(connection, pairId, cover, isFolder: true))
+                            proved.Add(cover);
+                        cover = null;
+                    }
+                    var localKey = reader.GetString(StateSchema.SyncedLocalKey);
+                    var isFolder = reader.GetBoolean(StateSchema.SyncedIsFolder);
+                    if (sql == StateSchema.SelectSyncedByDropboxKey && isFolder) mapped = localKey;
+                    if (cleared.Covers(localKey) || proved.Covers(localKey)) continue;
+                    if (IssueTable.UnreadableTouches(connection, pairId, localKey, isFolder)) return true;
+                    if (isFolder) proved.Add(localKey);
+                }
+                return false;
+            }
         }
         return false;
+    }
 
-        bool Probe(string sql, string key)
+    /// <summary>Reads token-isolated rows while keeping the pair file alive through iterator disposal.</summary>
+    public IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context)
+    {
+        ScanPartition scan;
+        SqliteConnection read;
+        lock (_lock)
         {
-            using var command = StorageCommand.Create(connection, null, sql,
-                (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, key));
-            using var reader = command.ExecuteReader();
-            while (reader.Read())
-            {
-                ct.ThrowIfCancellationRequested();
-                var localKey = reader.GetString(StateSchema.SyncedLocalKey);
-                if (!cleared.Covers(localKey) && IssueTable.UnreadableTouches(connection, pairId, localKey,
-                    reader.GetBoolean(StateSchema.SyncedIsFolder))) return true;
-            }
-            return false;
+            scan = RequireScan(pairId, scanId);
+            read = OpenScanRead(pairId);
+            scan.Borrowers++;
         }
+        try
+        {
+            using (read)
+                foreach (var row in ScanReader.Rows(read, pairId, context, scan.Record.Scope, scan.Key)) yield return row;
+        }
+        finally { lock (_lock) scan.Borrowers--; }
     }
 
-    /// <summary>Reads complete key groups without retaining a transaction during caller work.</summary>
-    public IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context)
+    public IReadOnlyList<RenameCandidate> ScanRenames(string pairId, Guid scanId)
     {
-        using var read = OpenScanRead(pairId);
-        foreach (var row in ScanReader.Rows(read, pairId, context)) yield return row;
+        ScanPartition scan;
+        SqliteConnection read;
+        lock (_lock)
+        {
+            scan = RequireScan(pairId, scanId);
+            read = OpenScanRead(pairId);
+            scan.Borrowers++;
+        }
+        try { using (read) return ScanReader.Renames(read, pairId, scan.Key); }
+        finally { lock (_lock) scan.Borrowers--; }
     }
 
-    /// <summary>Reads rename candidates through a separate read-only connection.</summary>
-    public IReadOnlyList<RenameCandidate> ScanRenames(string pairId)
-    {
-        using var read = OpenScanRead(pairId);
-        return ScanReader.Renames(read, pairId);
-    }
-
-    /// <summary>Reads this run's entry by its side's own key, including its identity.</summary>
-    public Entry? ScanEntry(string pairId, Side side, string key)
+    public Entry? ScanEntry(string pairId, Guid scanId, Side side, string key)
     {
         lock (_lock)
         {
+            var scan = RequireScan(pairId, scanId);
             AttachScan(pairId, create: false);
-            return ScanReader.EntryByKey(_connection, pairId, side, key);
+            return ScanReader.EntryByKey(_connection, pairId, side, key, scan.Key);
         }
     }
 
-    public bool InScan(string pairId, Side side, string key)
+    public bool InScan(string pairId, Guid scanId, Side side, string key)
     {
         lock (_lock)
         {
+            var scan = RequireScan(pairId, scanId);
             AttachScan(pairId, create: false);
             using var command = StorageCommand.Create(_connection, null, side == Side.Local ? StateSchema.InScanLocal : StateSchema.InScanDropbox,
-                (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, key));
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamScan, scan.Key), (StateSchema.ParamTargetKey, key));
             return (long)command.ExecuteScalar()! != 0;
         }
     }
@@ -910,6 +1189,8 @@ public sealed class StateStore : IStateStore
             throw new InvalidOperationException();
         if (_changes.HasCurrentLocalWork(transaction, expected.PairId, expectedGeneration))
             _changes.TransferLocalEvidenceGap(transaction, expected.PairId, expectedGeneration, local.Epoch, local.Revision);
+        if (RootBinding.HistoryIdentityChanged(current, next))
+            Execute(_connection, transaction, StateSchema.ReplaceDeletedHistoryIdentity, (StateSchema.ParamPair, expected.PairId));
         var generation = checked(expectedGeneration + 1);
         RequireOne(Execute(_connection, transaction, StateSchema.AdvancePair,
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamGeneration, expectedGeneration),
@@ -934,14 +1215,13 @@ public sealed class StateStore : IStateStore
                 notice.Subject, DateTimeOffset.UtcNow);
         transaction.Commit();
         _closureKeys?.Remove(expected.PairId);
-        ResetScan(expected.PairId);
+        InvalidateScans(expected.PairId);
     });
 
     /// <inheritdoc />
     public void FinishRepair(string pairId, RepairSummary summary, long expectedGeneration, Guid scanToken,
         LocalCatchUp local, DropboxCatchUp dropbox)
     {
-        long completedPair = 0;
         Write(() =>
         {
             var scan = ReadScan(pairId, scanToken);
@@ -950,7 +1230,7 @@ public sealed class StateStore : IStateStore
             var localRevision = scan.LocalRevision;
             var dropboxRevision = scan.DropboxRevision;
             // Page acquisition preserves this fence; every other cursor transition invalidates it.
-            if (!summary.Completed || scan.Generation != expectedGeneration || local.PairId != pairId || dropbox.PairId != pairId ||
+            if (scan.Scope is not null || !summary.Completed || scan.Generation != expectedGeneration || local.PairId != pairId || dropbox.PairId != pairId ||
                 local.PairGeneration != expectedGeneration || dropbox.PairGeneration != expectedGeneration ||
                 local.SourceEpoch != localEpoch || dropbox.SourceEpoch != dropboxEpoch ||
                 scan.ThroughWorkId > local.ThroughWorkId || scan.ThroughWorkId > dropbox.ThroughWorkId ||
@@ -968,7 +1248,6 @@ public sealed class StateStore : IStateStore
             using (var transaction = _connection.BeginTransaction())
             {
                 var pair = RequireGeneration(transaction, pairId, expectedGeneration);
-                completedPair = pair;
                 var retry = ReadRetry(transaction, pair);
                 var notice = retry is null ? null : IssueTable.RetryNotice(_connection, transaction, pairId) ??
                     throw new InvalidOperationException();
@@ -988,13 +1267,14 @@ public sealed class StateStore : IStateStore
 
             }
             _closureKeys?.Remove(pairId);
-            ResetScan(pairId, completed: true);
+        });
+        Write(() =>
+        {
             Reclaim();
             using var checkpoint = StorageCommand.Create(_connection, null, StateSchema.Checkpoint);
             using var result = checkpoint.ExecuteReader();
             result.Read();
         });
-        ReclaimDeletedHistory(completedPair);
     }
 
     /// <inheritdoc />
@@ -1077,8 +1357,8 @@ public sealed class StateStore : IStateStore
                 entry.DropboxId != expected.Source.Id || entry.DropboxContentHash != expected.Stage.ContentHash)
                 throw new ArgumentException(null, nameof(change));
         var raw = RequirePending(transaction, pair, expected);
-        RequireSaved(transaction, pairId, expected.Losing.Expected, expected.Saved);
-        StateCommitter.Commit(_connection, transaction, pairId, change, DateTimeOffset.UtcNow,
+        RequirePendingSaved(transaction, pairId, expected);
+        StateCommitter.Commit(_connection, transaction, _changes, pairId, change, DateTimeOffset.UtcNow,
             narrowRecordUpdates: true, raised: raised);
         RequireOne(Execute(_connection, transaction, StateSchema.PendingSettle,
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamExpected, raw)));
@@ -1093,7 +1373,7 @@ public sealed class StateStore : IStateStore
         var raw = PendingJson(transaction, pair);
         if (StateEncoding.DecodePending(raw) is not LegacyPending legacy || legacy.RawToken != rawToken)
             throw new InvalidOperationException();
-        StateCommitter.Commit(_connection, transaction, pairId, issueOnlyChange, DateTimeOffset.UtcNow,
+        StateCommitter.Commit(_connection, transaction, _changes, pairId, issueOnlyChange, DateTimeOffset.UtcNow,
             narrowRecordUpdates: true, raised: null);
         RequireOne(Execute(_connection, transaction, StateSchema.PendingSettle,
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamExpected, raw)));
@@ -1116,7 +1396,7 @@ public sealed class StateStore : IStateStore
     /// <inheritdoc />
     public long? AcquireJournalPage(string volumeKey, JournalPosition? expected, JournalPosition next,
         IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision,
-            bool Suspended, bool LostInterval)> members,
+            bool LostInterval)> members,
         IEnumerable<(string PairId, ChangeNotice Notice)> notices) =>
         Ordered(() => _changes.AcquireJournalPage(volumeKey, expected, next, members, notices));
 
@@ -1331,7 +1611,7 @@ public sealed class StateStore : IStateStore
             (StateSchema.ParamExpectedAttempts, expected?.Attempts),
             (StateSchema.ParamExpectedRetryAfter, expected?.RetryAfter.UtcTicks),
             (StateSchema.ParamAttempts, next.Attempts), (StateSchema.ParamRetryAfter, next.RetryAfter.UtcTicks)));
-        StateCommitter.Commit(_connection, transaction, pairId, failureNotice, DateTimeOffset.UtcNow,
+        StateCommitter.Commit(_connection, transaction, _changes, pairId, failureNotice, DateTimeOffset.UtcNow,
             narrowRecordUpdates: true, raised: null);
         transaction.Commit();
         UpdateClosures(pairId, failureNotice);
@@ -1372,7 +1652,7 @@ public sealed class StateStore : IStateStore
         RequireRetryNotice(failureNotice);
         using var transaction = _connection.BeginTransaction();
         RequireGeneration(transaction, pairId, expectedGeneration);
-        StateCommitter.Commit(_connection, transaction, pairId, failureNotice, DateTimeOffset.UtcNow,
+        StateCommitter.Commit(_connection, transaction, _changes, pairId, failureNotice, DateTimeOffset.UtcNow,
             narrowRecordUpdates: true, raised: null);
         var notice = IssueTable.RetryNotice(_connection, transaction, pairId) ?? throw new InvalidOperationException();
         transaction.Commit();
@@ -1520,7 +1800,7 @@ public sealed class StateStore : IStateStore
                     RequireOne(IssueTable.ReclassifyItemRetry(_connection, transaction, pair, expected.Token,
                         oldCause, reported.Cause, DateTimeOffset.UtcNow));
                 RequireOne(IssueTable.CompleteFailedItemAttempt(_connection, transaction, pair, expected, pending));
-                StateCommitter.Commit(_connection, transaction, expected.PairId, change, DateTimeOffset.UtcNow,
+                StateCommitter.Commit(_connection, transaction, _changes, expected.PairId, change, DateTimeOffset.UtcNow,
                     narrowRecordUpdates: true, raised: raised);
             }
             else
@@ -1532,7 +1812,7 @@ public sealed class StateStore : IStateStore
                 {
                     if (expected.Dispatch == ItemRetryDispatch.LocalRecovery && change.Raise.All(issue => issue.Kind == IssueKind.Info))
                         throw new ArgumentException(null, nameof(completedPending));
-                    StateCommitter.Commit(_connection, transaction, expected.PairId, change, DateTimeOffset.UtcNow,
+                    StateCommitter.Commit(_connection, transaction, _changes, expected.PairId, change, DateTimeOffset.UtcNow,
                         narrowRecordUpdates: true, raised: raised);
                 }
                 retiredEpisode = ReadOne(transaction, StateSchema.WorkDispatch,
@@ -1946,6 +2226,14 @@ public sealed class StateStore : IStateStore
                 continue;
             }
             ApplyFolderSettlement(transaction, pair, pairId, operationId, current, generation, next, change, settling);
+            if (settling && operation.DeletingSide == Side.Local &&
+                current.EffectState == FolderRemovalItem.EffectStatus.Verified &&
+                current.EffectKind != FolderEffectKind.StateOnly)
+            {
+                var key = PathNames.DropboxKey(current.Path);
+                if (!change.ForgetSelf.Any(item => item.Side == Side.Local && item.Key == key))
+                    DeletedHistory.Spend(_connection, transaction, pairId, key);
+            }
             settled[index] = true;
         }
         transaction.Commit();
@@ -2008,7 +2296,7 @@ public sealed class StateStore : IStateStore
                 (StateSchema.ParamNextGeneration, next.Generation),
                 (StateSchema.ParamNextEffectGeneration, next.EffectGeneration),
                 (StateSchema.ParamCause, next.Cause?.ToString())));
-        StateCommitter.Commit(_connection, transaction, pairId, verifiedChange, DateTimeOffset.UtcNow,
+        StateCommitter.Commit(_connection, transaction, _changes, pairId, verifiedChange, DateTimeOffset.UtcNow,
             narrowRecordUpdates: true, raised: null);
     }
 
@@ -2038,7 +2326,7 @@ public sealed class StateStore : IStateStore
         ValidateFolderChange(transaction, pair, pairId, operation, operation.RootEntry.Path,
             operation.SavedRoot, verifiedRootChange);
         if (selection is not null) _changes.AdvanceBefore(transaction, pairId, selection, verifiedRootChange);
-        StateCommitter.Commit(_connection, transaction, pairId, verifiedRootChange, DateTimeOffset.UtcNow,
+        StateCommitter.Commit(_connection, transaction, _changes, pairId, verifiedRootChange, DateTimeOffset.UtcNow,
             narrowRecordUpdates: true, raised: null);
         RequireOne(Execute(_connection, transaction, StateSchema.TerminalFolder,
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamOperation, operationId),
@@ -2177,7 +2465,7 @@ public sealed class StateStore : IStateStore
             (StateSchema.ParamNextPhase, (current.Phase == FolderRemovalPhase.Unknown ? FolderRemovalPhase.Unknown :
                 FolderRemovalPhase.Retained).ToString()), (StateSchema.ParamDisposition, disposition.ToString()),
             (StateSchema.ParamCause, current.Cause?.ToString())));
-        StateCommitter.Commit(_connection, transaction, pairId, issueOnlyAcknowledgement, DateTimeOffset.UtcNow,
+        StateCommitter.Commit(_connection, transaction, _changes, pairId, issueOnlyAcknowledgement, DateTimeOffset.UtcNow,
             narrowRecordUpdates: true, raised: null);
         transaction.Commit();
         UpdateClosures(pairId, issueOnlyAcknowledgement);
@@ -2484,15 +2772,17 @@ public sealed class StateStore : IStateStore
     public void ObserveSkipped(string pairId, long expectedGeneration, Side side, string path,
         (TextKey Cause, IssueSubject Subject)? currentSkip) => Write(() =>
     {
-        var touched = _scans.TryGetValue(pairId, out var scan) && scan.Record.Generation == expectedGeneration;
-        if (touched) AttachScan(pairId, create: false);
+        var touched = _scans.Where(item => item.Key.PairId == pairId && item.Value.Active &&
+            item.Value.Record.Generation == expectedGeneration).Select(item => item.Value).ToArray();
+        if (touched.Length != 0) AttachScan(pairId, create: false);
         using var transaction = _connection.BeginTransaction();
         var pair = RequireGeneration(transaction, pairId, expectedGeneration);
         // A touched side would stop ReplaceSkipped clearing it, so this returns before the touch.
         if (side == Side.Local && !IssuePolicy.ProtectsSubtree(currentSkip?.Cause.ToString()) &&
             IssueTable.ProtectingMember(_connection, transaction, pair, PathNames.Key(path))) return;
-        if (touched)
-            Execute(_connection, transaction, StateSchema.TouchSkip, (StateSchema.ParamPairRow, pair),
+        foreach (var scan in touched)
+            if (scan.Record.Scope is null || PathNames.IsSelfOrUnderKey(PathNames.KeyFor(side, path), PathNames.Key(scan.Record.Scope)))
+                Execute(_connection, transaction, StateSchema.TouchSkip, (StateSchema.ParamPairRow, pair), (StateSchema.ParamScan, scan.Key),
                 (StateSchema.ParamSide, (int)side), (StateSchema.ParamPath, PathNames.KeyFor(side, path)));
         IssueTable.ObserveSkipped(_connection, transaction, pairId, pair, side, path, currentSkip, DateTimeOffset.UtcNow);
         transaction.Commit();
@@ -2537,28 +2827,89 @@ public sealed class StateStore : IStateStore
     });
 
     /// <inheritdoc />
-    public bool HasDeletedNames(string pairId)
+    public bool HasDeletedNames(string pairId, Guid scanId)
     {
         lock (_lock)
         {
-            if (!_scans.TryGetValue(pairId, out var scan) || !scan.Record.Discovery) return false;
+            var scan = RequireScan(pairId, scanId);
+            if (!scan.Record.Discovery) return false;
             AttachScan(pairId, create: false);
             return ScanReader.HasDeletedNames(_connection, scan.PairRow);
         }
     }
 
     /// <inheritdoc />
-    public bool DeletedNameExact(string pairId, string key)
+    public bool DeletedNameExact(string pairId, Guid scanId, string key)
     {
         lock (_lock)
         {
-            if (!_scans.TryGetValue(pairId, out var scan) || !scan.Record.Discovery) return false;
-            AttachScan(pairId, create: false);
-            return ScanReader.DeletedNameExact(_connection, scan.PairRow, key);
+            var scan = RequireScan(pairId, scanId);
+            return scan.Record.Discovery && ExactDeletedName(pairId, key, scan);
         }
     }
 
-    public void Dispose() => Write(_connection, static (_, connection) => connection.Dispose());
+    /// <inheritdoc />
+    public bool SavedDeletedNameExact(string pairId, string key)
+    {
+        lock (_lock) return !DeletedHistoryOwed(pairId) && ExactDeletedName(pairId, key, null);
+    }
+
+    private bool ExactDeletedName(string pairId, string key, ScanPartition? scan)
+    {
+        var pair = RequirePairRow(null, pairId);
+        using var delta = StorageCommand.Create(_connection, null, StateSchema.DeletedKeyDelta,
+            (StateSchema.ParamPairRow, pair), (StateSchema.ParamPath, key));
+        if (delta.ExecuteScalar() is long spent) return spent == 0;
+        if (scan is not null)
+        {
+            AttachScan(pairId, create: false);
+            var foundInScan = ScanReader.DeletedNameExact(_connection, pair, key);
+            if (foundInScan || scan.ResumedHistory) return foundInScan;
+        }
+        if (DeletedHistoryCursor(pairId) is null) return false;
+        try
+        {
+            using var block = StorageCommand.Create(_connection, null, StateSchema.DeletedKeyBlock,
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamPath, key));
+            using var reader = block.ExecuteReader();
+            if (!reader.Read()) return false;
+            using var names = new SqliteBlob(_connection, StateSchema.DeletedBlockTable, StateSchema.DeletedBlockPayload,
+                reader.GetInt64(StateSchema.DeletedBlockRow), readOnly: true);
+            var found = false;
+            foreach (var name in StateEncoding.DecodeDeletedNames(names, reader.GetInt32(StateSchema.DeletedBlockCount),
+                reader.GetString(StateSchema.DeletedBlockLast), reader.IsDBNull(StateSchema.DeletedBlockPrevious)
+                    ? null : reader.GetString(StateSchema.DeletedBlockPrevious)))
+                found |= name == key;
+            return found;
+        }
+        catch (InvalidDataException)
+        {
+            InvalidateCorruptDeletedHistory(pairId);
+            return false;
+        }
+    }
+
+    /// <inheritdoc />
+    public bool DeletedNameSpent(string pairId, string key)
+    {
+        lock (_lock)
+            return ReadOne(null, StateSchema.SpentDeletedKey,
+                static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamPath, key));
+    }
+
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            lock (_queueLock)
+            {
+                if (_disposed) return;
+                _disposed = true;
+            }
+            Write(_connection, static (_, connection) => connection.Dispose());
+        }
+    }
 
     private void Write(Action action) => Write(action, static (_, action) => action());
 
@@ -2628,11 +2979,13 @@ public sealed class StateStore : IStateStore
         }
         finally
         {
+            bool flush;
             lock (_queueLock)
             {
-                if (_records is null) _flushing = false;
-                else ThreadPool.QueueUserWorkItem(static store => store.FlushRecords(), this, preferLocal: false);
+                flush = _records is not null;
+                if (!flush) _flushing = false;
             }
+            if (flush) ThreadPool.QueueUserWorkItem(static store => store.FlushRecords(), this, preferLocal: false);
         }
     }
 
@@ -2690,7 +3043,7 @@ public sealed class StateStore : IStateStore
                             (StateSchema.ParamPair, record.PairId), (StateSchema.ParamTargetKey, expected.LocalKey));
                         if (current != expected) throw new ChangedUnderneathException(expected.LocalPath);
                     }
-                    StateCommitter.Commit(_connection, transaction, record.PairId, record.Change, now,
+                    StateCommitter.Commit(_connection, transaction, _changes, record.PairId, record.Change, now,
                         record.Narrow, raised: null);
                 }
                 applying = false;
@@ -2792,6 +3145,13 @@ public sealed class StateStore : IStateStore
             if (ClosureKinds.Contains(issue.Kind)) keys.Add((issue.Path, issue.Kind));
     }
 
+    private IEnumerable<byte[]> ActiveScanKeys(string pairId)
+    {
+        var generation = ReadPairExecution(pairId)?.Generation;
+        return _scans.Where(item => item.Key.PairId == pairId && item.Value.Active &&
+            item.Value.Record.Generation == generation).Select(item => item.Value.Key);
+    }
+
     private string ScanPath(string pairId) => _path + StateSchema.ScanFileSuffix +
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(pairId))) +
         StateSchema.DatabaseExtension;
@@ -2810,8 +3170,24 @@ public sealed class StateStore : IStateStore
             (StateSchema.ParamPath, onDisk ? path : StateSchema.EmptyScan));
         _scanPair = pairId;
         _scanOnDisk = onDisk;
-        Execute(_connection, null, StateSchema.ScanPragmas);
-        Execute(_connection, null, StateSchema.CreateScan);
+        try
+        {
+            if (onDisk)
+            {
+                using var journal = StorageCommand.Create(_connection, null, StateSchema.ScanWal);
+                if (journal.ExecuteScalar() as string != StateSchema.WalMode)
+                    throw new InvalidDataException();
+                Execute(_connection, null, StateSchema.ScanPragmas);
+            }
+            else Execute(_connection, null, StateSchema.EmptyScanPragmas);
+            Execute(_connection, null, StateSchema.CreateScan);
+        }
+        catch (Exception setup)
+        {
+            try { Execute(_connection, null, StateSchema.DetachScan); _scanPair = null; }
+            catch (Exception cleanup) { throw new AggregateException(setup, cleanup); }
+            throw;
+        }
     }
 
     private SqliteConnection OpenScanRead(string pairId)
@@ -2836,27 +3212,26 @@ public sealed class StateStore : IStateStore
         }
     }
 
-    private void ResetScan(string pairId, bool completed = false)
+    private void InvalidateScans(string pairId)
     {
+        foreach (var scan in _scans.Where(item => item.Key.PairId == pairId)) scan.Value.Active = false;
+        if (!_scans.Keys.Any(key => key.PairId == pairId)) ResetScan(pairId);
+    }
+
+    private void ResetScan(string pairId)
+    {
+        var scans = _scans.Where(item => item.Key.PairId == pairId).ToArray();
+        if (scans.Any(item => item.Value.Borrowers != 0)) throw new InvalidOperationException();
         if (_scanPair == pairId)
         {
             Execute(_connection, null, StateSchema.DetachScan);
             _scanPair = null;
         }
-        _scans.Remove(pairId);
-        try
-        {
-            var path = ScanPath(pairId);
-            File.Delete(path);
-            File.Delete(path + StateSchema.PlanFileSuffix);
-            _plans.Remove(path + StateSchema.PlanFileSuffix);
-        }
-        catch (Exception error) when (completed && error is IOException or UnauthorizedAccessException)
-        {
-            // A committed repair stays successful; the next BeginScan must delete the leftover file.
-        }
-        _freshScans.Remove(pairId);
-        _resumedHistory.Remove(pairId);
+        foreach (var scan in scans) _scans.Remove(scan.Key);
+        var path = ScanPath(pairId);
+        File.Delete(path);
+        File.Delete(path + StateSchema.WalSuffix);
+        File.Delete(path + StateSchema.ShmSuffix);
     }
 
     private T? ReadMetadata<T>(string sql, Func<SqliteDataReader, T> decode,
@@ -2876,69 +3251,140 @@ public sealed class StateStore : IStateStore
         var actual = (long)version.ExecuteScalar()!;
         using var schema = StorageCommand.Create(connection, null, StateSchema.HasSchema);
         var empty = (long)schema.ExecuteScalar()! == 0;
-        if (actual != StateSchema.Version && actual != StateSchema.PhaseIndexVersion &&
-            actual != StateSchema.UpgradeFromVersion && actual != StateSchema.DeletedHistoryUpgradeVersion && (!writable || !empty))
+        if (actual != StateSchema.Version && actual != StateSchema.SpentHistoryUpgradeVersion &&
+            actual != StateSchema.DeletedBlocksUpgradeVersion &&
+            actual != StateSchema.IssueVisibilityUpgradeVersion &&
+            actual != StateSchema.PhaseIndexVersion && actual != StateSchema.UpgradeFromVersion &&
+            actual != StateSchema.DeletedHistoryUpgradeVersion && (!writable || !empty))
             throw new InvalidDataException(Text.Get(actual < StateSchema.Version
                 ? TextKey.StateSchemaTooOld : TextKey.StateSchemaTooNew, (TextArg.Path, connection.DataSource)));
         using var reference = Connect(StateSchema.ReadRoot, SqliteOpenMode.ReadWriteCreate);
         Execute(reference, null, StateSchema.Create);
-        if (!empty && actual == StateSchema.UpgradeFromVersion) ValidateStructure(connection, null, reference);
-        if (!writable && actual == StateSchema.UpgradeFromVersion) return true;
-        if (writable) Execute(connection, null, StateSchema.Pragmas);
-        if (actual is StateSchema.Version or StateSchema.PhaseIndexVersion or StateSchema.DeletedHistoryUpgradeVersion)
+        if (!empty)
         {
-            Execute(reference, null, StateSchema.SchemaAdditions);
+            if (actual != StateSchema.UpgradeFromVersion) Execute(reference, null, StateSchema.SchemaAdditions);
             if (actual == StateSchema.PhaseIndexVersion) Execute(reference, null, StateSchema.CreateObsoletePhaseIndex);
-            if (actual == StateSchema.Version) Execute(reference, null, StateSchema.DeletedHistorySchema);
-            ValidateStructure(connection, null, reference);
-            if (writable && actual != StateSchema.Version)
-            {
-                using var upgrade = connection.BeginTransaction();
-                if (actual == StateSchema.PhaseIndexVersion)
-                {
-                    Execute(connection, upgrade, StateSchema.DropObsoletePhaseIndex);
-                    Execute(reference, null, StateSchema.DropObsoletePhaseIndex);
-                }
-                Execute(connection, upgrade, StateSchema.DeletedHistorySchema);
+            if (actual >= StateSchema.IssueVisibilityUpgradeVersion)
                 Execute(reference, null, StateSchema.DeletedHistorySchema);
-                ValidateStructure(connection, upgrade, reference);
-                Execute(connection, upgrade, StateSchema.PublishVersion);
-                upgrade.Commit();
-            }
+            if (actual >= StateSchema.DeletedBlocksUpgradeVersion) Execute(reference, null, StateSchema.RebuildIssues);
+            if (actual >= StateSchema.SpentHistoryUpgradeVersion)
+                Execute(reference, null, StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames);
+            if (actual == StateSchema.Version) Execute(reference, null, StateSchema.SpentDeletedHistory);
+            ValidateStructure(connection, null, reference);
+        }
+        if (!writable)
+        {
+            if (actual == StateSchema.UpgradeFromVersion) return true;
+            if (actual != StateSchema.Version)
+                throw new InvalidDataException(Text.Get(TextKey.StateSchemaUpgradeRequired));
             return false;
         }
-        connection.CreateFunction(StateSchema.MappedSpellingFunction,
-            (string? path) => path is null ? null : PathNames.UpgradeMappedSpelling(path), isDeterministic: true);
-        using var transaction = connection.BeginTransaction();
-        if (empty) Execute(connection, transaction, StateSchema.Create);
-        Execute(connection, transaction, StateSchema.SchemaAdditions);
-        Execute(connection, transaction, StateSchema.SeedSources,
-            (StateSchema.ParamBootstrap, nameof(SourceObligation.Bootstrap)),
-            (StateSchema.ParamNormal, nameof(SourceObligation.NormalRepair)));
-        using (var collisions = StorageCommand.Create(connection, transaction, StateSchema.EffectiveDropboxKeyCollisions))
-            if ((long)collisions.ExecuteScalar()! != 0) throw new InvalidDataException();
+        Execute(connection, null, StateSchema.Pragmas);
+        if (!empty && actual == StateSchema.Version)
+        {
+            Reclaim(connection);
+            Execute(connection, null, StateSchema.Checkpoint);
+            return false;
+        }
+        // Disabling enforcement outside the transaction preserves member links while their parent is rebuilt.
+        Execute(connection, null, StateSchema.ForeignKeysOff);
         try
         {
-            Execute(connection, transaction, StateSchema.ConvertMappedDropboxKeys);
+            using var transaction = connection.BeginTransaction();
+            if (empty || actual == StateSchema.UpgradeFromVersion)
+            {
+                connection.CreateFunction(StateSchema.MappedSpellingFunction,
+                    (string? path) => path is null ? null : PathNames.UpgradeMappedSpelling(path), isDeterministic: true);
+                if (empty) Execute(connection, transaction, StateSchema.Create);
+                Execute(connection, transaction, StateSchema.SchemaAdditions);
+                Execute(connection, transaction, StateSchema.SeedSources,
+                    (StateSchema.ParamBootstrap, nameof(SourceObligation.Bootstrap)),
+                    (StateSchema.ParamNormal, nameof(SourceObligation.NormalRepair)));
+                using (var collisions = StorageCommand.Create(connection, transaction, StateSchema.EffectiveDropboxKeyCollisions))
+                    if ((long)collisions.ExecuteScalar()! != 0) throw new InvalidDataException();
+                try { Execute(connection, transaction, StateSchema.ConvertMappedDropboxKeys); }
+                catch (SqliteException error) when (error.SqliteErrorCode == SQLitePCL.raw.SQLITE_CONSTRAINT)
+                { throw new InvalidDataException(null, error); }
+                Execute(reference, null, StateSchema.SchemaAdditions);
+                using var pairs = StorageCommand.Create(connection, transaction, StateSchema.SelectPairs);
+                using var reader = pairs.ExecuteReader();
+                while (reader.Read()) StateEncoding.DecodePair(reader.GetString(StateSchema.FirstColumn));
+            }
+            if (!empty && actual == StateSchema.PhaseIndexVersion)
+            {
+                Execute(connection, transaction, StateSchema.DropObsoletePhaseIndex);
+                Execute(reference, null, StateSchema.DropObsoletePhaseIndex);
+            }
+            if (empty || actual < StateSchema.IssueVisibilityUpgradeVersion)
+            {
+                Execute(connection, transaction, StateSchema.DeletedHistorySchema);
+                Execute(reference, null, StateSchema.DeletedHistorySchema);
+            }
+            if (empty || actual < StateSchema.DeletedBlocksUpgradeVersion)
+            {
+                Execute(connection, transaction, StateSchema.RebuildIssues);
+                Execute(reference, null, StateSchema.RebuildIssues);
+            }
+            if (empty || actual < StateSchema.SpentHistoryUpgradeVersion)
+            {
+                Execute(connection, transaction, StateSchema.DeletedHistoryBlocks);
+                MigrateDeletedHistory(connection, transaction);
+                Execute(connection, transaction, StateSchema.DropDeletedHistoryNames);
+                Execute(reference, null, StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames);
+            }
+            Execute(connection, transaction, StateSchema.SpentDeletedHistory);
+            Execute(reference, null, StateSchema.SpentDeletedHistory);
+            if (empty || actual == StateSchema.UpgradeFromVersion) IssueTable.BackfillSkipMembers(connection, transaction);
+            ValidateStructure(connection, transaction, reference);
+            using (var foreign = StorageCommand.Create(connection, transaction, StateSchema.ForeignKeyViolations))
+            using (var reader = foreign.ExecuteReader())
+                if (reader.Read()) throw new InvalidDataException();
+            Execute(connection, transaction, StateSchema.PublishVersion);
+            transaction.Commit();
         }
-        catch (SqliteException error) when (error.SqliteErrorCode == SQLitePCL.raw.SQLITE_CONSTRAINT)
+        finally
         {
-            throw new InvalidDataException(null, error);
+            try
+            {
+                Execute(connection, null, StateSchema.ForeignKeysOn);
+                using var enabled = StorageCommand.Create(connection, null, StateSchema.ReadForeignKeys);
+                if ((long)enabled.ExecuteScalar()! != 1) throw new InvalidDataException();
+            }
+            catch { connection.Dispose(); throw; }
         }
-        Execute(reference, null, StateSchema.SchemaAdditions);
-        Execute(connection, transaction, StateSchema.DeletedHistorySchema);
-        Execute(reference, null, StateSchema.DeletedHistorySchema);
-        ValidateStructure(connection, transaction, reference);
-        IssueTable.BackfillSkipMembers(connection, transaction);
-        using (var pairs = StorageCommand.Create(connection, transaction, StateSchema.SelectPairs))
-        using (var reader = pairs.ExecuteReader())
-            while (reader.Read()) StateEncoding.DecodePair(reader.GetString(StateSchema.FirstColumn));
-        using (var foreign = StorageCommand.Create(connection, transaction, StateSchema.ForeignKeyViolations))
-        using (var reader = foreign.ExecuteReader())
-            if (reader.Read()) throw new InvalidDataException();
-        Execute(connection, transaction, StateSchema.PublishVersion);
-        transaction.Commit();
+        Reclaim(connection);
+        Execute(connection, null, StateSchema.Checkpoint);
         return false;
+    }
+
+    private static void WriteDeletedBlock(SqliteConnection connection, SqliteTransaction transaction,
+        long pair, IReadOnlyList<string> keys) => Execute(connection, transaction, StateSchema.SaveDeletedBlock,
+            (StateSchema.ParamPairRow, pair), (StateSchema.ParamPath, keys[^1]),
+            (StateSchema.ParamCount, keys.Count), (StateSchema.ParamNames, StateEncoding.EncodeDeletedNames(keys)));
+
+    private static void MigrateDeletedHistory(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var total = StorageCommand.Create(connection, transaction, StateSchema.LegacyDeletedCount);
+        var expected = (long)total.ExecuteScalar()!;
+        using var command = StorageCommand.Create(connection, transaction, StateSchema.LegacyDeletedNames);
+        using var reader = command.ExecuteReader();
+        var keys = new List<string>(StateSchema.DeletedHistoryBatchSize);
+        long pair = 0;
+        long copied = 0;
+        while (reader.Read())
+        {
+            var nextPair = reader.GetInt64(0);
+            if (keys.Count != 0 && (nextPair != pair || keys.Count == StateSchema.DeletedHistoryBatchSize))
+            {
+                WriteDeletedBlock(connection, transaction, pair, keys);
+                keys.Clear();
+            }
+            pair = nextPair;
+            keys.Add(reader.GetString(StateSchema.LegacyDeletedKeyColumn));
+            copied++;
+        }
+        if (keys.Count != 0) WriteDeletedBlock(connection, transaction, pair, keys);
+        if (copied != expected) throw new InvalidDataException();
     }
 
     private static void ValidateStructure(SqliteConnection connection, SqliteTransaction? transaction,
@@ -3002,6 +3448,7 @@ public sealed class StateStore : IStateStore
         // Wait inside SQLite before the provider resets a busy statement; reuse its command timeout.
         SqliteException.ThrowExceptionForRC(SQLitePCL.raw.sqlite3_busy_timeout(connection.Handle,
             checked((int)TimeSpan.FromSeconds(connection.DefaultTimeout).TotalMilliseconds)), connection.Handle);
+        connection.CreateFunction(StateSchema.HistoryKeyFunction, (string path) => PathNames.DropboxKey(path), isDeterministic: true);
         connection.CreateFunction(StateSchema.PathKeyFunction, (string? path) => path is null ? null : PathNames.Key(path), isDeterministic: true);
         connection.CreateFunction(StateSchema.ResponsibilityOverlapsFunction,
             (string localKey, string dropboxKey, bool folder, string? path) =>
@@ -3017,9 +3464,11 @@ public sealed class StateStore : IStateStore
     }
 
     /// <summary>Returns free pages to the file; incremental_vacuum yields once per reclaimed page.</summary>
-    private void Reclaim()
+    private void Reclaim() => Reclaim(_connection);
+
+    private static void Reclaim(SqliteConnection connection)
     {
-        using var command = StorageCommand.Create(_connection, null, StateSchema.Reclaim);
+        using var command = StorageCommand.Create(connection, null, StateSchema.Reclaim);
         using var pages = command.ExecuteReader();
         while (pages.Read()) { }
     }

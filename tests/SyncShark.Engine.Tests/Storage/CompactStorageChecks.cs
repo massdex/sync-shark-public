@@ -244,7 +244,7 @@ public static class CompactStorageChecks
         {
             var members = new[]
             {
-                (pairId, generation, local.Epoch, local.Revision, false, false),
+                (pairId, generation, local.Epoch, local.Revision, false),
             };
             store.AcquireJournalPage(domain, null, new JournalPosition(Volume, 0), members, []);
         }
@@ -294,6 +294,7 @@ public static class CompactStorageChecks
             using (var reader = store.ScanRows("a", _ => Context).GetEnumerator())
                 Check.Require(reader.MoveNext(), "the scan reader is disposed before completion");
             CompleteRepair(store, "a", token, generation);
+            store.EndScanAsync("a", token, 1).GetAwaiter().GetResult();
             var after = Number(inspect, "PRAGMA page_count");
             Check.Require(!File.Exists(ScanPath(path, "a")) && store.InScan("b", Side.Local, "KEEP"),
                 "completion deletes its file after readers close and preserves the other pair");
@@ -312,14 +313,14 @@ public static class CompactStorageChecks
         store.Commit("b", StateChange.Empty with { Record = Enumerable.Range(0, 300).Select(index => Saved("Parent/" + new string('x', 150) + index)).ToArray() });
         var beforeRemoval = Number(inspect, "PRAGMA page_count");
         store.RemovePair("b");
+        store.EndScanAsync("b", ScanFixture.Token(store, "b"), 1).GetAwaiter().GetResult();
         Check.Require(!File.Exists(ScanPath(path, "b")) && Number(inspect, "PRAGMA freelist_count") == 0 &&
             Number(inspect, "PRAGMA page_count") < beforeRemoval && store.Pair("a") is not null,
             "pair removal deletes only its scan and reclaims its durable pages");
         using var readOnly = StateStore.OpenReadOnly(path);
         Check.Require(readOnly!.Pairs().Count == 1 && !File.Exists(ScanPath(path, "a")),
             "read-only status does not create a scan file");
-        Check.Require(!readOnly.ScanRows("a", _ => Context).Any() && readOnly.ScanRenames("a").Count == 0 &&
-            !File.Exists(ScanPath(path, "a")), "read-only scan reads after deletion use no physical scan file");
+        RefusesScan(() => readOnly.ReadScan("a", Guid.NewGuid()));
     }
 
     private static void RestartScans(string path)
@@ -340,14 +341,13 @@ public static class CompactStorageChecks
                 "interleaved pair writers select their own attached file under the shared lock");
             store.FinishRepair("a", Summary(false));
             using var readOnly = StateStore.OpenReadOnly(path);
-            Check.Require(readOnly!.ScanRows("a", _ => Context).Single().Local?.Id == "a",
-                "a read-only store attaches an existing scan by its filesystem path");
+            RefusesScan(() => readOnly!.ReadScan("a", ScanFixture.Token(store, "a")));
         }
         using (var store = StateStore.Open(path))
         {
-            Check.Require(store.ScanEntry("a", Side.Local, "A")?.Id == "a", "an incomplete scan can be read after reopening");
+            RefusesScan(() => store.ReadScan("a", Guid.NewGuid()));
             store.BeginScan("a", Generation(store, "a"), false);
-            Check.Require(!store.InScan("a", Side.Local, "A") && store.InScan("b", Side.Local, "B"),
+            Check.Require(!store.InScan("a", Side.Local, "A") && File.Exists(ScanPath(path, "b")),
                 "restart discards the old pair scan without touching another pair");
             var first = store.OpenScan("a", Side.Local, ScanTestSettings.BatchRows);
             first.AddAsync(new Listed("Parent", new Entry("Parent", true, 0, default, "p", "", "", null)), default).GetAwaiter().GetResult();
@@ -367,6 +367,13 @@ public static class CompactStorageChecks
             Check.Require(!store.ScanRows("a", _ => Context).Any(),
                 "BeginScan discards a damaged disposable file without reading it");
         }
+    }
+
+    private static void RefusesScan(Action read)
+    {
+        try { read(); }
+        catch (LiveAdmissionStaleException) { return; }
+        throw new InvalidOperationException("Scratch bytes do not confer scan authority after reopen.");
     }
 
     private static void ScanReadConnections(string path)
@@ -425,6 +432,12 @@ public static class CompactStorageChecks
         using (var held = new FileStream(scanPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
         {
             CompleteRepair(store, "a", token, generation);
+            try
+            {
+                store.EndScanAsync("a", token, 1).GetAwaiter().GetResult();
+                throw new InvalidOperationException("The foreign handle must prevent scratch deletion");
+            }
+            catch (IOException) { }
             Check.Require(store.LastRepair("a")!.Completed && store.FirstRepairDone("a") && File.Exists(scanPath),
                 "a sharing violation during scan cleanup does not fail a committed repair");
             try
@@ -615,7 +628,7 @@ public static class CompactStorageChecks
                 "the base schema alone publishes no version");
             using (var create = memory.CreateCommand())
             {
-                create.CommandText = StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.PublishVersion;
+                create.CommandText = StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.PublishVersion;
                 create.ExecuteNonQuery();
             }
             Check.Require(Number(memory, "PRAGMA user_version") == StateSchema.Version,
@@ -669,7 +682,8 @@ public static class CompactStorageChecks
     private static void PartialKeyCollisions(string path)
     {
         using var store = StateStore.Open(path);
-        store.SavePair(Pair("a"));
+        // DESIGN-126-4 §2: replacing a crossed binding registers work against the pair's current roots.
+        store.SavePair(BoundPair("a"));
         foreach (var inheritedFirst in new[] { true, false })
         {
             store.ForgetAllSynced("a");
@@ -692,9 +706,12 @@ public static class CompactStorageChecks
                 store.SyncedByKey("a", Side.Local, existing.LocalKey) == existing &&
                 store.SyncedByKey("a", Side.Local, incoming.LocalKey) is null,
                 "both collision directions roll back without losing the prior record");
+            var watermark = store.ReadWorkWatermark();
             store.Commit("a", StateChange.Empty with { Record = [incoming] });
             Check.Require(store.SyncedByKey("a", Side.Dropbox, "B") == incoming,
                 "Record still intentionally replaces an existing effective Dropbox key");
+            Check.Require(store.ReadWorkWatermark() == watermark + (inheritedFirst ? 0 : 1),
+                "Only replacing the crossed binding releases its former Local endpoint.");
         }
         foreach (var movingOverride in new[] { false, true })
         {

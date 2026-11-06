@@ -5,6 +5,20 @@ namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 /// <summary>Composes the real execution owners for focused contract checks.</summary>
 internal static class SyncJobs
 {
+    internal static async Task RunBatchAsync(ExecutorContext context, SyncPorts ports,
+        WorkSelection? selection, string scope, CancellationToken ct, Side side = Side.Local,
+        IReadOnlySet<long>? retryIssues = null, bool settlesFirstRun = false)
+    {
+        var directory = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "batch-fixture-" + Guid.NewGuid().ToString("N"))).FullName;
+        try
+        {
+            using var log = Massdex.SyncShark.Engine.Run.RunLog.Open(directory, "pair", "batch", _ => { }, 256);
+            await Massdex.SyncShark.Engine.Run.FolderBatch.RunAsync(context, ports, context.Dropbox, log, selection, selection?.Side ?? side, scope, retryIssues, settlesFirstRun,
+                _ => Task.CompletedTask, new Massdex.SyncShark.Engine.Run.ScanOwnership(), () => true, ct);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     internal static async Task<FolderRemovalResult?> RemoveFolderAsync(this FolderSync folders,
         Row row, Side side, CancellationToken ct)
     {

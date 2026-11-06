@@ -33,7 +33,636 @@ public static class ChangeRunnerChecks
 
     private static readonly DateTimeOffset Stamp = DateTimeOffset.UnixEpoch.AddDays(1);
 
+    public static void RunStaleFreshness() => StaleFreshnessAsync().GetAwaiter().GetResult();
+
+    public static void ReleasedHistory() => ReleasedHistoryAsync().GetAwaiter().GetResult();
+
     public static void Run() => RunAsync().GetAwaiter().GetResult();
+
+    public static void RunContainment() => ContainmentAsync().GetAwaiter().GetResult();
+
+    public static void RunMoveOutSafety() => SavedUnderAddedFolderAsync().GetAwaiter().GetResult();
+
+    private static async Task ContainmentAsync()
+    {
+        foreach (var parents in new[] { false, true }) await BatchCrashAsync(parents);
+        await CrossBoundaryFolderEffectsAsync();
+        await MovedIntoBatchAsync();
+        await DraggedFolderAsync();
+        await BoundDuringReobservationAsync();
+        foreach (var sameIds in new[] { true, false }) await MidBatchBindingAsync(sameIds);
+        await NewFolderOneBatchAsync();
+        await SavedUnderAddedFolderAsync();
+        await BatchFailureWakeAsync();
+        await BatchIncompleteFinalizationAsync();
+        var failures = new List<Exception>();
+        foreach (var check in new Func<Task>[] { BatchReplacementAsync, BatchRootReadFailureAsync, FixedSubtreeCountsAsync })
+        {
+            try { await check(); }
+            catch (Exception error) { failures.Add(new InvalidOperationException(check.Method.Name, error)); }
+        }
+        if (failures.Count != 0) throw new AggregateException(failures);
+        foreach (var (baseline, matching) in new[] { (false, false), (true, true), (true, false) })
+        {
+            using var fixture = new Fixture(realStore: true);
+            var local = FolderEntry(Folder, LocalId);
+            var remote = FolderEntry(Folder, DropboxId);
+            fixture.Local.Seed(local, null);
+            fixture.Dropbox.Seed(remote, null);
+            fixture.Local.Seed(LocalEntry(Folder + "/Child", "child-local"), [1]);
+            if (baseline) fixture.Inner.Commit(PairId, StateChange.Empty with
+            { Record = [SyncedEntries.From(matching ? local : local with { Id = "previous-folder-id" }, remote)] });
+            var outsideLocal = LocalEntry("Outside/Missing", "outside-local");
+            var outsideRemote = RemoteEntry("Outside/Missing", "outside-remote");
+            var outsideSaved = SyncedEntries.From(outsideLocal, outsideRemote);
+            SeedFolders(fixture, "Outside");
+            fixture.Dropbox.Seed(outsideRemote, [1]);
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [outsideSaved] });
+            var selected = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Folder, null, LocalId, local, false, false));
+            var batches = 0;
+            Check.Require(await Counted(fixture, selected, () => batches++).RunAsync(selected, default), "folder selection completes");
+            Check.Require(batches == (matching ? 0 : 1),
+                "unknown and replaced folders batch; a plain touch of a known folder is entry-only");
+            Check.Require((await fixture.Dropbox.ReadOneAsync(Folder + "/Child", default) is not null) == !matching,
+                "unknown and recreated folders sync descendants; plain touches leave children untouched");
+            Check.Require(await fixture.Dropbox.ReadOneAsync(outsideRemote.Path, default) == outsideRemote &&
+                fixture.Inner.SyncedByKey(PairId, Side.Local, outsideSaved.LocalKey) == outsideSaved,
+                $"an outside baseline-backed delete candidate is neither executed nor forgotten, baseline={baseline} matching={matching}");
+        }
+    }
+
+    /// <summary>A pass whose batch port counts its calls; the views set on the fixture beforehand are the context's sides.</summary>
+    private static SelectionPass Counted(Fixture fixture, WorkSelection selection, Action onBatch,
+        Func<Task>? afterBatch = null, bool repaired = true, ExecutorContext? context = null)
+    {
+        RepairDone(fixture, repaired);
+        var boundary = new Boundary(_ => new Lease());
+        boundary.Capture = (selected, _, _) => Task.FromResult(Coverage(selected));
+        context ??= fixture.Context(selection);
+        var ports = new SyncPorts(new RecoveryBoundary(), boundary, RefusingExecutionBoundary.Instance, 0);
+        var jobs = SyncJobs.Create(context, ports);
+        return new SelectionPass(context, jobs.Items, jobs.Ancestors, boundary, jobs.Actions, async (selected, side, scope, retries, settles, ct) =>
+        {
+            onBatch();
+            await SyncJobs.RunBatchAsync(context, ports, selected, scope, ct);
+            if (afterBatch is not null) await afterBatch();
+        });
+    }
+
+    // AutoSync batches only after a pair's first Repair; the proxy answers it, the database keeps it for a reopened store.
+    private static void RepairDone(Fixture fixture, bool done = true)
+    {
+        fixture.Hooks.RepairDone = done;
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + fixture.DatabasePath + ";Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE pair SET first_repair_done = $done WHERE pair_id = $p;";
+        command.Parameters.AddWithValue("$done", done ? 1 : 0);
+        command.Parameters.AddWithValue("$p", PairId);
+        command.ExecuteNonQuery();
+    }
+
+    private static void SeedFolders(Fixture fixture, params string[] paths)
+    {
+        foreach (var path in paths)
+        {
+            fixture.Local.Seed(FolderEntry(path, "local-" + path), null);
+            fixture.Dropbox.Seed(FolderEntry(path, "remote-" + path), null);
+        }
+    }
+
+    private static async Task BatchFailureWakeAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var root = FolderEntry(Folder, LocalId);
+        var failedPath = Folder + "/Failed";
+        var goodPath = Folder + "/Good";
+        fixture.Local.Seed(root, null);
+        fixture.Local.Seed(LocalEntry(failedPath, "failed-id"), [1]);
+        fixture.Local.Seed(LocalEntry(goodPath, "good-id"), [1]);
+        fixture.DropboxView = new HookedSide(fixture.Dropbox, path =>
+        {
+            if (path == failedPath) throw new ItemFailedException(path, Text.ReadFailedOn(Side.Dropbox), new IOException());
+        });
+        var selected = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed,
+            Folder, null, LocalId, root, false, false));
+        var batches = 0;
+        await Counted(fixture, selected, () => batches++).RunAsync(selected, default);
+        Check.Require(batches == 1 && await fixture.Dropbox.ReadOneAsync(goodPath, default) is not null &&
+            await fixture.Dropbox.ReadOneAsync(failedPath, default) is null,
+            "a failed descendant does not stop its sibling and is not uploaded");
+        var issue = fixture.Inner.Issues(PairId).Single(value => value.Path == failedPath);
+        fixture.DropboxView = null;
+        await new Syncer(fixture.Context(selected), new SyncPorts(new RecoveryBoundary(), new Boundary(_ => new Lease()),
+            RefusingExecutionBoundary.Instance, 0)).ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
+        Check.Require(fixture.Inner.IssueById(PairId, issue.Id) is null &&
+            await fixture.Dropbox.ReadOneAsync(failedPath, default) is not null, "Retry resolves and uploads the descendant");
+    }
+
+    private static async Task BatchReplacementAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var root = FolderEntry(Folder, LocalId);
+        var path = Folder + "/Sub";
+        var oldLocal = FolderEntry(path, "sub-local");
+        var remote = FolderEntry(path, "sub-remote");
+        var incoming = LocalEntry(path, "replacement-local");
+        var child = RemoteEntry(path + "/New", "unbound-child");
+        fixture.Local.Seed(root, null);
+        fixture.Local.Seed(incoming, [1]);
+        fixture.Dropbox.Seed(FolderEntry(Folder, DropboxId), null);
+        fixture.Dropbox.Seed(remote, null);
+        fixture.Dropbox.Seed(child, [1]);
+        var saved = SyncedEntries.From(oldLocal, remote);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
+        var selected = Selected(fixture, Folder, root);
+        await Counted(fixture, selected, () => { }).RunAsync(selected, default);
+        Check.Require(await fixture.Dropbox.ReadOneAsync(child.Path, default) == child &&
+            await fixture.Dropbox.ReadOneAsync(path, default) == remote &&
+            fixture.Inner.SyncedByKey(PairId, Side.Local, saved.LocalKey) == saved,
+            "a left batch folder-to-file replacement preserves its unbound remote child and baseline");
+        // DESIGN-100-5 B1 leaves this row before replacement planning; it does not manufacture a Failure.
+        var leftRow = new Row(saved.LocalKey, incoming, remote, saved, [], null, RowContext.Neutral);
+        var leftJobs = SyncJobs.Create(fixture.Context(selected) with { BatchScope = Folder },
+            new SyncPorts(new RecoveryBoundary(), new Boundary(_ => new Lease()), RefusingExecutionBoundary.Instance, 0));
+        var left = await leftJobs.Items.PrepareAsync(leftRow, default);
+        var unfinished = new SyncOutcome(left.Kind, left.None, null, null, false);
+        Check.Require(left.None == NoneReason.OutOfScope && !unfinished.Succeeded() &&
+            unfinished.OwesWork(left.Row, fixture.Inner, PairId) == true,
+            "left replacement stays unfinished rather than reporting completion");
+
+        // The pre-removal guard also covers a mapped footprint outside the listed root.
+        using var crossing = new Fixture(realStore: true);
+        var outside = remote with { Path = "Outside/Sub" };
+        crossing.Local.Seed(root, null);
+        crossing.Local.Seed(incoming, [1]);
+        SeedFolders(crossing, "Outside");
+        crossing.Dropbox.Seed(outside, null);
+        var crossSaved = SyncedEntries.From(oldLocal, outside);
+        crossing.Inner.Commit(PairId, StateChange.Empty with { Record = [crossSaved] });
+        var selection = Selected(crossing, Folder, root);
+        crossing.Inner.BeginSelection(selection);
+        var context = crossing.Context(selection) with { BatchScope = Folder };
+        var boundary = new Boundary(_ => new Lease());
+        boundary.Capture = (work, _, _) => Task.FromResult(Coverage(work));
+        var jobs = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(), boundary,
+            RefusingExecutionBoundary.Instance, 0));
+        var row = new Row(crossSaved.LocalKey, incoming, outside, crossSaved, [], null, RowContext.Neutral);
+        await ThrowsAsync<ChangedUnderneathException>(() => jobs.Items.DispatchPreparedAsync(
+            new Massdex.SyncShark.Engine.Planner.SyncAction(ActionKind.ReplaceKind, row,
+                Side: Side.Dropbox, Target: outside.Path),
+            default, selection: selection));
+        Check.Require(boundary.Calls == 0 &&
+            crossing.Hooks.Count(nameof(IStateStore.BeginFolderRemoval)) == 0 &&
+            await crossing.Dropbox.ReadOneAsync(outside.Path, default) == outside,
+            "an out-of-batch replacement refuses before admission, planning or removal");
+    }
+
+    private static async Task BatchIncompleteFinalizationAsync()
+    {
+        foreach (var partial in new[] { false, true })
+        {
+            using var fixture = new Fixture(realStore: true);
+            var root = FolderEntry(Folder, LocalId);
+            fixture.Local.Seed(root, null);
+            fixture.Dropbox.Seed(FolderEntry(Folder, DropboxId), null);
+            var listed = LocalEntry(Folder + "/A", "listed-id");
+            var omitted = LocalEntry(Folder + "/Z", "omitted-id");
+            fixture.Local.Seed(listed, [1]);
+            fixture.Local.Seed(omitted, [1]);
+            fixture.Inner.Commit(PairId, StateChange.Empty with
+            {
+                Raise = [(IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, Folder,
+                    new IssueSubject([new IssueItem(Side.Local, Folder, LocalId)], null,
+                        FirstRunDeletion: IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice))]
+            });
+            var incomplete = new InventoryIncompleteException("partial first-run fixture", null);
+            if (partial) fixture.Local.FailWalkAfter(listed.Path, incomplete);
+            var finalizing = false;
+            var finalizerReads = 0;
+            fixture.DropboxView = new ProxySide(fixture.Dropbox)
+            {
+                OnRead = path => { if (finalizing && path == Folder) finalizerReads++; }
+            };
+            var selection = Selected(fixture, Folder, root);
+            fixture.Inner.BeginSelection(selection);
+            var context = fixture.Context(selection) with
+            {
+                Events = item => { if (item.StageKey == TextKey.StageFolderPlans) finalizing = true; }
+            };
+            var boundary = new Boundary(_ => new Lease());
+            boundary.Capture = (work, _, _) => Task.FromResult(Coverage(work));
+            var ports = new SyncPorts(new RecoveryBoundary(), boundary, RefusingExecutionBoundary.Instance, 0);
+            if (partial)
+            {
+                var thrown = await ThrowsAsync<InventoryIncompleteException>(() =>
+                    SyncJobs.RunBatchAsync(context, ports, selection, Folder, default));
+                Check.Require(ReferenceEquals(thrown, incomplete), "usable partial work still surfaces its original listing failure");
+            }
+            else await SyncJobs.RunBatchAsync(context, ports, selection, Folder, default);
+            Check.Require(await fixture.Dropbox.ReadOneAsync(listed.Path, default) is not null &&
+                (await fixture.Dropbox.ReadOneAsync(omitted.Path, default) is null) == partial,
+                "partial listing completes the safe listed child without inventing the omitted child");
+            Check.Require(finalizing && (finalizerReads == 0) == partial &&
+                fixture.Inner.Issues(PairId).Any(issue => issue.Path == Folder && issue.Kind == IssueKind.Failure) == partial,
+                "only a complete listing reaches first-run finalization and closes the retained folder failure");
+        }
+    }
+
+    private static async Task BatchRootReadFailureAsync()
+    {
+        using var fixture = UnreadableFixture();
+        var root = FolderEntry(Folder, FolderId);
+        UnreadableMember.Record(fixture.Inner, PairId, Member, MemberId);
+        var listing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var local = new ProxySide(fixture.Local) { OnListing = () => listing.TrySetResult() };
+        fixture.LocalView = local;
+        var incomplete = new InventoryIncompleteException("scoped root fixture",
+            new ItemFailedException(Folder, TextKey.MoveFailed, null));
+        fixture.DropboxView = new ProxySide(fixture.Dropbox)
+        {
+            BeforeRead = (_, ct) => listing.Task.WaitAsync(ct),
+            ReadFault = path => path == Folder ? incomplete : null
+        };
+        var selection = Selected(fixture, Folder, root);
+        fixture.Inner.BeginSelection(selection);
+        var ports = new SyncPorts(new RecoveryBoundary(), new Boundary(_ => new Lease()),
+            RefusingExecutionBoundary.Instance, 0);
+        var thrown = await ThrowsAsync<InventoryIncompleteException>(() =>
+            SyncJobs.RunBatchAsync(fixture.Context(selection), ports, selection, Folder, default));
+        Check.Require(ReferenceEquals(thrown, incomplete), "a scoped root failure preserves the original exception");
+        Check.Require(local.Finished, "a scoped root failure joins the started opposite listing");
+        Check.Require(fixture.Hooks.Count(nameof(IStateStore.ReleaseUnreadable)) == 0 && Touches(fixture, Member),
+            "a scoped root failure preserves unreadable membership");
+        Check.Require(fixture.Hooks.Count(nameof(IStateStore.ScanRows)) == 0,
+            "a scoped root failure never executes the aborted scan");
+    }
+
+    // Doubling unrelated bindings exposes pair-wide work while the involved subtree stays at two children.
+    private static async Task FixedSubtreeCountsAsync()
+    {
+        foreach (var fail in new[] { false, true })
+        {
+            long[]? previous = null;
+            Dictionary<string, long>? previousCalls = null;
+            foreach (var background in new[] { 8, 16 })
+            {
+                using var fixture = new Fixture(realStore: true);
+                var root = FolderEntry(Folder, LocalId);
+                var first = LocalEntry(Folder + "/A", "first-child");
+                var last = LocalEntry(Folder + "/Z", "unannounced-child");
+                fixture.Local.Seed(root, null);
+                fixture.Local.Seed(first, [1]);
+                fixture.Local.Seed(last, [1]);
+                fixture.Inner.Commit(PairId, StateChange.Empty with
+                {
+                    Record = Enumerable.Range(0, background).Select(index => SyncedEntries.From(
+                        LocalEntry("Outside/f" + index, "outside-local-" + index),
+                        RemoteEntry("Outside/f" + index, "outside-remote-" + index))).ToArray()
+                });
+                // This case enters AutoSync's real selector, so both source bases must be ready too.
+                foreach (var side in new[] { Side.Local, Side.Dropbox })
+                {
+                    var source = fixture.Inner.ReadSource(PairId, side)!.Value;
+                    fixture.Inner.AdvanceSource(PairId, side, Generation, source.Epoch, source.Revision,
+                        source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
+                        source.Provenance, source.Cursor, null);
+                }
+                if (fail) fixture.Local.FailWalkAfter(first.Path,
+                    new InventoryIncompleteException("partial listing fixture", null));
+                var selected = Selected(fixture, Folder, root);
+                var store = new StoreCounters(fixture.Store);
+                var local = new CountingSide(fixture.Local);
+                var remote = new CountingSide(fixture.Dropbox);
+                var context = fixture.Context(selected) with { Store = store, Local = local, Dropbox = remote };
+                var batches = 0;
+                await Counted(fixture, selected, () => batches++, context: context).RunAsync(selected, default);
+                if (fail)
+                {
+                    Check.Require(await fixture.Dropbox.ReadOneAsync(first.Path, default) is not null &&
+                        await fixture.Dropbox.ReadOneAsync(last.Path, default) is null,
+                        "partial discovery syncs the listed child but has no event for the undiscovered child");
+                    var issue = fixture.Inner.Issues(PairId).Single(value => value.Path == Folder);
+                    await new Syncer(context, new SyncPorts(new RecoveryBoundary(), new Boundary(_ => new Lease()),
+                        RefusingExecutionBoundary.Instance, 0)).ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
+                    Check.Require(fixture.Inner.IssueById(PairId, issue.Id) is null,
+                        "user Retry resolves the root and releases its retained discovery work");
+                    var boundary = new Boundary(_ => new Lease());
+                    boundary.Capture = (work, _, _) => Task.FromResult(Coverage(work));
+                    var ports = new SyncPorts(new RecoveryBoundary(), boundary, RefusingExecutionBoundary.Instance, 0);
+                    await new Syncer(context, ports with
+                    {
+                        RunBatchAsync = async (work, side, scope, retries, settles, ct) =>
+                        {
+                            batches++;
+                            await SyncJobs.RunBatchAsync(context, ports, work, scope, ct);
+                        }
+                    }).SyncWorkAsync(default);
+                }
+                Check.Require(batches == (fail ? 2 : 1) &&
+                    await fixture.Dropbox.ReadOneAsync(last.Path, default) is not null &&
+                    fixture.Inner.Issues(PairId).Count == 0,
+                    "the next AutoSync selection completes retained discovery, not a root-only success");
+                var counts = new long[] { local.Listings, remote.Listings, local.Yielded, remote.Yielded,
+                    local.Reads, remote.Reads, local.Hashes, remote.Hashes, local.Opens, remote.Opens,
+                    local.Stages, remote.Stages, local.Publishes, remote.Publishes, local.Deletes, remote.Deletes,
+                    store.Commands, store.CommitCalls, store.ReadConnections, store.RowsRead, store.ScanAccepted };
+                Check.Require(local.Listings == batches && remote.Listings == batches &&
+                    remote.Publishes == 2 && local.Deletes + remote.Deletes == 0 &&
+                    store.RowsRead <= batches * 3 && store.ScanAccepted <= batches * 6,
+                    "fixed subtree absolute budgets: one bilateral listing per batch, two publications, no removals or outside scan rows");
+                if (previous is not null)
+                {
+                    Check.Require(counts.SequenceEqual(previous), "fixed subtree counts do not grow with the pair");
+                    Check.Require(store.MemberCalls.Count == previousCalls!.Count && store.MemberCalls.All(call =>
+                        previousCalls.GetValueOrDefault(call.Key) == call.Value),
+                        "each counted store operation is independent of background pair size");
+                }
+                Console.WriteLine($"FIX97 counts background={background} involved=3 retry={fail} values=" + string.Join(",", counts));
+                Console.WriteLine("FIX97 store " + string.Join(",", store.MemberCalls.OrderBy(call => call.Key)
+                    .Select(call => call.Key + "=" + call.Value)));
+                previous = counts;
+                previousCalls = store.MemberCalls.ToDictionary(call => call.Key, call => call.Value);
+            }
+        }
+    }
+
+    // A binding that crosses the root is saved, so the add-only batch neither duplicates, deletes nor forgets it.
+    private static async Task CrossBoundaryFolderEffectsAsync()
+    {
+        foreach (var present in new[] { false, true })
+        {
+            using var fixture = new Fixture(realStore: true);
+            var root = FolderEntry("Parent", LocalId);
+            fixture.Local.Seed(root, null);
+            fixture.Local.Seed(LocalEntry("Parent/Ordinary", "ordinary-id"), [1]);
+            var outside = LocalEntry("Outside/Child", "child-local");
+            var inside = RemoteEntry("Parent/Child", "child-remote");
+            var saved = SyncedEntries.From(outside, inside);
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
+            if (present) fixture.Dropbox.Seed(inside, [1]);
+            var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed,
+                root.Path, null, LocalId, root, false, false));
+            var batches = 0;
+            var pass = Counted(fixture, selection, () => batches++);
+            var owed = fixture.Inner.Obligated(PairId);
+            Check.Require(await pass.RunAsync(selection, default) && batches == 1,
+                "a crossing binding still takes one batch, present=" + present);
+            Check.Require(fixture.Inner.Obligated(PairId) == owed && fixture.Inner.Issues(PairId).Count == 0,
+                "a crossing binding requests no Repair and raises no notice, present=" + present + " issues=" +
+                string.Join(",", fixture.Inner.Issues(PairId).Select(issue => issue.Path + ":" + issue.Cause)));
+            Check.Require(await fixture.Local.ReadOneAsync(inside.Path, default) is null &&
+                await fixture.Dropbox.ReadOneAsync("Parent/Ordinary", default) is not null &&
+                (await fixture.Dropbox.ReadOneAsync(inside.Path, default) is not null) == present &&
+                fixture.Inner.SyncedByKey(PairId, Side.Local, saved.LocalKey) == saved,
+                "the batch uploads the new child with no duplicate, deletion or baseline forgetting of the crossing binding");
+        }
+    }
+
+    // D-1105-22: a folder added or re-added over saved records only adds; no listing absence becomes a deletion.
+    private static async Task SavedUnderAddedFolderAsync()
+    {
+        foreach (var readded in new[] { false, true })
+        {
+            using var fixture = new Fixture(realStore: true);
+            var root = FolderEntry("Parent", readded ? "readded-root" : LocalId);
+            var remoteRoot = FolderEntry("Parent", DropboxId);
+            var kept = SyncedEntries.From(LocalEntry("Parent/Kept", "kept-local"), RemoteEntry("Parent/Kept", "kept-remote"));
+            var localGone = SyncedEntries.From(LocalEntry("Parent/LocalGone", "gone-local"), RemoteEntry("Parent/LocalGone", "gone-remote"));
+            var remoteGone = SyncedEntries.From(LocalEntry("Parent/RemoteGone", "left-local"), RemoteEntry("Parent/RemoteGone", "left-remote"));
+            var records = new List<SyncedEntry> { kept, localGone, remoteGone };
+            // Added: nothing saved at the root itself; re-added: the root's saved binding names a previous folder.
+            if (readded) records.Add(SyncedEntries.From(FolderEntry("Parent", LocalId), remoteRoot));
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = records });
+            fixture.Local.Seed(root, null);
+            fixture.Dropbox.Seed(remoteRoot, null);
+            fixture.Local.Seed(LocalEntry("Parent/Kept", "kept-local"), [1]);
+            fixture.Dropbox.Seed(RemoteEntry("Parent/Kept", "kept-remote"), [1]);
+            fixture.Dropbox.Seed(RemoteEntry("Parent/LocalGone", "gone-remote"), [1]);
+            fixture.Local.Seed(LocalEntry("Parent/RemoteGone", "left-local"), [1]);
+            fixture.Local.Seed(LocalEntry("Parent/New", "new-local"), [1]);
+            var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, root.Path, null, root.Id, root, false, false));
+            var batches = 0;
+            await Counted(fixture, selection, () => batches++).RunAsync(selection, default);
+            Check.Require(batches == 1 && await fixture.Dropbox.ReadOneAsync("Parent/New", default) is not null,
+                "SAFETY: the folder's new contents are added, readded=" + readded);
+            Check.Require(await fixture.Dropbox.ReadOneAsync("Parent/LocalGone", default) is not null &&
+                await fixture.Local.ReadOneAsync("Parent/RemoteGone", default) is not null &&
+                await fixture.Dropbox.ReadOneAsync("Parent/Kept", default) is not null &&
+                await fixture.Local.ReadOneAsync("Parent/Kept", default) is not null,
+                "SAFETY: nothing is deleted on either side from a listing, readded=" + readded);
+            Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, localGone.LocalKey) == localGone &&
+                fixture.Inner.SyncedByKey(PairId, Side.Local, remoteGone.LocalKey) == remoteGone &&
+                fixture.Inner.SyncedByKey(PairId, Side.Local, kept.LocalKey) == kept,
+                "SAFETY: saved records with an absent side are neither forgotten nor rewritten, readded=" + readded);
+        }
+    }
+
+    // A dragged-in synced item with no extra event: the batch writes nothing for its bound row and deletes nothing.
+    private static async Task MovedIntoBatchAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var root = FolderEntry("Parent", LocalId);
+        var original = LocalEntry("Outside/Child", "moved-local");
+        var remote = RemoteEntry("Outside/Child", "moved-remote");
+        var saved = SyncedEntries.From(original, remote);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
+        SeedFolders(fixture, "Outside");
+        fixture.Local.Seed(root, null);
+        fixture.Local.Seed(original with { Path = "Parent/Child" }, [1]);
+        fixture.Dropbox.Seed(remote, [1]);
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed,
+            root.Path, null, LocalId, root, false, false));
+        var batches = 0;
+        Check.Require(await Counted(fixture, selection, () => batches++).RunAsync(selection, default),
+            "moved-in selection completes");
+        Check.Require(batches == 1 && await fixture.Dropbox.ReadOneAsync("Parent/Child", default) is null,
+            "the batch writes nothing for a bound row");
+        Check.Require(await fixture.Dropbox.ReadOneAsync(remote.Path, default) == remote &&
+            fixture.Inner.SyncedByKey(PairId, Side.Local, saved.LocalKey) == saved && fixture.Inner.Issues(PairId).Count == 0,
+            "the moved item's Dropbox copy and binding are untouched: no duplicate, no deletion");
+    }
+
+    // A new folder holding a dragged-in synced folder and new files, with no extra event.
+    private static async Task DraggedFolderAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var subLocal = FolderEntry("Outside/Sub", "sub-local");
+        var subRemote = FolderEntry("Outside/Sub", "sub-remote");
+        var xLocal = LocalEntry("Outside/Sub/x", "x-local");
+        var xRemote = RemoteEntry("Outside/Sub/x", "x-remote");
+        fixture.Inner.Commit(PairId, StateChange.Empty with
+        { Record = [SyncedEntries.From(subLocal, subRemote), SyncedEntries.From(xLocal, xRemote)] });
+        SeedFolders(fixture, "Outside");
+        fixture.Dropbox.Seed(subRemote, null);
+        fixture.Dropbox.Seed(xRemote, [1]);
+        var root = FolderEntry("G", LocalId);
+        fixture.Local.Seed(root, null);
+        fixture.Local.Seed(LocalEntry("G/new", "new-local"), [1]);
+        fixture.Local.Seed(subLocal with { Path = "G/Sub" }, null);
+        fixture.Local.Seed(xLocal with { Path = "G/Sub/x" }, [1]);
+        fixture.Local.Seed(LocalEntry("G/Sub/fresh", "fresh-local"), [1]);
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, root.Path, null, LocalId, root, false, false));
+        var batches = 0;
+        Check.Require(await Counted(fixture, selection, () => batches++).RunAsync(selection, default),
+            "dragged-folder selection completes");
+        Check.Require(batches == 1 && await fixture.Dropbox.ReadOneAsync("G/Sub", default) is null &&
+            await fixture.Dropbox.ReadOneAsync("G/new", default) is not null,
+            "the batch holds the bound folder and its subtree and uploads the new sibling");
+        Check.Require(await fixture.Dropbox.ReadOneAsync(subRemote.Path, default) == subRemote &&
+            await fixture.Dropbox.ReadOneAsync(xRemote.Path, default) == xRemote,
+            "SAFETY: the dragged-in folder's Dropbox copy is neither deleted nor duplicated");
+    }
+
+    // A bound folder replaces a NEW folder between scan and execution; the refusal holds its subtree.
+    private static async Task BoundDuringReobservationAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var subLocal = FolderEntry("Outside/Sub", "sub-local");
+        var subRemote = FolderEntry("Outside/Sub", "sub-remote");
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(subLocal, subRemote)] });
+        SeedFolders(fixture, "Outside");
+        fixture.Local.Seed(subLocal, null);
+        fixture.Dropbox.Seed(subRemote, null);
+        var root = FolderEntry("Parent", LocalId);
+        var newSub = FolderEntry("Parent/Sub", "new-sub");
+        fixture.Local.Seed(root, null);
+        fixture.Local.Seed(newSub, null);
+        fixture.Local.Seed(LocalEntry("Parent/Sub/x", "x-local"), [1]);
+        var moved = false;
+        fixture.LocalView = new HookedSide(fixture.Local, beforeRead: path =>
+        {
+            if (moved || path != newSub.Path) return;
+            moved = true;
+            fixture.Local.DeleteAsync(newSub, null, default).GetAwaiter().GetResult();
+            fixture.Local.MoveAsync(subLocal, newSub.Path, default).GetAwaiter().GetResult();
+            fixture.Local.Seed(LocalEntry("Parent/Sub/x", "x-local"), [1]);
+        });
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, root.Path, null, LocalId, root, false, false));
+        var batches = 0;
+        await Counted(fixture, selection, () => batches++).RunAsync(selection, default);
+        Check.Require(moved && batches == 1 && await fixture.Dropbox.ReadOneAsync(newSub.Path, default) is null &&
+            await fixture.Dropbox.ReadOneAsync("Parent/Sub/x", default) is null,
+            "a folder bound during reobservation is refused and held: no Dropbox Parent/Sub and no Parent/Sub/x");
+        Check.Require(await fixture.Dropbox.ReadOneAsync(subRemote.Path, default) == subRemote,
+            "SAFETY: the moved-in folder's Dropbox copy is not deleted");
+    }
+
+    // A binding committed mid-batch at a NEW row is neither overwritten nor duplicated by the batch.
+    private static async Task MidBatchBindingAsync(bool sameIds)
+    {
+        using var fixture = new Fixture(realStore: true);
+        SeedFolders(fixture, "Outside");
+        var root = FolderEntry("Parent", LocalId);
+        var item = LocalEntry("Parent/a", "a-local");
+        fixture.Local.Seed(root, null);
+        fixture.Local.Seed(item, [1]);
+        var bound = sameIds
+            ? SyncedEntries.From(item with { Path = "Outside/a" }, RemoteEntry("Outside/a", "a-remote"))
+            : SyncedEntries.From(LocalEntry(item.Path, "other-local"), RemoteEntry(item.Path, "other-remote"));
+        var occupant = RemoteEntry(bound.DropboxPath, bound.DropboxId!);
+        var committed = false;
+        fixture.LocalView = new HookedSide(fixture.Local, beforeRead: path =>
+        {
+            if (committed || path != item.Path) return;
+            committed = true;
+            fixture.Dropbox.Seed(occupant, [2]);
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [bound] });
+        });
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, root.Path, null, LocalId, root, false, false));
+        var batches = 0;
+        try { await Counted(fixture, selection, () => batches++).RunAsync(selection, default); }
+        catch (LiveAdmissionStaleException) { }
+        var afterBatch = await fixture.Dropbox.ReadOneAsync(occupant.Path, default);
+        var uploaded = await fixture.Dropbox.ReadOneAsync(item.Path, default);
+        Check.Require(committed && batches == 1 && afterBatch == occupant && (!sameIds || uploaded is null),
+            "a mid-batch binding leaves the bound Dropbox item unchanged and is never uploaded twice, sameIds=" + sameIds +
+            $" committed={committed} batches={batches} after={afterBatch} uploaded={uploaded}");
+    }
+
+    // One new folder of N files is one batch; its Dropbox reads stay within two per item and below the 0.3.75 walk's,
+    // measured as that walk's per-item branches: one live selection per file under an already synced root.
+    private static async Task NewFolderOneBatchAsync()
+    {
+        const int Files = 8;
+        var reads = new int[2];
+        foreach (var walk in new[] { false, true })
+        {
+            using var fixture = new Fixture(realStore: true);
+            var root = FolderEntry("G", LocalId);
+            fixture.Local.Seed(root, null);
+            for (var index = 0; index < Files; index++) fixture.Local.Seed(LocalEntry("G/f" + index, "f-" + index), [1]);
+            if (walk)
+            {
+                var remoteRoot = FolderEntry("G", DropboxId);
+                fixture.Dropbox.Seed(remoteRoot, null);
+                fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(root, remoteRoot)] });
+            }
+            var count = 0;
+            fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: _ => Interlocked.Increment(ref count));
+            var batches = 0;
+            var notices = walk
+                ? Enumerable.Range(0, Files).Select(index => LocalEntry("G/f" + index, "f-" + index)).ToArray()
+                : [root];
+            for (var index = 0; index < notices.Length; index++)
+            {
+                var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, notices[index].Path, null,
+                    notices[index].Id, notices[index], false, false), index + 1);
+                Check.Require(await Counted(fixture, selection, () => batches++).RunAsync(selection, default),
+                    "every selection completes, walk=" + walk);
+            }
+            Check.Require(batches == (walk ? 0 : 1), "a new folder is one batch, walk=" + walk);
+            for (var index = 0; index < Files; index++)
+                Check.Require(await fixture.Dropbox.ReadOneAsync("G/f" + index, default) is not null, "every file uploads, walk=" + walk);
+            reads[walk ? 1 : 0] = count;
+        }
+        Check.Require(reads[0] <= 2 * Files + 3 && reads[0] < reads[1],
+            $"batched Dropbox reads: {reads[0]} for {Files} files, per-item walk branches: {reads[1]}");
+    }
+
+    // A crash after the root is recorded and before its children finish: the restart deletes nothing and keeps the root.
+    // The unfinished children then come from their own notices or Repair (D-1105-22).
+    private static async Task BatchCrashAsync(bool throughParents)
+    {
+        using var fixture = new Fixture(realStore: true);
+        var root = FolderEntry(Folder, LocalId);
+        fixture.Local.Seed(root, null);
+        fixture.Local.Seed(LocalEntry(Folder + "/Child", "child-local"), [1]);
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Folder, null, LocalId, root, false, false));
+        RepairDone(fixture);
+        var boundary = new Boundary(_ => new Lease());
+        boundary.Capture = (selected, _, _) => Task.FromResult(Coverage(selected));
+        var context = fixture.Context(selection);
+        var ports = new SyncPorts(new RecoveryBoundary(), boundary, RefusingExecutionBoundary.Instance, 0);
+        var jobs = SyncJobs.Create(context, ports);
+        var first = new SelectionPass(context, jobs.Items, jobs.Ancestors, boundary, jobs.Actions,
+            async (selected, side, scope, retries, settles, ct) =>
+            {
+                if (throughParents)
+                    await new Parents(context).EnsureAsync(Side.Dropbox, Folder + "/Child", ct);
+                else
+                {
+                    fixture.DropboxView = new HookedSide(fixture.Dropbox, _ => throw new OperationCanceledException());
+                    await SyncJobs.RunBatchAsync(fixture.Context(selected!), ports, selected, scope, ct);
+                }
+                throw new OperationCanceledException();
+            });
+        await ThrowsAsync<OperationCanceledException>(() => first.RunAsync(selection, default));
+        var rootBinding = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Folder));
+        Check.Require(rootBinding is not null && await fixture.Dropbox.ReadOneAsync(Folder + "/Child", default) is null,
+            "crash occurs after the root is recorded but before child completion, throughParents=" + throughParents);
+        fixture.DropboxView = null;
+        using var reopened = Massdex.SyncShark.Engine.Storage.StateStore.Open(fixture.DatabasePath!);
+        var resumedContext = fixture.Context(selection) with { Store = reopened };
+        var resumedJobs = SyncJobs.Create(resumedContext, ports);
+        var resumed = new SelectionPass(resumedContext, resumedJobs.Items, resumedJobs.Ancestors, boundary, resumedJobs.Actions,
+            (selected, side, scope, retries, settles, ct) => SyncJobs.RunBatchAsync(resumedContext, ports, selected, scope, ct));
+        Check.Require(await resumed.RunAsync(selection, default), "restart retires the anchor, throughParents=" + throughParents);
+        Check.Require(reopened.SyncedByKey(PairId, Side.Local, PathNames.Key(Folder)) == rootBinding &&
+            await fixture.Local.ReadOneAsync(Folder + "/Child", default) is not null &&
+            await fixture.Dropbox.ReadOneAsync(Folder, default) is not null,
+            "SAFETY: restart keeps the root binding and deletes nothing, throughParents=" + throughParents);
+    }
 
     public static void RunPeers()
     {
@@ -186,27 +815,30 @@ public static class ChangeRunnerChecks
             fixture.LocalView = local;
             var folder = (await local.ReadOneAsync(Folder, default))!;
             Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Folder, null, folder.Id, folder, false, false));
-            await RunPeerSelectionAsync(fixture, selected);
-            var kept = PendingWork.ByIdentity(fixture.Inner, Side.Local, VolumeKey, folder.Id).Single();
+            // The first selection's add-only batch lists both sides and observes the child in its listing, so the
+            // foreign notice arrives once the listing has yielded the child, before its upload.
             if (foreign)
             {
                 var injected = false;
                 fixture.LocalView = new ProxySide(local)
                 {
-                    OnRead = path =>
+                    ListingFault = under =>
                     {
-                        if (path != Plain || injected) return;
+                        if (under != Folder || injected) return null;
                         injected = true;
                         Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Folder, null,
                             null, folder, false, false), 2);
+                        return null;
                     }
                 };
-                var error = await ThrowsAsync<LiveAdmissionStaleException>(() => RunPeerSelectionAsync(fixture, kept));
+                var error = await ThrowsAsync<LiveAdmissionStaleException>(() => RunPeerSelectionAsync(fixture, selected));
                 Check.Require(injected && error.Reason == LiveAdmissionStaleReason.RelevantEvidenceChanged &&
                     await fixture.Dropbox.ReadOneAsync(Plain, default) is null,
                     "G18: foreign folder notice arriving before child refuses without uploading");
                 return;
             }
+            await RunPeerSelectionAsync(fixture, selected);
+            var kept = PendingWork.ByIdentity(fixture.Inner, Side.Local, VolumeKey, folder.Id).Single();
             await RunPeerSelectionAsync(fixture, kept);
             Check.Require((await fixture.Dropbox.ReadOneAsync(Plain, default))?.ContentHash ==
                 DropboxContentHash.Compute(new byte[] { 2 }) &&
@@ -333,7 +965,9 @@ public static class ChangeRunnerChecks
         var jobs = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(), boundary,
             RefusingExecutionBoundary.Instance, 0));
         boundary.Capture = (_, _, _) => Task.FromResult(Coverage(selection));
-        var runner = new SelectionPass(context, jobs.Items, jobs.Ancestors, boundary, jobs.Actions);
+        var runner = new SelectionPass(context, jobs.Items, jobs.Ancestors, boundary, jobs.Actions,
+            (selected, side, scope, retries, settles, ct) => SyncJobs.RunBatchAsync(context, new SyncPorts(new RecoveryBoundary(), boundary,
+                RefusingExecutionBoundary.Instance, 0), selected, scope, ct));
         Check.Require(await runner.RunAsync(selection, default), "G18: production selection completes");
     }
 
@@ -352,12 +986,15 @@ public static class ChangeRunnerChecks
         var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
         var position = fixture.Inner.ReadJournal(VolumeKey)!;
         var through = fixture.Inner.AcquireJournalPage(VolumeKey, position, position,
-            [(PairId, Generation, source.Epoch, source.Revision, false, false)],
+            [(PairId, Generation, source.Epoch, source.Revision, false)],
             [(PairId, first with { LocalContentDirty = true })])!.Value;
         selection = selection with { ThroughWorkId = through };
+        var reads = new CountingSide(fixture.Local);
+        fixture.LocalView = reads;
         Check.Require(await Runner(fixture, selection, new Boundary(_ => new Lease()),
             (_, _, _) => throw new InvalidOperationException("a held branch needs no coverage"))
             .RunAsync(selection, default), "two notices for a held item attach without stopping the opportunity");
+        Check.Require(reads.Reads == 1, "106 a repeated primary visit neither reads nor supplies another observation");
         var residual = PendingAt(fixture, Side.Local, Item).Single();
         Check.Require(residual.AnchorWorkId > through && fixture.Inner.ReadLocalDirty(PairId, Generation,
             source.Epoch, VolumeKey, LocalId, PathNames.Key(Item), null).Dirty,
@@ -425,7 +1062,7 @@ public static class ChangeRunnerChecks
         }
     }
 
-    private static WorkSelection SeedRemote(Fixture fixture, Entry remote)
+    private static WorkSelection SeedRemote(Fixture fixture, Entry remote, ChangeNotice? notice = null, int copies = 1)
     {
         var source = fixture.Inner.ReadSource(PairId, Side.Dropbox)!.Value;
         var roots = fixture.Pair.Roots!.Dropbox;
@@ -439,9 +1076,9 @@ public static class ChangeRunnerChecks
         }
         var work = fixture.Inner.AcquireDropboxPage(PairId, Generation, source.Epoch, source.Revision,
             provenance, source.Cursor,
-            [new ChangeNotice(Side.Dropbox, ChangeKind.Changed, remote.Path, null, remote.Id, remote, false, false)], Cursor);
+            Enumerable.Repeat(notice ?? new ChangeNotice(Side.Dropbox, ChangeKind.Changed, remote.Path, null, remote.Id, remote, false, false), copies).ToArray(), Cursor);
         return new WorkSelection(PairId, Generation, source.Epoch, Side.Dropbox, provenance.NamespaceId,
-            remote.Id, PathNames.KeyFor(Side.Dropbox, remote.Path), work, work);
+            remote.Id, PathNames.KeyFor(Side.Dropbox, remote.Path), work - copies + 1, work);
     }
 
     // PendingAncestors omits held work unless a coverage watermark is supplied; 0 is below every work id, so the
@@ -467,6 +1104,191 @@ public static class ChangeRunnerChecks
             fixture.Inner.AdvanceSource(PairId, side, Generation, source.Epoch, source.Revision,
                 source.Provenance, source.Cursor, source.Epoch, source.Revision, provenance,
                 side == Side.Dropbox ? Cursor : source.Cursor, null);
+        }
+    }
+
+    private static async Task FreshDropboxSelectionAsync()
+    {
+        foreach (var mode in new[] { "present", "absent", "failure", "identity-deleted", "three-rows" })
+        {
+            using var fixture = new Fixture(realStore: true);
+            var local = LocalEntry(Item, LocalId);
+            var remote = RemoteEntry(Item, DropboxId);
+            var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
+            fixture.Inner.AcquireJournalPage(VolumeKey, null, new JournalPosition(1, 1),
+                [(PairId, Generation, source.Epoch, source.Revision, false)], []);
+            if (mode is "present" or "three-rows")
+            {
+                fixture.Local.Seed(local, [1]);
+                fixture.Dropbox.Seed(remote, [1]);
+                fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(local, remote)] });
+            }
+            if (mode == "three-rows") fixture.Inner.Commit(PairId, StateChange.Empty with
+            {
+                Raise = [(IssueKind.NameClash, TextKey.ClashNameTaken, Item,
+                    new IssueSubject([new IssueItem(Side.Dropbox, Item, DropboxId)], null))]
+            });
+            var notice = new ChangeNotice(Side.Dropbox, ChangeKind.Changed, Item, null, DropboxId,
+                remote with { Revision = "stale", Size = 9 }, false, mode == "identity-deleted");
+            var selected = SeedRemote(fixture, remote, notice, mode == "three-rows" ? 3 : 1);
+            if (mode == "three-rows")
+                Check.Require(fixture.Inner.ReadWork(selected).Count() == 3, "121 fixture has three same-identity rows");
+            if (mode == "failure") fixture.Dropbox.FailNext(Item,
+                new ItemFailedException(Item, TextKey.ReadDropboxFailed, null));
+            var localCounter = new CountingSide(fixture.Local);
+            var remoteCounter = new CountingSide(fixture.Dropbox);
+            fixture.LocalView = localCounter;
+            fixture.DropboxView = remoteCounter;
+            Check.Require(await RunSelectionAsync(fixture, selected), "121 selection completes or retains failure: " + mode);
+            Check.Require(remoteCounter.Reads == 1 && localCounter.Reads == (mode == "failure" ? 0 : 1),
+                "121 primary Dropbox read counts: " + mode + "; Dropbox=" + remoteCounter.Reads + "; Local=" + localCounter.Reads);
+            Check.Require(localCounter.Work == 0 && remoteCounter.Work == 0, "121 observation has zero effects: " + mode);
+            var issues = fixture.Inner.Issues(PairId);
+            Console.WriteLine($"121 selection={mode}; issueCount={issues.Count}; kinds={string.Join(",", issues.Select(issue => issue.Kind))}");
+            // In-sync observations close a stale NameClash, even when repeated acquired rows name it.
+            Check.Require(mode == "failure" ? issues.Count == 1 && issues[0].Kind == IssueKind.Failure : issues.Count == 0,
+                "121 failure remains a Failure; absent or in-sync observations leave no stale notice: " + mode);
+            Console.WriteLine($"121 selection={mode}; Dropbox={remoteCounter.Reads}; Local={localCounter.Reads}");
+        }
+    }
+
+    private static async Task DropboxDeleteFreshnessAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var local = LocalEntry(Item, LocalId);
+        var remote = RemoteEntry(Item, DropboxId);
+        fixture.Local.Seed(local, [1]);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(local, remote)] });
+        var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
+        fixture.Inner.AcquireJournalPage(VolumeKey, null, new JournalPosition(1, 1),
+            [(PairId, Generation, source.Epoch, source.Revision, false)], []);
+        var selected = SeedRemote(fixture, remote,
+            new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, Item, null, DropboxId, null, false, false));
+        var remoteCounter = new CountingSide(fixture.Dropbox);
+        var localCounter = new CountingSide(fixture.Local);
+        fixture.DropboxView = remoteCounter;
+        fixture.LocalView = localCounter;
+        var boundary = new Boundary(_ =>
+        {
+            fixture.Dropbox.Seed(remote with { Revision = "recreated" }, [1]);
+            return new Lease();
+        });
+        var ready = await Runner(fixture, selected, boundary, (_, _, _) => Task.FromResult(Coverage(selected)))
+            .RunAsync(selected, default);
+        Check.Require(ready && remoteCounter.Reads == 3 && localCounter.Reads == 3 &&
+            localCounter.Deletes == 0 && remoteCounter.Deletes == 0 &&
+            await fixture.Local.ReadOneAsync(Item, default) == local &&
+            await fixture.Dropbox.ReadOneAsync(Item, default) == remote with { Revision = "recreated" } &&
+            fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Item)) == SyncedEntries.From(local, remote) &&
+            PendingAt(fixture, Side.Dropbox, Item).Count == 0 && fixture.Inner.Issues(PairId).Count == 0,
+            "121 recreated Dropbox item converges after one reobservation, preserving both files without deletes");
+        Console.WriteLine($"121 delete-race Dropbox={remoteCounter.Reads}; deletes={localCounter.Deletes + remoteCounter.Deletes}");
+    }
+
+    private static async Task DropboxPostRenameFailureAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var old = LocalEntry(OldPath, LocalId);
+        var remote = RemoteEntry(OldPath, DropboxId);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(old, remote)] });
+        fixture.Local.Seed(old, [1]);
+        var moved = remote with { Path = Item, Size = 2, Revision = "rev-2", ContentHash = DropboxContentHash.Compute(new byte[] { 2, 2 }) };
+        fixture.Dropbox.Seed(moved, [2, 2]);
+        var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
+        fixture.Inner.AcquireJournalPage(VolumeKey, null, new JournalPosition(1, 1),
+            [(PairId, Generation, source.Epoch, source.Revision, false)], []);
+        var selected = SeedRemote(fixture, moved,
+            new ChangeNotice(Side.Dropbox, ChangeKind.Renamed, Item, OldPath, DropboxId, null, false, false));
+        var reads = 0;
+        fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: path => { if (path == Item) reads++; });
+        var failed = false;
+        fixture.LocalView = new ProxySide(fixture.Local)
+        {
+            BlockPublish = (_, _) =>
+            {
+                if (!failed)
+                {
+                    failed = true;
+                    throw new ItemFailedException(Item, TextKey.ReadLocalFailed, null);
+                }
+                return Task.CompletedTask;
+            }
+        };
+        Check.Require(await RunSelectionAsync(fixture, selected), "121 post-rename failure is retained");
+        Check.Require(reads == 3 && failed, "121 Dropbox rename reads initial, post-rename and admitted metadata once each");
+        var after = fixture.Inner.SyncedById(PairId, Side.Dropbox, DropboxId)!;
+        Check.Require(after.DropboxPath == Item && fixture.Inner.Issues(PairId).Any(issue => issue.Kind == IssueKind.Failure),
+            "121 Dropbox rename commits before download failure");
+        var residual = PendingWork.ByIdentity(fixture.Inner, Side.Dropbox, selected.Domain, DropboxId).Single();
+        Check.Require(fixture.Inner.ReadWork(residual).All(work => work.Before == after), "121 residual retains advanced baseline");
+        Console.WriteLine($"121 post-rename Dropbox={reads}");
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Close = [(Item, IssueClosure.AfterEffect)] });
+        Check.Require(await RunSelectionAsync(fixture, residual), "121 post-rename residual retries to completion");
+    }
+
+    private static async Task FreshLocalSelectionAsync()
+    {
+        foreach (var mode in new[] { "absent", "identity-deleted", "dropbox", "old-path", "walked", "known-folder" })
+        {
+            using var fixture = new Fixture(realStore: true);
+            var folder = mode is "walked" or "known-folder";
+            if (mode == "walked") fixture.Hooks.RepairDone = false;
+            var path = folder ? Folder : Item;
+            var entry = folder ? FolderEntry(path, FolderId) : LocalEntry(path, LocalId);
+            if (mode != "absent")
+            {
+                var remote = entry.IsFolder ? FolderEntry(path, DropboxId) : RemoteEntry(path, DropboxId);
+                fixture.Local.Seed(entry, entry.IsFolder ? null : [1]);
+                fixture.Dropbox.Seed(remote, remote.IsFolder ? null : [1]);
+                fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(entry, remote)] });
+            }
+            if (folder)
+            {
+                var child = LocalEntry(Plain, LocalId);
+                var remoteChild = RemoteEntry(Plain, DropboxId + "-child");
+                fixture.Local.Seed(child, [1]);
+                fixture.Dropbox.Seed(remoteChild, [1]);
+                fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(child, remoteChild)] });
+            }
+            var side = mode == "dropbox" ? Side.Dropbox : Side.Local;
+            var notice = new ChangeNotice(side, ChangeKind.Changed, path,
+                mode == "old-path" ? OldPath : null, null, entry, false, mode == "identity-deleted");
+            if (mode == "dropbox")
+            {
+                var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
+                fixture.Inner.AcquireJournalPage(VolumeKey, null, new JournalPosition(1, 1),
+                    [(PairId, Generation, source.Epoch, source.Revision, false)], []);
+            }
+            var selected = mode == "dropbox" ? SeedRemote(fixture, RemoteEntry(path, DropboxId)) : Seed(fixture, notice);
+            var changedChild = LocalEntry(Plain, LocalId) with { Size = 2, Modified = Stamp.AddMinutes(1) };
+            WorkSelection? childSelection = null;
+            if (mode == "known-folder")
+            {
+                fixture.Local.Seed(changedChild, [2, 3]);
+                childSelection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Plain, null,
+                    LocalId, changedChild, true, false), 2);
+            }
+            var reads = new List<string>();
+            var counted = new CountingSide(fixture.Local);
+            fixture.LocalView = new HookedSide(counted, beforeRead: reads.Add);
+            Console.WriteLine("106 observation case=" + mode);
+            await RunSelectionAsync(fixture, selected);
+            Check.Require(reads.Count(value => value == path) == 1,
+                "106 primary observation is fresh, including absent and identity-deleted: " + mode + "; reads=" + string.Join(",", reads));
+            if (mode == "old-path") Check.Require(reads.Contains(OldPath), "106 old path reads independently");
+            if (mode == "walked") Check.Require(reads.Contains(Plain), "106 walked children read independently");
+            if (childSelection is { } childWork)
+            {
+                Check.Require(counted.Listings == 0 && !reads.Contains(Plain) && PendingAt(fixture, Side.Local, Folder).Count == 0 &&
+                    PendingAt(fixture, Side.Local, Plain).Count == 1,
+                    "A known folder touch retires without walking or consuming its child's own event");
+                Check.Require(await RunSelectionAsync(fixture, childWork), "The independently queued child completes");
+                var syncedChild = await fixture.Dropbox.ReadOneAsync(Plain, default);
+                Check.Require(reads.Contains(Plain) && syncedChild?.ContentHash == DropboxContentHash.Compute(new byte[] { 2, 3 }) &&
+                    fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Plain)) == SyncedEntries.From(changedChild, syncedChild!) &&
+                    PendingAt(fixture, Side.Local, Plain).Count == 0,
+                    "A child event acquired beside the folder touch is read, synced and retired independently");
+            }
         }
     }
 
@@ -520,6 +1342,8 @@ public static class ChangeRunnerChecks
                 fixture.Hooks.BeforeCall = null;
                 SeedRemote(fixture, remote);
             };
+            var localReads = new CountingSide(fixture.Local);
+            fixture.LocalView = localReads;
             var reads = 0;
             fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: _ => reads++);
             var connection = (Microsoft.Data.Sqlite.SqliteConnection)fixture.Inner.GetType().GetField("_connection",
@@ -529,6 +1353,9 @@ public static class ChangeRunnerChecks
             try { await RunSelectionAsync(fixture, selected); }
             finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
             Console.WriteLine("90a mode=" + mode + "; sql=" + statements + "; providerReads=" + reads);
+            if (mode == "echo")
+                Check.Require(localReads.Reads == 1 && reads == 0,
+                    "106 clean Local echo reads Local once and never calls Dropbox");
             var shortcut = mode is "echo" or "later-remote" or "completion-remote" or "unrelated";
             if (mode == "completion-remote")
                 Check.Require(PendingAt(fixture, Side.Dropbox, path).Any(),
@@ -662,6 +1489,8 @@ public static class ChangeRunnerChecks
         {
             using var fixture = new Fixture(realStore: true);
             TrustEchoSources(fixture);
+            // This case exercises per-file echo decisions in the pre-Repair child walk, not folder-batch admission.
+            fixture.Hooks.RepairDone = false;
             var local = FolderEntry(Folder, LocalId);
             var remote = FolderEntry(Folder, DropboxId);
             fixture.Local.Seed(local, null);
@@ -710,15 +1539,31 @@ public static class ChangeRunnerChecks
             var connection = (Microsoft.Data.Sqlite.SqliteConnection)fixture.Inner.GetType().GetField("_connection",
                 BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(fixture.Inner)!;
             var snapshots = 0;
+            var pairReads = 0;
+            var localReads = 0;
+            var dropboxReads = 0;
             SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, sql) =>
             {
-                if (sql.utf8_to_string().StartsWith("SELECT path,subject_json,NULL ", StringComparison.Ordinal)) snapshots++;
+                var text = sql.utf8_to_string();
+                if (text.StartsWith("SELECT path,subject_json,NULL ", StringComparison.Ordinal)) snapshots++;
+                if (text.StartsWith("SELECT id,execution_generation,first_repair_done,def_json FROM pair ", StringComparison.Ordinal)) pairReads++;
+                if (text.StartsWith("SELECT source_epoch,provenance_json,cursor,repair_reason,repair_revision FROM source_state ", StringComparison.Ordinal))
+                {
+                    if (text.EndsWith("side=0;", StringComparison.Ordinal)) localReads++;
+                    if (text.EndsWith("side=1;", StringComparison.Ordinal)) dropboxReads++;
+                }
             }), null);
             try
             {
                 for (var repeat = 0; repeat < repetitions; repeat++)
-                    Check.Require(fixture.Inner.CreateLocalEchoProbe(selected)(saved, selected.ThroughWorkId),
-                        "90a finite pass reuses responsibility snapshot");
+                {
+                    var probe = fixture.Inner.CreateLocalEchoProbe(selected);
+                    pairReads = localReads = dropboxReads = 0;
+                    Check.Require(probe(saved, selected.ThroughWorkId), "90a finite pass reuses responsibility snapshot");
+                    Check.Require(pairReads == 1 && localReads == 1 && dropboxReads == 1,
+                        "106 each echo guard reads the pair and each source fence once");
+                    Console.WriteLine($"106 guard pair={pairReads}; local={localReads}; dropbox={dropboxReads}");
+                }
                 Check.Require(snapshots == 1, "90a responsibility streams once per finite pass");
                 fixture.Inner.EndWorkPass(PairId);
                 fixture.Inner.Commit(PairId, StateChange.Empty with { Raise =
@@ -734,14 +1579,71 @@ public static class ChangeRunnerChecks
         }
     }
 
+    private static async Task CrossBoundDeletionAsync()
+    {
+        foreach (var side in Enum.GetValues<Side>())
+        {
+            using var fixture = new Fixture(realStore: true);
+            ClearObligations(fixture);
+            var local = LocalEntry(side == Side.Local ? "saved-copy" : Item, LocalId);
+            var remote = RemoteEntry(side == Side.Dropbox ? "saved-copy" : Item, DropboxId);
+            fixture.Local.Seed(local, [1]);
+            fixture.Dropbox.Seed(remote, [1]);
+            var saved = SyncedEntries.From(local, remote);
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
+            var notice = new ChangeNotice(side, ChangeKind.Deleted, Item, null, "deleted-id", null, false, false);
+            WorkSelection selected;
+            if (side == Side.Local) selected = Seed(fixture, notice);
+            else
+            {
+                SourceFixture.AcquireJournal(fixture.Inner, fixture.Pair);
+                selected = SeedRemote(fixture, RemoteEntry(Item, "deleted-id"));
+                var source = fixture.Inner.ReadSource(PairId, side)!.Value;
+                fixture.Inner.AcquireDropboxPage(PairId, Generation, source.Epoch, source.Revision,
+                    source.Provenance!, source.Cursor, [notice], Cursor);
+            }
+            var countedLocal = new CountingSide(fixture.Local);
+            var countedDropbox = new CountingSide(fixture.Dropbox);
+            var events = new List<RunEvent>();
+            var context = fixture.Context(selected) with
+            {
+                Local = countedLocal, Dropbox = countedDropbox, Events = events.Add
+            };
+            var boundary = new Boundary(_ => new Lease())
+            {
+                Capture = (selection, _, _) => Task.FromResult(Coverage(selection))
+            };
+            var syncer = new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
+                RefusingExecutionBoundary.Instance, 0));
+            await syncer.SyncWorkAsync(default);
+            Check.Require(!PendingAt(fixture, side, Item).Any() &&
+                fixture.Inner.SelectWork(PairId, Generation, context.Scope) is null,
+                "A deletion whose counterpart belongs elsewhere retires from live selection");
+            Check.Require(countedLocal.Work == 0 && countedDropbox.Work == 0 &&
+                fixture.Inner.Issues(PairId).Count == 0 && events.All(e => e.Error is null),
+                "Retiring the unrelated deletion has zero file effects, failures or notices");
+            Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, saved.LocalKey) == saved &&
+                await fixture.Local.ReadOneAsync(local.Path, default) == local &&
+                await fixture.Dropbox.ReadOneAsync(remote.Path, default) == remote,
+                "The cross-name binding and both saved files remain unchanged");
+        }
+    }
+
     private static async Task RunAsync()
     {
+        await StaleFreshnessAsync();
+        await ReleasedHistoryAsync();
+        await FreshDropboxSelectionAsync();
+        await DropboxDeleteFreshnessAsync();
+        await HeldRepeatedNoticeAsync();
+        await FreshLocalSelectionAsync();
         await LocalEchoCasesAsync();
         await LocalEchoResponsibilityAsync();
         await LocalEchoReadFailureAsync();
         await LocalEchoFolderAsync();
         LocalEchoIssueCounts();
         await EmptyOpportunityAsync();
+        await CrossBoundDeletionAsync();
         await SelectedReadFailuresAsync();
         await ObservationReadOutcomesAsync();
         await GenerationForwardedAsync();
@@ -759,6 +1661,7 @@ public static class ChangeRunnerChecks
         foreach (var rootState in new[] { RootState.Same, RootState.Replaced, RootState.Absent, RootState.Unreadable })
             await RetainedAncestorIdentityAsync(rootState);
         await PostRenameFailureRetainsAdvancedBeforeAsync();
+        await DropboxPostRenameFailureAsync();
         await OldAliasFailureRetainsAdvancedBeforeAsync();
         await EmptyBranchPreservesLaterArrivalAsync();
         await SeparateWalkWorkAsync();
@@ -784,6 +1687,153 @@ public static class ChangeRunnerChecks
         await OrdinaryWalkFailureAsync();
         await FolderSurvivorFailureIdentityAsync();
         await LiveReobserveRevokesDirectAsync();
+    }
+
+    private static async Task ReleasedHistoryAsync()
+    {
+        foreach (var acquiredBefore in new[] { false, true })
+        {
+            using var fixture = new Fixture(realStore: true);
+            SourceFixture.AcquireJournal(fixture.Inner, fixture.Pair);
+            ClearObligations(fixture);
+            SeedFolders(fixture, "Parent");
+            var partner = LocalEntry("Parent/Partner", "partner-id");
+            var sibling = LocalEntry("Parent/Sibling", "sibling-id");
+            var local = LocalEntry("Original", "original-local");
+            var remote = RemoteEntry("Original", "original-remote");
+            fixture.Local.Seed(partner, [1]);
+            fixture.Local.Seed(sibling, [1]);
+            fixture.Local.Seed(local, [1]);
+            fixture.Dropbox.Seed(remote, [1]);
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(partner, remote)] });
+            async Task AcquireHistoryAsync()
+            {
+                var token = fixture.Inner.BeginScan(PairId, Generation, true);
+                var sink = fixture.Inner.OpenScan(PairId, Side.Dropbox, ScanTestSettings.BatchRows);
+                await sink.AddAsync(new Listed("Parent", null), default);
+                await sink.CompleteAsync();
+                fixture.Inner.SaveDeletedHistory(PairId, token, Cursor);
+                await fixture.Inner.EndScanAsync(PairId, token, fixture.Settings.StoragePageSize);
+            }
+            if (acquiredBefore) await AcquireHistoryAsync();
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(local, remote)] });
+            Check.Require(fixture.Inner.DeletedNameSpent(PairId, PathNames.Key(partner.Path)) &&
+                fixture.Inner.DeletedHistoryOwed(PairId) != acquiredBefore,
+                "returning-original retirement spends the released Local endpoint in Complete and Owed history");
+            if (!acquiredBefore) await AcquireHistoryAsync();
+            fixture.RestartStore();
+            var selection = fixture.Inner.SelectWork(PairId, Generation, new PathScope(fixture.Pair, [fixture.Pair]))!;
+            Check.Require(selection is not null &&
+                fixture.Inner.ReadWork(selection).Single() is { Before: null, Notice.Side: Side.Local } work &&
+                work.Notice.Path == partner.Path && work.Notice.Id == partner.Id &&
+                fixture.Inner.DeletedNameSpent(PairId, PathNames.Key(partner.Path)) &&
+                fixture.Inner.SavedDeletedNameExact(PairId, PathNames.Key("Parent")),
+                "restart before selection preserves exact release custody and its negative override over ancestor history");
+            Check.Require(await RunSelectionAsync(fixture, selection!) && await SyncedAsync(fixture, partner.Path) &&
+                await fixture.Local.ReadOneAsync(partner.Path, default) is not null,
+                "released Local content uploads through ordinary selection without asking for deletion proof");
+            var evidenceReads = 0;
+            var context = fixture.Context(selection!) with
+            {
+                ReadDeletionEvidenceAsync = (path, _, _) =>
+                {
+                    Check.Require(path == sibling.Path, "spent partner never reaches deletion evidence");
+                    evidenceReads++;
+                    return Task.FromResult<DeletionEvidence>(new DeletionEvidence.DeletedFile(path, "domain",
+                        "deleted-sibling", "revision", Stamp.AddDays(1), null, remote.ContentHash, null));
+                }
+            };
+            ((FakeTimeProvider)context.Time).Advance(Stamp.AddDays(2) - context.Time.GetUtcNow());
+            var jobs = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(),
+                new Boundary(_ => new Lease()), RefusingExecutionBoundary.Instance, 0));
+            var rows = jobs.Items.ScanContexts(true, null, null,
+                key => fixture.Inner.SavedDeletedNameExact(PairId, key));
+            var row = new Row(rows.For, PathNames.Key(sibling.Path), sibling, null, null, [], null);
+            Check.Require(row.Context.DeletionEligible, "an unrelated sibling retains ancestor deletion eligibility");
+            var outcome = await jobs.Items.RunAdmittedAsync(row, default, execution: new Lease());
+            Check.Require(outcome.Kind == ActionKind.DeleteLocal && outcome.Succeeded() &&
+                evidenceReads == 1 && await fixture.Local.ReadOneAsync(sibling.Path, default) is null,
+                "an unrelated ancestor-matching sibling still takes T09 evidence and checked removal: " +
+                $"outcome={outcome}; eligible={row.Context.DeletionEligible}; evidenceReads={evidenceReads}");
+        }
+    }
+
+    private static async Task StaleFreshnessAsync()
+    {
+        foreach (var side in new[] { Side.Local, Side.Dropbox })
+        foreach (var mode in new[] { "race", "unchanged", "changing", "footprint" })
+        {
+            using var fixture = new Fixture(realStore: true);
+            ClearObligations(fixture);
+            var entry = side == Side.Local ? LocalEntry(Item, LocalId) : RemoteEntry(Item, DropboxId);
+            var source = side == Side.Local ? fixture.Local : fixture.Dropbox;
+            source.Seed(entry, [1]);
+            var selection = side == Side.Local ? Selected(fixture, Item, entry) : SeedRemote(fixture, entry);
+            var reads = 0;
+            var hook = new HookedSide(source, beforeRead: path =>
+            {
+                if (path != Item) return;
+                reads++;
+                if (reads == 2 || reads == 4 && mode is "unchanged" or "changing")
+                    source.Seed(entry with { Modified = Stamp.AddSeconds(reads) }, [1]);
+                if (reads == 3 && mode == "unchanged") source.Seed(entry, [1]);
+                if (reads == 3 && mode == "footprint") source.Seed(FolderEntry(Item, entry.Id), null);
+            });
+            var calls = new CountingSide(hook);
+            var targetCalls = new CountingSide(side == Side.Local ? fixture.Dropbox : fixture.Local);
+            fixture.LocalView = side == Side.Local ? calls : targetCalls;
+            fixture.DropboxView = side == Side.Dropbox ? calls : targetCalls;
+            var ready = false;
+            LiveAdmissionStaleException? refused = null;
+            try
+            {
+                ready = await Runner(fixture, selection, new Boundary(request => new Lease
+                {
+                    AllowedScopes = mode == "footprint" ? [] : null
+                }), (_, _, _) => Task.FromResult(Coverage(selection))).RunAsync(selection, default);
+            }
+            catch (LiveAdmissionStaleException error) { refused = error; }
+            Console.WriteLine($"stale {side} {mode}: reads={reads}, targetReads={targetCalls.Reads}, hashes={calls.Hashes}, effects={calls.Work + targetCalls.Work}");
+            if (mode == "race")
+            {
+                Check.Require(ready && refused is null && fixture.Inner.Issues(PairId).Count == 0 &&
+                    await SyncedAsync(fixture, Item), "A stale race reobserves and converges without a notice: " + side);
+                continue;
+            }
+            if (mode is "changing" or "footprint")
+            {
+                Check.Require(refused?.Reason == (mode == "changing" ? LiveAdmissionStaleReason.RelevantEvidenceChanged :
+                    LiveAdmissionStaleReason.FootprintChanged) && fixture.Inner.Issues(PairId).Count == 0 &&
+                    PendingAt(fixture, side, Item).Count == 1 && calls.Work + targetCalls.Work == 0,
+                    "Changing evidence stays pending without effects or a notice: " + side + mode);
+                Check.Require(reads - 2 <= 2, "Observation plus reobservation allow at most two freshness reads.");
+                continue;
+            }
+            var issue = fixture.Inner.Issues(PairId).Single();
+            Check.Require(ready && refused is null && issue.Cause == TextKey.FailChanged &&
+                PendingAt(fixture, side, Item).Count == 1 && calls.Work + targetCalls.Work == 0 &&
+                fixture.Inner.SyncedByKey(PairId, side, PathNames.KeyFor(side, Item)) is null,
+                "Unchanged stale evidence raises one notice and retains responsibility without effects.");
+            Check.Require(reads == 4 && targetCalls.Reads == 4,
+                "Stale diagnosis reuses the branch observation, then reobserves once with two freshness checks.");
+            var sibling = LocalEntry("sibling", "sibling-id");
+            fixture.Local.Seed(sibling, [1]);
+            var other = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, sibling.Path, null,
+                sibling.Id, sibling, false, false), side == Side.Local ? 2 : 1);
+            await RunSelectionAsync(fixture, other);
+            Check.Require(await SyncedAsync(fixture, sibling.Path), "A healthy sibling completes despite the stale notice.");
+            source.Seed(entry, [1]);
+            reads = 0;
+            var residual = PendingAt(fixture, side, Item).Single();
+            await RunSelectionAsync(fixture, residual);
+            Check.Require(fixture.Inner.Issues(PairId).Single().Id == issue.Id &&
+                PendingAt(fixture, side, Item).Count == 1, "A second opportunity reuses the notice and its one residual.");
+            fixture.LocalView = fixture.Local;
+            fixture.DropboxView = fixture.Dropbox;
+            await RunSelectionAsync(fixture, PendingAt(fixture, side, Item).Single());
+            Check.Require(await SyncedAsync(fixture, Item) && fixture.Inner.Issues(PairId).Count == 0 &&
+                PendingAt(fixture, side, Item).Count == 0, "Settled evidence closes the notice and retires the residual.");
+        }
     }
 
     private static async Task EmptyOpportunityAsync()
@@ -1039,7 +2089,7 @@ public static class ChangeRunnerChecks
         {
             var localSource = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
             fixture.Inner.AcquireJournalPage(VolumeKey, null, new JournalPosition(1, 1),
-                [(PairId, Generation, localSource.Epoch, localSource.Revision, false, false)], []);
+                [(PairId, Generation, localSource.Epoch, localSource.Revision, false)], []);
             selection = SeedRemote(fixture, entry with { Path = "Other/File" });
             var source = fixture.Inner.ReadSource(PairId, side)!.Value;
             fixture.Inner.AcquireDropboxPage(PairId, Generation, source.Epoch, source.Revision,
@@ -1283,8 +2333,12 @@ public static class ChangeRunnerChecks
             ReadFolderChangesAsync = (_, ct) => NoFolderChangesAsync(ct)
         };
         if (recovery is not null) context = context with { Recovery = recovery };
-        return new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-            RefusingExecutionBoundary.Instance, 0));
+        var ports = new SyncPorts(new RecoveryBoundary(), boundary, RefusingExecutionBoundary.Instance, 0);
+        return new Syncer(context, ports with
+        {
+            RunBatchAsync = (work, side, scope, retries, settles, ct) =>
+                SyncJobs.RunBatchAsync(context, ports, work, scope, ct, side, retries, settles)
+        });
     }
 
     private static async IAsyncEnumerable<Listed> NoFolderChangesAsync(
@@ -1505,14 +2559,14 @@ public static class ChangeRunnerChecks
         });
         await fixtureCase(withMember: true, async fixture =>
         {
-            // A96: root and descendant proved: both go, one continuation root.
+            // A96: root and descendant proved: both go; the folder batch's one scoped listing covers both, no continuation.
             var counted = new CountingSide(fixture.Local);
             fixture.LocalView = counted;
             UnreadableMember.Record(fixture.Inner, PairId, Folder, FolderId);
             UnreadableMember.Record(fixture.Inner, PairId, Member, MemberId);
             await RunNoticeAsync(fixture, Folder, folder);
-            Check.Require(!Touches(fixture, Folder) && !Touches(fixture, Member) && counted.Listings == 2,
-                $"A96, A124: one walk plus one continuation, not one per member ({counted.Listings})");
+            Check.Require(!Touches(fixture, Folder) && !Touches(fixture, Member) && counted.Listings == 1,
+                $"A96, A124: one batch listing, not one per member ({counted.Listings})");
         });
         await fixtureCase(withMember: true, async fixture =>
         {
@@ -1569,14 +2623,17 @@ public static class ChangeRunnerChecks
         });
         await fixtureCase(withMember: true, async fixture =>
         {
-            // A104: the continuation fails: the release stands, the Failure is attached, the parent keeps the rest.
+            // A104: the folder batch's one listing fails under the member: as a failed walk it releases nothing, the
+            // folder keeps one Failure, and the ordinary sibling still syncs (there is no continuation listing).
             UnreadableMember.Record(fixture.Inner, PairId, Member, MemberId);
             fixture.Local.Seed(LocalEntry(Member + "/file", OccupantId), [1]);
-            fixture.Local.FailWalkAfter(Member + "/file", new InventoryIncompleteException("fixture", null), earlierWalks: 1);
+            // The listing ends after the last entry, so every listed sibling is available to sync.
+            fixture.Local.FailWalkAfter(Plain, new InventoryIncompleteException("fixture", null));
             await RunNoticeAsync(fixture, Folder, folder);
-            Check.Require(!Touches(fixture, Member) && await SyncedAsync(fixture, Plain) &&
-                fixture.Inner.Issues(PairId).Any(issue => issue is { Kind: IssueKind.Failure, Path: Member }),
-                "A104 a failed continuation keeps the proved release");
+            Check.Require(Touches(fixture, Member) && await SyncedAsync(fixture, Plain) &&
+                !await SyncedAsync(fixture, Member + "/file") &&
+                fixture.Inner.Issues(PairId).Any(issue => issue is { Kind: IssueKind.Failure, Path: Folder }),
+                "A104 a failed batch listing keeps the member, its sibling progress and one Failure");
         });
         await fixtureCase(withMember: true, async fixture =>
         {
@@ -1762,6 +2819,11 @@ public static class ChangeRunnerChecks
         fixture.Dropbox.Seed(remote, [1]);
         var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Renamed, Item, OldPath,
             LocalId, null, true, false));
+        var primaryReads = 0;
+        fixture.LocalView = new HookedSide(fixture.Local, beforeRead: path =>
+        {
+            if (path == Item) primaryReads++;
+        });
         var failed = false;
         fixture.DropboxView = new ProxySide(fixture.Dropbox)
         {
@@ -1778,6 +2840,8 @@ public static class ChangeRunnerChecks
         var boundary = new Boundary(_ => new Lease());
         Check.Require(await Runner(fixture, selection, boundary, (_, _, _) => Task.FromResult(Coverage(selection)))
             .RunAsync(selection, default), "the post-rename failure is retained on its notice");
+        Console.WriteLine("106 post-rename Local reads=" + primaryReads);
+        Check.Require(primaryReads == 3, "106 rename reads initial, fresh reobservation and admitted freshness once each");
         var after = fixture.Inner.SyncedById(PairId, Side.Local, LocalId)!;
         Check.Require(after.LocalPath == Item && fixture.Inner.Issues(PairId).Any(issue => issue.Kind == IssueKind.Failure),
             "the rename commits before its ordinary branch fails");
@@ -2156,7 +3220,7 @@ public static class ChangeRunnerChecks
             var notice = new ChangeNotice(Side.Local, ChangeKind.Changed, Item, null, LocalId, null, false, false);
             var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
             var watermark = fixture.Inner.AcquireJournalPage(VolumeKey, null, new JournalPosition(1, 1),
-                [(PairId, Generation, source.Epoch, source.Revision, false, false)],
+                [(PairId, Generation, source.Epoch, source.Revision, false)],
                 [(PairId, notice), (PairId, notice)]);
             var selection = new WorkSelection(PairId, Generation, source.Epoch, Side.Local, VolumeKey, notice.Id,
                 PathNames.KeyFor(Side.Local, notice.Path), watermark!.Value, watermark!.Value);
@@ -2406,7 +3470,7 @@ public static class ChangeRunnerChecks
         var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
         var watermark = fixture.Inner.AcquireJournalPage(VolumeKey,
             page == 1 ? null : new JournalPosition(1, (ulong)page - 1), new JournalPosition(1, (ulong)page),
-            [(PairId, Generation, source.Epoch, source.Revision, false, false)], [(PairId, notice)]);
+            [(PairId, Generation, source.Epoch, source.Revision, false)], [(PairId, notice)]);
         Check.Require(watermark is not null, "The journal page commits the selected work.");
         return new WorkSelection(PairId, Generation, source.Epoch, Side.Local, VolumeKey, notice.Id,
             PathNames.KeyFor(Side.Local, notice.Path), watermark!.Value, watermark!.Value);
@@ -2441,7 +3505,9 @@ public static class ChangeRunnerChecks
         var jobs = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(), boundary,
             RefusingExecutionBoundary.Instance, 0));
         boundary.Capture = capture;
-        return new SelectionPass(context, jobs.Items, jobs.Ancestors, boundary, jobs.Actions);
+        return new SelectionPass(context, jobs.Items, jobs.Ancestors, boundary, jobs.Actions,
+            (selected, side, scope, retries, settles, ct) => SyncJobs.RunBatchAsync(context,
+                new SyncPorts(new RecoveryBoundary(), boundary, RefusingExecutionBoundary.Instance, 0), selected, scope, ct));
     }
 
     private static async Task<T> ThrowsAsync<T>(Func<Task> action) where T : Exception
@@ -2463,6 +3529,7 @@ public static class ChangeRunnerChecks
         public FakeSide Dropbox { get; } = new(Side.Dropbox);
         public IStateStore Inner { get; private set; }
         private readonly string? _storeFolder;
+        public string? DatabasePath => _storeFolder is null ? null : Path.Combine(_storeFolder, "state.db");
         public IStateStore Store { get; }
         public ForwardStore Hooks { get; }
         public FakeAdmission Admission { get; } = new() { Level = 1 };
@@ -2564,6 +3631,8 @@ public static class ChangeRunnerChecks
                 PathLocks.KeyComparer.Equals(scope.Key, required.Key) && (!required.IncludesDescendants || scope.IncludesDescendants))))
                 throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.FootprintChanged);
         }
+
+        public void Revalidate() { }
 
         public ValueTask ReleaseAdmissionAsync() => AllowsRelease
             ? default : throw new NotSupportedException(nameof(ReleaseAdmissionAsync));
@@ -2721,6 +3790,7 @@ public static class ChangeRunnerChecks
         }
 
         public Action<MethodInfo>? BeforeCall { get; set; }
+        public bool RepairDone { get; set; } = true;
         public List<WorkSelection> CommittedSelections { get; } = [];
         public int RecordedKeyVisits { get; private set; }
         public List<(Side Side, long? Through, int Count)> AncestorQueries { get; } = [];
@@ -2753,7 +3823,7 @@ public static class ChangeRunnerChecks
             if (method.Name == nameof(IStateStore.Commit) && args.Length == 4 && args[2] is WorkSelection selected)
                 CommittedSelections.Add(selected);
             // AutoSync runs only after the first Repair; these fixtures start from that state.
-            if (method.Name == nameof(IStateStore.FirstRepairDone)) return true;
+            if (method.Name == nameof(IStateStore.FirstRepairDone)) return RepairDone;
             BeforeCall?.Invoke(method);
             try
             {

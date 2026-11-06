@@ -68,7 +68,18 @@ public sealed class PairSession
         };
         Context = context;
         Syncer = new Syncer(context, new SyncPorts(new RecoveryExecutionBoundary(() => this),
-            new LiveExecutionBoundary(_ => this), PairSafety.SelectedBoundaryFor(this), LocalSide.HashSlots));
+            new LiveExecutionBoundary(_ => this), PairSafety.SelectedBoundaryFor(this), LocalSide.HashSlots) { RunBatchAsync = RunBatchAsync });
+    }
+
+    private async Task RunBatchAsync(WorkSelection? selection, Side side, string scope, IReadOnlySet<long>? retryIssues, bool settlesFirstRun, CancellationToken ct)
+    {
+        selection?.RequireFor(Pair.PairId, ExpectedGeneration);
+        await PairSafety.CheckRootsAsync(this, ct).ConfigureAwait(false);
+        await FolderBatch.RunAsync(Context, new SyncPorts(new RecoveryExecutionBoundary(() => this),
+                new LiveExecutionBoundary(_ => this), PairSafety.SelectedBoundaryFor(this), LocalSide.HashSlots),
+            PrerequisiteDropbox, Log ?? throw new InvalidOperationException(), selection, side, scope, retryIssues, settlesFirstRun,
+            token => PairSafety.CheckRootsAsync(this, token), Scans,
+            () => Host.TryHoldGeneration(Registration), ct).ConfigureAwait(false);
     }
 
     private readonly Func<bool, CancellationToken, Task<(RootBinding Roots, DriveEvidence? Drive)>> _readRoots;

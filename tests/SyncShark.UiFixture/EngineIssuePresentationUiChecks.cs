@@ -25,7 +25,7 @@ internal static class EngineIssuePresentationUiChecks
         CheckIsolatedRuntimeRoot();
         CheckBusyExitWritesAndClearsOwnerNotice();
         CheckNoticeWriteFailureLogsOneIdentityOnlyLine();
-        CheckStartupCommandIsCanonicalEngineSupervisor();
+        CheckStartupCommandIsCanonicalEngineStart();
         CheckReadinessVariableIsClearedOnClaim();
 
         var app = new App { SuppressProductStartup = true, ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -52,6 +52,16 @@ internal static class EngineIssuePresentationUiChecks
             CheckRetryStatesRenderDataOwnedGuidance(window);
             CheckSharedRendererIsSingleTextSource(window);
             CheckIgnoredFolderKeptOffersDataOwnedChoices(window);
+            foreach (var kind in Enum.GetValues<IssueKind>())
+            {
+                var issue = new Issue(900, kind, TextKey.FailChanged, "file.txt", new IssueSubject([], null), DateTimeOffset.UnixEpoch, false);
+                window.ApplyEngineIssues([issue], new Dictionary<long, IssueRetryView>());
+                Require(Row(window, issue.Id).NoticeOptions!.Any(option => option.Choice == nameof(ResolutionChoice.Ignore)), "every kind offers Ignore");
+                window.ApplyEngineIssues([issue with { Ignored = true }], new Dictionary<long, IssueRetryView>());
+                Require(Row(window, issue.Id).NoticeOptions!.Any(option => option.Choice == nameof(ResolutionChoice.Unignore) && option.Label == Text.Get(TextKey.RestoreLabel)), "ignored offers data-owned Restore");
+                window.ApplyEngineIssues([issue], new Dictionary<long, IssueRetryView>());
+                Require(!Row(window, issue.Id).NoticeOptions!.Any(option => option.Choice == nameof(ResolutionChoice.Unignore)), "restored view offers Ignore again");
+            }
             CheckRecoveryLabelsAreDataOwned();
             CheckOnlyMatchingCloseRemovesRows(window);
             CheckUnrelatedLegacyRowsSurvive(window);
@@ -85,8 +95,8 @@ internal static class EngineIssuePresentationUiChecks
                 + Environment.NewLine + Text.Get(ExpectedRetryKey(state));
             Require(row.Reason == expected,
                 "Retry state " + state + " renders the data-owned cause and guidance with no other text");
-            Require(row.NoticeOptions is null,
-                "Retry state " + state + " invents no notice option for a plain refusal");
+            Require(row.NoticeOptions!.Any(option => option.Choice == nameof(ResolutionChoice.Ignore)),
+                "Retry state " + state + " offers Ignore without changing retry guidance");
         }
 
         var transition = InUseIssue(150, "transition.txt");
@@ -142,7 +152,7 @@ internal static class EngineIssuePresentationUiChecks
             "The ignored-folder-kept notice renders its data-owned sentence");
         var options = row.NoticeOptions ?? throw new InvalidDataException(
             "The ignored-folder-kept notice offered no choices on the real refresh route.");
-        Require(options.Count == 2, "The notice offers exactly the one-off and always choices");
+        Require(options.Count == 3 && options.Any(option => option.Choice == nameof(ResolutionChoice.Ignore)), "The notice offers one-off, always and Ignore choices");
         Require(options[0].Choice == nameof(ResolutionChoice.Dismiss) &&
                 options[0].Label == EngineCliCatalog.Message(EngineMessageKey.KeepThisTimeLabel),
             "The one-off choice keeps the shared Dismiss identity and the data-owned 'Keep this time' label");
@@ -289,14 +299,13 @@ internal static class EngineIssuePresentationUiChecks
         }
     }
 
-    // RC05-V5-S: Start with Windows targets the canonical Engine supervisor, and only the owned
-    // supervisor spellings count as a product startup command.
-    private static void CheckStartupCommandIsCanonicalEngineSupervisor()
+    // Startup uses the readiness-gated CLI route; old owned supervisor registrations remain recognizable.
+    private static void CheckStartupCommandIsCanonicalEngineStart()
     {
         var executable = Path.Combine(Path.GetTempPath(), "SyncShark.exe");
         var command = AutoSyncProcess.StartupCommand(executable);
-        Require(command == "\"" + Path.GetFullPath(executable) + "\" --core v2 --engine-supervisor",
-            "Start with Windows targets the canonical Engine supervisor command");
+        Require(command == "\"" + Path.GetFullPath(executable) + "\" --cli engine host start --yes",
+            "Start with Windows targets the readiness-gated Engine host start command");
         Require(AutoSyncProcess.IsProductStartupCommand(command),
             "The canonical command is recognized as an owned product startup");
         Require(AutoSyncProcess.IsProductStartupCommand(

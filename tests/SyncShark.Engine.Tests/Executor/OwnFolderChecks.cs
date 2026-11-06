@@ -410,7 +410,7 @@ public static class OwnFolderChecks
         var volume = pair.Roots!.Local.VolumeSerialNumber.ToString(CultureInfo.InvariantCulture);
         var position = store.ReadJournal(volume);
         store.AcquireJournalPage(volume, position, position!,
-            [(pair.PairId, generation, source.Epoch, source.Revision, false, false)],
+            [(pair.PairId, generation, source.Epoch, source.Revision, false)],
             [(pair.PairId, notice)]);
     }
 

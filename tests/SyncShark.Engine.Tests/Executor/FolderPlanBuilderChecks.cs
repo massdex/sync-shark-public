@@ -109,6 +109,7 @@ public static class FolderPlanBuilderChecks
             if (test.Saved)
                 store.Commit(pair.PairId, StateChange.Empty with { Record = [synced] });
             await ScanAsync(store, pair.PairId, side, test.Scanned ? [entry] : []);
+            context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
             IReadOnlySet<string> restored = test.Restored ? new HashSet<string> { synced.LocalKey } : new HashSet<string>();
             counted.Reset();
             using (var plan = await new FolderPlanBuilder(context).BuildAsync(Folder(parent, side), side, restored,
@@ -161,6 +162,7 @@ public static class FolderPlanBuilderChecks
         var fresh = await FileAsync(source, "Parent/fresh");
         // The child is recorded in the scan, so a Repair plan would see InScan=true.
         await ScanAsync(store, pair.PairId, side, [fresh]);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         var folder = Folder(parent, side);
 
         counted.Reset();
@@ -237,6 +239,7 @@ public static class FolderPlanBuilderChecks
             Record = [savedParent, await SavedAsync(source, branch), savedSurvivor, await SavedAsync(source, unchanged)]
         });
         await ScanAsync(store, pair.PairId, side, [branch, survivor, unchanged, unsynced]);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         var folder = Folder(parent, side) with { Synced = savedParent };
         if (restored)
         {
@@ -286,6 +289,7 @@ public static class FolderPlanBuilderChecks
         var child = await FileAsync(source, "Parent/Inner/child");
         var sibling = await FileAsync(source, "Parent/Inner-other");
         await ScanAsync(store, pair.PairId, side, [sibling]);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         using var plan = await new FolderPlanBuilder(context).BuildAsync(Folder(parent, side), side,
             new HashSet<string>(), false, CancellationToken.None);
         var survivors = plan.Survivors(CancellationToken.None).ToArray();
@@ -452,6 +456,7 @@ public static class FolderPlanBuilderChecks
         var parent = await source.EnsureFolderAsync("Parent", CancellationToken.None);
         await FileAsync(source, "Parent/child");
         await ScanAsync(store, pair.PairId, side, []);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         using (var plan = await new FolderPlanBuilder(context).BuildAsync(Folder(parent, side), side,
             new HashSet<string>(), false, CancellationToken.None))
         {
@@ -479,7 +484,7 @@ public static class FolderPlanBuilderChecks
     }
 
     private static IEnumerable<string> Plans(string directory, string database) =>
-        Directory.EnumerateFiles(directory, Path.GetFileName(database) + "*" + StateSchema.PlanFileSuffix);
+        Directory.EnumerateFiles(directory, Path.GetFileName(database) + StateSchema.PlanFileSuffix + "*" + StateSchema.DatabaseExtension);
 
     private static async Task UnreadableChildrenAsync(string directory, Side side)
     {
@@ -511,6 +516,7 @@ public static class FolderPlanBuilderChecks
         var savedSibling = await SavedAsync(source, sibling);
         store.Commit(pair.PairId, StateChange.Empty with { Record = [savedPresent, savedAbsent, savedSibling] });
         await ScanAsync(store, pair.PairId, side, [branch, present, sibling]);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         UnreadableMember.Record(store, pair.PairId, unreadablePath);
         local.Hashes = 0;
         dropbox.Hashes = 0;
@@ -573,6 +579,7 @@ public static class FolderPlanBuilderChecks
         saved = saved with { LocalPath = "Parent/local-child", LocalKey = PathNames.Key("Parent/local-child") };
         store.Commit(pair.PairId, StateChange.Empty with { Record = [saved] });
         await ScanAsync(store, pair.PairId, Side.Dropbox, [child]);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         using var plan = await new FolderPlanBuilder(context).BuildAsync(Folder(parent, Side.Dropbox), Side.Dropbox,
             new HashSet<string> { saved.LocalKey }, false, CancellationToken.None);
         Check.Require(!plan.DeleteWhole &&
@@ -600,6 +607,7 @@ public static class FolderPlanBuilderChecks
         store.Commit(pair.PairId, StateChange.Empty with { Record = [savedColon, savedAbsent] });
         await context.Dropbox.DeleteAsync(absent, null, CancellationToken.None);
         await ScanAsync(store, pair.PairId, Side.Dropbox, [colon, question]);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         using var plan = await new FolderPlanBuilder(context).BuildAsync(Folder(parent, Side.Dropbox), Side.Dropbox,
             new HashSet<string>(), false, CancellationToken.None);
         Check.Require(!plan.Survivors(CancellationToken.None).Any() && plan.DeleteWhole &&
@@ -621,6 +629,7 @@ public static class FolderPlanBuilderChecks
         await FileAsync(source, "Parent/fresh");
         store.Commit(pair.PairId, StateChange.Empty with { Record = [await SavedAsync(source, savedChild)] });
         await ScanAsync(store, pair.PairId, Side.Dropbox, []);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         counted.Reset();
         using var plan = await new FolderPlanBuilder(context).BuildAsync(Folder(parent, Side.Dropbox), Side.Dropbox,
             new HashSet<string>(), false, CancellationToken.None);
@@ -741,6 +750,7 @@ public static class FolderPlanBuilderChecks
         };
         store.Commit(pair.PairId, StateChange.Empty with { Record = [savedUnchanged, savedUncertain] });
         await ScanAsync(store, pair.PairId, Side.Local, [unchanged, uncertain]);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         counted.Hashes = 0;
         countedStore.Reset();
         using var plan = await new FolderPlanBuilder(context).BuildAsync(Folder(parent, Side.Local), Side.Local,
@@ -763,6 +773,7 @@ public static class FolderPlanBuilderChecks
         var saved = (await SavedAsync(source, changed)) with { DropboxContentHash = "different-content" };
         store.Commit(pair.PairId, StateChange.Empty with { Record = [saved] });
         await ScanAsync(store, pair.PairId, Side.Dropbox, [changed]);
+        context = context with { ScanId = ScanFixture.Token(store, pair.PairId) };
         counted.Hashes = 0;
         using var plan = await new FolderPlanBuilder(context).BuildAsync(Folder(parent, Side.Dropbox), Side.Dropbox,
             new HashSet<string>(), false, CancellationToken.None);
@@ -914,7 +925,8 @@ public static class FolderPlanBuilderChecks
             CompleteDownloadAttemptAsync: (_, _) =>
                 throw new InvalidOperationException("Planning must not complete a download attempt"),
             UploadAdmissionIdentity: (AccountId: "account", RouteName: "route", SourceIdentity: "source"),
-            ItemAttempts: new RefusingItemAttempts(), Opportunity: new object(), ExpectedGeneration: generation);
+            ItemAttempts: new RefusingItemAttempts(), Opportunity: new object(), ExpectedGeneration: generation)
+        { ScanId = ScanFixture.TokenOrNone(store, pair.PairId) };
     }
 
     private static EngineSettings Settings() => new("", "", "", "", "", RecycleFallback.Fail, 1,

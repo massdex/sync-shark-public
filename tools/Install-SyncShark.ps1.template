@@ -50,7 +50,7 @@ $rollbackLink = Join-Path $transactionRoot 'predecessor.rollback'
 $stateBackup = Join-Path $transactionRoot 'state.predecessor'
 $stateBackupPreparing = Join-Path $transactionRoot 'state.predecessor.preparing'
 $steps = @('stage-package', 'publish-runtime', 'backup-state', 'create-next-link',
-    'retain-predecessor', 'publish-successor', 'register-explorer-package', 'verify-complete')
+    'retain-predecessor', 'publish-successor', 'register-explorer-package', 'register-application', 'verify-complete')
 $allowedCrashPoints = @('journal-created', 'journal-created-mid-write', 'journal-created-after-temp-write',
     'stage-package-mid-copy', 'publish-runtime-after-move', 'backup-state-mid-copy', 'backup-vnext-state-mid-copy')
 foreach ($step in $steps) {
@@ -98,6 +98,7 @@ Assert-SyncSharkExactPackage $signedRoot $manifestPath $ExpectedManifestSha256 $
 # from process enumeration. The isolated release-test root provides the same lock
 # file, so the test path exercises this shipped wrapper instead of a bypass.
 $transactionBody = {
+$dataRoot = Resolve-SyncSharkDataRoot $productRoot
 $journal = Read-SyncSharkJournal $journalPath 'install' $version $commit $productRoot $steps
 if ($null -ne $journal) {
     if (-not $journal.PSObject.Properties['artifacts'] -or
@@ -210,8 +211,8 @@ Invoke-SyncSharkJournalStep $journal $journalPath 'publish-runtime' $CrashAfter 
 
 Invoke-SyncSharkJournalStep $journal $journalPath 'backup-state' $CrashAfter {
     if (Test-Path -LiteralPath $stateBackup) {
-        foreach ($relative in @('state', 'vNext\state')) {
-            $source = Join-Path $productRoot $relative; $copy = Join-Path $stateBackup $relative
+        foreach ($relative in @('state', 'vNext\state', 'engine')) {
+            $source = Join-Path $dataRoot $relative; $copy = Join-Path $stateBackup $relative
             if (Test-Path -LiteralPath $source) { Assert-SyncSharkTreeMatch $source $copy }
             elseif (Test-Path -LiteralPath $copy) { throw "Unexpected backup subtree: $relative" }
         }
@@ -223,8 +224,8 @@ Invoke-SyncSharkJournalStep $journal $journalPath 'backup-state' $CrashAfter {
         Remove-Item -LiteralPath $stateBackupPreparing -Recurse -Force
     }
     New-Item -ItemType Directory -Path $stateBackupPreparing | Out-Null
-    foreach ($relative in @('state', 'vNext\state')) {
-        $source = Join-Path $productRoot $relative
+    foreach ($relative in @('state', 'vNext\state', 'engine')) {
+        $source = Join-Path $dataRoot $relative
         if (Test-Path -LiteralPath $source -PathType Container) {
             $destination = Join-Path $stateBackupPreparing $relative
             New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($destination)) -Force | Out-Null
@@ -237,8 +238,8 @@ Invoke-SyncSharkJournalStep $journal $journalPath 'backup-state' $CrashAfter {
 } {
     Assert-SyncSharkOrdinaryTree $stateBackup
     if (Test-Path -LiteralPath $stateBackupPreparing) { throw 'The predecessor state preparation tree remained.' }
-    foreach ($relative in @('state', 'vNext\state')) {
-        $source = Join-Path $productRoot $relative; $copy = Join-Path $stateBackup $relative
+    foreach ($relative in @('state', 'vNext\state', 'engine')) {
+        $source = Join-Path $dataRoot $relative; $copy = Join-Path $stateBackup $relative
         if (Test-Path -LiteralPath $source) { Assert-SyncSharkTreeMatch $source $copy }
     }
     $stateIdentity = [string]$journal.artifacts.state_predecessor_sha256
@@ -285,12 +286,18 @@ Invoke-SyncSharkJournalStep $journal $journalPath 'register-explorer-package' $C
     if($ExpectedSignedIdentityPackageSha256 -and -not $testMode){Invoke-SyncSharkExplorerPackage $target Verify}
 }
 
+Invoke-SyncSharkJournalStep $journal $journalPath 'register-application' $CrashAfter {
+    if (-not $testMode) { Invoke-SyncSharkAppRegistration $version Register }
+} {
+    if (-not $testMode) { Invoke-SyncSharkAppRegistration $version Verify }
+}
+
 Invoke-SyncSharkJournalStep $journal $journalPath 'verify-complete' $CrashAfter {
     & $assertPackage $target
     Assert-SyncSharkJunction $active $target
     Assert-SyncSharkJunction $rollbackLink $previousTarget
-    foreach ($relative in @('state', 'vNext\state')) {
-        $source = Join-Path $productRoot $relative; $copy = Join-Path $stateBackup $relative
+    foreach ($relative in @('state', 'vNext\state', 'engine')) {
+        $source = Join-Path $dataRoot $relative; $copy = Join-Path $stateBackup $relative
         if (Test-Path -LiteralPath $source) { Assert-SyncSharkTreeMatch $source $copy }
         elseif (Test-Path -LiteralPath $copy) { throw "Unexpected backup subtree: $relative" }
     }
@@ -299,8 +306,8 @@ Invoke-SyncSharkJournalStep $journal $journalPath 'verify-complete' $CrashAfter 
     if($testMode){Assert-SyncSharkRuntimeSystemReadAccess $target}else{Assert-SyncSharkProtectedRuntime $target}
     Assert-SyncSharkJunction $active $target
     Assert-SyncSharkJunction $rollbackLink $previousTarget
-    foreach ($relative in @('state', 'vNext\state')) {
-        $source = Join-Path $productRoot $relative; $copy = Join-Path $stateBackup $relative
+    foreach ($relative in @('state', 'vNext\state', 'engine')) {
+        $source = Join-Path $dataRoot $relative; $copy = Join-Path $stateBackup $relative
         if (Test-Path -LiteralPath $source) { Assert-SyncSharkTreeMatch $source $copy }
         elseif (Test-Path -LiteralPath $copy) { throw "Unexpected backup subtree: $relative" }
     }

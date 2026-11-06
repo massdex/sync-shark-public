@@ -33,6 +33,15 @@ internal static class PairSafety
         AdmitObserved(session, observed);
     }
 
+    internal static async Task CheckRootsAsync(PairSession session, CancellationToken ct)
+    {
+        RequireRunnable(session);
+        var observed = await session.ReadRootsAsync(includeDrive: false, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        RequireCurrent(session);
+        AdmitObserved(session, observed.Roots);
+    }
+
     private static void AdmitObserved(PairSession session, RootBinding observed)
     {
         CompareRoots(session.Store, session.Pair, session.ExpectedGeneration, observed, binding: false);
@@ -108,7 +117,7 @@ internal static class PairSafety
             throw new InvalidDataException(Text.Get(TextKey.StateRootBindingInvalid, (TextArg.Pair, pair.PairId)));
         if (!SameScope(pair, observed.LocalRoot, observed.DropboxRoot, observed.ConnectionId))
             throw Refuse(store, pair, generation, TextKey.RootConfiguredScopeChanged, null, null);
-        if (binding) return;
+        if (binding && pair.Roots is null) return;
         if (pair.Roots is not { } saved)
             throw Refuse(store, pair, generation, TextKey.RootUnbound, null, null);
         if (!SameScope(pair, saved.LocalRoot, saved.DropboxRoot, saved.ConnectionId))
@@ -255,7 +264,7 @@ internal static class PairSafety
                 if (!session.Host.TryHoldGeneration(session.Registration)) return false;
             return true;
         }
-        await using var execution = await AdmittedExecution.AcquireAsync(requests, AcceptGrant, ct).ConfigureAwait(false);
+        await using var execution = await AdmittedExecution.AcquireAsync(requests, AcceptGrant, ct, validate).ConfigureAwait(false);
         var checkedPairs = new HashSet<string>(StringComparer.Ordinal);
         foreach (var session in sessions)
         {
@@ -275,7 +284,7 @@ internal static class PairSafety
     private static void RequireIssue(PairSession session, Issue expected)
     {
         var current = session.Store.IssueById(session.Pair.PairId, expected.Id);
-        if (current is null || current with { Subject = expected.Subject } != expected ||
+        if (current is null || current with { Subject = expected.Subject, Ignored = expected.Ignored } != expected ||
             current.Subject.Incoming != expected.Subject.Incoming || !current.Subject.HasSameItems(expected.Subject) ||
             current.Subject.LocalHash != expected.Subject.LocalHash ||
             current.Subject.FirstRunDeletion != expected.Subject.FirstRunDeletion)

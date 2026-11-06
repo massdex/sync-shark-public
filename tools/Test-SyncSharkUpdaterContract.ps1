@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$Allocation='')
+param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$Allocation='',[switch]$AdmissionOnly)
 $ErrorActionPreference='Stop'
 $output=[IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\')
 $allocation=if([string]::IsNullOrWhiteSpace($Allocation)){[IO.Path]::Combine([Environment]::GetFolderPath('LocalApplicationData'),'SyncShark','build')}else{[IO.Path]::GetFullPath($Allocation).TrimEnd('\')}
@@ -14,12 +14,12 @@ foreach($reference in @('System.dll','System.Core.dll','System.Xml.dll','System.
 $compiler=[Microsoft.CSharp.CSharpCodeProvider]::new()
 try {
     $paths=@('SyncShark.DiscoverySetupNative.cs','SyncShark.DiscoveryTransaction.cs','SyncShark.UpdaterContract.cs','SyncShark.UpdaterData.cs','SyncShark.UpdaterSignature.cs','SyncShark.UpdaterTask.cs','SyncShark.UpdaterFiles.cs','SyncShark.UpdaterWindows.cs','SyncShark.UpdaterManifest.cs','SyncShark.UpdaterSession.cs','SyncShark.UpdaterSetup.cs','..\tests\SyncShark.UiFixture\UpdaterContractChecks.cs')
-    $paths+='SyncShark.UpdaterDiscovery.cs'
+    $paths+=@('SyncShark.UpdaterDiscovery.cs','SyncShark.SignerIdentity.cs')
     $sources=@($paths | ForEach-Object {[IO.File]::ReadAllText((Join-Path $PSScriptRoot $_)).Replace('#nullable disable','')})
     $result=$compiler.CompileAssemblyFromSource($parameters,[string[]]$sources)
     if($result.Errors.HasErrors){throw (($result.Errors | ForEach-Object {$_.ToString()}) -join "`n")}
     $start=[Diagnostics.ProcessStartInfo]::new($parameters.OutputAssembly)
-    $start.Arguments='--receipt-checks "'+$output+'"'
+    $start.Arguments=if($AdmissionOnly){''}else{'--receipt-checks "'+$output+'"'}
     $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
     $process=[Diagnostics.Process]::Start($start)
     try {

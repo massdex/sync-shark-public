@@ -71,11 +71,16 @@ internal static partial class Program
 
     private static int RunFixtureMain(string[] args)
     {
+        if (args is ["--core", "v2", var startupMode] &&
+            Environment.GetEnvironmentVariable(EngineStartupReadinessChecks.RendezvousVariable) is { } rendezvous)
+            return EngineStartupReadinessChecks.ChildAsync(rendezvous, startupMode).GetAwaiter().GetResult();
         if (args is ["--tray-client-checks"])
         { try { return TrayClientChecks.Run(); }
           catch (Exception error) { Console.Error.WriteLine(error); return 1; } }
         Massdex.SyncShark.V2.AutoSyncProcess.StartupKeyPathForTest = @"Software\SyncShark.Tests\Startup-" + Guid.NewGuid().ToString("N");
         AssertWindowsStartupContract();
+        if (args is ["--engine-startup-readiness-checks"])
+            return EngineStartupReadinessChecks.RunAsync().GetAwaiter().GetResult();
         if (args is ["--sparse-planning-correction-checks", var sparseCorrectionRoot])
         { SparsePlanningContextChecks.RunAsync(Path.GetFullPath(sparseCorrectionRoot), correctionsOnly: true).GetAwaiter().GetResult(); return 0; }
         if (args is ["--bounded-presentation-history-checks", var historyRoot])
@@ -1940,8 +1945,8 @@ internal static partial class Program
     {
         const string executable = @"C:\Program Files\Massdex\Sync Shark\SyncShark.exe";
         var command = Massdex.SyncShark.V2.AutoSyncProcess.StartupCommand(executable);
-        if (!string.Equals(command, "\"" + executable + "\" --core v2 --engine-supervisor", StringComparison.Ordinal))
-            throw new InvalidDataException("Windows logon launch is not bound to the quoted executable and the Engine supervisor mode.");
+        if (!string.Equals(command, "\"" + executable + "\" --cli engine host start --yes", StringComparison.Ordinal))
+            throw new InvalidDataException("Windows logon launch is not bound to the quoted executable and the readiness-gated Engine host start command.");
         try
         {
             _ = Massdex.SyncShark.V2.AutoSyncProcess.StartupCommand("SyncShark.exe");

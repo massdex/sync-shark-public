@@ -5,4 +5,8 @@ namespace Massdex.SyncShark.Engine;
 /// completion state. Notice is the ordered change evidence and Before the saved preimage of the last synced facts
 /// (null when none was saved).</summary>
 public sealed record PendingChange(long WorkId, string PairId, long PairGeneration, long SourceEpoch,
-    ChangeNotice Notice, SyncedEntry? Before);
+    ChangeNotice Notice, SyncedEntry? Before)
+{
+    /// <summary>Existing issue-retained work, projected by Storage rather than persisted again.</summary>
+    internal bool IsResidual { get; init; }
+}

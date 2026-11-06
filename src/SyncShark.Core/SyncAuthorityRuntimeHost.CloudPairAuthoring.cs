@@ -679,11 +679,11 @@ public sealed partial class SyncAuthorityRuntimeHost
     {
         ArgumentNullException.ThrowIfNull(draft);
         ArgumentNullException.ThrowIfNull(selectedRoot);
-        // the SHARED recovery entry holds the EXISTING configuration-mutation gate across its whole
+        // The SHARED recovery entry holds the EXISTING configuration-mutation gate across its whole
         // validation/retention/publication flow, and delegates to the gate-free normal binding core so the gate is
         // never re-entered. Every normal caller path still acquires the gate exactly once.
         using var mutation = await EnterPairConfigurationMutationAsync(cancellationToken);
-        // the SHARED app action binds the supplied source to the normalized current draft and the
+        // The SHARED app action binds the supplied source to the normalized current draft and the
         // held recovery target BEFORE RetainRecoveredControlAsync can commit anything. A wrong source pair, side
         // or root, an enabled/approved draft, or a wrong held physical identity refuses with NO recovery metadata
         // written, rather than failing later during ordinary publication.
@@ -700,18 +700,18 @@ public sealed partial class SyncAuthorityRuntimeHost
             throw new InvalidDataException(
                 "The retained-control source does not match the normalized current draft and the held recovery " +
                 "target; a wrong pair, side or root is refused before any recovery metadata is written.");
-        // the legitimate CURRENT draft identity and BOTH own endpoint/account/namespace/folder
+        // Item 3: the legitimate CURRENT draft identity and BOTH own endpoint/account/namespace/folder
         // identities are validated BEFORE retention, reusing the existing normal endpoint derivation and the
         // retained connection facts. A consistent draft carrying a changed cloud folder, namespace or connection is
         // refused here rather than committing recovered metadata that normal save would reject afterwards.
         RequireRecoveryDraftCurrent(normalized);
-        // an INITIAL publication validates the current unpublished candidate revision here, at the
+        // An INITIAL publication validates the current unpublished candidate revision here, at the
         // recovery boundary, and then hands NORMAL initial authoring NO published-edit expected revision. A
         // published repair keeps its exact replacement identity and revision CAS unchanged.
         // An INITIAL publication binds the expected current unpublished revision INSIDE the retention transaction
         // below and hands NORMAL initial authoring no published-edit expected revision. A published repair keeps
         // its exact replacement identity and revision CAS.
-        // bind the exact current mode, identity and revision BEFORE retention, with no null
+        // Item 2: bind the exact current mode, identity and revision BEFORE retention, with no null
         // bypass, and pass that expectation into the retention transaction which revalidates it.
         var current = await _authority.LoadRetainedPairStateAsync(normalized.Id, cancellationToken)
             ?? throw new InvalidOperationException(
@@ -727,7 +727,7 @@ public sealed partial class SyncAuthorityRuntimeHost
         }
         else
         {
-            // the published branch must name THIS exact pair as its replacement identity before
+            // Item 6: the published branch must name THIS exact pair as its replacement identity before
             // any recovered metadata is written.
             if (!string.Equals(replacingPairId, normalized.Id, StringComparison.Ordinal))
                 throw new InvalidDataException(
@@ -834,7 +834,7 @@ public sealed partial class SyncAuthorityRuntimeHost
     }
 
     /// <summary>
-    /// the read-only pre-retention validation of the CURRENT draft. It reuses the existing normal
+    /// Item 3: the read-only pre-retention validation of the CURRENT draft. It reuses the existing normal
     /// endpoint derivation (the engine layout id for a local/cloud pair, the cloud-pair id for a cloud/cloud pair)
     /// to require that the carried pair identity is exactly the identity of its own ordered endpoints, and reuses
     /// the retained connection facts to require each own cloud endpoint's provider, connection and namespace to

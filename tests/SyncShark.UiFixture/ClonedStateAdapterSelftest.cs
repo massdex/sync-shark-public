@@ -82,7 +82,7 @@ internal static partial class Program
         Refused("missing clone database refused", () => ClonedStateAdapter.Open(emptyClone));
 
         Refused("mutating command refused before any open", () => ClonedStateAdapter.RequireAllowedCommand(
-            ["--cli", "pairs", "retire", "--pair", "f00d0000000000000012", "--yes"]));
+            ["--cli", "pairs", "retire", "--pair", "fixture-pair-a", "--yes"]));
         ClonedStateAdapter.RequireAllowedCommand(["--cli", "pairs", "list"]);
         cases.Add("selected read command accepted by the allowlist");
 
@@ -230,7 +230,7 @@ internal static partial class Program
         Refused("destination outside the owner allocation refused",
             () => ClonedStateAdapter.RequireAllowedDestination(Path.Combine(Path.GetTempPath(), "r697-outside"), true));
         Refused("mutating command refused before any open", () => ClonedStateAdapter.RequireAllowedCommand(
-            ["--cli", "pairs", "retire", "--pair", "f00d0000000000000012", "--yes"]));
+            ["--cli", "pairs", "retire", "--pair", "fixture-pair-a", "--yes"]));
         Refused("network use refused", () => new HttpClient(new DenyAllNetworkHandler())
             .GetStringAsync("https://api.dropboxapi.com/2/users/get_current_account").GetAwaiter().GetResult());
         Refused("dropbox credential read refused", () =>
@@ -303,7 +303,7 @@ internal static partial class Program
         try
         {
             Run(["--cli", "pairs", "list", "--json"]);
-            Run(["--cli", "pairs", "show", "--pair", "f00d0000000000000012", "--json"]);
+            Run(["--cli", "pairs", "show", "--pair", "fixture-pair-a", "--json"]);
             Run(["--cli", "accounts", "list", "--json"]);
             Run(["--cli", "settings", "show", "--json"]);
             Run(["--cli", "attention", "list", "--json"]);

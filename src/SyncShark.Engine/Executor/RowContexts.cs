@@ -23,11 +23,11 @@ internal sealed class RowContexts(ExecutorContext context, bool firstRun, bool c
         IReadOnlyDictionary<string, IssueSubject>? proofs, Func<string, bool>? deleted)
     {
         firstRun = initialRun;
-        completeInventory = true;
+        completeInventory = context.BatchScope is null || !context.Store.DeletedHistoryOwed(_pairId);
         retryIssues = retries;
         subjects = proofs;
         deletedName = deleted;
-        _ordinary = _ordinary with { FirstRun = firstRun, CompleteInventory = true };
+        _ordinary = _ordinary with { FirstRun = firstRun, CompleteInventory = completeInventory };
         _roots.Clear();
         return this;
     }
@@ -75,11 +75,15 @@ internal sealed class RowContexts(ExecutorContext context, bool firstRun, bool c
         return row with { LocalHash = hash };
     }
 
-    /// <summary>Whether a stored hold or this execution's rename footprint covers the key (the prefix rule).</summary>
+    /// <summary>Whether a stored hold, this execution's rename footprint, or a held dependent root covers the key
+    /// (the prefix rule).</summary>
     public bool Covers(string key)
     {
         lock (_gate)
+        {
             if (_renameHolds.Covers(key)) return true;
+            if (_dependentRoots?.Covers(key) == true) return true;
+        }
         return context.Store.HeldCovers(_pairId, key, retryIssues);
     }
 
@@ -151,8 +155,9 @@ internal sealed class RowContexts(ExecutorContext context, bool firstRun, bool c
     public RowContext For(Row row)
     {
         var retained = context.Store.RetainedFirstRun(_pairId);
+        // A folder batch's listing never sees a recorded folder outside its root, so its rows ask like targeted rows.
         return Build(row, retained, retained.Count != 0 && IssuePolicy.UnbaselinedLocal(row) &&
-            UnderRetainedSubtree(retained, row.Key), false);
+            UnderRetainedSubtree(retained, row.Key), context.BatchScope is not null && UnderUnreadable(row));
     }
 
     /// <summary>Builds a targeted row's context, validating a covering first-run root by a fresh Local read. A failed
@@ -194,7 +199,8 @@ internal sealed class RowContexts(ExecutorContext context, bool firstRun, bool c
         foreach (var root in CoveringRoots(retained, key))
         {
             if (!Known(root.Key, out var holds))
-                holds = Remember(root.Key, RootHolds(context.Store.ScanEntry(_pairId, Side.Local, root.Key), retained));
+                holds = Remember(root.Key, RootHolds(context.ScanId == Guid.Empty ? null :
+                    context.Store.ScanEntry(_pairId, context.ScanId, Side.Local, root.Key), retained));
             covered |= holds;
         }
         return covered;
@@ -245,22 +251,32 @@ internal sealed class RowContexts(ExecutorContext context, bool firstRun, bool c
             // kind, so no issue's refresh rule can release a dependent row while its prerequisite is unresolved.
             if (_dependentRoots is { } dependents && IssuePolicy.CoveredKey(row, dependents) is not null)
                 heldKind = IssueKind.Failure;
-            return RowContext.ForRow(row, context.Scope, _ordinary, skipped, heldKind, underFolderDelete,
+            var ordinary = context.BatchScope is not null && kept == IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice
+                ? _ordinary with { CompleteInventory = true } : _ordinary;
+            return RowContext.ForRow(row, context.Scope, ordinary, skipped, heldKind, underFolderDelete,
                 DeletionEligible(row, kept, inventory), kept);
         }
     }
 
     // Membership has authority only over a completed acquisition (RQ-178, engine 8.1): before one a selected row waits
     // in None(Held); after one a match selects and a nonmatch is ordinary first-run sync, retained or not.
+    internal Row RefreshDeletionEligibility(Row row) =>
+        row.Context.DeletionEligible && row.Local is { } local &&
+        context.Store.DeletedNameSpent(_pairId, PathNames.DropboxKey(local.Path))
+            ? row with { Context = row.Context with { DeletionEligible = false } }
+            : row;
+
     private bool DeletionEligible(Row row, IssueSubject.FirstRunDeletionKind kept, bool inventory)
     {
         if (!IssuePolicy.InFirstRunScope(row, firstRun, kept)) return false;
+        var path = row.Local!.Path;
+        var key = PathNames.DropboxKey(path);
+        if (context.Store.DeletedNameSpent(_pairId, key)) return false;
         if (!inventory || !completeInventory) return true;
         var probe = deletedName;
         if (probe is null) return false;
-        var path = row.Local!.Path;
         foreach (var ancestor in PathNames.Ancestors(path))
             if (probe(PathNames.DropboxKey(ancestor))) return true;
-        return probe(PathNames.DropboxKey(path));
+        return probe(key);
     }
 }

@@ -274,6 +274,7 @@ public static class StoredFolderPlanChecks
     {
         var child = Item("root/branch/child");
         var adjacent = Item("root/branch0/child");
+        var sibling = Item("root/branchx");
         var root = Item("root", folder: true);
         var skipped = Item("root/skipped") with { Skip = TextKey.SkipLink.ToString() };
         var cases = new (Listed[] Events, Entry[] Expected)[]
@@ -287,8 +288,18 @@ public static class StoredFolderPlanChecks
             ([Present(child), Present(Item("root/branch", true)), Present(adjacent), new("root/branch", null)],
                 [adjacent]),
             ([Present(child), Present(adjacent), new("root/branch", null)], [adjacent]),
+            // #129: a capture that began empty still holds the folder's children when its file arrives.
             ([Present(Item("root/branch", true)), Present(child), Present(Item("root/branch"))],
-                [Item("root/branch"), child]),
+                [Item("root/branch")]),
+            ([Present(child), Present(Item("root/branch"))], [Item("root/branch")]),
+            ([Present(Item("root/branch")), Present(child), Present(Item("root/branch"))],
+                [Item("root/branch")]),
+            ([Present(Item("root/branch", true)), Present(Item("root/branch/deep/leaf")), Present(adjacent),
+                Present(sibling), Present(Item("root/branch"))],
+                [Item("root/branch"), adjacent, sibling]),
+            ([Present(Item("root/A%_é", true)), Present(Item("root/A%_é/雪")), Present(Item("root/A%_é0")),
+                Present(Item("root/a%_é"))],
+                [Item("root/a%_é"), Item("root/A%_é0")]),
             ([Present(child), new("root/branch", null), Present(child)], [child]),
             ([Present(child), Present(root), Present(skipped)], [root, child, skipped]),
             ([Present(skipped)], [skipped]),
@@ -312,7 +323,7 @@ public static class StoredFolderPlanChecks
         writer.AddAsync(Present(Item("root/branch")), default).GetAwaiter().GetResult();
         await writer.CompleteAsync();
         Check.Require(store.ScanEntry(Pair, side, PathNames.Key(child.Path)) is null,
-            "ordinary reopened scans remove replaced-folder descendants unlike begun-empty plan captures");
+            "ordinary reopened scans remove replaced-folder descendants");
         using var isolated = store.OpenFolderPlan(Pair, Folder(side), side);
         await isolated.CaptureAsync(Source([Present(Item("root/private"))]), CancellationToken.None);
         Check.Require(store.ScanEntry(Pair, side, PathNames.Key("root/branch")) is { IsFolder: false } &&
@@ -827,6 +838,30 @@ public static class StoredFolderPlanChecks
                 "an adjacent prefix does not overlap a protected binding");
         }
         store.ForgetAllSynced(Pair);
+        var selected = new[] { "root/first", "root/second" };
+        store.Commit(Pair, StateChange.Empty with { Record = selected.Select((path, index) =>
+            side == Side.Local ? Saved(path, "mapped/branch" + index, true) :
+                Saved("mapped/branch" + index, path, true)).ToArray() });
+        using (var partial = store.OpenFolderPlan(Pair, Folder(side), side))
+        {
+            await partial.CaptureAsync(Source([Present(Item(selected[0], true)), Present(Item(selected[1], true)), Present(Item("root/keep"))]), default);
+            foreach (var child in partial.Children(default))
+            {
+                if (child.Entry!.Path == "root/keep")
+                    partial.MarkClassified(child.Key, child.NativeKey,
+                        new FolderChild(child.Entry, child.Synced, FolderVerdict.Survives), true, default);
+                else MarkRemoved(partial, child);
+            }
+            partial.PrepareBranches(default);
+            foreach (var branch in partial.RemovedChildren(default)) partial.SelectBranch(branch.Id, default);
+            partial.Complete(deleteWhole: false, default);
+            Check.Require(!partial.ForgetTouchesUnreadable(default), "completed partial plan is clear without members");
+            var member = side == Side.Local ? "root/second/blocked" : "mapped/branch1/blocked";
+            Check.Require(Guards(store, partial, member), "partial guard reaches the second selected mapped root");
+            Check.Require(partial.FrozenEvidence(10, default).Count() == 3,
+                "partial guard preserves the completed plan and its survivor");
+        }
+        store.ForgetAllSynced(Pair);
         using var unsaved = store.OpenFolderPlan(Pair, Folder(side), side);
         await unsaved.CaptureAsync(Source([]), CancellationToken.None);
         Complete(unsaved);
@@ -880,7 +915,7 @@ public static class StoredFolderPlanChecks
         {
             await plan.CaptureAsync(Source([Present(Item("root/stale"))]), CancellationToken.None);
             Complete(plan);
-            planPath = Directory.EnumerateFiles(directory, "*.plan").Single(path => path != sentinel);
+            planPath = Directory.EnumerateFiles(directory, "*.plan*.db").Single();
             File.SetAttributes(planPath, File.GetAttributes(planPath) | FileAttributes.ReadOnly);
         }
         finally
@@ -890,23 +925,22 @@ public static class StoredFolderPlanChecks
         try
         {
             Check.Require(File.Exists(planPath), "a refused cleanup leaves owned scratch without failing completed work");
-            Throws<UnauthorizedAccessException>(() => store.OpenFolderPlan(Pair, Folder(Side.Local), Side.Local));
+            using var second = store.OpenFolderPlan(Pair, Folder(Side.Local), Side.Local);
+            await second.CaptureAsync(Source([Present(Item("root/fresh"))]), CancellationToken.None);
+            var secondPath = Directory.EnumerateFiles(directory, "*.plan*.db").Single(path => path != planPath);
+            Check.Require(second.Entries(CancellationToken.None).Single().Path == "root/fresh" && File.Exists(planPath),
+                "a new plan has independent inventory while an earlier plan's cleanup remains refused");
+            second.Dispose();
+            Check.Require(!File.Exists(secondPath) && File.Exists(planPath),
+                "normal disposal deletes only its own plan file");
         }
         finally
         {
             File.SetAttributes(planPath, FileAttributes.Normal);
         }
-        using (var second = store.OpenFolderPlan(Pair, Folder(Side.Local), Side.Local))
-        {
-            await second.CaptureAsync(Source([Present(Item("root/fresh"))]), CancellationToken.None);
-            Check.Require(second.Entries(CancellationToken.None).Single().Path == "root/fresh",
-                "the next plan in the same run deletes failed-disposal leftovers before opening");
-        }
-        Check.Require(!File.Exists(planPath), "normal disposal deletes its own plan file");
-        File.WriteAllText(planPath, "incomplete crash scratch");
         store.BeginScan(Pair, Generation(store), includeDeleted: false);
-        Check.Require(!File.Exists(planPath) && File.ReadAllText(sentinel) == "unowned",
-            "scan reset discards owned crash scratch and preserves foreign files");
+        Check.Require(File.Exists(planPath) && File.ReadAllText(sentinel) == "unowned",
+            "scan reset preserves independently owned plan scratch and foreign files");
 
         const string otherPair = "other-plan-pair";
         store.SavePair(Config(directory, otherPair));
@@ -921,8 +955,9 @@ public static class StoredFolderPlanChecks
         }
         File.WriteAllText(planPath, "leftover after drained operation");
         store.RemovePair(Pair);
-        Check.Require(!File.Exists(planPath) && File.ReadAllText(sentinel) == "unowned",
-            "pair removal after plans drain removes only its owned leftover");
+        Check.Require(File.Exists(planPath) && File.ReadAllText(sentinel) == "unowned",
+            "pair removal does not sweep independent plan leftovers or foreign files");
+        File.Delete(planPath);
         File.Delete(sentinel);
     }
 
@@ -938,7 +973,7 @@ public static class StoredFolderPlanChecks
             {
                 await abandoned.CaptureAsync(Source([Present(Item("root/stale"))]), CancellationToken.None);
                 Complete(abandoned);
-                planPath = Directory.EnumerateFiles(directory, "preview.db*.plan").Single();
+                planPath = Directory.EnumerateFiles(directory, "preview.db.plan*.db").Single();
                 File.SetAttributes(planPath, FileAttributes.ReadOnly);
             }
             finally
@@ -950,7 +985,7 @@ public static class StoredFolderPlanChecks
         var before = File.ReadAllBytes(database);
         var durableSidecars = new[] { database + "-wal", database + "-shm" };
         var filesBefore = Directory.EnumerateFiles(directory)
-            .Where(path => path != planPath && !durableSidecars.Contains(path, StringComparer.Ordinal))
+            .Where(path => !durableSidecars.Contains(path, StringComparer.Ordinal))
             .OrderBy(path => path, StringComparer.Ordinal).ToArray();
         File.SetAttributes(database, FileAttributes.ReadOnly);
         try
@@ -961,10 +996,10 @@ public static class StoredFolderPlanChecks
                 await preview.CaptureAsync(Source([Present(Item("root", true)), Present(Item("root/preview"))]), CancellationToken.None);
                 Check.Require(preview.Entries(CancellationToken.None).Select(entry => entry.Path)
                     .SequenceEqual(["root", "root/preview"]),
-                    "read-only preview deletes crash leftovers and captures writable disposable inventory including its root");
+                    "read-only preview captures independent writable disposable inventory including its root");
             }
-            Check.Require(!File.Exists(planPath) && File.ReadAllBytes(database).SequenceEqual(before),
-                "preview removes scratch without changing the read-only durable database bytes");
+            Check.Require(File.Exists(planPath) && File.ReadAllBytes(database).SequenceEqual(before),
+                "preview preserves older plan scratch without changing the read-only durable database bytes");
         }
         finally
         {
@@ -974,6 +1009,7 @@ public static class StoredFolderPlanChecks
         Check.Require(Directory.EnumerateFiles(directory).Where(path => !durableSidecars.Contains(path, StringComparer.Ordinal))
                 .OrderBy(path => path, StringComparer.Ordinal).SequenceEqual(filesBefore),
             "read-only preview creates no lasting scan, journal or metadata file");
+        File.Delete(planPath);
     }
 
     private static async Task<FolderPlan> BuildAsync(IStateStore store, Row folder, Side side,
@@ -1003,7 +1039,8 @@ public static class StoredFolderPlanChecks
             BeginDownloadAttempt: source => new RequestAttempt(source, AttemptOwner.Transfer),
             CompleteDownloadAttemptAsync: (_, _) => Task.FromResult(false),
             UploadAdmissionIdentity: (AccountId: "account", RouteName: "route", SourceIdentity: "source"),
-            ItemAttempts: new UnusedItemAttempts(), Opportunity: new object(), ExpectedGeneration: Generation(store));
+            ItemAttempts: new UnusedItemAttempts(), Opportunity: new object(), ExpectedGeneration: Generation(store))
+        { ScanId = ScanFixture.Token(store, Pair) };
         return await new FolderPlanBuilder(context).BuildAsync(folder, side, new HashSet<string>(), false, CancellationToken.None);
     }
 
@@ -1015,7 +1052,7 @@ public static class StoredFolderPlanChecks
 
     private static void RefuseFailedCapture(FolderPlan plan, string directory)
     {
-        Check.Require(!Directory.EnumerateFiles(directory, "*.plan").Any(), "failed capture discards its scratch");
+        Check.Require(!Directory.EnumerateFiles(directory, "*.plan*.db").Any(), "failed capture discards its scratch");
         Reject(() => plan.Entries(CancellationToken.None).ToArray());
         Reject(() => plan.Children(CancellationToken.None).ToArray());
         Reject(() => plan.Complete(true, CancellationToken.None));

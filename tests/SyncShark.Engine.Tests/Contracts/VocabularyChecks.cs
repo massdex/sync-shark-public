@@ -89,8 +89,9 @@ public static class VocabularyChecks
                     nameof(ResolutionChoice.KeepLocal), nameof(ResolutionChoice.KeepDropbox),
                     nameof(ResolutionChoice.RenameLocal), nameof(ResolutionChoice.RenameDropbox),
                     nameof(ResolutionChoice.Retry), nameof(ResolutionChoice.FirstSync),
-                    nameof(ResolutionChoice.SyncNormally), nameof(ResolutionChoice.KeepFolderAlways)],
-            "the choices append Retry, FirstSync, SyncNormally and KeepFolderAlways; no Stop or removal choice is added");
+                    nameof(ResolutionChoice.SyncNormally), nameof(ResolutionChoice.KeepFolderAlways),
+                    nameof(ResolutionChoice.BindRoots), nameof(ResolutionChoice.Ignore), nameof(ResolutionChoice.Unignore)],
+            "visibility choices append Ignore and Unignore without changing existing choices");
         Check.Require(Enum.GetValues<ResolutionChoice>().Select((choice, ordinal) => (int)choice == ordinal)
                 .All(kept => kept),
             "no existing choice is renumbered and the new choices continue the ordinals");

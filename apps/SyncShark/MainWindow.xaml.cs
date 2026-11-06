@@ -491,6 +491,20 @@ public partial class MainWindow : Window
         tabs.Items.Add(new TabItem { Header = EngineCliCatalog.Rows.Single(row =>
             EngineCliCatalog.CommandKey(row.Command) == EngineCommandKey.Issues).Command,
             Content = WorkspaceVisuals.Detach(ConflictGrid) });
+        var ignoredTab = new TabItem { Header = EngineText.Get(EngineTextKey.IgnoredLabel) };
+        tabs.Items.Add(ignoredTab);
+        tabs.SelectionChanged += async (_, e) =>
+        {
+            if (!ReferenceEquals(e.Source, tabs)) return;
+            var ignored = ReferenceEquals(tabs.SelectedItem, ignoredTab);
+            if (_engineIgnored == ignored) return;
+            _engineIgnored = ignored;
+            var activeTab = (TabItem)tabs.Items[0];
+            activeTab.Content = null;
+            ignoredTab.Content = null;
+            (ignored ? ignoredTab : activeTab).Content = ConflictGrid;
+            await RefreshEnginePresentationAsync();
+        };
         tabs.Items.Add(new TabItem { Header = EngineCliCatalog.Rows.Single(row =>
             EngineCliCatalog.CommandKey(row.Command) == EngineCommandKey.Recovery).Command,
             Content = BuildEngineRecoveryPresentation() });
@@ -736,8 +750,10 @@ public partial class MainWindow : Window
             if (_closing || version != _engineRefreshVersion) return;
             PhaseText.Text = status.RenderHuman();
             if (pair is null) return;
+            var options = new List<(EngineOptionKey Key, string Value)> { (EngineOptionKey.Pair, pair.Id) };
+            if (_engineIgnored) options.Add((EngineOptionKey.Ignored, string.Empty));
             var issues = await EngineRequestAsync<Massdex.SyncShark.Engine.Edge.Results.IssuesResult>(EngineCommandKey.Issues,
-                (EngineOptionKey.Pair, pair.Id));
+                options.ToArray());
             if (_closing || version != _engineRefreshVersion || !ReferenceEquals(pair, _engineSelectedPair)) return;
             if (issues.PairId != pair.Id) throw new InvalidDataException(EngineText.Get(EngineTextKey.ResolveSubjectStale));
             ApplyEngineIssues(pair.Id, pair.Name, issues.Issues,

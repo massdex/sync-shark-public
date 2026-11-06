@@ -43,9 +43,14 @@ public static class IssueSubjectChecks
     }
 
     private static void Same(IReadOnlyList<IssueItem> left, IReadOnlyList<IssueItem> right, bool expected,
-        string what) =>
-        Check.Require(new IssueSubject(left, null).HasSameItems(new IssueSubject(right, null)) == expected,
-            "HasSameItems: " + what);
+        string what)
+    {
+        var a = new IssueSubject(left, null);
+        var b = new IssueSubject(right, Side.Dropbox);
+        Check.Require(a.HasSameItems(b) == expected, "HasSameItems: " + what);
+        Check.Require(new HashSet<IssueSubject>(IssueSubject.ItemSetComparer) { a }.Contains(b) == expected,
+            "indexed item equality: " + what);
+    }
 
     private static void DistinctConstruction()
     {

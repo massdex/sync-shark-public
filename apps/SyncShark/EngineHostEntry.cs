@@ -297,9 +297,9 @@ internal static class EngineHostEntry
     {
         // The platform wake source registers its signals in its constructor, before any current-state inspection.
         using var wake = new SystemWakeSource();
-        using var acceptStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         await using var host = EngineHost.Compose(productRoot, IgnoreProgress, stateAuthority,
             EngineHost.Mode.Persistent);
+        using var acceptStop = CancellationTokenSource.CreateLinkedTokenSource(ct, host.Stopping);
         host.BindStopSupervision(() =>
         {
             // The admitted safe stop ends supervision first, then this host drains and releases its own resources.
@@ -341,7 +341,7 @@ internal static class EngineHostEntry
                     connected.Dispose();
                     continue;
                 }
-                connections[++id] = server.ServeAsync(connected, CancellationToken.None);
+                connections[++id] = server.ServeAsync(connected, acceptStop);
             }
         }
         catch (OperationCanceledException) when (acceptStop.IsCancellationRequested) { }

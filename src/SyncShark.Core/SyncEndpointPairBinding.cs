@@ -62,7 +62,7 @@ public sealed partial class SyncAuthorityRuntimeHost
     }
 
     /// <summary>
-    /// the normal endpoint-authoring core WITHOUT the configuration-mutation gate, so the composed
+    /// The normal endpoint-authoring core WITHOUT the configuration-mutation gate, so the composed
     /// shared recovery entry can hold the SAME existing gate across its whole validation/retention/publication
     /// flow without re-entering it. The public BindEndpointPairAsync acquires the gate exactly once and delegates
     /// here; every normal caller path is unchanged.

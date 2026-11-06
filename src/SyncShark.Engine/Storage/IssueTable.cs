@@ -114,15 +114,23 @@ public static class IssueTable
     /// <summary>Deletes one issue with its member associations only while the stored row still equals expected.
     /// False means it changed, is gone or stays retained by its owner, and nothing was written.</summary>
     internal static bool CloseExact(SqliteConnection connection, SqliteTransaction transaction, string pairId,
-        Issue expected)
+        Issue expected, bool acknowledgeFirstRun = false)
     {
         var stored = ReadOne(connection, transaction, StateSchema.SelectIssueById,
             (StateSchema.ParamPair, pairId), (StateSchema.ParamId, expected.Id));
-        if (stored is null || stored with { Subject = expected.Subject } != expected ||
+        if (stored is null || stored with { Subject = expected.Subject, Ignored = expected.Ignored } != expected ||
             stored.Subject.Incoming != expected.Subject.Incoming || !stored.Subject.HasSameItems(expected.Subject) ||
             stored.Subject.LocalHash != expected.Subject.LocalHash ||
             stored.Subject.FirstRunDeletion != expected.Subject.FirstRunDeletion)
             return false;
+        if (acknowledgeFirstRun && HasFirstRunWork(stored))
+        {
+            foreach (var item in stored.Subject.Items.Where(item => item.Side == Side.Local))
+                AcknowledgeFirstRun(connection, transaction, pairId, item);
+            stored = ReadOne(connection, transaction, StateSchema.SelectIssueById,
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamId, expected.Id));
+            if (stored is null) return true;
+        }
         return DeleteIssue(connection, transaction, pairId, stored);
     }
 
@@ -153,7 +161,7 @@ public static class IssueTable
     /// seam for proving the shared snapshot.</summary>
     public static (IReadOnlyList<(string PairId, Issue Issue)> Page, int Total) OpenPage(SqliteConnection connection,
         string? pairId, string? account, string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset,
-        Action? between = null)
+        Action? between = null, bool ignored = false)
     {
         connection.CreateFunction(StateSchema.PathContainsFunction,
             (string path, string text) => PathNames.Contains(path, text), isDeterministic: true);
@@ -167,17 +175,17 @@ public static class IssueTable
                 using var command = connection.CreateCommand();
                 command.Transaction = transaction;
                 command.CommandText = StateSchema.SelectIssuePage;
-                BindPageFilter(command, pairId, account, search, kinds, limit, offset);
+                BindPageFilter(command, pairId, account, search, kinds, limit, offset, ignored);
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
-                    page.Add((reader.GetString(StateSchema.IssueDismissed + 1), ReadIssue(reader)));
+                    page.Add((reader.GetString(StateSchema.IssueIgnored + 1), ReadIssue(reader)));
             }
             between?.Invoke();
             using (var count = connection.CreateCommand())
             {
                 count.Transaction = transaction;
                 count.CommandText = StateSchema.CountIssuePage;
-                BindPageFilter(count, pairId, account, search, kinds, null, null);
+                BindPageFilter(count, pairId, account, search, kinds, null, null, ignored);
                 total = checked((int)(long)count.ExecuteScalar()!);
             }
             transaction.Commit();
@@ -190,7 +198,7 @@ public static class IssueTable
     /// one snapshot, so a concurrent commit can neither hide a notice behind a reused issue id nor make the count
     /// disagree with the rows. `between` is the one test reader's seam for proving the shared snapshot.</summary>
     public static (IReadOnlyList<(string PairId, Issue Issue)> Rows, int Total) PageSnapshot(
-        SqliteConnection connection, IReadOnlyList<IssueKind>? kinds, int pageSize, Action? between = null)
+        SqliteConnection connection, IReadOnlyList<IssueKind>? kinds, int pageSize, Action? between = null, bool ignored = false)
     {
         connection.CreateFunction(StateSchema.PathContainsFunction,
             (string path, string text) => PathNames.Contains(path, text), isDeterministic: true);
@@ -200,7 +208,7 @@ public static class IssueTable
             // Ids strictly increase, so each page advances the key and a short page ends the traversal.
             for (var after = 0L; pageSize > 0;)
             {
-                var page = PageAfter(connection, transaction, after, kinds, pageSize);
+                var page = PageAfter(connection, transaction, after, kinds, pageSize, ignored);
                 rows.AddRange(page);
                 between?.Invoke();
                 if (page.Count < pageSize) break;
@@ -209,7 +217,7 @@ public static class IssueTable
             using var count = connection.CreateCommand();
             count.Transaction = transaction;
             count.CommandText = StateSchema.CountIssuePage;
-            BindPageFilter(count, null, null, null, kinds, null, null);
+            BindPageFilter(count, null, null, null, kinds, null, null, ignored);
             var total = checked((int)(long)count.ExecuteScalar()!);
             transaction.Commit();
             return (rows, total);
@@ -217,22 +225,23 @@ public static class IssueTable
     }
 
     private static IReadOnlyList<(string PairId, Issue Issue)> PageAfter(SqliteConnection connection,
-        SqliteTransaction transaction, long after, IReadOnlyList<IssueKind>? kinds, int limit)
+        SqliteTransaction transaction, long after, IReadOnlyList<IssueKind>? kinds, int limit, bool ignored)
     {
         using var command = StorageCommand.Create(connection, transaction, StateSchema.SelectIssuePageAfter,
-            (StateSchema.ParamAfter, after),
+            (StateSchema.ParamAfter, after), (StateSchema.ParamIgnored, ignored),
             (StateSchema.ParamKinds, kinds is null ? DBNull.Value : JsonSerializer.Serialize(kinds)),
             (StateSchema.ParamLimit, limit));
         var rows = new List<(string, Issue)>();
         using var reader = command.ExecuteReader();
         while (reader.Read())
-            rows.Add((reader.GetString(StateSchema.IssueDismissed + 1), ReadIssue(reader)));
+            rows.Add((reader.GetString(StateSchema.IssueIgnored + 1), ReadIssue(reader)));
         return rows;
     }
 
     private static void BindPageFilter(SqliteCommand command, string? pairId, string? account, string? search,
-        IReadOnlyList<IssueKind>? kinds, int? limit, int? offset)
+        IReadOnlyList<IssueKind>? kinds, int? limit, int? offset, bool ignored)
     {
+        command.Parameters.AddWithValue(StateSchema.ParamIgnored, ignored);
         command.Parameters.AddWithValue(StateSchema.ParamPair, (object?)pairId ?? DBNull.Value);
         command.Parameters.AddWithValue(StateSchema.ParamAccount, (object?)account ?? DBNull.Value);
         command.Parameters.AddWithValue(StateSchema.ParamKinds,
@@ -269,7 +278,7 @@ public static class IssueTable
     /// observation touched during this scan. One item has one notice: spellings of the same frozen key (a listing's
     /// spelling and a destructive walk's, for example) are one group, and a stored spelling keeps its notice.</summary>
     public static void ReplaceSkipped(SqliteConnection connection, SqliteTransaction transaction, string pairId,
-        long pair, IEnumerable<(string Path, TextKey Cause, IssueSubject Subject)> skipped, DateTimeOffset now)
+        long pair, byte[] scanId, IEnumerable<(string Path, TextKey Cause, IssueSubject Subject)> skipped, DateTimeOffset now)
     {
         var wanted = skipped.GroupBy(entry => PathNames.Key(entry.Path), StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
@@ -284,11 +293,11 @@ public static class IssueTable
         {
             var key = PathNames.Key(path);
             if (pathsByKey.ContainsKey(key) || !wanted.ContainsKey(key))
-                ReconcileSkip(connection, transaction, pairId, pair, path, [], now);
+                ReconcileSkip(connection, transaction, pairId, pair, scanId, path, [], now);
             else pathsByKey.Add(key, path);
         }
         foreach (var group in wanted)
-            ReconcileSkip(connection, transaction, pairId, pair,
+            ReconcileSkip(connection, transaction, pairId, pair, scanId,
                 pathsByKey.GetValueOrDefault(group.Key) ?? group.Value[0].Path, group.Value, now);
     }
 
@@ -397,10 +406,11 @@ public static class IssueTable
             (StateSchema.ParamPair, pairId), (StateSchema.ParamId, id), (StateSchema.ParamKind, (int)IssueKind.Info));
 
     /// <summary>Counts non-dismissed issues without decoding subjects, omitting zero-count kinds.</summary>
-    public static IReadOnlyDictionary<IssueKind, int> Counts(SqliteConnection connection, string pairId)
+    public static IReadOnlyDictionary<IssueKind, int> Counts(SqliteConnection connection, string pairId, bool? ignored = null)
     {
         var counts = new Dictionary<IssueKind, int>();
-        using var command = StorageCommand.Create(connection, null, StateSchema.CountIssues, (StateSchema.ParamPair, pairId));
+        using var command = StorageCommand.Create(connection, null, StateSchema.CountIssues, (StateSchema.ParamPair, pairId),
+            (StateSchema.ParamIgnored, ignored));
         using var reader = command.ExecuteReader();
         while (reader.Read())
             counts.Add((IssueKind)reader.GetInt64(StateSchema.IssueCountKind),
@@ -539,11 +549,11 @@ public static class IssueTable
     }
 
     private static void ReconcileSkip(SqliteConnection connection, SqliteTransaction transaction, string pairId,
-        long pair, string path, IEnumerable<(string Path, TextKey Cause, IssueSubject Subject)> entries,
+        long pair, byte[] scanId, string path, IEnumerable<(string Path, TextKey Cause, IssueSubject Subject)> entries,
         DateTimeOffset now) => MergeSkip(connection, transaction, pairId, pair, path, (side, key, current) =>
         {
             using var touched = StorageCommand.Create(connection, transaction, StateSchema.SkipTouched,
-                (StateSchema.ParamPairRow, pair), (StateSchema.ParamSide, (int)side), (StateSchema.ParamPath, key));
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamScan, scanId), (StateSchema.ParamSide, (int)side), (StateSchema.ParamPath, key));
             return (long)touched.ExecuteScalar()! != 0 ? current : SideOf(entries, side);
         }, now);
 
@@ -842,5 +852,6 @@ public static class IssueTable
         StateEncoding.ReadEnum<TextKey>(reader, StateSchema.IssueCause), reader.GetString(StateSchema.IssuePath),
         StateEncoding.Decode<IssueSubject>(reader.GetString(StateSchema.IssueSubject)),
         StateEncoding.ReadTime(reader, StateSchema.IssueAt),
-        StateEncoding.ReadBool(reader, StateSchema.IssueDismissed));
+        StateEncoding.ReadBool(reader, StateSchema.IssueDismissed),
+        StateEncoding.ReadBool(reader, StateSchema.IssueIgnored));
 }

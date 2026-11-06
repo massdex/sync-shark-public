@@ -376,12 +376,15 @@ function New-RollbackTestRoot([string]$Name) {
     $fixture
 }
 
-function Assert-RollbackRejectedUnchanged([string]$Case, [object]$Fixture) {
+function Assert-RollbackRejectedUnchanged([string]$Case, [object]$Fixture, [string]$ExpectedReason='') {
+    $dataRoot = Resolve-SyncSharkDataRoot $Fixture.Root
+    $dataBefore = Get-RootManifest $dataRoot
     $before = Get-RootManifest $Fixture.Root
     $run = Invoke-Rollback $Fixture.Root $Fixture.Observation
     if ($run.ExitCode -eq 0) { throw "Rejected rollback case was accepted: $Case" }
+    if ($ExpectedReason -and -not $run.Stderr.Contains($ExpectedReason)) { throw "Wrong rollback rejection for ${Case}: $($run.Stderr)" }
     $after = Get-RootManifest $Fixture.Root
-    if ($after -cne $before) { throw "Rejected rollback case mutated the product root: $Case" }
+    if ($after -cne $before -or (Get-RootManifest $dataRoot) -cne $dataBefore) { throw "Rejected rollback case mutated installation or data: $Case" }
     $beforeBytes = [Text.UTF8Encoding]::new($false).GetBytes($before)
     $afterBytes = [Text.UTF8Encoding]::new($false).GetBytes($after)
     $results.Add([ordered]@{
@@ -656,7 +659,7 @@ function New-Journal([string]$Root, [string[]]$Completed = @(), [string]$Pending
     [pscustomobject]@{
         schema = 1; operation = 'install'; version = '0.3.21'; commit = $SourceCommit
         product_root = [IO.Path]::GetFullPath($Root); status = 'active'; pending = $Pending
-        completed = $Completed; allowed_steps = @('stage-package', 'publish-runtime', 'backup-state', 'create-next-link', 'retain-predecessor', 'publish-successor', 'verify-complete')
+        completed = $Completed; allowed_steps = @('stage-package', 'publish-runtime', 'backup-state', 'create-next-link', 'retain-predecessor', 'publish-successor', 'register-explorer-package', 'register-application', 'verify-complete')
         artifacts = [pscustomobject]@{ state_predecessor_sha256 = $null }
     }
 }
@@ -794,10 +797,26 @@ $transaction = Join-Path $fixture.Root ('replacement-staging\transactions\0.3.21
 [IO.File]::AppendAllText((Join-Path $transaction 'state.predecessor\state\state.txt'), 'tamper')
 Assert-RollbackRejectedUnchanged 'rollback-journal-reject/predecessor-state-backup-mismatch' $fixture
 
-$fixture = New-RollbackTestRoot 'rollback-unexpected-successor-artifact'
-$transaction = Join-Path $fixture.Root ('replacement-staging\transactions\0.3.21-' + $SourceCommit.Substring(0, 7))
-New-Item -ItemType Directory -Path (Join-Path $transaction 'state.successor') | Out-Null
-Assert-RollbackRejectedUnchanged 'rollback-journal-reject/unexpected-successor-state-artifact' $fixture
+foreach ($redirected in @($false,$true)) {
+    $fixture = New-RollbackTestRoot 'rollback-unexpected-successor-artifact'
+    if ($redirected) {
+        $dataRoot = Join-Path $testBase ('rollback-data-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $dataRoot | Out-Null
+        foreach ($relative in @('state','vNext','engine')) {
+            $source = Join-Path $fixture.Root $relative
+            if (Test-Path -LiteralPath $source) { Move-Item -LiteralPath $source -Destination (Join-Path $dataRoot $relative) }
+        }
+        [IO.File]::WriteAllText((Join-Path $fixture.Root 'product-root.txt'), $dataRoot + [Environment]::NewLine)
+    }
+    $transaction = Join-Path (Resolve-SyncSharkDataRoot $fixture.Root) ('replacement-staging\rollback-0.3.21-' + $SourceCommit.Substring(0, 7))
+    $unexpected = Join-Path $transaction 'state.successor'
+    New-Item -ItemType Directory -Path $unexpected -Force | Out-Null
+    Assert-RollbackRejectedUnchanged ('rollback-journal-reject/unexpected-successor-state-artifact/redirected-' + $redirected) $fixture ('Unexpected rollback artifact: ' + $unexpected)
+    Remove-Item -LiteralPath $unexpected
+    $control = Invoke-Rollback $fixture.Root $fixture.Observation
+    if ($control.ExitCode -ne 0) { throw "Successor-artifact removal control failed: $($control.Stderr)" }
+    $results.Add([ordered]@{case=('rollback-successor-artifact-removal-control/redirected-' + $redirected);result='allowed-after-removing-only-artifact'})
+}
 
 $escapeRoot = Join-Path $testBase ('escape-source-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $escapeRoot | Out-Null

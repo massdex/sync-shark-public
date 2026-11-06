@@ -147,7 +147,7 @@ public static partial class CallBudgetChecks
             Console.WriteLine($"READPROVIDER live={shape.Items} deleted={deleted} pages={handler.Pages} response_bytes={handler.Bytes} elapsed_ms={completeMs:F3} response_generation_ms={handler.GenerationMs:F3} allocated_bytes={GC.GetTotalAllocatedBytes(true)-allocated}");
             Console.WriteLine($"READPROVIDER pipeline={save} modeled_page_delay_ms={delayMs} measured_delay_ms={handler.DelayMs:F3} produced_ms={producedMs:F3} final_drain_ms={completeMs-producedMs:F3} sampled_peak_channel={peakQueued} channel_at_producer_end={queuedAtEnd}");
             Console.WriteLine($"READPROVIDER known_history_parents={knownParents} last_http_response_ms={handler.LastResponseMs:F3} peak_waiting_entries={peakWaiting} process_managed_heap_at_peak_waiting={heapAtPeakWaiting}");
-            Check.Require(peakWaiting == (knownParents ? 0 : deleted), "the two history shapes expose their expected spelling backlog");
+            Check.Require(peakWaiting == 0, "both history shapes stream tombstones without a spelling backlog");
             // Channel counts exclude the batch already removed by SaveLoopAsync for writing.
             if (store is not null)
             {

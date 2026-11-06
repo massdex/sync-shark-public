@@ -302,7 +302,7 @@ public sealed partial class SyncAuthorityRuntimeHost
 
         // CC4AHOST-3/4: read the candidate from its own provider, then register it through the existing
         // transaction with the complete retained set rechecked.
-        // read BOTH fresh provider-issued candidate hierarchies BEFORE registering either root, and
+        // Read BOTH fresh provider-issued candidate hierarchies BEFORE registering either root, and
         // register the pair's two cloud roots through ONE narrow guarded ATOMIC two-sided operation, so the
         // unchanged proof resolver can see both genuine DB-held identities for an opaque corresponding pair.
         var leftCandidate = await ReadCandidateHierarchyAsync(left, request.LeftRootBindingId, cancellationToken);

@@ -270,7 +270,9 @@ internal sealed class Monitor : IAsyncDisposable
     private async Task RunPairAsync(string pairId, CancellationToken ct)
     {
         try { await _host.RunPrerequisiteAsync(pairId, ct).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        // The attempt owner classified this stop and the attempt's own log holds its diagnosis, so the scheduler
+        // reports no failure for it; any other outcome stays diagnostic.
+        catch (PrerequisiteStoppedException) { }
         catch (Exception error)
         {
             // The host has already accounted for the attempt; this is diagnostic, never a second failure report.

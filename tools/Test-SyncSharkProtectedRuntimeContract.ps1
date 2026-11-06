@@ -70,7 +70,7 @@ function Contract {
 }
 $version=$releaseVersion+'+'+$revision
 $valid=Contract;$members=Assert-SyncSharkProtectedRuntimeContract $valid $version
-Check ($members.Count -eq 17 -and $members.ContainsKey('Assets/SyncShark-64.png')) 'Exact complete code/dependency/logo contract admitted by production predicate'
+Check ($members.Count -eq 18 -and $members.ContainsKey('Assets/SyncShark-64.png') -and $members.ContainsKey('tools/SyncShark.Uninstall.ps1')) 'Exact complete code/dependency/logo/uninstall contract admitted by production predicate'
 foreach($template in @('Install-SyncShark.ps1.template','Rollback-SyncShark.ps1.template')) {
     $tokens=$null;$errors=$null
     $rendered=Expand-SyncSharkReleaseTemplate ([IO.File]::ReadAllText((Join-Path $PSScriptRoot $template))) $metadata ((Contract)|ConvertTo-Json -Depth 6 -Compress)

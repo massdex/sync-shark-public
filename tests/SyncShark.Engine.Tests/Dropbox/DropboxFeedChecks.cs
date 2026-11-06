@@ -68,6 +68,7 @@ public static class DropboxFeedChecks
         await LongpollBackoffAsync();
         await SignalledCursorDrainsAsync();
         await ListenerFailuresAsync();
+        await FiniteFailuresAsync();
         await ResetAndGenerationAsync();
         await ExpiredCursorAsync();
     }
@@ -402,6 +403,57 @@ public static class DropboxFeedChecks
             Check.Require(error is DropboxApiException && permanent.Registrations.Count == 0 &&
                 permanent.Handler.Requests.Count == FirstPageRequest + 1,
                 "A permanent listener failure surfaces its one classified result and registers no automatic resend.");
+        }
+    }
+
+    private static async Task FiniteFailuresAsync()
+    {
+        foreach (var capture in new[] { false, true })
+        foreach (var permanent in new[] { false, true })
+        {
+            using var fixture = new Fixture();
+            var failedRequest = capture ? FirstRequest : FirstPageRequest;
+            fixture.Handler.Reply = (ordinal, _, _) => ordinal == failedRequest
+                ? Error(permanent ? HttpStatusCode.Conflict : HttpStatusCode.InternalServerError,
+                    permanent ? "path/not_found/.." : "internal_error/..")
+                : capture && ordinal == FirstRequest + 1 || !capture && ordinal == FirstRequest
+                    ? Json(new { cursor = CursorZero })
+                    : Page(false, CursorOne);
+            Exception? failure = null;
+            var catchingUp = fixture.Feed.CatchUpAsync(fixture.Stop.Token);
+            for (var step = 0; step < DriveSteps && !catchingUp.IsCompleted; step++)
+            {
+                await Task.Yield();
+                fixture.Time.Advance(Tick);
+            }
+            Check.Require(catchingUp.IsCompleted, "Finite retry completes without a background deadline dispatcher.");
+            try { await catchingUp; }
+            catch (Exception error) { failure = error; }
+            if (permanent)
+            {
+                Check.Require(failure is DropboxApiException && fixture.Registrations.Count == 0 &&
+                    fixture.Handler.Requests.Count == failedRequest,
+                    "A permanent finite feed failure surfaces without a reconnect or a silent retry loop.");
+                continue;
+            }
+            Check.Require(fixture.Registrations.Count == 0,
+                "A finite retry does not depend on a background listener deadline dispatcher.");
+            if (!capture)
+            {
+                Check.Require(failure is LiveAdmissionStaleException && fixture.Acquires.Count == 0 &&
+                    StoredSource(fixture).Cursor == CursorZero,
+                    "A failed finite page holds admission and preserves the unpublished cursor.");
+                await fixture.Feed.CatchUpAsync(fixture.Stop.Token);
+                var pages = fixture.Handler.Requests.Where(request => IsContinue(request.Path)).ToArray();
+                Check.Require(pages.Length == 2 && pages.All(request => CursorOf(request.Body) == CursorZero),
+                    "The next finite opportunity retries only the same unpublished page, not a relist.");
+            }
+            else Check.Require(failure is null, "A transient cursor capture recovers through the existing install loop.");
+            var requests = fixture.Handler.Requests;
+            Check.Require(requests[failedRequest].Sent - requests[failedRequest - 1].Sent >= InitialWait,
+                "The finite retry cannot resend before its adopted listener wait expires.");
+            Check.Require(StoredSource(fixture).Cursor == CursorOne && fixture.Acquires.Count == 1,
+                "Recovered finite acquisition commits the page exactly once.");
         }
     }
 

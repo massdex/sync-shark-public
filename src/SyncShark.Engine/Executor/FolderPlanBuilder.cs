@@ -120,7 +120,7 @@ public sealed class FolderPlanBuilder
             ? unreadable(key)
             : synced is not null ? unreadable(synced.LocalKey) : selectedReplacement && unreadable(key);
         var facts = new FolderChildFacts(
-            selectedReplacement || !live && synced is null && _context.Store.InScan(_context.Pair.PairId, side, key),
+            selectedReplacement || !live && synced is null && _context.ScanId != Guid.Empty && _context.Store.InScan(_context.Pair.PairId, _context.ScanId, side, key),
             inScope, nested, restored.Contains(synced?.LocalKey ?? key), isUnreadable);
         string? localHash = null;
         var dirty = false;

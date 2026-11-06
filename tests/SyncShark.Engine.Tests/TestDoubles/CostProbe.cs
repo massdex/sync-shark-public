@@ -52,6 +52,7 @@ internal sealed class CostProbe : IDisposable
     private const string PlanPairSubquery = "(SELECT id FROM durable_state.pair WHERE pair_id=$p)";
     private readonly sqlite3 _database;
     private readonly delegate_function_scalar _pathKey;
+    private readonly delegate_function_scalar _historyKey;
     private readonly delegate_function_scalar _depth;
     private readonly delegate_function_scalar _mappedSpelling;
     private readonly delegate_function_scalar _localAccessRetryCause;
@@ -70,6 +71,12 @@ internal sealed class CostProbe : IDisposable
         _depth = CountDepth;
         _mappedSpelling = CountMappedSpelling;
         _localAccessRetryCause = CountLocalAccessRetryCause;
+        _historyKey = (context, _, values) =>
+        {
+            Interlocked.Increment(ref _pathKeyCalls);
+            raw.sqlite3_result_text(context, PathNames.DropboxKey(raw.sqlite3_value_text(values[0]).utf8_to_string()));
+        };
+        Register(StateSchema.HistoryKeyFunction, _historyKey);
         Register(StateSchema.PathKeyFunction, _pathKey);
         Register(StateSchema.PlanDepthFunction, _depth);
         Register(StateSchema.MappedSpellingFunction, _mappedSpelling);
@@ -90,7 +97,7 @@ internal sealed class CostProbe : IDisposable
         Execute(StateSchema.Pragmas);
         Execute(StateSchema.Create);
         Execute(StateSchema.SchemaAdditions);
-        Execute(StateSchema.DeletedHistorySchema);
+        Execute(StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory);
         Execute(StateSchema.PublishVersion);
         Execute(StateSchema.CreateIssueFactsTriggers);
     }

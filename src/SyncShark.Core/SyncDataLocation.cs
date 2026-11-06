@@ -1,140 +1,39 @@
-using Massdex.SyncShark.V2;
-using Microsoft.Win32;
-
 namespace Massdex.SyncShark;
 
-/// <summary>Resolves the registered data folder once per process, importing the legacy pointer when needed.</summary>
-public static class SyncDataLocation
+/// <summary>The small installation-side pointer is read once per process, never from the data folder.</summary>
+public static partial class SyncDataLocation
 {
     private static readonly Lazy<string> EffectiveRoot = new(ReadProductRoot);
     private static readonly string DatabaseRelativePath = Path.Combine("vNext", "state", "syncshark.db");
-    public const string EngineFolder = "engine";
-    public const string EngineDatabaseFile = "state.db";
-    public static string EngineDatabasePath(string root) => Path.Combine(root, EngineFolder, EngineDatabaseFile);
-    private const string RegistryPath = @"Software\Massdex\SyncShark";
-    private const string ValueName = "DataLocation";
-    internal static string? RegistryPathForTest { get; set; }
-    internal static string? DefaultRootForTest { get; set; }
-    internal static Action<string>? BeforeRegistrationForTest { get; set; }
-    private static string DefaultRoot => DefaultRootForTest ?? SyncSharkRuntimePaths.InstallationUserRoot;
-    public static string PointerPath => Path.Combine(DefaultRoot, "product-root.txt");
+    public static string PointerPath => Path.Combine(SyncSharkRuntimePaths.InstallationUserRoot, "product-root.txt");
     public static string ProductRoot => EffectiveRoot.Value;
 
     internal static string ReadProductRoot()
     {
-        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        string? configured = null;
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(RegistryPathForTest ?? RegistryPath);
-            var value = key?.GetValue(ValueName, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
-            configured = value?.ToString();
-            if (value is not null)
-            {
-                if (value is not string || key!.GetValueKind(ValueName) != RegistryValueKind.String)
-                    throw new InvalidDataException(EdgeMessages.Text("data-location-value"));
-                return ValidateExistingStore(configured!);
-            }
-            string[]? lines = null;
+            string[] lines;
             try { lines = File.ReadAllLines(PointerPath); }
-            catch (FileNotFoundException) { }
-            catch (DirectoryNotFoundException) { }
-            configured = lines is null ? DefaultRoot : string.Join(Environment.NewLine, lines);
-            if (lines is not null && (lines.Length != 1 || string.IsNullOrWhiteSpace(lines[0])))
-                throw new InvalidDataException(EdgeMessages.Text("data-location-value"));
-            var root = ValidateExistingStore(configured);
-            WriteProductRoot(root);
-            return root;
+            catch (FileNotFoundException) { return SyncSharkRuntimePaths.InstallationUserRoot; }
+            catch (DirectoryNotFoundException) { return SyncSharkRuntimePaths.InstallationUserRoot; }
+            if (lines.Length != 1 || string.IsNullOrWhiteSpace(lines[0]))
+                throw new InvalidDataException("Expected exactly one absolute local folder path.");
+            return ValidateDirectory(lines[0]);
         }
-        catch (Exception error) when (error is InvalidDataException or IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            throw new InvalidDataException(EdgeMessages.Text("data-location-invalid",
-                $"{configured ?? DefaultRoot}: {error.Message}"), error);
+            throw new InvalidDataException($"Invalid Sync Shark data location in '{PointerPath}': {error.Message} Correct the pointer before starting Sync Shark; no fallback location was used.", error);
         }
     }
 
-    private static string ValidateExistingStore(string path)
+    internal static void CheckMoveMarker(PilotStateAuthority authority)
     {
-        var root = ValidateDirectory(path);
-        using var store = new FileStream(EngineDatabasePath(root), FileMode.Open,
-            FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        ReadOnlySpan<byte> signature = "SQLite format 3\0"u8;
-        Span<byte> header = stackalloc byte[signature.Length];
-        store.ReadExactly(header);
-        if (!header.SequenceEqual(signature))
-            throw new InvalidDataException(EdgeMessages.Text("data-location-store-missing"));
-        return root;
-    }
-
-    private static void WriteProductRoot(string root)
-    {
-        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        using var key = Registry.CurrentUser.CreateSubKey(RegistryPathForTest ?? RegistryPath, writable: true);
-        BeforeRegistrationForTest?.Invoke(root);
-        key.SetValue(ValueName, root, RegistryValueKind.String);
-    }
-
-    /// <summary>Explicit setup-only initialization; normal startup never creates a missing store.</summary>
-    public static void InitializeNewStore(string root, Action<string> initialize)
-    {
-        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
-        ArgumentNullException.ThrowIfNull(initialize);
-        root = ValidateDirectory(root);
-        using var key = Registry.CurrentUser.CreateSubKey(RegistryPathForTest ?? RegistryPath, writable: true);
-        if (key.GetValue(ValueName) is not null)
-            throw new InvalidDataException(EdgeMessages.Text("data-location-already-configured"));
-        string? legacy = null;
-        try
-        {
-            var lines = File.ReadAllLines(PointerPath);
-            if (lines.Length != 1) throw new InvalidDataException(EdgeMessages.Text("data-location-value"));
-            legacy = ValidateExistingStore(lines[0]);
-        }
-        catch (FileNotFoundException) when (!File.Exists(PointerPath)) { }
-        catch (DirectoryNotFoundException) when (!File.Exists(PointerPath)) { }
-        catch (Exception error) when (error is InvalidDataException or IOException or ArgumentException or NotSupportedException)
-        {
-            Console.Error.WriteLine(EdgeMessages.Text("data-location-stale-pointer", PointerPath + ": " + error.Message));
-        }
-        if (legacy is not null)
-        {
-            WriteProductRoot(legacy);
-            return;
-        }
-        using var authority = PilotInstanceLock.Acquire(Path.Combine(root, "state", SyncSharkRuntimePaths.InstanceLockFileName));
-        var database = EngineDatabasePath(root);
-        string[] files = [database, database + "-wal", database + "-shm", database + "-journal"];
-        if (key.GetValue(ValueName) is not null || files.Any(File.Exists))
-            throw new InvalidDataException(EdgeMessages.Text("data-location-already-configured"));
-        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
-        // CreateNew establishes ownership before the initializer can write any database bytes.
-        using (new FileStream(database, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
-        try
-        {
-            initialize(root);
-            WriteProductRoot(ValidateExistingStore(root));
-        }
-        catch
-        {
-            foreach (var file in files)
-            {
-                try { File.Delete(file); }
-                catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
-                { Console.Error.WriteLine(EdgeMessages.Text("data-location-cleanup", file + ": " + cleanup.Message)); }
-            }
-            throw;
-        }
-    }
-
-    internal static void CheckMoveMarker(string root)
-    {
-        var marker = Path.Combine(root, "MOVED-TO.txt");
-        if (!File.Exists(marker)) return;
-        var destination = File.ReadAllText(marker).Trim();
-        if (string.Equals(ReadProductRoot(), destination, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("This data folder has moved to " + destination + ". Restart Sync Shark.");
-        File.Delete(marker);
-        Console.Error.WriteLine("Previous data move did not complete; continuing on " + root);
+        RecoverMove(authority);
+        var marker = Path.Combine(authority.ProductRoot, "MOVED-TO.txt");
+        if (!Path.Exists(marker)) return;
+        using var evidence = new MoveEvidence(marker);
+        // A marker without its journal cannot prove ownership for deletion.
+        throw EvidenceChanged();
     }
 
     public sealed record MoveResult(string DataLocation, bool RestartRequired, string Message,
@@ -145,16 +44,25 @@ public static class SyncDataLocation
         if (!result.RestartRequired || result.OldRoot is null) return result.Message;
         try
         {
-            foreach (var entry in result.CopiedEntries ?? [])
-            {
-                var path = Path.Combine(result.OldRoot, entry);
-                if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
-                else if (File.Exists(path)) File.Delete(path);
-            }
-            return result.Message + " Old runtime data removed.";
+            if (!string.Equals(ReadProductRoot(), result.DataLocation, StringComparison.OrdinalIgnoreCase))
+                throw new IOException(MoveText("data-move-stale-result"));
+            using var owner = PilotInstanceLock.AcquireForMaintenance(Path.Combine(result.DataLocation, "state", "instance.lock"));
+            if (!string.Equals(ReadProductRoot(), result.DataLocation, StringComparison.OrdinalIgnoreCase))
+                throw new IOException(MoveText("data-move-stale-result"));
+            return RecoverMove(owner.StateAuthority)
+                ? MoveText("data-move-cleanup-complete", ("message", result.Message))
+                : MoveText("data-move-no-pending-cleanup");
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        { return result.Message + " Old copy not removed at " + result.OldRoot + ": " + error.Message; }
+        catch (Exception error) { return DescribeMoveFailure(result, error); }
+    }
+
+    /// <summary>Classifies a failed action without confusing a no-op or failed cleanup with pointer rollback.</summary>
+    public static string DescribeMoveFailure(MoveResult? observed, Exception error)
+    {
+        if (observed is null) return MoveText("data-move-precommit-failed", ("reason", error.Message));
+        if (!observed.RestartRequired) return MoveText("data-move-noop-finalization-failed", ("reason", error.Message));
+        return MoveText("data-move-cleanup-incomplete", ("location", observed.DataLocation),
+            ("oldRoot", observed.OldRoot ?? string.Empty), ("reason", error.Message));
     }
 
     // Caller must be a quiescent, exclusive lock owner (maintenance process or direct CLI).
@@ -162,14 +70,20 @@ public static class SyncDataLocation
         CancellationToken cancellationToken = default)
     {
         authority.VerifyAuthority();
+        RecoverMove(authority);
         var source = Path.GetFullPath(authority.ProductRoot);
         var target = ValidateDirectory(destination);
         if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase))
-            return new(target, false, "The data is already at this location.");
+            return new(target, false, MoveText("data-move-noop"));
         if (PilotPath.IsPathInside(source, target) || PilotPath.IsPathInside(target, source))
             throw new InvalidDataException("The old and new data folders must not contain one another.");
-        if (Directory.Exists(target))
-            throw new InvalidDataException("Choose a new folder that doesn't exist yet; Sync Shark creates it.");
+        // The default home also owns the launcher and pointer; returning data must preserve them.
+        var excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "product-root.txt", "product-root.txt.move.tmp", "data-move.json", "data-move.json.tmp", "MOVED-TO.txt", "active", "active.next", "active.previous", "versions", "updater", "discovery", "replacement-staging" };
+        var existingTarget = Directory.Exists(target);
+        if (existingTarget && (!string.Equals(target, SyncSharkRuntimePaths.InstallationUserRoot, StringComparison.OrdinalIgnoreCase) ||
+                Directory.EnumerateFileSystemEntries(target).Any(path => !excluded.Contains(Path.GetFileName(path)))))
+            throw new InvalidDataException("Choose a new folder, or the default home containing only installation files.");
         var targetParent = Path.GetDirectoryName(target);
         if (string.IsNullOrEmpty(targetParent) || !Directory.Exists(targetParent))
             throw new InvalidDataException("The parent folder of the new data location must already exist.");
@@ -184,12 +98,19 @@ public static class SyncDataLocation
             throw new InvalidOperationException("Finish or resolve pending work first: retained replacement or recovery staging prevents moving the data location.");
         var identity = await SyncAuthorityDatabase.PrepareDataLocationDatabaseAsync(database, cancellationToken);
         // Never traverse the installed launcher's junction or move installer-owned material.
-        var excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "product-root.txt", "MOVED-TO.txt", "active", "active.next", "active.previous", "versions", "updater", "discovery", "replacement-staging" };
+        using var sourceChain = new PilotDirectoryLease.MigrationChain(source);
+        using var targetParentChain = new PilotDirectoryLease.MigrationChain(targetParent);
         var files = new List<string>();
+        var stage = Path.Combine(targetParent, ".syncshark-data-move-" + Guid.NewGuid().ToString("N"));
         void CopyDirectory(string from, string to)
         {
-            Directory.CreateDirectory(to);
+            if (!string.Equals(to, stage, StringComparison.OrdinalIgnoreCase))
+            {
+                if (Path.Exists(to)) throw new IOException("A destination entry appeared during the move: " + to);
+                Directory.CreateDirectory(to);
+            }
+            using var sourceDirectory = PilotDirectoryLease.OpenMigrationDirectory(from);
+            using var targetDirectory = PilotDirectoryLease.OpenMigrationDirectory(to);
             foreach (var entry in Directory.EnumerateFileSystemEntries(from))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -199,78 +120,103 @@ public static class SyncDataLocation
                 var attributes = File.GetAttributes(entry);
                 if ((attributes & FileAttributes.ReparsePoint) != 0)
                     throw new InvalidDataException("Data migration cannot copy a reparse point: " + relative);
-                var output = Path.Combine(target, relative);
+                var output = Path.Combine(stage, relative);
                 if ((attributes & FileAttributes.Directory) != 0) CopyDirectory(entry, output);
                 else
                 {
                     var name = Path.GetFileName(entry);
                     if (name.Equals("syncshark.db-wal", StringComparison.OrdinalIgnoreCase) ||
                         name.Equals("syncshark.db-shm", StringComparison.OrdinalIgnoreCase)) continue;
-                    using (var input = new FileStream(entry, FileMode.Open, FileAccess.Read, FileShare.Read))
-                    using (var copy = new FileStream(output, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
-                    { input.CopyTo(copy); copy.Flush(true); }
+                    using (var input = SyncLocalFileAuthority.OpenExistingReadGuard(entry))
+                    using (var copy = SyncLocalFileAuthority.CreateNewUnprotectedFile(output, writeThrough: false))
+                    {
+                        input.VerifyMigrationFile(entry); copy.VerifyMigrationFile(output);
+                        MoveCrashPointForTest?.Invoke("copy-open");
+                        input.Stream.CopyTo(copy.Stream, 1024 * 1024); copy.Stream.Flush(true);
+                    }
+                    MoveCrashPointForTest?.Invoke("copy-file");
                     files.Add(relative);
                 }
             }
         }
-        void DeleteRecursivelyBestEffort(string path)
-        {
-            if (Directory.Exists(path))
-            {
-                try
-                {
-                    foreach (var child in Directory.EnumerateFileSystemEntries(path))
-                        DeleteRecursivelyBestEffort(child);
-                }
-                catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException) { }
-                try { Directory.Delete(path); }
-                catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException) { }
-            }
-            else
-            {
-                try { File.Delete(path); }
-                catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException) { }
-            }
-        }
         var entries = Directory.EnumerateFileSystemEntries(source).Select(Path.GetFileName)
             .Where(name => name is not null && (!installationRoot || !excluded.Contains(name))).Cast<string>().ToArray();
+        foreach (var entry in entries)
+            if (Path.Exists(Path.Combine(target, entry)))
+                throw new InvalidDataException("The destination contains an entry that would be replaced: " + entry);
         var marker = Path.Combine(source, "MOVED-TO.txt");
-        var createdTarget = false;
+        string? temporary = null;
+        var journal = CreateMoveJournal(source, target, stage, existingTarget, entries, authority.LockPath);
+        SaveMoveJournal(journal);
+        MoveCrashPointForTest?.Invoke("journal");
         try
         {
-            Directory.CreateDirectory(target);
-            createdTarget = true;
-            CopyDirectory(source, target);
-            if (Directory.EnumerateFiles(target, "*", SearchOption.AllDirectories).Count() != files.Count)
+            Directory.CreateDirectory(stage);
+            // The stage is held from creation through publication, so it cannot be renamed or replaced in that window.
+            using var stageLease = PilotDirectoryLease.OpenMigrationDirectory(stage);
+            var stageIdentity = stageLease.Identity;
+            CopyDirectory(source, stage);
+            if (Directory.EnumerateFiles(stage, "*", SearchOption.AllDirectories).Count() != files.Count)
                 throw new IOException("The copied file list differs from the source.");
-            var copiedDatabase = Path.Combine(target, DatabaseRelativePath);
+            var copiedDatabase = Path.Combine(stage, DatabaseRelativePath);
             if (await SyncAuthorityDatabase.VerifyDataLocationDatabaseAsync(copiedDatabase, cancellationToken) != identity)
                 throw new InvalidDataException("The copied database installation identity differs from the source.");
-            foreach (var relative in files)
-            {
-                using var original = File.OpenRead(Path.Combine(source, relative));
-                using var copy = File.OpenRead(Path.Combine(target, relative));
-                if (original.Length != copy.Length || !System.Security.Cryptography.SHA256.HashData(original)
-                        .SequenceEqual(System.Security.Cryptography.SHA256.HashData(copy)))
-                    throw new IOException("Data copy verification failed for " + relative);
-            }
             cancellationToken.ThrowIfCancellationRequested();
             authority.VerifyAuthority();
-            // Publish only after the verified copy and durable move marker; retain the legacy pointer.
-            using (var stream = new FileStream(marker, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+            VerifyMoveFiles(stage, journal.Files);
+            journal = journal with { Publishing = true };
+            SaveMoveJournal(journal);
+            MoveCrashPointForTest?.Invoke("verified");
+            Directory.CreateDirectory(target);
+            using var targetChain = new PilotDirectoryLease.MigrationChain(target);
+            foreach (var entry in entries)
             {
-                stream.Write(System.Text.Encoding.UTF8.GetBytes(target)); stream.Flush(true);
+                stageLease.VerifyMigrationBinding(); targetChain.Verify();
+                var from = Path.Combine(stage, entry);
+                var to = Path.Combine(target, entry);
+                if (Directory.Exists(from)) Directory.Move(from, to);
+                else File.Move(from, to);
+                MoveCrashPointForTest?.Invoke("publish-entry");
             }
-            WriteProductRoot(target);
+            targetParentChain.Verify();
+            stageLease.VerifyMigrationBinding();
+            stageLease.Dispose();
+            // Hand over to one delete-capable handle whose proven identity is the stage held above, never a path.
+            using var stageDelete = PilotDirectoryLease.OpenMigrationDirectory(stage, delete: true);
+            if (stageDelete.Identity != stageIdentity) throw EvidenceChanged();
+            stageDelete.VerifyMigrationBinding();
+            MoveCrashPointForTest?.Invoke("stage-delete");
+            stageDelete.DeleteOnClose();
+            // Flush before the atomic same-directory rename. After this point cancellation cannot roll back the pointer.
+            Directory.CreateDirectory(SyncSharkRuntimePaths.InstallationUserRoot);
+            temporary = PointerPath + ".move.tmp";
+            using var installationChain = new PilotDirectoryLease.MigrationChain(SyncSharkRuntimePaths.InstallationUserRoot);
+            using var installationDirectory = PilotDirectoryLease.OpenMigrationDirectory(SyncSharkRuntimePaths.InstallationUserRoot);
+            using var pointer = SyncLocalFileAuthority.CreateNewUnprotectedFile(temporary);
+            pointer.VerifyMigrationFile(temporary);
+            pointer.Stream.Write(System.Text.Encoding.UTF8.GetBytes(target + Environment.NewLine));
+            pointer.Stream.Flush(true);
+            MoveCrashPointForTest?.Invoke("pointer-flushed");
+            using var movedMarker = SyncLocalFileAuthority.CreateNewUnprotectedFile(marker);
+            movedMarker.VerifyMigrationFile(marker);
+            movedMarker.Stream.Write(System.Text.Encoding.UTF8.GetBytes(target));
+            movedMarker.Stream.Flush(true);
+            MoveCrashPointForTest?.Invoke("marker");
+            installationChain.Verify(); sourceChain.Verify(); targetParentChain.Verify(); targetChain.Verify();
+            pointer.VerifyMigrationFile(temporary); movedMarker.VerifyMigrationFile(marker);
+            OrdinaryFile(PointerPath);
+            pointer.RenameTo(installationDirectory, Path.GetFileName(PointerPath), replaceIfExists: true);
+            MoveCrashPointForTest?.Invoke("pointer");
         }
         catch
         {
-            try { if (File.Exists(marker)) File.Delete(marker); }
+            // Recovery validates and retains exact evidence; the catch must never unlink a pathname blindly.
+            try { RecoverMove(authority); }
             catch (Exception cleanupError) when (cleanupError is IOException or UnauthorizedAccessException) { }
-            if (createdTarget) DeleteRecursivelyBestEffort(target);
+            // Recovery evidence remains durable whenever cleanup cannot safely finish.
             throw;
         }
-        return new(target, true, $"Data moved to {target}. Restart required; rerun the CLI after it exits.", source, entries);
+        return new(target, true, MoveText("data-move-committed", ("location", target)), source, entries);
     }
 
     internal static async Task ValidateConfiguredPairsAsync(PilotStateAuthority authority, string target,

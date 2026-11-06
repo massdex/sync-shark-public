@@ -210,7 +210,7 @@ function Get-SyncSharkUpdateInstallerReceipt([object]$Output) {
     $lines = @($Output | Where-Object { $null -ne $_ -and ([string]$_).Trim().Length -ne 0 })
     if ($lines.Count -ne 1) { throw 'The installer did not return exactly one completion receipt. Nothing was launched.' }
     $receipt = $null
-    try { $receipt = ([string]$lines[0]) | ConvertFrom-Json -Depth 8 }
+    try { $receipt = ([string]$lines[0]) | ConvertFrom-Json -Depth 8 -NoEnumerate }
     catch { throw 'The installer completion receipt is not valid JSON. Nothing was launched.' }
     if ($null -eq $receipt -or $receipt -is [string] -or $receipt -is [Array]) {
         throw 'The installer did not return exactly one completion receipt object. Nothing was launched.'

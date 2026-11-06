@@ -52,6 +52,15 @@ public sealed record IssuesResult(IReadOnlyList<Issue> Issues, IReadOnlyList<Iss
             yield return Text.Get(TextKey.ResultIssueLine, (TextArg.Id, id),
                 (TextArg.Path, issue.Path), (TextArg.At, issue.At.ToString(CultureInfo.InvariantCulture)));
             yield return CauseText(issue, id);
+            if (pairId is not null)
+            {
+                var choice = issue.Ignored ? ResolutionChoice.Unignore : ResolutionChoice.Ignore;
+                var option = IssuePresentation.Options(issue).Single(option => option.Choice == choice.ToString());
+                yield return Text.Get(TextKey.ResultIssueVisibilityChoice, (TextArg.Name, option.Label),
+                    (TextArg.Pair, pairId), (TextArg.Id, id),
+                    (TextArg.Choice, EngineCliCatalog.OptionValue(EngineOptionKey.Choice, choice.ToString())));
+                yield return IssuePresentation.ResolutionConfirmation(issue, choice);
+            }
             if (issue.Kind == IssueKind.DriveChange && pairId is not null)
                 yield return Text.Get(TextKey.ResultDriveChoices, (TextArg.Pair, pairId),
                     (TextArg.Id, id));
@@ -60,9 +69,10 @@ public sealed record IssuesResult(IReadOnlyList<Issue> Issues, IReadOnlyList<Iss
             yield return Text.Get(TextKey.ResultFailureRetry, (TextArg.Pair, pairId));
     }
 
-    // The shared renderer adds only the in-use retry guidance; every other notice keeps this listing's own
+    // Keep-both locations and in-use guidance share the UI renderer; other templates keep this listing's
     // operands ({Id}, {Pair}) so a template's placeholder never renders as a literal.
-    private string CauseText(Issue issue, string id) => IssuePolicy.IsLocalAccessRetryCause(issue.Cause)
+    private string CauseText(Issue issue, string id) => issue.Cause == TextKey.InfoKeptBoth ||
+        IssuePolicy.IsLocalAccessRetryCause(issue.Cause)
         ? IssuePresentation.Render(issue, ViewFor(issue))
         : Text.Get(issue.Cause, (TextArg.Path, issue.Path), (TextArg.Message, ""), (TextArg.Id, id),
             (TextArg.Pair, PairId ?? ""));

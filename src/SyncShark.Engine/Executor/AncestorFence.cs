@@ -116,6 +116,21 @@ internal sealed class AncestorFence(ExecutorContext _context)
         return AncestorNews.Changed;
     }
 
+    /// <summary>A scoped pass leaves a row owned by a pending ancestor to that ancestor's ordinary selection.</summary>
+    internal bool BatchAdmits(Row row)
+    {
+        var paths = Row.Paths(row);
+        foreach (var side in new[] { Side.Local, Side.Dropbox })
+        {
+            var keys = DependencyKeys(side, side == Side.Local ? paths.Local : paths.Dropbox, null, row.Synced,
+                row.Context.Destination, null, null);
+            if (keys.Length == 0 || AncestorPending(side, keys) is not { } owner) continue;
+            if (_selection is { } own && owner.AnchorWorkId > own.ThroughWorkId) throw Stale(owner, side);
+            return false;
+        }
+        return true;
+    }
+
     // A selection's own work never refuses its rows (8.7); work arriving after it, or anyone else's, still does.
     private WorkSelection? AncestorPending(Side side, string[] keys)
     {

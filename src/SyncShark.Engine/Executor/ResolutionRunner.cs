@@ -7,7 +7,8 @@ namespace Massdex.SyncShark.Engine.Executor;
 /// closes the issue, then syncs its independent follow-up paths.</summary>
 internal sealed class ResolutionRunner(
     ExecutorContext context, ActionExecutor executor, KeepBothRunner keepBoth,
-    ItemSync items, ISelectedExecutionBoundary selectedBoundary)
+    ItemSync items, ISelectedExecutionBoundary selectedBoundary,
+    Func<WorkSelection?, Side, string, IReadOnlySet<long>?, bool, CancellationToken, Task>? runBatch = null)
 {
     /// <summary>True once this resolution closed its notice, or dismissed it.</summary>
     internal bool Resolved { get; private set; }
@@ -44,6 +45,11 @@ internal sealed class ResolutionRunner(
         {
             if (!Resolutions.Allows(issue.Kind, issue.Cause, choice))
                 throw new EngineRequestException(TextKey.ResolveBadChoice);
+            if (context.Store.IssueById(context.Pair.PairId, issue.Id) is null)
+            {
+                Resolved = true;
+                return SyncOutcome.InSync;
+            }
             var retried = SyncOutcome.InSync;
             IReadOnlySet<long> retryIssues = new HashSet<long> { issue.Id };
             if (issue.Subject.Items.Count == 0)
@@ -167,14 +173,9 @@ internal sealed class ResolutionRunner(
             }
             return outcome;
         }
-        catch (InventoryIncompleteException error)
+        catch (Exception error) when (error is InventoryIncompleteException || ActionExecutor.IsItemError(error))
         {
-            return await executor.FailAsync(Unobserved(path), null,
-                ActionExecutor.InventoryFailure(error, path, side), ct);
-        }
-        catch (Exception error) when (ActionExecutor.IsItemError(error))
-        {
-            return await executor.FailAsync(Unobserved(path), null, error, ct);
+            return await FollowUpFailureAsync(side, path, error, ct);
         }
     }
 
@@ -183,7 +184,22 @@ internal sealed class ResolutionRunner(
     {
         try
         {
-            var outcome = await items.SyncPathAsync(side, path, ct, retryIssues);
+            Row? completed = null;
+            var outcome = await items.SyncPathAsync(side, path, ct, retryIssues,
+                retryIssues is null ? null : (row, _) => completed = row);
+            if (retryIssues is not null && outcome.Raised != IssueKind.Failure &&
+                completed is { } observed && observed.IsFolder() && runBatch is not null &&
+                SyncPorts.AdmitsBatch(context.Store, context.Pair.PairId))
+            {
+                var retries = context.Store.OpenIssuesUnder(context.Pair.PairId, PathNames.KeyFor(side, path),
+                    [IssueKind.Failure]).Select(notice => notice.Id).ToHashSet();
+                retries.UnionWith(retryIssues);
+                await runBatch(null, side, path, retries, true, ct);
+                if (context.Store.OpenIssuesUnder(context.Pair.PairId, PathNames.KeyFor(side, path),
+                    [IssueKind.Failure]).FirstOrDefault() is { } failure)
+                    return new SyncOutcome(ActionKind.Notice, null, null, IssueKind.Failure, false, failure.Cause);
+                return SyncOutcome.InSync;
+            }
             if (!syncDescendants || !outcome.Succeeded()) return outcome;
             Entry? entry;
             await using (var permit = side == Side.Dropbox
@@ -194,16 +210,15 @@ internal sealed class ResolutionRunner(
             return entry is { IsFolder: true, Skip: null }
                 ? await SyncDescendantsAsync(side, entry.Path, issue, outcome, ct) : outcome;
         }
-        catch (InventoryIncompleteException error)
+        catch (Exception error) when (error is InventoryIncompleteException || ActionExecutor.IsItemError(error))
         {
-            return await executor.FailAsync(Unobserved(path), null,
-                ActionExecutor.InventoryFailure(error, path, side), ct);
-        }
-        catch (Exception error) when (ActionExecutor.IsItemError(error))
-        {
-            return await executor.FailAsync(Unobserved(path), null, error, ct);
+            return await FollowUpFailureAsync(side, path, error, ct);
         }
     }
+
+    private Task<SyncOutcome> FollowUpFailureAsync(Side side, string path, Exception error, CancellationToken ct) =>
+        executor.FailAsync(Unobserved(path), null, error is InventoryIncompleteException incomplete
+            ? ActionExecutor.InventoryFailure(incomplete, path, side) : error, ct);
 
     private static Row Unobserved(string path) =>
         Row.ForOneSide(Side.Local, path, null, null, [], null, RowContext.Neutral);

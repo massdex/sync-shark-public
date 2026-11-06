@@ -8,7 +8,6 @@ using System.Text.Json;
 using Massdex.SyncShark;
 using Microsoft.Data.Sqlite;
 
-// Original M4 / Claude D-F3. Root owns selector wiring, serial compilation and execution.
 // Synthetic remote bytes are inputs only: Host plans, fences, stages, promotes and recovers.
 // The current child binary EXITs before the receipt; throwing/disposing is not this witness.
 // NativeLocalAuthorityChecks' existing normal/manual/legacy witnesses are not rerun here.

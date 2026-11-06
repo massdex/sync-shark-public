@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Storage;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
 using Microsoft.Data.Sqlite;
@@ -54,15 +55,17 @@ public static class StateStoreChecks
         {
             foreach (var test in new Func<string, Task>[]
             {
-                BusyReaderCases, BasicCases, MappingCases, ScanCases, DeletedHistoryCases, DeletedHistoryBatchCases, DeletedHistoryUpgradeCases, ScanRecordCases, SkipCases, ProtectingMemberCases, MemberlessUpgradeCases, UnreadableCases, RecordCases, GroupedRecordCases, GroupedAdoptionCases, MarkerCases,
+                DisposedRecordCases, IssueRollbackCase, IssueUpgradeCases, BusyReaderCases, BasicCases, MappingCases, ScanCases, DeletedHistoryCases, DeletedHistoryBatchCases, DeletedHistoryUpgradeCases, ScanRecordCases, SkipCases, ProtectingMemberCases, MemberlessUpgradeCases, UnreadableCases, RecordCases, GroupedRecordCases, GroupedAdoptionCases, MarkerCases,
                 PendingCases, PageCases, JournalCases, PageWaitCases, CompletionCases, ClaimedRepairCases, DropboxBookmarkCases, DropboxResetRetryCases, ConfigurationCases,
                 ItemCases, FolderCases, CounterpartPagesCases, CounterpartSiblingAnchorCases, UpgradeCases, PhaseIndexUpgradeCases, CodecCases, LegacyPendingCases, KeepRulesCases,
-                PendingAcknowledgmentCases, UnsavedPendingBindingRaces, SelectedPendingSettlement, RootContextCases, FolderMemberOrdinalCases, FolderSettlementCases, FolderBatchSettlementCases, InvalidJobCases, FolderRefusalTypeCases, BeginFolderRemovalCancellationCase, BeginFolderRemovalMidCancellationCase, DecoratedCases, PostCommitCases
+                PendingAcknowledgmentCases, UnsavedPendingBindingRaces, CrossedPendingReplacement, SelectedPendingSettlement, RootContextCases, FolderMemberOrdinalCases, FolderSettlementCases, FolderBatchSettlementCases, InvalidJobCases, FolderRefusalTypeCases, BeginFolderRemovalCancellationCase, BeginFolderRemovalMidCancellationCase, DecoratedCases, PostCommitCases
             })
             {
                 try { await test(Path.Combine(folder, test.Method.Name + StateSchema.DatabaseExtension)); }
                 catch (Exception error) { failures.Add(new InvalidOperationException(test.Method.Name, error)); }
             }
+            try { ForgetUnreadableChecks.Run(); }
+            catch (Exception error) { failures.Add(new InvalidOperationException(nameof(ForgetUnreadableChecks), error)); }
             try { CompactStorageChecks.Run(); }
             catch (Exception error) { failures.Add(new InvalidOperationException(nameof(CompactStorageChecks), error)); }
         }
@@ -231,12 +234,12 @@ public static class StateStoreChecks
             Enumerable.Range(0, batch + 1).All(i => store.DeletedNameExact(PairId,
                 PathNames.Key("Name" + i.ToString("D8", CultureInfo.InvariantCulture)))),
             "A published multi-batch copy restores exactly every saved key and row.");
-        Execute(connection, "CREATE TEMP TRIGGER change_generation AFTER INSERT ON main.discovery_deleted_name " +
-            "WHEN new.path_key='" + PathNames.Key("Name" + (batch - 1).ToString("D8", CultureInfo.InvariantCulture)) +
+        Execute(connection, "CREATE TEMP TRIGGER change_generation AFTER INSERT ON main.discovery_deleted_block " +
+            "WHEN new.last_key='" + PathNames.Key("Name" + (batch - 1).ToString("D8", CultureInfo.InvariantCulture)) +
             "' BEGIN UPDATE pair SET execution_generation=execution_generation+1 WHERE id=new.pair_id; END;");
         Refuses<LiveAdmissionStaleException>(() => store.SaveDeletedHistory(PairId, token, NextCursor));
         Execute(connection, "DROP TRIGGER change_generation;");
-        Check.Require(Snapshot(connection, "SELECT count(*) FROM discovery_deleted_name;") == "[[" + batch + "]]" &&
+        Check.Require(Snapshot(connection, "SELECT sum(name_count) FROM discovery_deleted_block;") == "[[" + batch + "]]" &&
             Snapshot(connection, "SELECT deleted_history_cursor IS NULL FROM pair;") == "[[1]]",
             "Generation change at the first batch boundary refuses the next batch without publication.");
         token = store.BeginScan(PairId, Generation(store), true);
@@ -245,17 +248,29 @@ public static class StateStoreChecks
         sink = store.OpenScan(PairId, Side.Dropbox, ScanTestSettings.BatchRows);
         for (var i = 0; i <= batch; i++) await sink.AddAsync(new Listed("Name" + i.ToString("D8", CultureInfo.InvariantCulture), null), CancellationToken.None);
         await sink.CompleteAsync();
-        Execute(connection, "CREATE TEMP TRIGGER interrupt_save BEFORE INSERT ON main.discovery_deleted_name " +
-            "WHEN new.path_key='" + PathNames.Key("Name" + batch.ToString("D8", CultureInfo.InvariantCulture)) +
+        Execute(connection, "CREATE TEMP TRIGGER interrupt_save BEFORE INSERT ON main.discovery_deleted_block " +
+            "WHEN new.last_key='" + PathNames.Key("Name" + batch.ToString("D8", CultureInfo.InvariantCulture)) +
             "' BEGIN SELECT RAISE(ABORT,'synthetic interruption'); END;");
         Refuses<SqliteException>(() => store.SaveDeletedHistory(PairId, token, Cursor));
-        Check.Require(Snapshot(connection, "SELECT count(*) FROM discovery_deleted_name;") == "[[" + batch + "]]",
+        Check.Require(Snapshot(connection, "SELECT sum(name_count) FROM discovery_deleted_block;") == "[[" + batch + "]]",
             "A completed batch survives interruption before publication.");
         Execute(connection, "DROP TRIGGER interrupt_save;");
         token = store.BeginScan(PairId, Generation(store), true);
         Check.Require(store.RestoreDeletedHistory(PairId, token) is null && !store.HasDeletedNames(PairId),
             "Unpublished partial saves never restore.");
-        Execute(connection, "INSERT INTO discovery_deleted_name SELECT id,'extra' FROM pair WHERE pair_id=$p;", ("$p", PairId));
+        Execute(connection, "DELETE FROM discovery_deleted_block;");
+        using (var transaction = connection.BeginTransaction())
+        {
+            for (var index = 0; index <= batch; index++)
+            {
+                var key = "Extra" + index.ToString("D8", CultureInfo.InvariantCulture);
+                using var insert = StorageCommand.Create(connection, transaction, StateSchema.SaveDeletedBlock,
+                    (StateSchema.ParamPairRow, 1L), (StateSchema.ParamPath, key), (StateSchema.ParamCount, 1),
+                    (StateSchema.ParamNames, StateEncoding.EncodeDeletedNames([key])));
+                insert.ExecuteNonQuery();
+            }
+            transaction.Commit();
+        }
         Task? intake = null;
         var deleted = 0;
         connection.CreateFunction("reclaim_progress", () =>
@@ -265,11 +280,11 @@ public static class StateStoreChecks
                 "A queued store write commits before reclaim's next batch, while rows remain.");
             return 0;
         });
-        Execute(connection, "CREATE TEMP TRIGGER reclaim_progress AFTER DELETE ON main.discovery_deleted_name BEGIN SELECT reclaim_progress(); END;");
+        Execute(connection, "CREATE TEMP TRIGGER reclaim_progress AFTER DELETE ON main.discovery_deleted_block BEGIN SELECT reclaim_progress(); END;");
         store.SaveDeletedHistory(PairId, token, EmptyPageCursor);
         Execute(connection, "DROP TRIGGER reclaim_progress;");
         await intake!;
-        Check.Require(deleted == batch + 1 && Snapshot(connection, "SELECT count(*) FROM discovery_deleted_name;") == "[[0]]" &&
+        Check.Require(deleted == batch + 1 && Snapshot(connection, "SELECT count(*) FROM discovery_deleted_block;") == "[[0]]" &&
             store.SyncedByKey(PairId, Side.Local, Saved().LocalKey) == Saved(),
             "The next save reclaims interrupted rows and interleaves the queued writer before publishing.");
         sink = store.OpenScan(PairId, Side.Dropbox, ScanTestSettings.BatchRows);
@@ -282,11 +297,128 @@ public static class StateStoreChecks
         token = store.BeginScan(PairId, Generation(store), true);
         Check.Require(store.RestoreDeletedHistory(PairId, token) == Cursor && store.DeletedNameExact(PairId, PathNames.Key(Parent)),
             "BeginScan discards interrupted restore scratch before reusing the published acquisition.");
+        store.SavePair(Pair() with { Name = "Renamed pair" });
+        token = store.BeginScan(PairId, Generation(store), true);
+        Check.Require(Snapshot(connection, "SELECT count(*) FROM discovery_deleted_block;") == "[[1]]" &&
+            store.RestoreDeletedHistory(PairId, token) is null && !store.HasDeletedNames(PairId),
+            "Ordinary invalidation keeps unpublished leftovers, never restore evidence.");
         store.SavePair(Pair() with { DropboxRoot = "/Other" });
         token = store.BeginScan(PairId, Generation(store), true);
-        Check.Require(Snapshot(connection, "SELECT count(*) FROM discovery_deleted_name;") == "[[1]]" &&
+        Check.Require(Snapshot(connection, "SELECT count(*) FROM discovery_deleted_block;") == "[[0]]" &&
             store.RestoreDeletedHistory(PairId, token) is null && !store.HasDeletedNames(PairId),
-            "Invalidation keeps unpublished leftovers, never restore evidence.");
+            "Identity replacement removes the old namespace, never retaining its restore evidence.");
+    }
+
+    private static void RefuseOldRead(string path)
+    {
+        try { using var unexpected = StateStore.OpenReadOnly(path); throw new Exception("old read accepted"); }
+        catch (InvalidDataException error)
+        {
+            Check.Require(error.Message.Contains("upgrade with a compatible writable host", StringComparison.Ordinal),
+                "old read explains writable upgrade");
+        }
+    }
+
+    // Use the original schema's own SQL, preserving its exact ALTER formatting and FK destinations.
+    private static void DowngradeIssueFixture(SqliteConnection connection)
+    {
+        Execute(connection, "DROP TRIGGER invalidate_deleted_history;DROP TABLE discovery_deleted_block;DROP TABLE discovery_deleted_delta;ALTER TABLE pair DROP COLUMN deleted_history_owed;ALTER TABLE pair DROP COLUMN deleted_history_cursor;" + StateSchema.DeletedHistorySchema);
+        using var legacy = Inspect(":memory:");
+        Execute(legacy, StateSchema.Create + StateSchema.SchemaAdditions);
+        using var query = StorageCommand.Create(legacy, null, "SELECT sql FROM sqlite_master WHERE name='issue';");
+        var sql = (string)query.ExecuteScalar()!;
+        Execute(connection, "PRAGMA foreign_keys=OFF;CREATE TEMP TABLE saved_issue AS SELECT issue_id,pair_id,kind,cause,path,subject_json,at_ticks,dismissed,item_retry_episode,item_retry_revision,item_retry_work_id FROM issue;DROP TABLE issue;" +
+            sql + ";INSERT INTO issue SELECT * FROM saved_issue;DROP TABLE saved_issue;CREATE UNIQUE INDEX issue_item_retry_work ON issue(item_retry_work_id) WHERE item_retry_work_id IS NOT NULL;PRAGMA foreign_keys=ON;");
+    }
+
+    private static Task IssueRollbackCase(string path)
+    {
+        using (var store = StateStore.Open(path))
+        {
+            store.SavePair(Pair());
+            store.Commit(PairId, StateChange.Empty with
+            { Raise = [(IssueKind.Info, TextKey.FailChanged, Other, new IssueSubject([], null))] });
+        }
+        string before;
+        using (var connection = Inspect(path))
+        {
+            DowngradeIssueFixture(connection);
+            Execute(connection, "PRAGMA user_version=7;PRAGMA foreign_keys=OFF;UPDATE issue SET pair_id=999;PRAGMA foreign_keys=ON;");
+            before = DatabaseImage(connection);
+        }
+        try { using var refused = StateStore.Open(path); throw new Exception("invalid foreign key accepted"); }
+        catch (InvalidDataException) { }
+        using (var connection = Inspect(path))
+        {
+            Check.Require(Version(connection) == 7 && DatabaseImage(connection) == before &&
+                Snapshot(connection, "SELECT count(*) FROM sqlite_master WHERE name='issue_new';") == "[[0]]" &&
+                Snapshot(connection, "SELECT count(*) FROM sqlite_sequence WHERE name='issue';") == "[[0]]",
+                "failed migration rolls back rows, version, temporary table and sequence");
+            Execute(connection, "UPDATE issue SET pair_id=(SELECT id FROM pair LIMIT 1);");
+        }
+        using var restarted = StateStore.Open(path);
+        Check.Require(restarted.Issues(PairId).Count == 1, "restart upgrades the repaired source once");
+        return Task.CompletedTask;
+    }
+
+    private static Task IssueUpgradeCases(string path)
+    {
+        foreach (var source in new[] { 5, 6, 7 })
+        foreach (var populated in new[] { false, true })
+        {
+            var file = path + source + populated;
+            using (var store = StateStore.Open(file))
+            {
+                store.SavePair(Pair());
+                if (populated)
+                    store.Commit(PairId, StateChange.Empty with
+                    {
+                        Raise = [(IssueKind.Info, TextKey.FailChanged, Other, new IssueSubject([], null)),
+                            (IssueKind.Skipped, TextKey.SkipOnlineOnly, Child, new IssueSubject([], null))]
+                    });
+            }
+            string before;
+            string members;
+            string workSequence;
+            long maximum;
+            using (var connection = Inspect(file))
+            {
+                DowngradeIssueFixture(connection);
+                if (populated)
+                    Execute(connection, "UPDATE issue SET issue_id=issue_id*7,dismissed=1;INSERT INTO issue_member(pair_id,issue_id,side,path_key,identity,subject_json,skip_cause) SELECT pair_id,issue_id,0,'CHILD','identity','{\"Version\":1}','SkipOnlineOnly' FROM issue LIMIT 1;");
+                if (populated)
+                {
+                    Execute(connection, "INSERT INTO change_work(work_origin,issue_work_key,pair_id,pair_generation,source_epoch,side,domain,path_key) SELECT 'Issue','retry-key',id,execution_generation,0,0,'domain','OTHER' FROM pair;");
+                    Execute(connection, "UPDATE issue SET kind=0,cause='FailLocalInUse',item_retry_episode='episode',item_retry_revision=3,item_retry_work_id=(SELECT max(work_id) FROM change_work) WHERE path='Other';");
+                    Execute(connection, "INSERT INTO issue_member(pair_id,issue_id,work_id,side,path_key,identity,subject_json) SELECT pair_id,issue_id,item_retry_work_id,0,'OTHER','retry-identity','{\"Version\":1}' FROM issue WHERE item_retry_work_id IS NOT NULL;");
+                }
+                if (source < 7)
+                    Execute(connection, "DROP TRIGGER invalidate_deleted_history;DROP TABLE discovery_deleted_name;ALTER TABLE pair DROP COLUMN deleted_history_cursor;");
+                if (source == 5) Execute(connection, StateSchema.CreateObsoletePhaseIndex);
+                Execute(connection, "PRAGMA user_version=" + source + ";");
+                before = Snapshot(connection, "SELECT * FROM issue ORDER BY issue_id;");
+                members = Snapshot(connection, "SELECT * FROM issue_member ORDER BY member_id;");
+                workSequence = Snapshot(connection, "SELECT * FROM sqlite_sequence WHERE name='change_work';");
+                using var max = StorageCommand.Create(connection, null, "SELECT coalesce(max(issue_id),0) FROM issue;");
+                maximum = (long)max.ExecuteScalar()!;
+            }
+            RefuseOldRead(file);
+            using (var upgraded = StateStore.Open(file))
+                Check.Require(upgraded.Issues(PairId).All(issue => !issue.Ignored), "upgraded visibility defaults active");
+            using (var connection = Inspect(file))
+            {
+                Check.Require(Snapshot(connection, "SELECT issue_id,pair_id,kind,cause,path,subject_json,at_ticks,dismissed,item_retry_episode,item_retry_revision,item_retry_work_id FROM issue ORDER BY issue_id;") == before &&
+                    Snapshot(connection, "SELECT * FROM issue_member ORDER BY member_id;") == members,
+                    "upgrade preserves every issue value and entire member rows");
+                Check.Require(Snapshot(connection, "SELECT * FROM sqlite_sequence WHERE name='change_work';") == workSequence &&
+                    Snapshot(connection, "SELECT count(*) FROM sqlite_sequence WHERE name='issue_new';") == "[[0]]" &&
+                    Snapshot(connection, "SELECT seq FROM sqlite_sequence WHERE name='issue';") == (populated ? "[[" + maximum + "]]" : "[]"),
+                    "only issue's sequence is seeded to the old maximum");
+                Check.Require(Snapshot(connection, "PRAGMA foreign_key_check;") == "[]", "all upgrade routes preserve foreign keys");
+            }
+            using var reopened = StateStore.Open(file);
+        }
+        return Task.CompletedTask;
     }
 
     private static Task DeletedHistoryUpgradeCases(string path)
@@ -298,11 +430,11 @@ public static class StateStoreChecks
         }
         using (var inspect = Inspect(path))
         {
+            DowngradeIssueFixture(inspect);
             Execute(inspect, "DROP TRIGGER invalidate_deleted_history;DROP TABLE discovery_deleted_name;ALTER TABLE pair DROP COLUMN deleted_history_cursor;");
             Execute(inspect, "PRAGMA user_version=" + StateSchema.DeletedHistoryUpgradeVersion + ";");
         }
-        using (var read = StateStore.OpenReadOnly(path)!)
-            Check.Require(read.SyncedByKey(PairId, Side.Local, Saved().LocalKey) == Saved(), "Old schema remains readable without writes.");
+        RefuseOldRead(path);
         using (var upgraded = StateStore.Open(path))
         {
             Check.Require(upgraded.SyncedByKey(PairId, Side.Local, Saved().LocalKey) == Saved(), "History migration preserves saved bindings.");
@@ -541,7 +673,7 @@ public static class StateStoreChecks
         }
         var stale = store.BeginScan(PairId, Generation(store), false);
         store.BeginScan(PairId, Generation(store), false);
-        Refuses<InvalidOperationException>(() => store.ReplaceSkipped(PairId, stale, []));
+        Refuses<LiveAdmissionStaleException>(() => store.ReplaceSkipped(PairId, stale, []));
         Check.Require(!store.ScanRows(PairId, _ => Context).Any(), nameof(ScanCases));
         var saved = Saved() with { LocalId = LocalId };
         store.Commit(PairId, StateChange.Empty with { Record = [saved] });
@@ -565,27 +697,36 @@ public static class StateStoreChecks
             var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
             var position = new JournalPosition(Single, 0);
             store.AcquireJournalPage(Domain, null, position,
-                [(PairId, generation, local.Epoch, local.Revision, false, false)], []);
+                [(PairId, generation, local.Epoch, local.Revision, false)], []);
             var token = store.BeginScan(PairId, generation, true);
             var captured = store.ReadScan(PairId, token);
             Check.Require(captured == new ScanRecord(token, generation, true, true, 0,
                 local.Epoch, local.Revision, remote.Epoch, remote.Revision, null), nameof(ScanRecordCases));
             var notice = new ChangeNotice(Side.Local, ChangeKind.Changed, Child, null, LocalId, Entry(), true, false);
             var later = store.AcquireJournalPage(Domain, position, position,
-                [(PairId, generation, local.Epoch, local.Revision, false, false)], [(PairId, notice)])!.Value;
+                [(PairId, generation, local.Epoch, local.Revision, false)], [(PairId, notice)])!.Value;
             Check.Require(later > captured.ThroughWorkId && store.ReadScan(PairId, token) == captured,
                 nameof(ScanRecordCases));
             var oldSink = store.OpenScan(PairId, Side.Local, ScanTestSettings.BatchRows);
-            var replacement = store.BeginScan(PairId, generation, false);
             await oldSink.AbortAsync();
+            var replacement = store.BeginScan(PairId, generation, false);
             Check.Require(store.ReadScan(PairId, replacement).Token == replacement, nameof(ScanRecordCases));
             Refuses<LiveAdmissionStaleException>(() => store.ReadScan(PairId, token));
             await store.OpenScan(PairId, Side.Local, ScanTestSettings.BatchRows).AbortAsync();
             Refuses<LiveAdmissionStaleException>(() => store.ReadScan(PairId, replacement));
+            var pair = store.Pair(PairId)!;
+            store.SavePairDecision(pair, generation, pair with { Name = "renamed" }, null, false, null);
+            InstallDropbox(store);
+            generation = Generation(store);
+            local = store.ReadSource(PairId, Side.Local)!.Value;
+            remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
             token = store.BeginScan(PairId, generation, false);
             captured = store.ReadScan(PairId, token);
+            Check.Require(captured.LocalGapRevision == local.Revision, nameof(ScanRecordCases));
             var through = store.AcquireJournalPage(Domain, position, position,
-                [(PairId, generation, local.Epoch, local.Revision, true, false)], [])!.Value;
+                [(PairId, generation, local.Epoch, local.Revision, true)], [])!.Value;
+            Check.Require(store.ReadLocalGap(PairId, local.Epoch) == local.Revision + 1,
+                nameof(ScanRecordCases));
             var localCatchUp = new LocalCatchUp(PairId, generation, local.Epoch,
                 new NtfsUsnCheckpoint(Single, 0, 0, 0), through);
             var remoteCatchUp = new DropboxCatchUp(PairId, generation, remote.Epoch, Cursor, through);
@@ -593,8 +734,8 @@ public static class StateStoreChecks
             Refuses<LiveAdmissionStaleException>(() =>
                 store.FinishRepair(PairId, Summary(), generation, token, localCatchUp, remoteCatchUp));
             Check.Require(!store.FirstRepairDone(PairId), nameof(ScanRecordCases));
-            var pair = store.Pair(PairId)!;
-            store.SavePairDecision(pair, generation, pair with { Enabled = false }, null, false, null);
+            var renamed = store.Pair(PairId)!;
+            store.SavePairDecision(renamed, generation, renamed with { Enabled = false }, null, false, null);
             Refuses<LiveAdmissionStaleException>(() => store.ReadScan(PairId, token));
         }
         using var inspect = Inspect(path);
@@ -752,6 +893,33 @@ public static class StateStoreChecks
         return Task.CompletedTask;
     }
 
+    private static async Task DisposedRecordCases(string path)
+    {
+        var store = StateStore.Open(path);
+        store.SavePair(Pair());
+        var change = StateChange.Empty with { Record = [Saved()] };
+        var queued = store.CommitRecordAsync(PairId, change, null);
+        store.Dispose();
+        await queued;
+        Check.Require(queued.IsCompletedSuccessfully, "Dispose preserves accepted record completion");
+        store.Dispose();
+        foreach (var call in new Action[]
+        {
+            () => _ = store.CommitRecordAsync(PairId, change, null),
+            () => _ = store.CommitAsync(PairId, change),
+            () => store.Commit(PairId, StateChange.Empty)
+        })
+        {
+            var refused = false;
+            try { call(); }
+            catch (ObjectDisposedException) { refused = true; }
+            Check.Require(refused, "disposed commits are refused synchronously");
+        }
+        using var reopened = StateStore.Open(path);
+        Check.Require(reopened.SyncedByKey(PairId, Side.Local, Saved().LocalKey) == Saved(),
+            "accepted record survives disposal and reopen");
+    }
+
     private static async Task RecordCases(string path)
     {
         using (var store = StateStore.Open(path))
@@ -883,8 +1051,19 @@ public static class StateStoreChecks
             var database = path + Path.GetRandomFileName();
             using (var store = StateStore.Open(database))
             {
-                store.SavePair(Pair());
-                store.SavePair(Pair(OtherPair));
+                store.SavePair(BoundPair());
+                store.SavePair(BoundPair() with { PairId = OtherPair, Name = OtherPair });
+                for (var index = 0; index < bad.Length; index++)
+                {
+                    var target = index.ToString(CultureInfo.InvariantCulture);
+                    var crossed = Saved(target + "/Partner") with
+                    {
+                        DropboxKey = PathNames.DropboxKey(target), DropboxPath = target
+                    };
+                    store.Commit(index % BothSides == 0 ? PairId : OtherPair,
+                        StateChange.Empty with { Record = [crossed] });
+                }
+                var releaseStart = store.ReadWorkWatermark();
                 var initial = Saved(Parent);
                 using var release = new ManualResetEventSlim(false);
                 var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -942,6 +1121,12 @@ public static class StateStoreChecks
                     Check.Require(store.SyncedByKey(member.Pair, Side.Local, member.Row.LocalKey) ==
                         (member.Bad ? null : member.Row), nameof(GroupedRecordCases));
                 }
+                Check.Require(store.ReadWorkWatermark() == releaseStart + ready.Count(member => !member.Bad),
+                    "Batch rollback and isolated reapply register exactly one release per successful member.");
+                foreach (var member in ready)
+                    Check.Require((store.SyncedByKey(member.Pair, Side.Local,
+                        PathNames.Key(member.Row.LocalPath + "/Partner")) is not null) == member.Bad,
+                        "Failed batch members retain their crossed binding; successful members retire it.");
                 // A completed write barrier must neither hide a failed member nor undo a durable sibling.
                 store.SaveLimiterLevel(Account, Single);
                 Check.Require(ready.All(member => member.Completion.IsCompleted), nameof(GroupedRecordCases));
@@ -1225,6 +1410,80 @@ public static class StateStoreChecks
         return Task.CompletedTask;
     }
 
+    private static Task CrossedPendingReplacement(string path)
+    {
+        foreach (var real in new[] { true, false })
+        foreach (var race in new[] { "none", "path", "identity", "changed", "retired", "moved" })
+        {
+            var database = path + "-" + race;
+            using IStateStore store = real ? StateStore.Open(database) : new InMemoryStateStore();
+            store.SavePair(BoundPair());
+            var saved = Saved(Other) with { DropboxKey = PathNames.DropboxKey(Child), DropboxPath = Child };
+            store.Commit(PairId, StateChange.Empty with { Record = [saved] });
+            var source = Entry() with { Id = saved.DropboxId };
+            var stage = new StageProof(Stage, Domain, "published-id", 0, ZeroHash);
+            var pending = Pending(saved) with { Kind = PendingKind.LocalReplace, Source = source, Stage = stage };
+            var final = SyncedEntries.From(Entry() with { Id = stage.FileId }, source);
+            var change = StateChange.Empty with { Record = [final] };
+            var before = store.ReadWorkWatermark();
+
+            // A moved source and every non-replacement effect retain the original exact-binding refusal.
+            Refuses<InvalidOperationException>(() => store.ArmPending(PairId,
+                pending with { Source = source with { Path = Moved } }));
+            Refuses<InvalidOperationException>(() => store.ArmPending(PairId, Pending(saved)));
+            var arrival = race switch
+            {
+                "path" => Saved() with { LocalId = "unrelated-id", DropboxKey = PathNames.DropboxKey(Sibling), DropboxPath = Sibling },
+                "identity" => Saved(Sibling) with { LocalId = LocalId },
+                "changed" => saved with { LocalSize = saved.LocalSize + 1 },
+                "moved" => saved with { DropboxKey = PathNames.DropboxKey(Moved), DropboxPath = Moved },
+                _ => null
+            };
+            if (race is "path" or "identity")
+            {
+                store.Commit(PairId, StateChange.Empty with { Record = [arrival!] });
+                Refuses<InvalidOperationException>(() => store.ArmPending(PairId, pending));
+                store.Commit(PairId, StateChange.Empty with { ForgetSelf = [(Side.Local, arrival!.LocalKey)] });
+            }
+            store.ArmPending(PairId, pending);
+            Check.Require(store.Pending(PairId) is CurrentPending armed && armed.Value.Saved == saved,
+                "Returning Local replacement preserves the original crossed binding in custody.");
+            var published = pending with { Generation = pending.Generation + 1, Phase = PendingPhase.Published };
+            store.AdvancePending(PairId, pending, published);
+            if (arrival is not null) store.Commit(PairId, StateChange.Empty with { Record = [arrival] });
+            if (race == "retired")
+                store.Commit(PairId, StateChange.Empty with { ForgetSelf = [(Side.Local, saved.LocalKey)] });
+            if (race != "none")
+            {
+                var watermark = store.ReadWorkWatermark();
+                Refuses<InvalidOperationException>(() => store.SettlePending(PairId, published, change));
+                Check.Require(store.Pending(PairId) is CurrentPending held && held.Value == published &&
+                    store.ReadWorkWatermark() == watermark &&
+                    store.SyncedByKey(PairId, Side.Local, final.LocalKey) != final,
+                    "Changed custody refuses settlement without binding, release or pending mutation.");
+                continue;
+            }
+            if (real)
+                RollbackAt(database, "UPDATE ON pair", () => store.SettlePending(PairId, published, change));
+            Check.Require(store.Pending(PairId) is CurrentPending &&
+                store.SyncedByKey(PairId, Side.Dropbox, saved.DropboxKey) == saved && store.ReadWorkWatermark() == before,
+                "Pending rollback retains the original binding and inserts no release work.");
+            store.SettlePending(PairId, published, change);
+            Check.Require(store.Pending(PairId) is NoPending &&
+                store.SyncedByKey(PairId, Side.Local, final.LocalKey) == final &&
+                store.SyncedByKey(PairId, Side.Local, saved.LocalKey) is null && store.ReadWorkWatermark() == before + 1,
+                "Published returning Local replacement settles with one durable released partner.");
+            if (real)
+            {
+                using var reopened = StateStore.OpenReadOnly(database)!;
+                Check.Require(reopened.Pending(PairId) is NoPending && reopened.ReadWorkWatermark() == before + 1 &&
+                    reopened.SyncedByKey(PairId, Side.Local, final.LocalKey) == final,
+                    "Pending settlement and release survive reopening the real database.");
+            }
+        }
+        return Task.CompletedTask;
+    }
+
     private static SourceProvenance InstallDropbox(IStateStore store)
     {
         var generation = Generation(store);
@@ -1317,8 +1576,8 @@ public static class StateStoreChecks
         var generation = Generation(store);
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var other = store.ReadSource(OtherPair, Side.Local)!.Value;
-        var members = new[] { (PairId, generation, local.Epoch, local.Revision, false, false),
-            (OtherPair, store.ReadPairExecution(OtherPair)!.Value.Generation, other.Epoch, other.Revision, false, false) };
+        var members = new[] { (PairId, generation, local.Epoch, local.Revision, false),
+            (OtherPair, store.ReadPairExecution(OtherPair)!.Value.Generation, other.Epoch, other.Revision, false) };
         var position = new JournalPosition(Single, 0);
         Check.Require(store.AcquireJournalPage(Domain, null, position, members, []) == 0, nameof(JournalCases));
         var notice = new ChangeNotice(Side.Local, ChangeKind.Changed, Child, null, LocalId, Entry(), true, false);
@@ -1326,13 +1585,13 @@ public static class StateStoreChecks
             position with { NextUsn = position.NextUsn + 1 }, members, BrokenJournal(notice)));
         Check.Require(store.ReadJournal(Domain) == position && store.ReadWorkWatermark() == 0, nameof(JournalCases));
         var wrong = members.ToArray();
-        wrong[0] = (PairId, generation + 1, local.Epoch, local.Revision, false, false);
+        wrong[0] = (PairId, generation + 1, local.Epoch, local.Revision, false);
         Check.Require(store.AcquireJournalPage(Domain, position, position, wrong, []) is null,
             nameof(JournalCases));
         foreach (var stale in new[]
         {
-            (PairId, generation, local.Epoch + 1, local.Revision, false, false),
-            (PairId, generation, local.Epoch, local.Revision + 1, false, false)
+            (PairId, generation, local.Epoch + 1, local.Revision, false),
+            (PairId, generation, local.Epoch, local.Revision + 1, false)
         })
             Check.Require(store.AcquireJournalPage(Domain, position, position, [stale], []) is null,
                 nameof(JournalCases));
@@ -1347,17 +1606,20 @@ public static class StateStoreChecks
         var evidence = store.ReadLocalDirty(PairId, generation, local.Epoch, Domain, LocalId,
             PathNames.Key(Child), null);
         Check.Require(evidence.Dirty && evidence.EvidenceVersion > 0, nameof(JournalCases));
-        members[0] = (PairId, generation, local.Epoch, local.Revision, true, false);
-        store.AcquireJournalPage(Domain, next, next, members, []);
-        var gap = store.ReadSource(PairId, Side.Local)!.Value;
-        Check.Require(gap.Obligation == SourceObligation.LocalSkippedCoverage && gap.Revision == local.Revision + 1,
-            nameof(JournalCases));
-        members[0] = (PairId, generation, gap.Epoch, gap.Revision, true, false);
-        store.AcquireJournalPage(Domain, next, next, members, []);
-        Check.Require(store.ReadSource(PairId, Side.Local) == gap && store.ReadWorkWatermark() == evidence.EvidenceVersion,
-            nameof(JournalCases));
         var pair = store.Pair(PairId)!;
-        store.SavePairDecision(pair, generation, pair with { Enabled = false }, null, false, null);
+        store.SavePairDecision(pair, generation, pair with { Name = "renamed" }, null, false, null);
+        var current = Generation(store);
+        var watermark = store.ReadWorkWatermark();
+        var gap = store.ReadSource(PairId, Side.Local)!.Value;
+        Check.Require(gap.Obligation == SourceObligation.LocalSkippedCoverage && gap.Epoch == local.Epoch + 1 &&
+            gap.Revision == local.Revision + 1 && store.ReadLocalGap(PairId, gap.Epoch) == gap.Revision,
+            nameof(JournalCases));
+        members[0] = (PairId, current, gap.Epoch, gap.Revision, false);
+        store.AcquireJournalPage(Domain, next, next, members, []);
+        Check.Require(store.ReadSource(PairId, Side.Local) == gap && store.ReadWorkWatermark() == watermark,
+            nameof(JournalCases));
+        var renamed = store.Pair(PairId)!;
+        store.SavePairDecision(renamed, current, renamed with { Enabled = false }, null, false, null);
         Check.Require(store.ReadSource(PairId, Side.Local)!.Value.Obligation == SourceObligation.LocalSkippedCoverage,
             nameof(JournalCases));
         return Task.CompletedTask;
@@ -1505,7 +1767,7 @@ public static class StateStoreChecks
             var local = store.ReadSource(PairId, Side.Local)!.Value;
             var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
             store.AcquireJournalPage(Domain, null, new JournalPosition(Single, 0),
-                [(PairId, generation, local.Epoch, local.Revision, false, false)], []);
+                [(PairId, generation, local.Epoch, local.Revision, false)], []);
             var token = store.BeginScan(PairId, generation, false);
             foreach (var side in Enum.GetValues<Side>()) await store.OpenScan(PairId, side, ScanTestSettings.BatchRows).CompleteAsync();
             var localCatchUp = new LocalCatchUp(PairId, generation, local.Epoch,
@@ -1559,7 +1821,7 @@ public static class StateStoreChecks
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
         var position = new JournalPosition(Single, 0);
-        var members = new[] { (PairId, generation, local.Epoch, local.Revision, false, false) };
+        var members = new[] { (PairId, generation, local.Epoch, local.Revision, false) };
         store.AcquireJournalPage(Domain, null, position, members, []);
         var token = store.BeginScan(PairId, generation, true);
         foreach (var side in Enum.GetValues<Side>())
@@ -1583,11 +1845,12 @@ public static class StateStoreChecks
         Check.Require(store.FirstRepairDone(PairId) && store.ReadSource(PairId, Side.Local)!.Value.Obligation is null &&
             store.ReadSource(PairId, Side.Dropbox)!.Value.Obligation is null, nameof(CompletionCases));
         using (var inspect = Inspect(path))
-            Check.Require(Snapshot(inspect, "SELECT deleted_history_cursor IS NULL FROM pair;") == "[[1]]" &&
-                Snapshot(inspect, "SELECT count(*) FROM discovery_deleted_name;") == "[[0]]",
-                "First Repair completion invalidates its marker and reclaims retained rows.");
+            Check.Require(Snapshot(inspect, "SELECT deleted_history_cursor IS NULL FROM pair;") == "[[0]]" &&
+                Snapshot(inspect, "SELECT sum(name_count) FROM discovery_deleted_block;") == "[[1]]" &&
+                Snapshot(inspect, "PRAGMA freelist_count;") == "[[0]]",
+                "First Repair keeps its published history and reclaims remaining cleanup pages.");
         var readyLocal = store.ReadSource(PairId, Side.Local)!.Value;
-        members[0] = (PairId, generation, readyLocal.Epoch, readyLocal.Revision, false, false);
+        members[0] = (PairId, generation, readyLocal.Epoch, readyLocal.Revision, false);
         var change = new ChangeNotice(Side.Local, ChangeKind.Changed, Child, null, LocalId, Entry(), true, false);
         var nextPosition = position with { NextUsn = position.NextUsn + 1 };
         var through = store.AcquireJournalPage(Domain, position, nextPosition, members, [(PairId, change)])!.Value;
@@ -1619,7 +1882,7 @@ public static class StateStoreChecks
         var original = store.ReadSource(PairId, Side.Local)!.Value;
         token = store.BeginScan(PairId, generation, false);
         foreach (var side in Enum.GetValues<Side>()) await store.OpenScan(PairId, side, ScanTestSettings.BatchRows).CompleteAsync();
-        members[0] = (PairId, generation, original.Epoch, original.Revision, false, true);
+        members[0] = (PairId, generation, original.Epoch, original.Revision, true);
         store.AcquireJournalPage(Domain, position, position, members, []);
         var newer = store.ReadSource(PairId, Side.Local);
         Refuses<InvalidOperationException>(() => store.FinishRepair(PairId, Summary(), generation,
@@ -1633,7 +1896,7 @@ public static class StateStoreChecks
         token = store.BeginScan(PairId, generation, false);
         foreach (var side in Enum.GetValues<Side>()) await store.OpenScan(PairId, side, ScanTestSettings.BatchRows).CompleteAsync();
         var current = store.ReadSource(PairId, Side.Local)!.Value;
-        members[0] = (PairId, generation, current.Epoch, current.Revision, false, false);
+        members[0] = (PairId, generation, current.Epoch, current.Revision, false);
         var newest = store.AcquireJournalPage(Domain, position, position, members, [(PairId, change)])!.Value;
         store.FinishRepair(PairId, Summary(), generation, token,
             localCatchUp with { ThroughWorkId = newest }, remoteCatchUp with { ThroughWorkId = newest });
@@ -1643,7 +1906,7 @@ public static class StateStoreChecks
             "completed Repair consumes current-epoch preimages only through its pre-list watermark");
         store.Commit(PairId, Raise(TextKey.FailChanged));
         current = store.ReadSource(PairId, Side.Local)!.Value;
-        members[0] = (PairId, generation, current.Epoch, current.Revision, false, false);
+        members[0] = (PairId, generation, current.Epoch, current.Revision, false);
         var dirtyLatest = store.AcquireJournalPage(Domain, position, position, members, [(PairId, change)])!.Value;
         token = store.BeginScan(PairId, generation, false);
         foreach (var side in Enum.GetValues<Side>()) await store.OpenScan(PairId, side, ScanTestSettings.BatchRows).CompleteAsync();
@@ -1652,6 +1915,7 @@ public static class StateStoreChecks
         Refuses<LiveAdmissionStaleException>(() => store.ReadWork(surviving).ToArray());
         store.EndWorkPass(PairId);
         var dirtyWork = store.SelectWork(PairId, generation, new PathScope(store.Pair(PairId)!, store.Pairs()))!;
+        store.BeginSelection(dirtyWork);
         Check.Require(dirtyWork.AnchorWorkId == dirtyLatest && store.ReadWork(dirtyWork).Count() == 1 &&
             store.ReadLocalDirty(PairId, generation, current.Epoch, Domain, LocalId, PathNames.Key(Child), null).Dirty,
             "failed Repair retains one latest dirty responsibility instead of losing or accumulating edits");
@@ -1660,6 +1924,10 @@ public static class StateStoreChecks
         foreach (var side in Enum.GetValues<Side>()) await store.OpenScan(PairId, side, ScanTestSettings.BatchRows).CompleteAsync();
         store.FinishRepair(PairId, Summary(), generation, token,
             localCatchUp with { ThroughWorkId = dirtyLatest }, remoteCatchUp with { ThroughWorkId = dirtyLatest });
+        Check.Require(store.ReadWork(dirtyWork).Count() == 1,
+            "Repair preserves responsibility selected by an active live pass until its owner completes it");
+        store.CompleteWork(dirtyWork, null);
+        store.EndSelection(dirtyWork);
         store.EndWorkPass(PairId);
         Check.Require(store.SelectWork(PairId, generation, new PathScope(store.Pair(PairId)!, store.Pairs())) is null,
             "successful recovery closes the Failure and completes retained dirty responsibility");
@@ -1686,7 +1954,7 @@ public static class StateStoreChecks
             var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
             var position = new JournalPosition(Single, 0);
             store.AcquireJournalPage(Domain, null, position,
-                [(PairId, generation, local.Epoch, local.Revision, false, false)], []);
+                [(PairId, generation, local.Epoch, local.Revision, false)], []);
             async Task Finish(bool measure = false)
             {
                 var token = store.BeginScan(PairId, generation, false);
@@ -1707,7 +1975,7 @@ public static class StateStoreChecks
                 var source = store.ReadSource(PairId, sourceSide)!.Value;
                 return sourceSide == Side.Local
                     ? store.AcquireJournalPage(Domain, position, position,
-                        [(PairId, generation, source.Epoch, source.Revision, false, false)], [(PairId, notice)])!.Value
+                        [(PairId, generation, source.Epoch, source.Revision, false)], [(PairId, notice)])!.Value
                     : store.AcquireDropboxPage(PairId, generation, source.Epoch, source.Revision,
                         source.Provenance!, source.Cursor, [notice], NextCursor);
             }
@@ -2216,7 +2484,12 @@ public static class StateStoreChecks
                 EffectState = FolderRemovalItem.EffectStatus.Settled, Phase = FolderRemovalItem.RecoveryPhase.Settled };
             RollbackAt(database, "UPDATE ON folder_removal_item", () =>
                 store.SettleFolderRemovalItem(PairId, operation, item.Ordinal, item.Generation, settled, StateChange.Empty));
+            Check.Require(!store.DeletedNameSpent(PairId, PathNames.DropboxKey(item.Path)),
+                "A rolled-back folder settlement publishes no spent fact.");
             store.SettleFolderRemovalItem(PairId, operation, item.Ordinal, item.Generation, settled, StateChange.Empty);
+            Check.Require(store.DeletedNameSpent(PairId, PathNames.DropboxKey(item.Path)) ==
+                (receipt && store.FolderRemoval(PairId, operation).DeletingSide == Side.Local),
+                "Only a verified Local removal spends an unbound member; known no-effect does not.");
             Refuses<InvalidOperationException>(() => store.SettleFolderRemovalItem(PairId, operation,
                 item.Ordinal, item.Generation, settled, StateChange.Empty));
             using var reopened = StateStore.OpenReadOnly(database)!;
@@ -2301,6 +2574,9 @@ public static class StateStoreChecks
             Check.Require(afterCrash.Count(item => item.EffectState == FolderRemovalItem.EffectStatus.Settled) == count &&
                 afterCrash.Count(item => item.EffectState == FolderRemovalItem.EffectStatus.Verified) == count,
                 "restart preserves the committed first batch and all receipts of the rolled-back second batch");
+            Check.Require(members.Take(count).All(item => reopened.DeletedNameSpent(PairId, PathNames.DropboxKey(item.Path))) &&
+                members.Skip(count).All(item => !reopened.DeletedNameSpent(PairId, PathNames.DropboxKey(item.Path))),
+                "Restart preserves spent facts only for the committed batch, not the rolled-back batch.");
             var pending = members.Skip(count).Select(Change).ToArray();
             var mixed = reopened.SettleFolderRemovalItems(PairId, operation,
                 [Change(members[0]), .. pending]);
@@ -2308,6 +2584,9 @@ public static class StateStoreChecks
                 "restart skips a stale committed member and settles the second batch from durable verified receipts");
             Check.Require(reopened.SettleFolderRemovalItems(PairId, operation, pending).All(value => !value),
                 "replaying stale settlement changes nothing");
+            Check.Require(members.All(item => reopened.DeletedNameSpent(PairId, PathNames.DropboxKey(item.Path))) &&
+                !reopened.DeletedNameSpent(PairId, PathNames.DropboxKey(Parent + "/" + Other)),
+                "Isolated reapply spends every confirmed member, never the untouched survivor.");
             Check.Require(reopened.FolderRemoval(PairId, operation).Active,
                 "member settlement never completes the enclosing root");
         }
@@ -2589,16 +2868,17 @@ public static class StateStoreChecks
         string expectedRows;
         using (var inspect = Inspect(path))
         {
+            Execute(inspect, "UPDATE source_state SET repair_revision=repair_revision+1;");
             expectedRows = DatabaseImage(inspect);
+            Execute(inspect, "UPDATE source_state SET repair_revision=repair_revision-1;");
+            DowngradeIssueFixture(inspect);
             Execute(inspect, "DROP TRIGGER invalidate_deleted_history;DROP TABLE discovery_deleted_name;ALTER TABLE pair DROP COLUMN deleted_history_cursor;");
             Execute(inspect, StateSchema.CreateObsoletePhaseIndex);
             Execute(inspect, "PRAGMA user_version=" + StateSchema.PhaseIndexVersion + ";");
             beforeRows = DatabaseImage(inspect);
             beforeSchema = Snapshot(inspect, StateSchema.SchemaObjects);
         }
-        using (var reader = StateStore.OpenReadOnly(path)!)
-            Check.Require(reader.FolderRemovalItems(PairId, operation, BeforeFirstOrdinal, int.MaxValue)
-                .SequenceEqual(members), "read-only version five preserves pending member access");
+        RefuseOldRead(path);
         using (var inspect = Inspect(path))
             Check.Require(Version(inspect) == StateSchema.PhaseIndexVersion &&
                 Snapshot(inspect, StateSchema.SchemaObjects) == beforeSchema && DatabaseImage(inspect) == beforeRows,
@@ -2610,7 +2890,7 @@ public static class StateStoreChecks
         using (var inspect = Inspect(path))
         {
             Check.Require(Version(inspect) == StateSchema.Version && DatabaseImage(inspect) == expectedRows,
-                "migration preserves every old row and adds only empty history and its null cursor");
+                "migration preserves rows and schedules the required history acquisition with one source revision advance");
             Check.Require(!Snapshot(inspect, StateSchema.SchemaObjects).Contains("folder_item_phase", StringComparison.Ordinal),
                 "writable opening removes the old write-only phase index");
         }

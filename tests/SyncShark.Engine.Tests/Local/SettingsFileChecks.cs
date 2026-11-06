@@ -7,6 +7,17 @@ namespace Massdex.SyncShark.Engine.Tests.Local;
 /// <summary>Checks for SettingsFile (`--engine-checks local`), written by SettingsFile's writer.</summary>
 public static class SettingsFileChecks
 {
+    // Zero waits keep the ordinary cases fast; the shipped schedule is asserted by the hold cases below.
+    private static readonly AtomicReplacePolicy Immediate = new(
+        [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero]);
+
+    // The shipped defaults in engine-settings.json: five attempts, doubling from 50 ms.
+    private static readonly AtomicReplacePolicy Shipped = new(
+        [TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(200),
+            TimeSpan.FromMilliseconds(400)]);
+
+    private const int SharingViolation = unchecked((int)0x80070020);
+
     public static void Run()
     {
         var temporary = Directory.CreateTempSubdirectory(nameof(SettingsFileChecks));
@@ -50,7 +61,7 @@ public static class SettingsFileChecks
                 JsonSerializer.Serialize(new Dictionary<string, string>()),
                 "",
                 nameof(SettingsFileChecks),
-                "{\"" + nameof(SettingsFileChecks) + "\":\"" + new string('\u2603', 100_000) + "\"}",
+                "{\"" + nameof(SettingsFileChecks) + "\":\"" + new string('☃', 100_000) + "\"}",
                 emptyOverride,
                 prefixBearing
             };
@@ -60,7 +71,7 @@ public static class SettingsFileChecks
             var seeded = false;
             foreach (var json in jsons)
             {
-                SettingsFile.Write(productRoot, json);
+                SettingsFile.Write(productRoot, json, Immediate);
                 // The first write creates the engine folder; a publication adds nothing but its own result.
                 Check.Require(Directory.Exists(engineFolder), nameof(engineFolder));
                 Check.Require(File.ReadAllBytes(path).AsSpan().SequenceEqual(Encoding.UTF8.GetBytes(json)), nameof(SettingsFile.Write));
@@ -84,7 +95,7 @@ public static class SettingsFileChecks
             {
                 RequireThrows<IOException>(() => SettingsFile.Read(productRoot));
                 // Write reports the OS's own failure, so either managed I/O type may surface here.
-                RequireManagedIoFailure(() => SettingsFile.Write(productRoot, oldSupported));
+                RequireManagedIoFailure(() => SettingsFile.Write(productRoot, oldSupported, Immediate));
                 // A failed publication keeps the old complete document and leaves the complete new one
                 // in its owned replacement; the file is never a mixture of the two.
                 locked.Position = 0;
@@ -100,24 +111,67 @@ public static class SettingsFileChecks
             // The public read still observes the old complete document; the replacement is not consulted.
             Check.Require(SettingsFile.Read(productRoot) == previous, nameof(SettingsFile.Read));
 
+            // A brief hold of the published file must not fail the write (#135). One real Windows handle is
+            // opened first: a plain single move is refused while it is open, and the public write publishes
+            // once the seam releases that same handle after the failed attempt.
+            File.WriteAllText(path, previous);
+            File.WriteAllText(replacement, prefixBearing);
+            var released = 0;
+            using (var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                var refused = false;
+                try
+                {
+                    File.Move(replacement, path, overwrite: true);
+                }
+                catch (Exception error) when (error is UnauthorizedAccessException ||
+                    error is IOException { HResult: SharingViolation })
+                {
+                    refused = true;
+                }
+                Check.Require(refused, "a plain single move fails while the settings file is held");
+                SettingsFile.Write(productRoot, oldSupported, Shipped, _ =>
+                {
+                    released++;
+                    held.Dispose();
+                });
+            }
+            Check.Require(released == 1, "the hold was released after a failed publish attempt");
+            Check.Require(SettingsFile.Read(productRoot) == oldSupported,
+                "a write survives a hold released inside the shipped policy");
+            Check.Require(!File.Exists(replacement), nameof(ResourceNames.UserSettingsReplacementFile));
+
             File.Delete(path);
             Check.Require(SettingsFile.Read(productRoot) is null, nameof(SettingsFile.Read));
-            Check.Require(OnlyEntries(engineFolder, replacement, unrelated), nameof(engineFolder));
+            // Every publication above succeeded, so only the unrelated file is left.
+            Check.Require(OnlyEntries(engineFolder, unrelated), nameof(engineFolder));
 
             // An abandoned replacement is truncated and reused by the next successful publication,
             // which restores the old-supported value over the prefix-bearing one.
             File.WriteAllText(replacement, new string('x', 200_000));
-            SettingsFile.Write(productRoot, oldSupported);
+            SettingsFile.Write(productRoot, oldSupported, Immediate);
             Check.Require(File.ReadAllText(path) == oldSupported, nameof(SettingsFile.Write));
             Check.Require(SettingsFile.Read(productRoot) == oldSupported, nameof(SettingsFile.Read));
             Check.Require(!File.Exists(replacement), nameof(ResourceNames.UserSettingsReplacementFile));
             Check.Require(File.ReadAllBytes(unrelated).SequenceEqual(unrelatedBytes), nameof(SettingsFile.Write));
             Check.Require(OnlyEntries(engineFolder, path, unrelated), nameof(SettingsFile.Write));
 
+            // A permanent access denial is bounded and still reports the OS's failure; the old document stays.
+            File.SetAttributes(path, FileAttributes.ReadOnly);
+            try
+            {
+                RequireThrows<UnauthorizedAccessException>(() => SettingsFile.Write(productRoot, prefixBearing, Shipped));
+            }
+            finally
+            {
+                File.SetAttributes(path, FileAttributes.Normal);
+            }
+            Check.Require(SettingsFile.Read(productRoot) == oldSupported, nameof(SettingsFile.Write));
+
             File.Delete(path);
             Directory.CreateDirectory(path);
             RequireThrows<UnauthorizedAccessException>(() => SettingsFile.Read(productRoot));
-            RequireThrows<UnauthorizedAccessException>(() => SettingsFile.Write(productRoot, ""));
+            RequireThrows<UnauthorizedAccessException>(() => SettingsFile.Write(productRoot, "", Immediate));
             Check.Require(File.ReadAllBytes(unrelated).SequenceEqual(unrelatedBytes), nameof(SettingsFile.Write));
             Check.Require(
                 Directory.EnumerateFileSystemEntries(engineFolder)

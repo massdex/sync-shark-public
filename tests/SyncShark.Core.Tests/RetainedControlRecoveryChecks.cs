@@ -1390,7 +1390,7 @@ internal static class RetainedControlRecoveryChecks
 
 
     /// <summary>
-    /// /-4: a REAL permitted publication-mode drift with the legitimate provider setup.
+    /// Items 1-4: a REAL permitted publication-mode drift with the legitimate provider setup.
     /// The pre-retention callback performs the existing permitted Null -> pair_json transition for the current
     /// disabled draft, verifies INSIDE the callback that the SAME database and pair row now carries pair_json at
     /// the same revision, and captures the post-mutation snapshot. The retention transaction must then refuse with
@@ -1483,7 +1483,7 @@ internal static class RetainedControlRecoveryChecks
     }
 
     /// <summary>
-    /// clarification: the explicit expectation contract on the real DB. A supplied wrong revision
+    /// Item 2 clarification: the explicit expectation contract on the real DB. A supplied wrong revision
     /// and a supplied published expectation are both ENFORCED by the retention transaction on an unpublished
     /// candidate, leaving the retained metadata unchanged; a legitimate exact unpublished expectation succeeds and
     /// its exact replay is a replay.

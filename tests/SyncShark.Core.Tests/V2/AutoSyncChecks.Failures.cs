@@ -1,6 +1,6 @@
 namespace Massdex.SyncShark.V2;
 
-// Failure-path checks from Astra's review of 68e8bde: foreign cancellations, access faults, dying watches, the real
+// Failure-path checks from review of 68e8bde: foreign cancellations, access faults, dying watches, the real
 // SyncRun gate, and losing waits that finish cancelling late.
 internal static partial class AutoSyncChecks
 {

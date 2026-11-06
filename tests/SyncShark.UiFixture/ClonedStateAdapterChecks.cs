@@ -219,18 +219,24 @@ internal sealed class ClonedStateAdapter : IAsyncDisposable
             Path.Combine(OwnerAllocation, "root682-cloned-state-live", "real-provider-state"),
             mustBeFresh: false);
         var targetRoot = RequireAllowedDestination(RealStagedSsdRoot, mustBeFresh: true);
-        return ContinueRetainedRealClone(sourceRoot, targetRoot,
-            fromCapacity
-                ? ["bridge-conflicts.json", "choices-f00d0000000000000012.json", "review-f00d0000000000000012.json",
-                   "choices-f00d0000000000000028.json", "review-f00d0000000000000028.json"]
-                : ["bridge-conflicts.json", "choices-f00d0000000000000012.json", "review-f00d0000000000000012.json"]);
+        // The retained root's snapshot file names carry the operator's own pair identities.
+        var childFiles = new[] { "choices-" + RetainedCloneIdentities.ChildPair + ".json",
+            "review-" + RetainedCloneIdentities.ChildPair + ".json" };
+        var parentFiles = new[] { "choices-" + RetainedCloneIdentities.ParentPair + ".json",
+            "review-" + RetainedCloneIdentities.ParentPair + ".json" };
+        string[] rootFiles = fromCapacity
+            ? ["bridge-conflicts.json", .. childFiles, .. parentFiles]
+            : ["bridge-conflicts.json", .. childFiles];
+        return ContinueRetainedRealClone(sourceRoot, targetRoot, rootFiles);
     }
 
     internal static object ContinueRetainedRealCloneOnCapacityVolume() => ContinueRetainedRealClone(
         RequireAllowedDestination(RealStagedSsdRoot, mustBeFresh: false),
         RequireAllowedDestination(RealStagedCapacityRoot, mustBeFresh: true),
-        ["bridge-conflicts.json", "choices-f00d0000000000000012.json", "review-f00d0000000000000012.json",
-         "choices-f00d0000000000000028.json", "review-f00d0000000000000028.json"]);
+        ["bridge-conflicts.json", "choices-" + RetainedCloneIdentities.ChildPair + ".json",
+         "review-" + RetainedCloneIdentities.ChildPair + ".json",
+         "choices-" + RetainedCloneIdentities.ParentPair + ".json",
+         "review-" + RetainedCloneIdentities.ParentPair + ".json"]);
 
     private static object ContinueRetainedRealClone(string sourceRoot, string targetRoot, string[] rootFiles)
     {

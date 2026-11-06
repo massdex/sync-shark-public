@@ -48,7 +48,7 @@ public static class SyncCliRegistry
     public static readonly IReadOnlyList<SyncCliCommandRow> Rows =
     [
         new("setup check", "setup check", SyncCliRequestKind.State, "none", "checks the latest stable signed setup release", "network", "state-free", None),
-        new("setup apply", "setup apply --update <exact-version> --yes", SyncCliRequestKind.State, "yes", "downloads, verifies and starts the exact signed setup; recovery after migration is roll-forward only", "network and Windows PowerShell", "state-free", "--update,--yes", Mutating: true, RequiresYes: true),
+        new("setup apply", "setup apply --update <exact-version> --yes", SyncCliRequestKind.State, "yes", "downloads, verifies and starts exact per-user setup; installs program files without stopping the host or changing data", "network and Windows PowerShell", "state-free", "--update,--yes", Mutating: true, RequiresYes: true),
         new("help", "help [<command>]", SyncCliRequestKind.Help, "none", "prints this command map or one command's usage and requirements",
             "nothing", "state-free", None),
         new("version", "version", SyncCliRequestKind.Version, "none", "prints the product and bound source revision",
@@ -56,7 +56,7 @@ public static class SyncCliRegistry
         new("capabilities", "capabilities", SyncCliRequestKind.Capabilities, "none",
             "prints the machine-readable capability inventory", "nothing", "state-free", None),
         new("autosync start", "autosync start", SyncCliRequestKind.State, "explicit", "start or attach to the shared supervised background host; unexpected exits relaunch", "installed executable", "background-host", None, Mutating: true),
-        new("autosync install-startup", "autosync install-startup [--this-build] --yes", SyncCliRequestKind.State, "yes", "register the Engine supervisor used by Start With Windows in the current user's single Windows startup registration; prefer the same bound stable installed build; migrate owned legacy startup; report selection paths and versions when they differ; preserve foreign entries", "installed executable", "background-host", "--this-build,--yes", Mutating: true, RequiresYes: true),
+        new("autosync install-startup", "autosync install-startup [--this-build] --yes", SyncCliRequestKind.State, "yes", "register --cli engine host start --yes used by Start With Windows in the current user's single Windows startup registration; prefer the same bound stable installed build; migrate owned legacy startup; report selection paths and versions when they differ; preserve foreign entries", "installed executable", "background-host", "--this-build,--yes", Mutating: true, RequiresYes: true),
         new("autosync uninstall-startup", "autosync uninstall-startup --yes", SyncCliRequestKind.State, "yes", "disable Start With Windows by removing the current user's owned Engine-supervisor and legacy startup entries; preserve foreign entries and the running host", "installed executable", "background-host", "--yes", Mutating: true, RequiresYes: true),
         new("autosync stop", "autosync stop", SyncCliRequestKind.State, "explicit", "send stop to host first; host cancels supervision before draining to a durable safe point; CLI stops relaunch backoff only without a host, never on failed or uncertain sends", "host or supervisor", "background-host", None, Mutating: true),
         new("autosync status", "autosync status", SyncCliRequestKind.State, "none", "host identity, pair scheduler state, live progress (kind/stage/done/total/item/ETA/updatedAt), intake retirement counts, urgentPending, planningBacklog and nullable open-conflict count; store fields marked stale when slow; never launches", "nothing", "background-host", None, HostRead: EngineHostReadKind.AutoSyncStatus),
@@ -229,7 +229,7 @@ public static class SyncCliRegistry
         new("conflicts list", "conflicts list [--pair <exact-id>] [--account <exact-id>] [--search <text>] [--group <group>] [--limit 1..200] [--offset <n>]",
             SyncCliRequestKind.State, "none", "open conflicts with group, recommendation and generation; capped content-proof notices and paginated retained diagnostics include failure stage and native error; overflow Retry/Ignore targets the root summary",
             "the product state or the running application", "direct|running-application",
-            "--pair,--account,--search,--group,--limit,--offset", HostRead: EngineHostReadKind.ConflictsList),
+            "--pair,--account,--search,--group,--limit,--offset," + EngineCliCatalog.Flag(EngineOptionKey.Ignored), HostRead: EngineHostReadKind.ConflictsList),
         new("conflicts select", "conflicts select --account <exact-id> [--pair <exact-id>] [--search <text>] [--group <group>]",
             SyncCliRequestKind.State, "none", "captures every exact matching conflict ID and generation", "retained authority",
             "direct|running-application", "--account,--pair,--search,--group"),
@@ -386,7 +386,7 @@ public static class SyncCliRegistry
             "transfer.maximumConcurrentFiles: 0 (recommended) or 1..1024; " +
             "transfer.uploadBatchSize: 0 (default 1000) or 1..1000; transfer.uploadCommitConcurrency: 0 (default 1) or 1..4; " +
             "transfer.deleteBatchSize: 0 (default 1000) or 1..1000; uploadKiBPerSecond/downloadKiBPerSecond: 0 (unlimited) or an explicit cap; " +
-            "interface.statusIconStyle: Colour, Symbol or Combined; dataLocation: empty local fixed-drive folder, changed alone with app closed and no pending work; restart required",
+            "interface.statusIconStyle: Colour, Symbol or Combined; dataLocation: new local folder or default home containing only installation/pointer files, changed alone with app closed and no pending work; verified copy and atomic pointer switch; restart required",
             "the product state or the running application", "direct|running-application", "--settings,--yes",
             Mutating: true, RequiresYes: true),
         new("ignores list", "ignores list --pair <exact-id>", SyncCliRequestKind.State, "none",
@@ -543,7 +543,7 @@ public static class SyncCliRegistry
             "checks a local package with the installed signature, hash and compatibility verifier; does not install",
             "the running signed installed application", "running-application", "--path", NeedsApplication: true),
         new("updates apply", "updates apply --update <exact-version> [--path <absolute-installer-path>] --yes", SyncCliRequestKind.State, "yes",
-            "verifies the retained exact version and starts the app's existing installer handoff; Windows consent remains required",
+            "verifies the retained exact version and starts the app's existing installer handoff; Windows approval and installed-result verification remain separate",
             "the running signed installed app and one exact local or retained downloaded package", "running-application", "--update,--path,--yes",
             NeedsApplication: true, LiveVerificationRequired: true, Mutating: true, RequiresYes: true)
         ,
@@ -635,8 +635,8 @@ public static class SyncCliRegistry
             "the product admission path verifies the remote root through the real Dropbox client, so live "
             + "admission needs an authenticated provider; the CLI-facing creation flow is pairs create"),
         new("updates install",
-            "installation is the signed installer's own privileged action after updates apply initiates the "
-            + "existing app verifier/handoff; Windows consent and installed-result verification remain separate")
+            "installation is the setup executable's own per-user action after updates apply initiates the "
+            + "existing verifier/handoff; no elevation is requested, and installed-result verification remains separate")
     ];
 
     public static readonly IReadOnlyDictionary<string, string> ExitCodes =
@@ -1028,7 +1028,7 @@ public static class SyncCliRegistry
         if ((command is "updates apply" or "setup apply") && (!options.TryGetValue("--update", out var exactVersion) ||
             exactVersion is null || !System.Text.RegularExpressions.Regex.IsMatch(exactVersion,
                 @"^[0-9]+\.[0-9]+\.[0-9]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)))
-            throw new SyncCliUsageException("updates apply requires --update <exact-version>, for example 0.3.35.");
+            throw new SyncCliUsageException($"{command} requires --update <exact-version>, for example 0.3.35.");
         if (command == "dates restore" && string.IsNullOrWhiteSpace(options.GetValueOrDefault("--audit-log")))
             throw new SyncCliUsageException("dates restore requires --audit-log <file>.");
         if (command is "dates repair" or "dates report-mismatch")

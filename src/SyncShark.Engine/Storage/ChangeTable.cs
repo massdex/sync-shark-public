@@ -80,19 +80,19 @@ internal sealed class ChangeTable
             : null;
 
     /// <summary>Atomically checks the expected position and every member's persistent fence, inserts the ordered
-    /// notices, applies each member's requested repair and suspended coverage, and advances the journal. Null is a
+    /// notices, applies each member's requested repair, and advances the journal. Null is a
     /// definitive stale rollback with no page changes; a value is the committed work watermark, including zero.
     /// Invalid inputs and genuine failures throw. The caller's gate, not this check, proves membership complete.
     /// </summary>
     internal long? AcquireJournalPage(string volumeKey, JournalPosition? expected, JournalPosition next,
         IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision,
-            bool Suspended, bool LostInterval)> members,
+            bool LostInterval)> members,
         IEnumerable<(string PairId, ChangeNotice Notice)> notices)
     {
         ArgumentException.ThrowIfNullOrEmpty(volumeKey);
         using var transaction = _connection.BeginTransaction();
         if (ReadPosition(transaction, volumeKey) != expected) return null;
-        var fences = new Dictionary<string, (PairRow Pair, SourceRow Source, bool Suspended,
+        var fences = new Dictionary<string, (PairRow Pair, SourceRow Source,
             SourceObligation? Obligation)>(members.Count, StringComparer.Ordinal);
         foreach (var member in members)
         {
@@ -102,7 +102,7 @@ internal sealed class ChangeTable
                 return null;
             // A lost interval raises the source-obligation owner's answer: Bootstrap before the first completion,
             // NormalRepair after it. Configuration and gap ownership belong to their own transitions.
-            fences.Add(member.PairId, (pair, source, member.Suspended,
+            fences.Add(member.PairId, (pair, source,
                 member.LostInterval ? LostIntervalObligation(pair) : (SourceObligation?)null));
         }
         var workId = Watermark(transaction);
@@ -110,21 +110,19 @@ internal sealed class ChangeTable
         {
             foreach (var (pairId, notice) in notices)
             {
-                // A suspended member owes one aggregate gap, never per-record work.
-                if (notice.Side != Side.Local || !fences.TryGetValue(pairId, out var fence) || fence.Suspended)
+                if (notice.Side != Side.Local || !fences.TryGetValue(pairId, out var fence))
                     throw new ArgumentException(null, nameof(notices));
                 workId = checked(workId + 1);
                 AddWork(insert, workId, fence.Pair.Row, fence.Pair.Generation, fence.Source.Epoch, volumeKey, notice,
                     null, workId, null, null);
             }
         }
-        foreach (var (pair, source, suspended, requested) in fences.Values)
+        foreach (var (pair, source, requested) in fences.Values)
         {
-            // Repeated suspended hints in one gap move nothing; a request is new responsibility even over old debt.
-            if (requested is null && (!suspended || source.Reason == GapReason)) continue;
+            if (requested is null) continue;
             Advance(transaction, pair.Row, Side.Local, pair.Generation, source.Epoch, source.Revision,
                 source.Provenance, source.Cursor, source.Epoch, checked(source.Revision + 1), source.Provenance,
-                source.Cursor, suspended ? GapReason : source.Reason ?? requested.ToString());
+                source.Cursor, source.Reason ?? requested.ToString());
         }
         Require(expected is null
             ? Run(transaction, StateSchema.JournalInsert, (StateSchema.ParamVolume, volumeKey),
@@ -155,6 +153,9 @@ internal sealed class ChangeTable
             foreach (var notice in notices)
             {
                 if (notice.Side != Side.Dropbox) throw new ArgumentException(null, nameof(notices));
+                if (notice.Kind == ChangeKind.Deleted)
+                    Run(transaction, StateSchema.AppendDeletedHistory,
+                        (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamPath, PathNames.Key(notice.Path)));
                 workId = checked(workId + 1);
                 AddWork(insert, workId, pair.Row, expectedGeneration, expectedEpoch, provenance.NamespaceId, notice,
                     null, workId, null, null);
@@ -251,8 +252,25 @@ internal sealed class ChangeTable
         return null;
     }
 
+    /// <summary>Registers an endpoint unbound by a committed replacement in the caller's transaction.</summary>
+    internal void RegisterReleasedEndpoint(SqliteTransaction transaction, string pairId,
+        Side side, string path, string id)
+    {
+        var pair = RequirePair(transaction, pairId);
+        var source = ReadSourceRow(transaction, pair.Row, side);
+        var domain = Domain(Roots(pair), side);
+        if (source is null || domain is null)
+            throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
+        var workId = checked(Watermark(transaction) + 1);
+        using var insert = WorkInsert(transaction);
+        AddWork(insert, workId, pair.Row, pair.Generation, source.Epoch, domain,
+            new ChangeNotice(side, ChangeKind.Changed, path, null, id, null, false, false),
+            null, workId, null, null);
+        if (_passes.TryGetValue(pairId, out var pass) && pass.Generation == pair.Generation) pass.Released = true;
+    }
+
     internal bool EndWorkPass(string pairId) =>
-        _passes.Remove(pairId, out var pass) && pass.NetRetired > 0;
+        _passes.Remove(pairId, out var pass) && (pass.NetRetired > 0 || pass.Released);
 
     internal void RecordRetirement(string pairId)
     {
@@ -273,7 +291,8 @@ internal sealed class ChangeTable
         PendingChange Decode(SqliteDataReader reader) => new(reader.GetInt64(StateSchema.WorkId), selection.PairId,
             selection.PairGeneration, selection.SourceEpoch,
             StateEncoding.ReadEnvelope<ChangeNotice>(reader, StateSchema.WorkNoticeJson),
-            StateEncoding.ReadOptionalEnvelope<SyncedEntry>(reader, StateSchema.WorkBeforeJson));
+            StateEncoding.ReadOptionalEnvelope<SyncedEntry>(reader, StateSchema.WorkBeforeJson))
+        { IsResidual = !reader.IsDBNull(StateSchema.WorkParentAnchor) };
         if (selection.Identity is null)
         {
             var row = Read(null, StateSchema.ReadPathSelection, Decode, Membership(pair.Row, selection, anchor))
@@ -422,10 +441,18 @@ internal sealed class ChangeTable
 
     private bool CanSettleLocalEcho(WorkSelection selection, SyncedEntry saved, long throughWorkId, RootBinding? roots)
     {
-        var pair = RequireCurrent(null, selection);
+        // The whole call holds StateStore's _lock, so these fences cannot change before this guard returns.
+        var pair = ReadPair(null, selection.PairId);
+        if (pair is null || pair.Generation != selection.PairGeneration)
+            throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged);
+        var selectedSource = ReadSourceRow(null, pair.Row, selection.Side);
+        if (selectedSource?.Epoch != selection.SourceEpoch)
+            throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged);
         var anchor = RequireAnchor(null, pair.Row, selection);
-        if (selection.Side != Side.Local || Obligated(pair) || anchor.Parent is not null || anchor.Obligation is not null ||
-            ReadSourceRow(null, pair.Row, Side.Dropbox) is not { Cursor: not null, Provenance: not null } source ||
+        if (selection.Side != Side.Local) return false;
+        var source = ReadSourceRow(null, pair.Row, Side.Dropbox);
+        if (OwesRepair(selectedSource) || OwesRepair(source) || anchor.Parent is not null || anchor.Obligation is not null ||
+            source is not { Cursor: not null, Provenance: not null } ||
             string.IsNullOrEmpty(source.Cursor) || Domain(roots, Side.Dropbox) is not { } domain ||
             Read(null, StateSchema.WorkIssue, static reader => reader.GetInt64(StateSchema.FirstColumn),
                 (StateSchema.ParamWork, anchor.WorkId)).Any() ||
@@ -1439,6 +1466,7 @@ internal sealed class ChangeTable
     {
         internal Dictionary<long, WorkSelection>? Claims { get; set; }
         internal long NetRetired { get; set; }
+        internal bool Released { get; set; }
         internal Func<SyncedEntry, bool>? LocalEchoResponsibility { get; set; }
         internal HashSet<long>? Attempted { get; set; }
         internal Dictionary<(long Work, long Through), bool>? Deletions { get; set; }

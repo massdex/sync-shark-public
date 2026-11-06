@@ -32,6 +32,7 @@ public static class EngineCommandsChecks
 
     public static void Run()
     {
+        KeptBothLocations();
         ParsesEveryCommand();
         ConfirmationRules();
         RowsAreCoherent();
@@ -199,6 +200,10 @@ public static class EngineCommandsChecks
             "--choice", "keep-folder-always", "--rules", "FileName:desktop.ini", "--yes"]);
         Check.Require(resolve.Value(EngineCliCatalog.Flag(EngineOptionKey.Rules)) == "FileName:desktop.ini",
             "keep-folder-always carries its rules");
+        var bind = SyncCliRegistry.Parse(["--cli", "engine", "resolve", "--pair", "p", "--issue", "7",
+            "--choice", "bind-roots", "--yes"]);
+        Check.Require(bind.Value(EngineCliCatalog.Flag(EngineOptionKey.Choice)) == "bind-roots",
+            "the root action is reachable through the shared resolve catalog");
         var recoveryResolve = SyncCliRegistry.Parse(["--cli", "engine", "recovery-resolve", "--pair", "p",
             "--operation", "op", "--generation", "2", "--choice", "accept-current", "--yes"]);
         Check.Require(recoveryResolve.Generation == 2 &&
@@ -505,7 +510,7 @@ public static class EngineCommandsChecks
     private static void RecoveryRefusalsBeforeState(string root)
     {
         var commands = new EngineCommands(new EngineOperations(root, _ => { }));
-        foreach (var choice in new[] { "use-local", "keep-both", "retry", "first-sync", "keep-folder-always" })
+        foreach (var choice in new[] { "use-local", "keep-both", "retry", "first-sync", "keep-folder-always", "bind-roots" })
         {
             var invocation = SyncCliRegistry.Parse(["--cli", "engine", "recovery-resolve", "--pair", "p",
                 "--operation", "op", "--generation", "2", "--choice", choice, "--yes"]);
@@ -629,6 +634,16 @@ public static class EngineCommandsChecks
         }
     }
 
+    private static string VisibilityGuidance(Issue issue, string pairId)
+    {
+        var choice = issue.Ignored ? ResolutionChoice.Unignore : ResolutionChoice.Ignore;
+        var label = issue.Ignored ? Text.Get(TextKey.RestoreLabel) : EngineCliCatalog.OptionValue(EngineOptionKey.Choice, choice.ToString());
+        return Text.Get(TextKey.ResultIssueVisibilityChoice, (TextArg.Name, label), (TextArg.Pair, pairId),
+            (TextArg.Id, issue.Id.ToString(CultureInfo.InvariantCulture)),
+            (TextArg.Choice, EngineCliCatalog.OptionValue(EngineOptionKey.Choice, choice.ToString()))) +
+            Environment.NewLine + IssuePresentation.ResolutionConfirmation(issue, choice);
+    }
+
     private static void ResolveOptionValidation(string root)
     {
         var progress = 0;
@@ -723,6 +738,16 @@ public static class EngineCommandsChecks
         }
         Check.Require(progress == 0 && Directory.GetFileSystemEntries(root).Length == 0,
             "a keep-folder-always request on a missing pair creates nothing");
+        var bind = SyncCliRegistry.Parse(["--cli", "engine", "resolve", "--pair", "missing", "--issue", "7",
+            "--choice", "bind-roots", "--yes"]);
+        try
+        {
+            Await(commands.RunAsync(bind, CancellationToken.None));
+            Check.Require(false, "bind-roots must reach the Run owner");
+        }
+        catch (EngineRequestException) { }
+        Check.Require(progress == 0 && Directory.GetFileSystemEntries(root).Length == 0,
+            "a bind-roots request on a missing pair creates nothing");
     }
 
     private static void FirstSyncWithValidRoots(string root)
@@ -918,24 +943,24 @@ public static class EngineCommandsChecks
         Check.Require(human == string.Join(Environment.NewLine,
             Text.Get(TextKey.ResultIssueGroup, (TextArg.Kind, IssueKind.Failure.ToString()),
                 (TextArg.Cause, TextKey.FailDropboxNoPermission.ToString()), (TextArg.Count, "2")),
-            Line(result.Issues[0]), Text.Get(TextKey.FailDropboxNoPermission, (TextArg.Path, "a")),
-            Line(result.Issues[1]), Text.Get(TextKey.FailDropboxNoPermission, (TextArg.Path, "b")),
+            Line(result.Issues[0]), Text.Get(TextKey.FailDropboxNoPermission, (TextArg.Path, "a")), VisibilityGuidance(result.Issues[0], pair.PairId),
+            Line(result.Issues[1]), Text.Get(TextKey.FailDropboxNoPermission, (TextArg.Path, "b")), VisibilityGuidance(result.Issues[1], pair.PairId),
             retry,
             Text.Get(TextKey.ResultIssueGroup, (TextArg.Kind, IssueKind.Failure.ToString()),
                 (TextArg.Cause, TextKey.FailLocalNoSpace.ToString()), (TextArg.Count, "1")),
-            Line(result.Issues[2]), Text.Get(TextKey.FailLocalNoSpace, (TextArg.Path, "c")),
+            Line(result.Issues[2]), Text.Get(TextKey.FailLocalNoSpace, (TextArg.Path, "c")), VisibilityGuidance(result.Issues[2], pair.PairId),
             retry,
             Text.Get(TextKey.ResultIssueGroup, (TextArg.Kind, IssueKind.DriveChange.ToString()),
                 (TextArg.Cause, TextKey.DriveRestored.ToString()), (TextArg.Count, "1")),
-            Line(drive), Text.Get(TextKey.DriveRestored),
+            Line(drive), Text.Get(TextKey.DriveRestored), VisibilityGuidance(drive, pair.PairId),
             Text.Get(TextKey.ResultDriveChoices, (TextArg.Pair, pair.PairId),
                 (TextArg.Id, drive.Id.ToString(CultureInfo.InvariantCulture))),
             Text.Get(TextKey.ResultIssueGroup, (TextArg.Kind, IssueKind.NameClash.ToString()),
                 (TextArg.Cause, TextKey.ResolveSameSideUnsupported.ToString()), (TextArg.Count, "1")),
-            Line(result.Issues[4]), Text.Get(TextKey.ResolveSameSideUnsupported),
+            Line(result.Issues[4]), Text.Get(TextKey.ResolveSameSideUnsupported), VisibilityGuidance(result.Issues[4], pair.PairId),
             Text.Get(TextKey.ResultIssueGroup, (TextArg.Kind, IssueKind.Tie.ToString()),
                 (TextArg.Cause, TextKey.ResolveSubjectStale.ToString()), (TextArg.Count, "1")),
-            Line(result.Issues[5]), Text.Get(TextKey.ResolveSubjectStale)),
+            Line(result.Issues[5]), Text.Get(TextKey.ResolveSubjectStale), VisibilityGuidance(result.Issues[5], pair.PairId)),
             "issue causes follow their items, drive choices follow their notice and retry closes each Failure group");
         Check.Require(!human.Contains("{Id}", StringComparison.Ordinal) && !human.Contains("{Pair}", StringComparison.Ordinal),
             "issue guidance fills identifiers");
@@ -1099,13 +1124,13 @@ public static class EngineCommandsChecks
             Text.Get(TextKey.ResultIssueGroup, (TextArg.Kind, IssueKind.Tie.ToString()),
                 (TextArg.Cause, TextKey.TieEqualTimes.ToString()), (TextArg.Count, "2")),
             Text.Get(TextKey.ResultIssueLine, (TextArg.Id, "1"), (TextArg.Path, "a"), (TextArg.At, at)),
-            Text.Get(TextKey.TieEqualTimes, (TextArg.Path, "a"), (TextArg.Message, "")),
+            Text.Get(TextKey.TieEqualTimes, (TextArg.Path, "a"), (TextArg.Message, "")), VisibilityGuidance(issues.Issues[0], pair.PairId),
             Text.Get(TextKey.ResultIssueLine, (TextArg.Id, "3"), (TextArg.Path, "c"), (TextArg.At, at)),
-            Text.Get(TextKey.TieEqualTimes, (TextArg.Path, "c"), (TextArg.Message, "")),
+            Text.Get(TextKey.TieEqualTimes, (TextArg.Path, "c"), (TextArg.Message, "")), VisibilityGuidance(issues.Issues[2], pair.PairId),
             Text.Get(TextKey.ResultIssueGroup, (TextArg.Kind, IssueKind.Failure.ToString()),
                 (TextArg.Cause, TextKey.PairUnknown.ToString()), (TextArg.Count, "1")),
             Text.Get(TextKey.ResultIssueLine, (TextArg.Id, "2"), (TextArg.Path, "b"), (TextArg.At, at)),
-            Text.Get(TextKey.PairUnknown, (TextArg.Path, "b"), (TextArg.Message, ""), (TextArg.Pair, pair.PairId)),
+            Text.Get(TextKey.PairUnknown, (TextArg.Path, "b"), (TextArg.Message, ""), (TextArg.Pair, pair.PairId)), VisibilityGuidance(issues.Issues[1], pair.PairId),
             Text.Get(TextKey.ResultFailureRetry, (TextArg.Pair, pair.PairId))),
             "engine issues human header and item lines");
     }
@@ -1429,6 +1454,67 @@ public static class EngineCommandsChecks
             output.ToString().Contains("\"pairId\":\"p\"", StringComparison.Ordinal) &&
             !output.ToString().Contains("Root identities saved", StringComparison.Ordinal),
             "the CLI JSON envelope keeps the typed root binding result");
+    }
+
+    private static void KeptBothLocations()
+    {
+        IssueItem local = new(Side.Local, "Parent/local.txt", "local");
+        IssueItem remote = new(Side.Dropbox, "Other/remote.txt", "remote");
+        IssueItem upload = new(Side.Dropbox, "Other/local-copy.txt", "upload");
+        IssueItem download = new(Side.Local, "Parent/remote-copy.txt", "download");
+        const string generic = "Parent/local.txt: both versions were kept. Linked originals and labelled copies are synced files, not independent backups. Deleting either endpoint of a linked version also deletes its unchanged counterpart on the other side; an edited counterpart is kept and copied back to where it was deleted. To retain a version before cleaning up, copy it outside all synced folders and verify that copy before deleting. Dismiss only hides this notice; it does not delete files or stop syncing.";
+        var locations = Environment.NewLine + "Locations recorded when the versions were kept (paths relative to this pair’s roots):" + Environment.NewLine;
+        (IssueItem[] Items, string Expected)[] layouts =
+        [
+            ([], generic), ([local], generic), ([local, remote], generic),
+            ([local, remote, upload],
+                "Other/remote.txt: both versions were kept on this side. Dismiss only hides this notice." + locations +
+                "Version from Dropbox: Dropbox \"Other/remote.txt\". Version from this PC: Dropbox \"Other/local-copy.txt\"."),
+            ([local, remote, download],
+                "Parent/local.txt: both versions were kept on this side. Dismiss only hides this notice." + locations +
+                "Version from this PC: this PC \"Parent/local.txt\". Version from Dropbox: this PC \"Parent/remote-copy.txt\"."),
+            ([local, remote, upload, download], generic + locations +
+                "Version from this PC: this PC \"Parent/local.txt\"; Dropbox \"Other/local-copy.txt\"." + Environment.NewLine +
+                "Version from Dropbox: Dropbox \"Other/remote.txt\"; this PC \"Parent/remote-copy.txt\"."),
+            ([remote, local, upload], generic), ([local, remote, download, upload], generic),
+            ([local, remote, upload, upload], generic), ([local, remote, upload, download, local], generic)
+        ];
+        foreach (var (items, expected) in layouts)
+        {
+            var issue = IssueAt(7, IssueKind.Info, TextKey.InfoKeptBoth, local.Path) with
+                { Subject = new IssueSubject(items, null) };
+            var rendered = IssuePresentation.Render(issue, new(RetryPresentationState.Unavailable));
+            Check.Require(rendered == expected && IssuesResult.From([issue]).RenderHuman().Contains(rendered),
+                "CLI and shared renderer match the literal location and safety guidance for each layout.");
+            using var json = JsonDocument.Parse(JsonOf(IssuesResult.From([issue])));
+            Check.Require(json.RootElement.GetProperty("issues")[0].GetProperty("subject").GetProperty("items")
+                .GetArrayLength() == items.Length, "CLI JSON preserves enriched and legacy subjects.");
+        }
+        WithProductRoot(root =>
+        {
+            using var store = StateStore.Open(StateStore.DatabasePath(root));
+            store.SavePair(new PairConfig("pair", "Pair A", "C:/PairA", "/PairA", "account", [], [],
+                FirstRunPolicy.NewestWins, true, null));
+            var subject = new IssueSubject([local, remote, upload, download], null);
+            var change = StateChange.Empty with { Raise = [(IssueKind.Info, TextKey.InfoKeptBoth, local.Path, subject)] };
+            store.Commit("pair", change);
+            var saved = store.Issues("pair").Single();
+            Check.Require(saved.Subject.Items.SequenceEqual(subject.Items), "SQLite JSON round-trips copy identities in order.");
+            store.Commit("pair", change);
+            Check.Require(store.Issues("pair").Single().Id == saved.Id && store.Issues("pair").Single().At == saved.At, "An identical repeat retains the notice identity and timestamp.");
+            var replacement = subject with { Items = [local, remote, upload with { Id = "new-copy" }, download] };
+            store.Commit("pair", StateChange.Empty with
+                { Raise = [(IssueKind.Info, TextKey.InfoKeptBoth, local.Path, replacement)] });
+            Check.Require(store.Issues("pair").Single().Subject.Items.SequenceEqual(replacement.Items),
+                "A new actual copy updates the stored notice.");
+            store.DismissIssue("pair", saved.Id);
+            Check.Require(store.Issues("pair").Count == 0, "Dismiss still removes the informational notice.");
+        });
+        var unusual = local with { Path = "Parent/{Name} \"雪\".txt" };
+        var escaped = IssueAt(8, IssueKind.Info, TextKey.InfoKeptBoth, unusual.Path) with
+            { Subject = new IssueSubject([unusual, remote, upload, download], null) };
+        Check.Require(IssuePresentation.Render(escaped, new(RetryPresentationState.Unavailable)).Contains(unusual.Path),
+            "Braces, quotes and Unicode remain path data, not template operands.");
     }
 
     // CV-RETRYVIEW: all eight presentation states render their own guidance for the in-use family only.

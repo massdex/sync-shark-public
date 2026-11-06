@@ -120,7 +120,8 @@ public sealed class EngineCommands(EngineOperations operations)
     {
         var pairId = Value(invocation, EngineOptionKey.Pair);
         var kind = invocation.Value(EngineCliCatalog.Flag(EngineOptionKey.Kind));
-        var issues = _operations.Issues(pairId, kind is null ? null : Parse<IssueKind>(kind));
+        var issues = _operations.Issues(pairId, kind is null ? null : Parse<IssueKind>(kind),
+            Confirmed(invocation, EngineOptionKey.Ignored));
         // One page-batched Run projection; a missing entry is rendered Unavailable by the result owner.
         return IssuesResult.From(pairId, issues) with
         {

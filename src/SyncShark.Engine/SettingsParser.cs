@@ -60,7 +60,10 @@ public static class SettingsParser
             StoragePageSize = ReadInt(root, overlay, nameof(EngineSettings.StoragePageSize)),
             BatchPollIntervalSeconds = ReadDouble(root, overlay, nameof(EngineSettings.BatchPollIntervalSeconds)),
             FolderDeleteMinimumPollSeconds =
-                ReadDouble(root, overlay, nameof(EngineSettings.FolderDeleteMinimumPollSeconds))
+                ReadDouble(root, overlay, nameof(EngineSettings.FolderDeleteMinimumPollSeconds)),
+            AtomicReplaceAttempts = ReadInt(root, overlay, nameof(EngineSettings.AtomicReplaceAttempts)),
+            AtomicReplaceInitialDelayMilliseconds =
+                ReadInt(root, overlay, nameof(EngineSettings.AtomicReplaceInitialDelayMilliseconds))
         };
     }
 
@@ -151,10 +154,15 @@ public static class SettingsParser
         return number;
     }
 
-    /// <summary>The shared integer rule: the adaptive limiter starts at level one or higher and the log buffer, the
-    /// storage page and the scan save batch are positive.</summary>
+    // Existing atomic-publish validation bounds; these are not defaults.
+    private const int MaximumAtomicReplaceAttempts = 10;
+    private const int MaximumAtomicReplaceInitialDelayMilliseconds = 60_000;
+
+    /// <summary>The shared integer rule: positive storage sizes and bounded atomic-replace settings.</summary>
     private static bool IsValidInt(string name, int number) => name switch
     {
+        nameof(EngineSettings.AtomicReplaceAttempts) => number > 0 && number <= MaximumAtomicReplaceAttempts,
+        nameof(EngineSettings.AtomicReplaceInitialDelayMilliseconds) => number >= 0 && number <= MaximumAtomicReplaceInitialDelayMilliseconds,
         nameof(EngineSettings.InitialLimiterLevel) or nameof(EngineSettings.LogBufferCharacters) or
             nameof(EngineSettings.StoragePageSize) or nameof(EngineSettings.StoreBatchRows) => number > 0,
         _ => true

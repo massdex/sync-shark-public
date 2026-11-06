@@ -49,8 +49,116 @@ jobs:
       - name: Check setup transitions on stock PowerShell
         shell: powershell
         run: ./tools/Test-SyncSharkSetup.ps1
+      - name: Check setup as a standard user
+        shell: powershell
+        run: ./tools/Test-SyncSharkSetupUnelevated.ps1
+
+  setup-mutants:
+    needs: setup-transitions
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove setup assertions reject isolated mutants
+        shell: powershell
+        run: ./tools/Test-SyncSharkSetupMutants.ps1
+      - name: Retain setup mutant evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup-mutant-evidence
+          path: ${{ runner.temp }}/setup-mutants-*/**/*.log
+  # A lane branch may commit .ci-lane.json to run only the work it names. No
+  # file means today's full matrix (every job below keeps its original scope).
+  # The file has four optional arrays: build (project keys), engine (Engine
+  # check groups), core (Core.Tests switches) and ui (UiFixture selectors).
+  select:
+    name: select lane work
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      has_selection: ${{ steps.read.outputs.has_selection }}
+      build: ${{ steps.read.outputs.build }}
+      engine: ${{ steps.read.outputs.engine }}
+      engine_count: ${{ steps.read.outputs.engine_count }}
+      core: ${{ steps.read.outputs.core }}
+      core_count: ${{ steps.read.outputs.core_count }}
+      ui: ${{ steps.read.outputs.ui }}
+      ui_count: ${{ steps.read.outputs.ui_count }}
+      needs_zig: ${{ steps.read.outputs.needs_zig }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read .ci-lane.json
+        id: read
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $knownBuild = @('core', 'core-tests', 'fod-tests', 'engine-tests', 'app', 'ui-fixture')
+          $path = Join-Path $env:GITHUB_WORKSPACE '.ci-lane.json'
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            # No selection: today's full matrix. quick/** still skips the UI fixture.
+            $build = @('core', 'core-tests', 'fod-tests', 'app', 'ui-fixture')
+            if ($env:GITHUB_REF -like 'refs/heads/quick/*') { $build = @('core', 'core-tests', 'fod-tests', 'app') }
+            $data = [ordered]@{ has_selection = 'false'; build = $build; engine = @(); core = @(); ui = @() }
+          } else {
+            $lane = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+            if ($null -eq $lane) { throw '.ci-lane.json is empty; list engine groups, core switches, ui selectors or build projects.' }
+            $allowed = @('build', 'engine', 'core', 'ui')
+            foreach ($name in $lane.PSObject.Properties.Name) {
+              if ($allowed -cnotcontains $name) { throw "Unknown .ci-lane.json key '$name'; allowed: $($allowed -join ', ')." }
+            }
+            $readArray = {
+              param([string]$Name)
+              $property = $lane.PSObject.Properties[$Name]
+              if ($null -eq $property -or $null -eq $property.Value) { return @() }
+              $values = @($property.Value)
+              foreach ($value in $values) {
+                if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { throw ".ci-lane.json '$Name' must be an array of non-empty strings." }
+              }
+              return $values
+            }
+            $build = @(& $readArray 'build')
+            $engine = @(& $readArray 'engine')
+            $core = @(& $readArray 'core')
+            $ui = @(& $readArray 'ui')
+            foreach ($group in $engine) { if ($group -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') { throw "Invalid engine group '$group'." } }
+            foreach ($flag in $core) { if ($flag -cnotmatch '^--[a-z0-9-]+$') { throw "Invalid core switch '$flag'." } }
+            foreach ($selector in $ui) { if ($selector -cnotmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') { throw "Invalid ui selector '$selector'." } }
+            foreach ($project in $build) { if ($knownBuild -cnotcontains $project) { throw "Unknown build project '$project'; allowed: $($knownBuild -join ', ')." } }
+            # An omitted build list is derived from what the run selects.
+            if ($build.Count -eq 0) {
+              if ($engine.Count) { $build += 'engine-tests' }
+              if ($core.Count) { $build += 'core-tests' }
+              # The UI jobs restore the Core.Tests artifact too; the assembly selector needs it.
+              if ($ui.Count) { $build += @('core-tests', 'app', 'ui-fixture') }
+            }
+            if ($build.Count -eq 0 -and $engine.Count -eq 0 -and $core.Count -eq 0 -and $ui.Count -eq 0) {
+              throw '.ci-lane.json selects nothing; list engine groups, core switches, ui selectors or build projects.'
+            }
+            $data = [ordered]@{ has_selection = 'true'; build = $build; engine = $engine; core = $core; ui = $ui }
+          }
+          # A matrix must not be empty; the count outputs keep the dummy out of a run.
+          $matrix = {
+            param($Values, $Sentinel)
+            if ($Values.Count -eq 0) { return @($Sentinel) }
+            return $Values
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "has_selection=$($data.has_selection)"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "build=$((ConvertTo-Json -InputObject @($data.build) -Compress))"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "engine=$((ConvertTo-Json -InputObject @(& $matrix $data.engine '__none__') -Compress))"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "engine_count=$($data.engine.Count)"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "core=$((ConvertTo-Json -InputObject @(& $matrix $data.core '__none__') -Compress))"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "core_count=$($data.core.Count)"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "ui=$((ConvertTo-Json -InputObject @(& $matrix $data.ui '__none__') -Compress))"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "ui_count=$($data.ui.Count)"
+          $needsZig = (@($data.build) -ccontains 'app') -or (@($data.build) -ccontains 'ui-fixture')
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "needs_zig=$($needsZig.ToString().ToLowerInvariant())"
 
   spec-ratchet:
+    needs: select
+    # A selected lane run reports only what it selected; the full matrix keeps the ratchet.
+    if: ${{ needs.select.outputs.has_selection != 'true' }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -66,6 +174,7 @@ jobs:
           exit $LASTEXITCODE
 
   build:
+    needs: select
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -96,8 +205,10 @@ jobs:
             nuget-${{ runner.os }}-
 
       # apps/SyncShark builds native Explorer and Discovery helpers through the
-      # pinned Zig 0.16.0 toolchain; the runner does not ship it.
+      # pinned Zig 0.16.0 toolchain; the runner does not ship it. A selection
+      # that builds only managed projects does not pay for it.
       - name: Install Zig 0.16.0
+        if: ${{ needs.select.outputs.needs_zig == 'true' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -113,60 +224,77 @@ jobs:
           "ZIG_EXE=$($zig.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           & $zig.FullName version
 
-      - name: Build Core
+      # One owner for the project build list: the select job's `build` output.
+      # No selection carries today's full list; a lane lists only what it needs.
+      - name: Build selected projects
         shell: pwsh
+        env:
+          BUILD_KEYS: ${{ needs.select.outputs.build }}
         run: |
-          dotnet build 'src/SyncShark.Core/SyncShark.Core.csproj' -c $env:CONFIGURATION --nologo
-          exit $LASTEXITCODE
-
-      # The test project targets net8.0 (not net8.0-windows) but naturally uses
-      # Windows identity APIs on the Windows-only host checks. Keep the one
-      # platform-compatibility rule quiet so the runner's full analyzer set does
-      # not turn its Windows-only calls into errors.
-      - name: Build tests
-        shell: pwsh
-        run: |
-          dotnet build 'tests/SyncShark.Core.Tests/SyncShark.Core.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & "tests/SyncShark.Core.Tests/bin/$env:CONFIGURATION/net8.0/SyncShark.Core.Tests.exe" --engine-layout-checks
-          exit $LASTEXITCODE
-
-      # The standalone Files On-Demand project is the native acceptance runner and
-      # compiles a different subset of files than the main test project. Build it
-      # (compile only, its tests never run in CI) without NoWarn=CA1416 so drift the
-      # main project hides fails here instead of on native-acceptance day.
-      - name: Build Files On-Demand tests
-        shell: pwsh
-        run: |
-          dotnet build 'tests/SyncShark.FilesOnDemand.Tests/SyncShark.FilesOnDemand.Tests.csproj' -c $env:CONFIGURATION --nologo
-          exit $LASTEXITCODE
-
-      # The product build owns its output allocation through SyncSharkBuildRoot;
-      # the native setup script refuses an output outside it.
-      - name: Build app
-        shell: pwsh
-        run: |
+          $ErrorActionPreference = 'Stop'
           $buildRoot = Join-Path $env:GITHUB_WORKSPACE 'build\ci'
-          dotnet build 'apps/SyncShark/SyncShark.csproj' -c $env:CONFIGURATION --nologo `
-            -p:SyncSharkBuildRoot=$buildRoot `
-            -p:SyncSharkZigPath=$env:ZIG_EXE
-          exit $LASTEXITCODE
-
-      # The GUI/app fixture is a separate WPF executable that references the app
-      # project. Build it into the same allocation so its output sits beside the
-      # app's (build\ci\bin\<project>\<configuration>\<framework>) and the copied
-      # native Explorer/Discovery helpers come along to the ui-tests job.
-      - name: Build UI fixture
-        if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
-        shell: pwsh
-        run: |
-          $buildRoot = Join-Path $env:GITHUB_WORKSPACE 'build\ci'
-          dotnet build 'tests/SyncShark.UiFixture/SyncShark.UiFixture.csproj' -c $env:CONFIGURATION --nologo `
-            -p:SyncSharkBuildRoot=$buildRoot `
-            -p:SyncSharkZigPath=$env:ZIG_EXE
-          exit $LASTEXITCODE
+          $keys = @($env:BUILD_KEYS | ConvertFrom-Json)
+          if ($keys.Count -eq 0) { throw 'The select job reported no build projects.' }
+          foreach ($key in $keys) {
+            Write-Host "::group::BUILD $key"
+            $code = 1
+            switch -CaseSensitive ($key) {
+              'core' {
+                dotnet build 'src/SyncShark.Core/SyncShark.Core.csproj' -c $env:CONFIGURATION --nologo
+                $code = $LASTEXITCODE
+              }
+              # The test project targets net8.0 (not net8.0-windows) but naturally
+              # uses Windows identity APIs on the Windows-only host checks. Keep the
+              # one platform-compatibility rule quiet so the runner's full analyzer
+              # set does not turn its Windows-only calls into errors.
+              'core-tests' {
+                dotnet build 'tests/SyncShark.Core.Tests/SyncShark.Core.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
+                $code = $LASTEXITCODE
+                if ($code -eq 0) {
+                  & "tests/SyncShark.Core.Tests/bin/$env:CONFIGURATION/net8.0/SyncShark.Core.Tests.exe" --engine-layout-checks
+                  $code = $LASTEXITCODE
+                }
+              }
+              # The standalone Files On-Demand project is the native acceptance
+              # runner and compiles a different subset of files than the main test
+              # project. Build it (compile only, its tests never run in CI) without
+              # NoWarn=CA1416 so drift the main project hides fails here instead of
+              # on native-acceptance day.
+              'fod-tests' {
+                dotnet build 'tests/SyncShark.FilesOnDemand.Tests/SyncShark.FilesOnDemand.Tests.csproj' -c $env:CONFIGURATION --nologo
+                $code = $LASTEXITCODE
+              }
+              'engine-tests' {
+                dotnet build 'tests/SyncShark.Engine.Tests/SyncShark.Engine.Tests.csproj' -c $env:CONFIGURATION --nologo -p:NoWarn=CA1416
+                $code = $LASTEXITCODE
+              }
+              # The product build owns its output allocation through
+              # SyncSharkBuildRoot; the native setup script refuses an output
+              # outside it.
+              'app' {
+                dotnet build 'apps/SyncShark/SyncShark.csproj' -c $env:CONFIGURATION --nologo `
+                  -p:SyncSharkBuildRoot=$buildRoot `
+                  -p:SyncSharkZigPath=$env:ZIG_EXE
+                $code = $LASTEXITCODE
+              }
+              # The GUI/app fixture is a separate WPF executable that references
+              # the app project. Build it into the same allocation so its output
+              # sits beside the app's and the copied native Explorer/Discovery
+              # helpers come along to the ui jobs.
+              'ui-fixture' {
+                dotnet build 'tests/SyncShark.UiFixture/SyncShark.UiFixture.csproj' -c $env:CONFIGURATION --nologo `
+                  -p:SyncSharkBuildRoot=$buildRoot `
+                  -p:SyncSharkZigPath=$env:ZIG_EXE
+                $code = $LASTEXITCODE
+              }
+              default { throw "Unknown build project '$key'." }
+            }
+            Write-Host "::endgroup::"
+            if ($code -ne 0) { exit $code }
+          }
 
       - name: Upload test binaries
+        if: ${{ contains(fromJson(needs.select.outputs.build), 'core-tests') }}
         uses: actions/upload-artifact@v4
         with:
           name: sync-shark-tests
@@ -174,11 +302,31 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # The ui-tests job needs the app plus the fixture and its copied helpers.
+      - name: Upload engine test binaries
+        if: ${{ contains(fromJson(needs.select.outputs.build), 'engine-tests') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-shark-engine-tests
+          path: tests/SyncShark.Engine.Tests/bin/${{ env.CONFIGURATION }}/net8.0-windows
+          if-no-files-found: error
+          retention-days: 7
+
+      # OwnershipChecks resolves engine types with the project's generated global
+      # usings; a lane checkout has no obj\ tree, so the generated file travels.
+      - name: Upload engine global usings
+        if: ${{ contains(fromJson(needs.select.outputs.build), 'engine-tests') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-shark-engine-usings
+          path: src/SyncShark.Engine/obj/${{ env.CONFIGURATION }}/net8.0-windows/SyncShark.Engine.GlobalUsings.g.cs
+          if-no-files-found: error
+          retention-days: 7
+
+      # The ui jobs need the app plus the fixture and its copied helpers.
       # With these two paths the artifact root is build/ci/bin, so downloading it
       # there restores the layout the fixture resolves its sibling outputs from.
       - name: Upload UI fixture binaries
-        if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
+        if: ${{ contains(fromJson(needs.select.outputs.build), 'ui-fixture') }}
         uses: actions/upload-artifact@v4
         with:
           name: sync-shark-ui-fixture
@@ -196,9 +344,10 @@ jobs:
   # fails, then fails the job if any suite failed.
   tests:
     name: tests (${{ matrix.label }})
-    needs: build
-    # quick/** runs one targeted quick-tests job instead of the full shard matrix.
-    if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
+    needs: [select, build]
+    # quick/** runs one targeted quick-tests job instead of the full shard matrix;
+    # a lane selection runs only its named jobs below.
+    if: ${{ needs.select.outputs.has_selection != 'true' && !startsWith(github.ref, 'refs/heads/quick/') }}
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -221,12 +370,16 @@ jobs:
               - suite: reincluded-evidence
                 flag: --reincluded-evidence-checks
                 drive: c
-          - label: 'shard-3: local-journal, blockers, cli, composition'
+          - label: 'shard-3: local-journal, blockers, cli, composition, atomic-file'
             suites:
               # Real NTFS USN journal checks. runner.temp is on the runner's D:
               # volume, which has no usable journal; keep these roots on C:.
               - suite: local-journal
                 flag: --v2-local-journal-checks
+                drive: c
+              # Takes no fixture root: it owns its short C: temp folders.
+              - suite: atomic-file
+                flag: --atomic-file-checks
                 drive: c
               - suite: blockers
                 flag: --blocker-checks
@@ -478,6 +631,9 @@ jobs:
                 flag: --v2-gap-promotion-bound-checks
                 drive: c
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download test binaries
         uses: actions/download-artifact@v4
         with:
@@ -493,10 +649,6 @@ jobs:
           $suites = $env:SHARD_SUITES | ConvertFrom-Json
           $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Core.Tests\bin\$env:CONFIGURATION\net8.0\SyncShark.Core.Tests.exe"
           $results = @()
-          # Suite arguments come from the workflow-wide map shared with quick-tests.
-          if (-not $env:SUITE_ROOT_ARGS) { throw 'SUITE_ROOT_ARGS is missing from the workflow environment.' }
-          $rootSuites = @($env:SUITE_ROOT_ARGS -split '\s+' | Where-Object { $_ })
-          $extraArgs = if ($env:SUITE_EXTRA_ARGS) { $env:SUITE_EXTRA_ARGS | ConvertFrom-Json } else { [pscustomobject]@{} }
 
           foreach ($s in $suites) {
             $suite = $s.suite
@@ -515,11 +667,7 @@ jobs:
               # directory that already exists.
               $root = Join-Path $base "syncshark-ci\$suite-root"
               if (-not (Test-Path $exe)) { throw "Test executable not found: $exe" }
-              $testArgs = @($s.flag)
-              if ($rootSuites -ccontains $s.flag) { $testArgs += $root }
-              # A few suites take a case selector after the root (e.g. slowdelete).
-              $extra = $extraArgs.PSObject.Properties[$s.flag]
-              if ($null -ne $extra) { $testArgs += @($extra.Value) }
+              $testArgs = @(& ./tools/ci/Get-CoreCheckArguments.ps1 -Flag $s.flag -Root $root)
               Write-Host "Running: $exe $($testArgs -join ' ')"
               & $exe @testArgs
               $code = $LASTEXITCODE
@@ -558,6 +706,129 @@ jobs:
           if ($failed.Count -gt 0) { exit 1 }
           exit 0
 
+  # Lane selection jobs: one matrix job per named Engine group, Core switch and
+  # UI selector, so a lane runs just its work in parallel. They run only when
+  # .ci-lane.json selected something; the full matrix above is unchanged.
+  lane-engine:
+    name: engine (${{ matrix.group }})
+    needs: [select, build]
+    if: ${{ needs.select.outputs.engine_count != '0' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ${{ fromJson(needs.select.outputs.engine) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download engine test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-engine-tests
+          path: tests/SyncShark.Engine.Tests/bin/${{ env.CONFIGURATION }}/net8.0-windows
+
+      # OwnershipChecks reads src/SyncShark.Engine/obj/**/*GlobalUsings.g.cs, which
+      # only a build produces; without it the literals group fails on every lane.
+      - name: Download engine global usings
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-engine-usings
+          path: src/SyncShark.Engine/obj/${{ env.CONFIGURATION }}/net8.0-windows
+
+      - name: Run engine group
+        shell: pwsh
+        env:
+          GROUP: ${{ matrix.group }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Engine.Tests\bin\$env:CONFIGURATION\net8.0-windows\SyncShark.Engine.Tests.exe"
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Test executable not found: $exe" }
+          # Short C: roots: the engine's store and journal checks need the
+          # SQLite path headroom and a volume with a usable journal.
+          $scratch = Join-Path $env:SystemDrive 'ss'
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          $env:SYNCSHARK_TEST_ROOT = $scratch
+          & $exe --engine-checks $env:GROUP
+          exit $LASTEXITCODE
+
+  lane-core:
+    name: core (${{ matrix.flag }})
+    needs: [select, build]
+    if: ${{ needs.select.outputs.core_count != '0' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        flag: ${{ fromJson(needs.select.outputs.core) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-tests
+          path: tests/SyncShark.Core.Tests/bin/${{ env.CONFIGURATION }}/net8.0
+
+      - name: Run core switch
+        shell: pwsh
+        env:
+          FLAG: ${{ matrix.flag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:GITHUB_WORKSPACE "tests\SyncShark.Core.Tests\bin\$env:CONFIGURATION\net8.0\SyncShark.Core.Tests.exe"
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Test executable not found: $exe" }
+          $name = $env:FLAG.TrimStart('-')
+          $scratch = Join-Path $env:LOCALAPPDATA "syncshark-ci\lane-$name-scratch"
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          $env:SYNCSHARK_TEST_ROOT = $scratch
+          $testArgs = @(& ./tools/ci/Get-CoreCheckArguments.ps1 -Flag $env:FLAG -Root (Join-Path $env:LOCALAPPDATA "syncshark-ci\lane-$name-root"))
+          Write-Host "Running: $exe $($testArgs -join ' ')"
+          & $exe @testArgs
+          exit $LASTEXITCODE
+
+  lane-ui:
+    name: ui (${{ matrix.selector }})
+    needs: [select, build]
+    if: ${{ needs.select.outputs.ui_count != '0' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        selector: ${{ fromJson(needs.select.outputs.ui) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Artifact root is build/ci/bin, so this restores
+      # build/ci/bin/SyncShark/<configuration> and SyncShark.UiFixture/<configuration>.
+      - name: Download UI fixture binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-ui-fixture
+          path: build/ci/bin
+
+      # The assembly selector resolves the focused core test assembly here.
+      - name: Download core test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-tests
+          path: build/ci/bin/SyncShark.Core.Tests/${{ env.CONFIGURATION }}/net8.0
+
+      - name: Run UI selector
+        shell: pwsh
+        env:
+          SELECTOR: ${{ matrix.selector }}
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector $env:SELECTOR
+
   # GUI/app checks from tests/SyncShark.UiFixture: the selectors that drive the
   # real WPF surfaces over isolated state (the *-ui-checks family plus the named
   # tray, window-close, settings-bridge, pair, endpoint and first-sync checks).
@@ -567,8 +838,8 @@ jobs:
   # final step fails the job after all checks have reported, like the shards.
   ui-tests:
     name: ui-tests
-    needs: build
-    if: ${{ !startsWith(github.ref, 'refs/heads/quick/') }}
+    needs: [select, build]
+    if: ${{ needs.select.outputs.has_selection != 'true' && !startsWith(github.ref, 'refs/heads/quick/') }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -607,13 +878,13 @@ jobs:
         id: ui-tray-tooltip
         continue-on-error: true
         shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-tooltip-contract -Arguments none
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-tooltip-contract
 
       - name: 'UI check: window close'
         id: ui-window-close
         continue-on-error: true
         shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector window-close-contract -Arguments none
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector window-close-contract
 
       - name: 'UI check: foundation'
         id: ui-foundation
@@ -752,13 +1023,13 @@ jobs:
         id: ui-mixed-file-retry
         continue-on-error: true
         shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector mixed-file-retry-ui-checks -Arguments assembly
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector mixed-file-retry-ui-checks
 
       - name: 'UI check: pair failure presentation'
         id: ui-pair-failure
         continue-on-error: true
         shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector pair-failure-presentation-checks -Arguments none
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector pair-failure-presentation-checks
 
       # The tray-client selector is carried by the tray feature's fixture. Run it wherever that
       # fixture exists and skip it on a tree that does not carry it, rather than failing the check.
@@ -767,7 +1038,13 @@ jobs:
         if: ${{ hashFiles('tests/SyncShark.UiFixture/TrayClientChecks.cs') != '' }}
         continue-on-error: true
         shell: pwsh
-        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-client-checks -Arguments none
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-client-checks
+
+      - name: 'UI check: engine startup readiness'
+        id: ui-engine-startup-readiness
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector engine-startup-readiness-checks -Arguments none
 
       # Run every check before failing, so one red selector never hides the rest.
       - name: Enforce UI check results
@@ -848,11 +1125,6 @@ jobs:
           }
           if (-not (Test-Path -LiteralPath $exe)) { throw "Test executable not found: $exe" }
 
-          # The same workflow-wide argument map the shard matrix uses; no second list.
-          if (-not $env:SUITE_ROOT_ARGS) { throw 'SUITE_ROOT_ARGS is missing from the workflow environment.' }
-          $rootSuites = @($env:SUITE_ROOT_ARGS -split '\s+' | Where-Object { $_ })
-          $extraArgs = if ($env:SUITE_EXTRA_ARGS) { $env:SUITE_EXTRA_ARGS | ConvertFrom-Json } else { [pscustomobject]@{} }
-
           $results = @()
           foreach ($suite in $selectors) {
             $suiteName = $suite.TrimStart('-')
@@ -866,14 +1138,9 @@ jobs:
               $env:TEMP = $scratch
               $env:TMP = $scratch
               $env:SYNCSHARK_TEST_ROOT = $scratch
-              $testArgs = @($suite)
               # Root-taking suites get the fixture root exactly as the shards do; it
               # must not pre-exist, so only the scratch directory is created.
-              if ($rootSuites -ccontains $suite) {
-                $testArgs += (Join-Path $env:LOCALAPPDATA "syncshark-ci\quick-$suiteName-root")
-              }
-              $extra = $extraArgs.PSObject.Properties[$suite]
-              if ($null -ne $extra) { $testArgs += @($extra.Value) }
+              $testArgs = @(& ./tools/ci/Get-CoreCheckArguments.ps1 -Flag $suite -Root (Join-Path $env:LOCALAPPDATA "syncshark-ci\quick-$suiteName-root"))
               Write-Host "Running: $exe $($testArgs -join ' ')"
               & $exe @testArgs
               $code = $LASTEXITCODE

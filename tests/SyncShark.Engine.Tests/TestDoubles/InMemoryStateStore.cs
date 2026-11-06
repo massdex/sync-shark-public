@@ -27,15 +27,19 @@ public sealed class InMemoryStateStore : IStateStore
     private readonly Dictionary<long, ItemRetryCandidate> _items = [];
     private readonly Dictionary<(string PairId, string OperationId), FolderOperation> _folders = [];
     private readonly Dictionary<string, SubmissionRecord> _submissions = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, ScanRecord> _scans = new(StringComparer.Ordinal);
-    private readonly HashSet<(string PairId, Side Side, string Key)> _skipTouched = [];
+    private readonly Dictionary<(string PairId, Guid ScanId), ScanRecord> _scans = [];
+    private readonly HashSet<(string PairId, Guid ScanId, Side Side, string Key)> _skipTouched = [];
     private readonly Dictionary<(string PairId, Side Side, string Key), (TextKey Cause, IssueSubject Subject)>
         _skipMembers = [];
     private readonly Dictionary<string, HashSet<string>> _deletedNames = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _resumedHistory = new(StringComparer.Ordinal);
+    private readonly HashSet<(string PairId, Guid ScanId)> _incrementalHistory = [];
+    private readonly HashSet<(string PairId, Guid ScanId)> _resumedHistory = [];
+    private readonly Dictionary<string, HashSet<string>> _spentDeletedNames = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, HashSet<string>> _deletedDelta = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (long Generation, string Cursor, HashSet<string> Names)> _deletedHistory = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Pass> _passes = new(StringComparer.Ordinal);
     private readonly List<ScanRow> _scan = [];
+    private readonly Dictionary<(string PairId, Guid ScanId), List<Issue>> _scanIssues = [];
     private long _nextIssueId;
     private long _nextWorkId;
 
@@ -172,6 +176,9 @@ public sealed class InMemoryStateStore : IStateStore
             if (HasCurrentLocalWork(expected.PairId, expectedGeneration) &&
                 local.Obligation != SourceObligation.LocalSkippedCoverage)
                 throw new InvalidOperationException();
+            _deletedHistory.Remove(expected.PairId);
+            _deletedDelta.Remove(expected.PairId);
+            if (RootBinding.HistoryIdentityChanged(current, next)) _spentDeletedNames.Remove(expected.PairId);
             _pairs[expected.PairId] = next;
             _generations[expected.PairId] = checked(expectedGeneration + 1);
             Advance(expected.PairId, Side.Local, expectedGeneration + 1, local.Epoch, local.Revision,
@@ -210,7 +217,15 @@ public sealed class InMemoryStateStore : IStateStore
         lock (_gate)
         {
             if (_pairs.TryGetValue(pair.PairId, out var before) && before with { Drive = pair.Drive } != pair)
+            {
                 _deletedHistory.Remove(pair.PairId);
+                _deletedDelta.Remove(pair.PairId);
+                if (RootBinding.HistoryIdentityChanged(before, pair))
+                {
+                    _spentDeletedNames.Remove(pair.PairId);
+                    ResetScan(pair.PairId);
+                }
+            }
             _pairs[pair.PairId] = pair;
             SeedSources(pair.PairId);
         }
@@ -254,10 +269,13 @@ public sealed class InMemoryStateStore : IStateStore
             _sources.Remove(SourceKey(pairId, Side.Local));
             _sources.Remove(SourceKey(pairId, Side.Dropbox));
             _retries.Remove(pairId);
-            _scans.Remove(pairId);
+            foreach (var scan in _scans.Keys.Where(key => key.PairId == pairId).ToArray()) _scans.Remove(scan);
             _deletedNames.Remove(pairId);
             _deletedHistory.Remove(pairId);
-            _resumedHistory.Remove(pairId);
+            _deletedDelta.Remove(pairId);
+            _spentDeletedNames.Remove(pairId);
+            _resumedHistory.RemoveWhere(key => key.PairId == pairId);
+            _incrementalHistory.RemoveWhere(key => key.PairId == pairId);
             _work.RemoveAll(row => row.PairId == pairId);
             foreach (var member in _skipMembers.Keys.Where(key => key.PairId == pairId).ToList())
                 _skipMembers.Remove(member);
@@ -308,7 +326,7 @@ public sealed class InMemoryStateStore : IStateStore
             var dropboxEpoch = scan.DropboxEpoch;
             var localRevision = scan.LocalRevision;
             var dropboxRevision = scan.DropboxRevision;
-            if (!summary.Completed || scan.Generation != expectedGeneration || local.PairId != pairId || dropbox.PairId != pairId ||
+            if (scan.Scope is not null || !summary.Completed || scan.Generation != expectedGeneration || local.PairId != pairId || dropbox.PairId != pairId ||
                 local.PairGeneration != expectedGeneration || dropbox.PairGeneration != expectedGeneration ||
                 local.SourceEpoch != localEpoch || dropbox.SourceEpoch != dropboxEpoch ||
                 scan.ThroughWorkId > local.ThroughWorkId || scan.ThroughWorkId > dropbox.ThroughWorkId ||
@@ -333,7 +351,7 @@ public sealed class InMemoryStateStore : IStateStore
                 CloseFinishedRetryNotice(pairId, notice, expectedGeneration);
             RetireCoveredWork(pairId, expectedGeneration, Side.Local, localEpoch, scan.ThroughWorkId);
             RetireCoveredWork(pairId, expectedGeneration, Side.Dropbox, dropboxEpoch, scan.ThroughWorkId);
-            ResetScan(pairId, completed: true);
+
         }
     }
 
@@ -441,7 +459,7 @@ public sealed class InMemoryStateStore : IStateStore
             if (value.Generation != 0 || value.Phase != PendingPhase.Armed)
                 throw new ArgumentException(null, nameof(value));
             if (!_pairs.ContainsKey(pairId)) throw new InvalidOperationException();
-            RequireSaved(pairId, value.Losing.Expected, value.Saved);
+            RequirePendingSaved(pairId, value);
             if (_pending.ContainsKey(pairId)) throw new InvalidOperationException();
             _pending[pairId] = value;
         }
@@ -505,7 +523,8 @@ public sealed class InMemoryStateStore : IStateStore
                 throw new ArgumentException(null, nameof(change));
             foreach (var (side, key) in change.ForgetSelf)
                 if (expected.Phase != PendingPhase.Removed || expected.Kind != PendingKind.LocalDelete ||
-                    expected.Saved is null || key != expected.Saved.KeyOn(side))
+                    (expected.Saved is { } saved ? key != saved.KeyOn(side) :
+                        side != Side.Local || key != PathNames.Key(expected.Losing.Expected.Path)))
                     throw new ArgumentException(null, nameof(change));
             foreach (var entry in change.Record)
                 if (expected.Phase != PendingPhase.Published || expected.Kind != PendingKind.LocalReplace ||
@@ -515,7 +534,7 @@ public sealed class InMemoryStateStore : IStateStore
                     throw new ArgumentException(null, nameof(change));
             if (!_pending.TryGetValue(pairId, out var current) || current != expected)
                 throw new InvalidOperationException();
-            RequireSaved(pairId, expected.Losing.Expected, expected.Saved);
+            RequirePendingSaved(pairId, expected);
             var raised = ApplyAtomic(pairId, change);
             _pending.Remove(pairId);
             return raised;
@@ -538,14 +557,14 @@ public sealed class InMemoryStateStore : IStateStore
 
     public long? AcquireJournalPage(string volumeKey, JournalPosition? expected, JournalPosition next,
         IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision,
-            bool Suspended, bool LostInterval)> members,
+            bool LostInterval)> members,
         IEnumerable<(string PairId, ChangeNotice Notice)> notices)
     {
         ArgumentException.ThrowIfNullOrEmpty(volumeKey);
         lock (_gate)
         {
             if (_journal.GetValueOrDefault(volumeKey) != expected) return null;
-            var fences = new Dictionary<string, (long Epoch, long Revision, bool Suspended,
+            var fences = new Dictionary<string, (long Epoch, long Revision,
                 SourceObligation? Obligation)>(StringComparer.Ordinal);
             foreach (var member in members)
             {
@@ -553,25 +572,23 @@ public sealed class InMemoryStateStore : IStateStore
                     !_sources.TryGetValue(SourceKey(member.PairId, Side.Local), out var source) ||
                     source.Epoch != member.Epoch || source.Revision != member.Revision)
                     return null;
-                fences.Add(member.PairId, (source.Epoch, source.Revision, member.Suspended,
+                fences.Add(member.PairId, (source.Epoch, source.Revision,
                     member.LostInterval ? LostIntervalObligation(member.PairId) : (SourceObligation?)null));
             }
             foreach (var (pairId, notice) in notices)
             {
-                if (notice.Side != Side.Local || !fences.TryGetValue(pairId, out var fence) || fence.Suspended)
+                if (notice.Side != Side.Local || !fences.TryGetValue(pairId, out var fence))
                     throw new ArgumentException(null, nameof(notices));
                 AddWork(pairId, checked(Generation(pairId)), fence.Epoch, Side.Local, volumeKey, notice, null,
                     null, null);
             }
             foreach (var (pairId, fence) in fences)
             {
-                if (fence.Obligation is null &&
-                    (!fence.Suspended ||
-                     RequireSource(pairId, Side.Local).Obligation == SourceObligation.LocalSkippedCoverage))
+                if (fence.Obligation is null)
                     continue;
                 Advance(pairId, Side.Local, Generation(pairId), fence.Epoch, fence.Revision, null, null,
                     fence.Epoch, checked(fence.Revision + 1), null, null,
-                    fence.Suspended ? SourceObligation.LocalSkippedCoverage : fence.Obligation);
+                    RequireSource(pairId, Side.Local).Obligation ?? fence.Obligation);
             }
             _journal[volumeKey] = next;
             return _nextWorkId;
@@ -615,6 +632,12 @@ public sealed class InMemoryStateStore : IStateStore
             foreach (var notice in notices)
             {
                 if (notice.Side != Side.Dropbox) throw new ArgumentException(null, nameof(notices));
+                if (notice.Kind == ChangeKind.Deleted)
+                {
+                    if (!_deletedDelta.TryGetValue(pairId, out var names)) _deletedDelta[pairId] = names = [];
+                    var key = PathNames.DropboxKey(notice.Path);
+                    if (!DeletedNameSpent(pairId, key)) names.Add(key);
+                }
                 AddWork(pairId, expectedGeneration, expectedEpoch, Side.Dropbox, provenance.NamespaceId, notice,
                     null, null, null);
             }
@@ -696,7 +719,7 @@ public sealed class InMemoryStateStore : IStateStore
 
     public bool EndWorkPass(string pairId)
     {
-        lock (_gate) return _passes.Remove(pairId, out var pass) && pass.NetRetired > 0;
+        lock (_gate) return _passes.Remove(pairId, out var pass) && (pass.NetRetired > 0 || pass.Released);
     }
 
     public IEnumerable<PendingChange> ReadWork(WorkSelection selection)
@@ -719,7 +742,7 @@ public sealed class InMemoryStateStore : IStateStore
             }
             foreach (var row in Membership(selection, anchor))
                 result.Add(new PendingChange(row.WorkId, selection.PairId, selection.PairGeneration,
-                    selection.SourceEpoch, row.Notice!, row.Before));
+                    selection.SourceEpoch, row.Notice!, row.Before) { IsResidual = row.Parent is not null });
             return result;
         }
     }
@@ -778,7 +801,7 @@ public sealed class InMemoryStateStore : IStateStore
         var saved = first.Identity is null ? SyncedByKey(row.PairId, first.Side, first.PathKey) :
             SyncedById(row.PairId, first.Side, first.Identity);
         return (notice is { Side: Side.Local, Kind: ChangeKind.Renamed } &&
-            _passes.GetValueOrDefault(row.PairId)?.Scope.LeavesScope(notice.Path, null,
+            _passes.GetValueOrDefault(row.PairId)?.Scope?.LeavesScope(notice.Path, null,
                 notice.Observed?.IsFolder ?? last.Before?.IsFolder ?? saved?.IsFolder ?? false,
                 (Owner: this, row.PairId), static (state, side, key) => state.Owner.SyncedByKey(state.PairId, side, key)) == true, null);
     }
@@ -930,8 +953,26 @@ public sealed class InMemoryStateStore : IStateStore
         }
     }
 
-    public void ClaimSelectionPeer(WorkSelection selection, SelectionPeer peer) { }
-    public void EndSelection(WorkSelection selection) { }
+    public void ClaimSelectionPeer(WorkSelection selection, SelectionPeer peer)
+    {
+        lock (_gate)
+        {
+            if (_passes.GetValueOrDefault(selection.PairId)?.Claims is not { } claims ||
+                !claims.TryGetValue(selection.AnchorWorkId, out var claimed) || claimed != selection with { Peer = claimed.Peer })
+                throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged);
+            claims[selection.AnchorWorkId] = claimed with { Peer = peer };
+        }
+    }
+
+    public void EndSelection(WorkSelection selection)
+    {
+        lock (_gate)
+        {
+            if (_passes.GetValueOrDefault(selection.PairId) is not { } pass) return;
+            pass.Claims.Remove(selection.AnchorWorkId);
+            if (pass.Scope is null && pass.Claims.Count == 0) _passes.Remove(selection.PairId);
+        }
+    }
     public void BeginSelection(WorkSelection selection)
     {
         lock (_gate)
@@ -943,7 +984,10 @@ public sealed class InMemoryStateStore : IStateStore
             var before = selection.Identity is null ? SyncedByKey(selection.PairId, selection.Side, selection.Key) :
                 SyncedById(selection.PairId, selection.Side, selection.Identity);
             foreach (var row in Membership(selection, anchor).ToArray()) row.Before = before;
-            pass?.Attempted.Add(selection.AnchorWorkId);
+            if (pass is null)
+                _passes[selection.PairId] = pass = new Pass(selection.PairGeneration, 0, selection.ThroughWorkId, null);
+            if (pass.Scope is not null) pass.Attempted.Add(selection.AnchorWorkId);
+            pass.Claims[selection.AnchorWorkId] = selection;
         }
     }
 
@@ -1600,7 +1644,9 @@ public sealed class InMemoryStateStore : IStateStore
             var synced = SyncedRows(pairId).ToList();
             var issues = IssueRows(pairId).ToList();
             var scan = _scan.ToList();
+            var spent = new HashSet<string>(_spentDeletedNames.GetValueOrDefault(pairId) ?? [], StringComparer.Ordinal);
             var settled = new bool[items.Count];
+            HashSet<(Side Side, string Path, string Id)> released = [];
             for (var at = 0; at < items.Count; at++)
             {
                 var (expectedGeneration, next, verifiedChange) = items[at];
@@ -1615,12 +1661,18 @@ public sealed class InMemoryStateStore : IStateStore
                 {
                     continue;
                 }
-                ApplyCommit(synced, issues, scan, pairId, verifiedChange, DateTimeOffset.UtcNow);
+                ApplyCommit(synced, issues, scan, spent, pairId, verifiedChange, DateTimeOffset.UtcNow, released);
+                if (next.EffectState == FolderRemovalItem.EffectStatus.Settled &&
+                    current.EffectState == FolderRemovalItem.EffectStatus.Verified &&
+                    operation.State.DeletingSide == Side.Local && current.EffectKind != FolderEffectKind.StateOnly)
+                    spent.Add(PathNames.DropboxKey(current.Path));
                 members[index] = next;
                 settled[at] = true;
             }
+            PublishReleased(pairId, released);
             operation.Items.Clear();
             operation.Items.AddRange(members);
+            _spentDeletedNames[pairId] = spent;
             _synced[pairId] = synced;
             _issues[pairId] = issues;
             _scan.Clear();
@@ -1888,7 +1940,7 @@ public sealed class InMemoryStateStore : IStateStore
     }
 
     public (IReadOnlyList<(string PairId, Issue Issue)> Page, int Total) OpenIssuePage(string? pairId,
-        string? account, string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset)
+        string? account, string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset, bool ignored = false)
     {
         lock (_gate)
         {
@@ -1896,7 +1948,7 @@ public sealed class InMemoryStateStore : IStateStore
                 .Where(pair => pairId is null || pair.Key == pairId)
                 .Where(pair => account is null ||
                     _pairs.TryGetValue(pair.Key, out var config) && config.ConnectionId == account)
-                .SelectMany(pair => pair.Value.Where(issue => !issue.Dismissed)
+                .SelectMany(pair => pair.Value.Where(issue => !issue.Dismissed && issue.Ignored == ignored)
                     .Select(issue => (PairId: pair.Key, Issue: issue)))
                 .Where(row => kinds is null || kinds.Contains(row.Issue.Kind))
                 .Where(row => string.IsNullOrEmpty(search) || PathNames.Contains(row.Issue.Path, search))
@@ -1908,16 +1960,19 @@ public sealed class InMemoryStateStore : IStateStore
     public (IReadOnlyList<(string PairId, Issue Issue)> Rows, int Total) OpenIssueSnapshot(
         IReadOnlyList<IssueKind>? kinds, int pageSize)
     {
+        const bool ignored = false;
         lock (_gate)
         {
             var rows = _issues
-                .SelectMany(pair => pair.Value.Where(issue => !issue.Dismissed)
+                .SelectMany(pair => pair.Value.Where(issue => !issue.Dismissed && issue.Ignored == ignored)
                     .Select(issue => (PairId: pair.Key, Issue: issue)))
                 .Where(row => kinds is null || kinds.Contains(row.Issue.Kind))
                 .OrderBy(row => row.Issue.Id).ToArray();
             return (rows, rows.Length);
         }
     }
+    public IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null) =>
+        Issues(pairId, kinds).Where(issue => issue.IsUnder(scopeKey));
 
     public long SyncedCount(string pairId)
     {
@@ -1925,11 +1980,23 @@ public sealed class InMemoryStateStore : IStateStore
     }
 
     /// <summary>Counts only non-dismissed issues, matching the durable store.</summary>
-    public IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId)
+    public IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId, bool? ignored = null)
     {
         lock (_gate)
-            return IssueRows(pairId).Where(issue => !issue.Dismissed).GroupBy(issue => issue.Kind)
+            return IssueRows(pairId).Where(issue => !issue.Dismissed && (ignored is null || issue.Ignored == ignored)).GroupBy(issue => issue.Kind)
                 .ToDictionary(group => group.Key, group => group.Count());
+    }
+
+    public bool SetIssueIgnored(string pairId, long id, bool ignored)
+    {
+        lock (_gate)
+        {
+            var rows = IssueRows(pairId);
+            var index = rows.FindIndex(issue => issue.Id == id);
+            if (index < 0) return false;
+            rows[index] = rows[index] with { Ignored = ignored };
+            return true;
+        }
     }
 
     public Issue? IssueById(string pairId, long id)
@@ -1998,21 +2065,20 @@ public sealed class InMemoryStateStore : IStateStore
     {
         lock (_gate)
         {
-            if (!_scans.TryGetValue(pairId, out var scan) || scan.Token != scanToken)
-                throw new InvalidOperationException();
-            RequireGeneration(pairId, scan.Generation);
+            var scan = ReadScan(pairId, scanToken);
+            if (scan.Scope is not null) throw new InvalidOperationException();
             var wanted = skipped.GroupBy(entry => entry.Path, StringComparer.Ordinal)
                 .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
             foreach (var path in IssueRows(pairId).Where(issue => issue.Kind == IssueKind.Skipped)
                          .Select(issue => issue.Path).Distinct().ToList())
                 if (!wanted.ContainsKey(path))
                     foreach (var side in new[] { Side.Local, Side.Dropbox })
-                        if (!_skipTouched.Contains((pairId, side, PathNames.KeyFor(side, path))))
+                        if (!_skipTouched.Contains((pairId, scanToken, side, PathNames.KeyFor(side, path))))
                             MergeSkip(pairId, path, side, null);
             foreach (var (path, entries) in wanted)
                 foreach (var side in new[] { Side.Local, Side.Dropbox })
                 {
-                    if (_skipTouched.Contains((pairId, side, PathNames.KeyFor(side, path)))) continue;
+                    if (_skipTouched.Contains((pairId, scanToken, side, PathNames.KeyFor(side, path)))) continue;
                     var naming = entries.Where(candidate =>
                         candidate.Subject.Items.Any(item => item.Side == side)).ToList();
                     var skip = naming.Count == 0 ? null :
@@ -2035,8 +2101,9 @@ public sealed class InMemoryStateStore : IStateStore
             if (side == Side.Local && !IssuePolicy.ProtectsSubtree(currentSkip?.Cause.ToString()) &&
                 _skipMembers.TryGetValue((pairId, side, PathNames.Key(path)), out var stored) &&
                 IssuePolicy.ProtectsSubtree(stored.Cause.ToString())) return;
-            if (_scans.TryGetValue(pairId, out var scan) && scan.Generation == expectedGeneration)
-                _skipTouched.Add((pairId, side, PathNames.KeyFor(side, path)));
+            foreach (var scan in _scans.Where(item => item.Key.PairId == pairId && item.Value.Generation == expectedGeneration))
+                if (scan.Value.Scope is null || PathNames.IsSelfOrUnderKey(PathNames.KeyFor(side, path), PathNames.Key(scan.Value.Scope)))
+                    _skipTouched.Add((pairId, scan.Key.ScanId, side, PathNames.KeyFor(side, path)));
             MergeSkip(pairId, path, side, currentSkip);
         }
     }
@@ -2088,7 +2155,7 @@ public sealed class InMemoryStateStore : IStateStore
     }
 
     /// <summary>Starts one process-local scan token; discovery is decided by Repair, not by a saved row.</summary>
-    public Guid BeginScan(string pairId, long expectedGeneration, bool includeDeleted)
+    public Guid BeginScan(string pairId, Guid scanId, long expectedGeneration, bool includeDeleted, string? scope = null)
     {
         lock (_gate)
         {
@@ -2096,36 +2163,71 @@ public sealed class InMemoryStateStore : IStateStore
             var local = RequireSource(pairId, Side.Local);
             var dropbox = RequireSource(pairId, Side.Dropbox);
             var gap = ReadLocalGap(pairId, local.Epoch);
-            ResetScan(pairId);
-            var token = Guid.NewGuid();
-            _scans[pairId] = new ScanRecord(token, expectedGeneration, includeDeleted,
-                !FirstRepairDone(pairId), _nextWorkId, local.Epoch, local.Revision, dropbox.Epoch, dropbox.Revision, gap);
-            _deletedNames.Remove(pairId);
+            if (scanId == Guid.Empty || _scans.ContainsKey((pairId, scanId)) || includeDeleted && scope is not null ||
+                scope is null && _scans.Any(item => item.Key.PairId == pairId && item.Value.Scope is null))
+                throw new InvalidOperationException();
+            var token = scanId;
+            _scans[(pairId, scanId)] = new ScanRecord(token, expectedGeneration, includeDeleted,
+                !FirstRepairDone(pairId), _nextWorkId, local.Epoch, local.Revision, dropbox.Epoch, dropbox.Revision, gap) { Scope = scope };
+            if (includeDeleted) _deletedNames.Remove(pairId);
+            _scanIssues[(pairId, scanId)] = IssueRows(pairId).ToList();
             return token;
         }
     }
 
-    public bool HasDeletedNames(string pairId)
+    public bool HasDeletedNames(string pairId, Guid scanId)
     {
         lock (_gate)
-            return _scans.TryGetValue(pairId, out var scan) && scan.Discovery &&
-                _deletedNames.TryGetValue(pairId, out var names) && names.Count > 0;
+            return ReadScan(pairId, scanId).Discovery &&
+                ((_deletedNames.TryGetValue(pairId, out var names) && names.Any(key => !DeletedNameSpent(pairId, key))) ||
+                 (_deletedDelta.TryGetValue(pairId, out var delta) && delta.Any(key => !DeletedNameSpent(pairId, key))));
     }
 
-    public bool DeletedNameExact(string pairId, string key)
+    public bool DeletedNameExact(string pairId, Guid scanId, string key)
     {
         lock (_gate)
-            return _scans.TryGetValue(pairId, out var scan) && scan.Discovery &&
-                _deletedNames.TryGetValue(pairId, out var names) && names.Contains(key);
+            return !DeletedNameSpent(pairId, key) &&
+                ((ReadScan(pairId, scanId).Discovery &&
+                  _deletedNames.TryGetValue(pairId, out var names) && names.Contains(key)) ||
+                 (_deletedDelta.TryGetValue(pairId, out var delta) && delta.Contains(key)) ||
+                 (!_resumedHistory.Contains((pairId, scanId)) && _deletedHistory.TryGetValue(pairId, out var history) && history.Names.Contains(key)));
+    }
+
+    public bool DeletedNameSpent(string pairId, string key)
+    {
+        lock (_gate) return _spentDeletedNames.TryGetValue(pairId, out var spent) && spent.Contains(key);
     }
 
     public ScanRecord ReadScan(string pairId, Guid scanToken)
     {
         lock (_gate)
         {
-            if (!_scans.TryGetValue(pairId, out var scan) || scan.Token != scanToken)
+            if (!_scans.TryGetValue((pairId, scanToken), out var scan))
                 throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
+            RequireGeneration(pairId, scan.Generation);
             return scan;
+        }
+    }
+
+    public bool DeletedHistoryOwed(string pairId)
+    {
+        lock (_gate) return !_deletedHistory.ContainsKey(pairId);
+    }
+
+    public bool SavedDeletedNameExact(string pairId, string key)
+    {
+        lock (_gate) return !DeletedNameSpent(pairId, key) && _deletedHistory.TryGetValue(pairId, out var history) &&
+            (history.Names.Contains(key) || _deletedDelta.TryGetValue(pairId, out var delta) && delta.Contains(key));
+    }
+
+    public string? ContinueDeletedHistory(string pairId, Guid scanToken)
+    {
+        lock (_gate)
+        {
+            RequireGeneration(pairId, ReadScan(pairId, scanToken).Generation);
+            if (!ReadScan(pairId, scanToken).Discovery || !_deletedHistory.TryGetValue(pairId, out var history)) return null;
+            _incrementalHistory.Add((pairId, scanToken));
+            return history.Cursor;
         }
     }
 
@@ -2135,10 +2237,10 @@ public sealed class InMemoryStateStore : IStateStore
         {
             var scan = ReadScan(pairId, scanToken);
             RequireGeneration(pairId, scan.Generation);
-            if (!scan.FirstRun || !scan.Discovery || !_deletedHistory.TryGetValue(pairId, out var history) ||
+            if (!scan.Discovery || !_deletedHistory.TryGetValue(pairId, out var history) ||
                 history.Generation != scan.Generation) return null;
-            _deletedNames[pairId] = new HashSet<string>(history.Names, StringComparer.Ordinal);
-            _resumedHistory.Add(pairId);
+            _deletedNames[pairId] = new HashSet<string>(history.Names.Where(key => !DeletedNameSpent(pairId, key)), StringComparer.Ordinal);
+            _resumedHistory.Add((pairId, scanToken));
             return history.Cursor;
         }
     }
@@ -2148,12 +2250,14 @@ public sealed class InMemoryStateStore : IStateStore
         lock (_gate)
         {
             RequireGeneration(pairId, ReadScan(pairId, scanToken).Generation);
-            _scan.RemoveAll(item => item.PairId == pairId && item.Side == Side.Dropbox);
+            if (!ReadScan(pairId, scanToken).Discovery) throw new InvalidOperationException();
+            _scan.RemoveAll(item => item.PairId == pairId && item.ScanId == scanToken && item.Side == Side.Dropbox);
             if (discardNames)
             {
                 _deletedNames.Remove(pairId);
                 _deletedHistory.Remove(pairId);
-                _resumedHistory.Remove(pairId);
+                _resumedHistory.Remove((pairId, scanToken));
+                _incrementalHistory.Remove((pairId, scanToken));
             }
         }
     }
@@ -2164,15 +2268,56 @@ public sealed class InMemoryStateStore : IStateStore
         {
             var scan = ReadScan(pairId, scanToken);
             RequireGeneration(pairId, scan.Generation);
-            if (!scan.FirstRun || !scan.Discovery) return;
-            _deletedHistory[pairId] = (scan.Generation, cursor,
-                new HashSet<string>(_deletedNames.GetValueOrDefault(pairId) ?? [], StringComparer.Ordinal));
+            if (_incrementalHistory.Contains((pairId, scanToken)))
+            {
+                var history = _deletedHistory[pairId];
+                _deletedHistory[pairId] = (history.Generation, cursor, history.Names);
+                return;
+            }
+            if (!scan.Discovery) return;
+            var names = new HashSet<string>(_deletedNames.GetValueOrDefault(pairId) ?? [], StringComparer.Ordinal);
+            if (_deletedDelta.Remove(pairId, out var delta)) names.UnionWith(delta);
+            names.RemoveWhere(key => DeletedNameSpent(pairId, key));
+            _deletedNames[pairId] = names;
+            _deletedHistory[pairId] = (scan.Generation, cursor, new HashSet<string>(names, StringComparer.Ordinal));
         }
     }
 
-    public IScanSink OpenScan(string pairId, Side side, int batchRows)
+    public IScanSink OpenScan(string pairId, Guid scanId, Side side, int batchRows)
     {
-        lock (_gate) return new ScanSink(this, pairId, side, _scans.GetValueOrDefault(pairId)?.Token);
+        lock (_gate) return new ScanSink(this, pairId, side, ReadScan(pairId, scanId).Token);
+    }
+
+    public Task EndScanAsync(string pairId, Guid scanId, int pageSize)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pageSize);
+        lock (_gate)
+        {
+            _incrementalHistory.Remove((pairId, scanId));
+            _resumedHistory.Remove((pairId, scanId));
+            _scans.Remove((pairId, scanId));
+            _scanIssues.Remove((pairId, scanId));
+            _scan.RemoveAll(row => row.PairId == pairId && row.ScanId == scanId);
+            _skipTouched.RemoveWhere(row => row.PairId == pairId && row.ScanId == scanId);
+            if (!_scans.Keys.Any(key => key.PairId == pairId)) _deletedNames.Remove(pairId);
+        }
+        return Task.CompletedTask;
+    }
+
+    public bool CloseScanIssue(string pairId, Guid scanId, Issue expected)
+    {
+        lock (_gate)
+        {
+            if (ReadScan(pairId, scanId).Scope is not null) throw new InvalidOperationException();
+            if (!_scanIssues[(pairId, scanId)].Contains(expected) || !IssueRows(pairId).Contains(expected)) return false;
+            ApplyAtomic(pairId, StateChange.Empty with
+            {
+                FirstRunAcknowledged = expected.Subject.FirstRunDeletion == IssueSubject.FirstRunDeletionKind.None
+                    ? [] : expected.Subject.Items.Where(item => item.Side == Side.Local).ToArray(),
+                Close = [(expected.Path, new[] { expected.Kind })]
+            });
+            return !IssueRows(pairId).Any(issue => issue.Id == expected.Id);
+        }
     }
 
     public FolderPlan OpenFolderPlan(string pairId, Row folder, Side deletingFrom) =>
@@ -2199,7 +2344,9 @@ public sealed class InMemoryStateStore : IStateStore
             var key = (pairId, Side.Local, localKey);
             if (!_skipMembers.TryGetValue(key, out var member) || !IssuePolicy.ProtectsSubtree(member.Cause.ToString()) ||
                 member.Subject.Items[0].Id != acquiredId) return false;
-            if (_scans.TryGetValue(pairId, out var scan) && scan.Generation == expectedGeneration) _skipTouched.Add(key);
+            foreach (var scan in _scans.Where(item => item.Key.PairId == pairId && item.Value.Generation == expectedGeneration))
+                if (scan.Value.Scope is null || PathNames.IsSelfOrUnderKey(localKey, PathNames.Key(scan.Value.Scope)))
+                    _skipTouched.Add((pairId, scan.Key.ScanId, Side.Local, localKey));
             MergeSkip(pairId, member.Subject.Items[0].Path, Side.Local, null);
             return true;
         }
@@ -2219,24 +2366,30 @@ public sealed class InMemoryStateStore : IStateStore
             IssuePolicy.ProtectsSubtree(member.Value.Cause.ToString()))
         .Select(member => member.Key.Key).ToList();
 
-    public IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context)
+    public IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context)
     {
         List<RowParts> parts;
-        lock (_gate) parts = BuildRows(SyncedRows(pairId), _scan.Where(row => row.PairId == pairId).ToList());
+        lock (_gate)
+        {
+            ReadScan(pairId, scanId);
+            parts = BuildRows(SyncedRows(pairId), _scan.Where(row => row.PairId == pairId && row.ScanId == scanId).ToList());
+        }
         foreach (var part in parts)
         {
             // Context is built from the row's own paths, so the placeholder is never read (as ScanReader).
             var row = new Row(part.Key, part.Local, part.Dropbox, part.Synced, part.Extra, null, null!);
+            if (_scans.GetValueOrDefault((pairId, scanId))?.Scope is { } scope && !PathNames.IsSelfOrUnderKey(row.Key, PathNames.Key(scope))) continue;
             yield return row with { Context = context(row) };
         }
     }
 
-    public IReadOnlyList<RenameCandidate> ScanRenames(string pairId)
+    public IReadOnlyList<RenameCandidate> ScanRenames(string pairId, Guid scanId)
     {
         lock (_gate)
         {
+            ReadScan(pairId, scanId);
             var candidates = new List<RenameCandidate>();
-            foreach (var scan in _scan.Where(row => row.PairId == pairId))
+            foreach (var scan in _scan.Where(row => row.PairId == pairId && row.ScanId == scanId))
                 foreach (var synced in SyncedRows(pairId))
                 {
                     if (scan.Side == Side.Local)
@@ -2253,17 +2406,24 @@ public sealed class InMemoryStateStore : IStateStore
     }
 
     /// <summary>Reads the side's scan entry by its own key rather than the mapped join key.</summary>
-    public Entry? ScanEntry(string pairId, Side side, string key)
+    public Entry? ScanEntry(string pairId, Guid scanId, Side side, string key)
     {
         lock (_gate)
-            return _scan.Where(row => row.PairId == pairId && row.Side == side && PathNames.Key(row.Path) == key)
+        {
+            ReadScan(pairId, scanId);
+            return _scan.Where(row => row.PairId == pairId && row.ScanId == scanId && row.Side == side && PathNames.Key(row.Path) == key)
                 .Select(row => new Entry(row.Path, row.IsFolder, row.Size, new DateTimeOffset(row.ModifiedTicks, TimeSpan.Zero),
                     row.Id, row.Revision, row.ContentHash, row.Skip)).FirstOrDefault();
+        }
     }
 
-    public bool InScan(string pairId, Side side, string key)
+    public bool InScan(string pairId, Guid scanId, Side side, string key)
     {
-        lock (_gate) return _scan.Any(row => row.PairId == pairId && row.Side == side && row.Key == key);
+        lock (_gate)
+        {
+            ReadScan(pairId, scanId);
+            return _scan.Any(row => row.PairId == pairId && row.ScanId == scanId && row.Side == side && row.Key == key);
+        }
     }
 
     public void Dispose()
@@ -2310,6 +2470,21 @@ public sealed class InMemoryStateStore : IStateStore
         _sources.TryAdd(SourceKey(pairId, Side.Dropbox), new SourceRow(Side.Dropbox, 0, null, null, reason, 1));
     }
 
+    private void RequirePendingSaved(string pairId, PendingEffect effect)
+    {
+        if (!StateStore.IsCrossedLocalReplace(effect))
+        {
+            RequireSaved(pairId, effect.Losing.Expected, effect.Saved);
+            return;
+        }
+        RequireSaved(pairId, effect.Losing.Expected, null);
+        var saved = effect.Saved!;
+        var rows = SyncedRows(pairId);
+        if (rows.FirstOrDefault(row => row.DropboxKey == saved.DropboxKey) != saved ||
+            rows.FirstOrDefault(row => row.DropboxId == saved.DropboxId) != saved)
+            throw new InvalidOperationException();
+    }
+
     private void RequireSaved(string pairId, Entry expected, SyncedEntry? saved)
     {
         var rows = SyncedRows(pairId);
@@ -2345,7 +2520,7 @@ public sealed class InMemoryStateStore : IStateStore
             (source.Obligation == SourceObligation.LocalSkippedCoverage ||
              nextEpoch > source.Epoch && HasCurrentLocalWork(pairId, generation))
                 ? SourceObligation.LocalSkippedCoverage
-                : obligation ?? source.Obligation;
+                : obligation;
         _sources[SourceKey(pairId, side)] = new SourceRow(side, nextEpoch, provenance, cursor, reason,
             nextRevision);
     }
@@ -2520,7 +2695,7 @@ public sealed class InMemoryStateStore : IStateStore
     }
 
     private static bool IssueEquals(Issue stored, Issue expected) =>
-        stored with { Subject = expected.Subject } == expected &&
+        stored with { Subject = expected.Subject, Ignored = expected.Ignored } == expected &&
         stored.Subject.Incoming == expected.Subject.Incoming &&
         stored.Subject.HasSameItems(expected.Subject) &&
         stored.Subject.LocalHash == expected.Subject.LocalHash &&
@@ -2584,7 +2759,17 @@ public sealed class InMemoryStateStore : IStateStore
                 row.PairId == pairId && row.WorkId <= through && row.PairGeneration <= generation &&
                 row.Notice?.LocalContentDirty == true && failures.Contains(row.PathKey))
             .GroupBy(row => (row.Domain, row.Identity, row.PathKey)).Select(group => group.Max(row => row.WorkId)).ToHashSet();
+        var claimed = new HashSet<long>();
+        if (_passes.GetValueOrDefault(pairId)?.Claims is { } claims)
+            foreach (var selection in claims.Values)
+            {
+                var anchor = _work.FirstOrDefault(row => row.WorkId == selection.AnchorWorkId && row.PairId == pairId);
+                if (anchor is null) continue;
+                claimed.UnionWith(Membership(selection, anchor).Concat(_work.Where(row =>
+                    row.Parent == anchor.WorkId || PeerOwned(selection, anchor, row, selection.Peer))).Select(row => row.WorkId));
+            }
         _work.RemoveAll(row => !row.IssueOrigin && row.PairId == pairId && row.WorkId <= through &&
+            !claimed.Contains(row.WorkId) &&
             row.PairGeneration <= generation && row.Side == side && row.IssueId == 0 && !dirty.Contains(row.WorkId) &&
             !_pending.ContainsKey(pairId) && !Obligated(pairId) &&
             !_folders.Values.Any(operation => operation.State.Active ||
@@ -2702,7 +2887,7 @@ public sealed class InMemoryStateStore : IStateStore
         {
             var at = rows.FindIndex(stored => stored.Id == issue.Id);
             if (at < 0) continue;
-            rows[at] = rows[at] with { Cause = cause, At = DateTimeOffset.UtcNow, Dismissed = false };
+            rows[at] = rows[at] with { Cause = cause, At = DateTimeOffset.UtcNow, Dismissed = false, Ignored = false };
             return;
         }
     }
@@ -2898,17 +3083,14 @@ public sealed class InMemoryStateStore : IStateStore
 
     private void ResetScan(string pairId, bool completed = false)
     {
-        _resumedHistory.Remove(pairId);
+        _resumedHistory.RemoveWhere(key => key.PairId == pairId);
+        _incrementalHistory.RemoveWhere(key => key.PairId == pairId);
         _scan.RemoveAll(row => row.PairId == pairId);
         _skipTouched.RemoveWhere(entry => entry.PairId == pairId);
-        if (completed)
-        {
-            _scans.Remove(pairId);
-            _deletedHistory.Remove(pairId);
-        }
+        if (completed) foreach (var scan in _scans.Keys.Where(key => key.PairId == pairId).ToArray()) _scans.Remove(scan);
         else
         {
-            _scans.Remove(pairId);
+            foreach (var scan in _scans.Keys.Where(key => key.PairId == pairId).ToArray()) _scans.Remove(scan);
             _deletedNames.Remove(pairId);
         }
     }
@@ -2925,7 +3107,11 @@ public sealed class InMemoryStateStore : IStateStore
         var synced = SyncedRows(pairId).ToList();
         var issues = IssueRows(pairId).ToList();
         var scan = _scan.ToList();
-        var raised = ApplyCommit(synced, issues, scan, pairId, change, DateTimeOffset.UtcNow);
+        HashSet<(Side Side, string Path, string Id)> released = [];
+        var spent = new HashSet<string>(_spentDeletedNames.GetValueOrDefault(pairId) ?? [], StringComparer.Ordinal);
+        var raised = ApplyCommit(synced, issues, scan, spent, pairId, change, DateTimeOffset.UtcNow, released);
+        PublishReleased(pairId, released);
+        _spentDeletedNames[pairId] = spent;
         _synced[pairId] = synced;
         _issues[pairId] = issues;
         _scan.Clear();
@@ -2934,30 +3120,46 @@ public sealed class InMemoryStateStore : IStateStore
     }
 
     private List<Issue> ApplyCommit(List<SyncedEntry> synced, List<Issue> issues, List<ScanRow> scan,
-        string pairId, StateChange change, DateTimeOffset now)
+        HashSet<string> spent, string pairId, StateChange change, DateTimeOffset now, HashSet<(Side Side, string Path, string Id)> released)
     {
         // Section 3.5 order: renames, forgets, records, acknowledged first-run, closes, raises.
         foreach (var rename in change.Renames) ApplyRename(synced, scan, pairId, rename);
 
+        void Retire(Predicate<SyncedEntry> matches, bool releaseEndpoints = false)
+        {
+            synced.RemoveAll(entry =>
+            {
+                if (!matches(entry)) return false;
+                if (releaseEndpoints && StateCommitter.ReleasedSide(entry, change) is { } side)
+                    released.Add((side, entry.PathOn(side), entry.IdOn(side)));
+                if (!change.Record.Any(record => record.LocalKey == entry.LocalKey) &&
+                    !change.Renames.Any(rename => rename.After.LocalKey == entry.LocalKey))
+                    spent.Add(PathNames.DropboxKey(entry.LocalPath));
+                return true;
+            });
+        }
         foreach (var (side, key) in change.ForgetSelf)
-            synced.RemoveAll(row => SideKey(row, side) == key);
+        {
+            Retire(row => SideKey(row, side) == key, releaseEndpoints: true);
+            if (side == Side.Local) spent.Add(PathNames.DropboxKey(key));
+        }
 
         foreach (var (side, key) in change.ForgetSubtrees)
-            synced.RemoveAll(row => IsSelfOrDescendant(SideKey(row, side), key));
+            Retire(row => IsSelfOrDescendant(SideKey(row, side), key));
 
         foreach (var (localKey, dropboxKey) in change.ForgetBothSubtrees)
-            synced.RemoveAll(row => PathNames.IsSelfOrUnderKey(row.LocalKey, localKey) &&
+            Retire(row => PathNames.IsSelfOrUnderKey(row.LocalKey, localKey) &&
                 PathNames.IsSelfOrUnderKey(row.DropboxKey, dropboxKey));
 
         foreach (var before in change.StaleBindings)
         {
             if (!change.Record.Any(entry => entry.IsRelocationOf(before)))
                 throw new ArgumentException(null, nameof(change));
-            synced.Remove(before);
+            Retire(row => row == before);
         }
         foreach (var entry in change.Record)
         {
-            synced.RemoveAll(row => row.LocalKey == entry.LocalKey || row.DropboxKey == entry.DropboxKey);
+            Retire(row => row.LocalKey == entry.LocalKey || row.DropboxKey == entry.DropboxKey, releaseEndpoints: true);
             synced.Add(entry);
         }
 
@@ -2989,6 +3191,23 @@ public sealed class InMemoryStateStore : IStateStore
             raised.Add(issues.First(issue => issue.Id == issueId));
         }
         return raised;
+    }
+
+
+    private void PublishReleased(string pairId, HashSet<(Side Side, string Path, string Id)> released)
+    {
+        foreach (var endpoint in released)
+            if (!_pairs.ContainsKey(pairId) || !_sources.ContainsKey(SourceKey(pairId, endpoint.Side)) ||
+                Domain(pairId, endpoint.Side) is null)
+                throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
+        foreach (var endpoint in released)
+        {
+            AddWork(pairId, Generation(pairId), RequireSource(pairId, endpoint.Side).Epoch, endpoint.Side,
+                Domain(pairId, endpoint.Side)!,
+                new ChangeNotice(endpoint.Side, ChangeKind.Changed, endpoint.Path, null, endpoint.Id, null, false, false),
+                null, null, null);
+            if (_passes.TryGetValue(pairId, out var pass) && pass.Generation == Generation(pairId)) pass.Released = true;
+        }
     }
 
     private static void ApplyRename(List<SyncedEntry> synced, List<ScanRow> scan, string pairId, RenameApplied rename)
@@ -3147,7 +3366,7 @@ public sealed class InMemoryStateStore : IStateStore
     {
         var at = issues.FindIndex(issue => issue.Id == existing.Id);
         if (at < 0) return;
-        issues[at] = existing with { Cause = cause, Subject = subject, At = now, Dismissed = false };
+        issues[at] = existing with { Cause = cause, Subject = subject, At = now, Dismissed = false, Ignored = false };
         _items.Remove(existing.Id);
     }
 
@@ -3223,29 +3442,36 @@ public sealed class InMemoryStateStore : IStateStore
     private static bool SharesLocalItem(IssueSubject left, IssueSubject right) =>
         left.Items.Any(item => item.Side == Side.Local && right.Items.Contains(item));
 
-    private void AddScan(string pairId, Side side, Listed item)
+    private void AddScan(string pairId, Guid scanId, Side side, Listed item)
     {
         lock (_gate)
         {
+            ReadScan(pairId, scanId);
             var ownKey = PathNames.Key(item.Path);
             if (item.Entry is not { } entry)
             {
-                if (_scans.TryGetValue(pairId, out var discovery) && discovery.Discovery)
+                if (side == Side.Dropbox && _incrementalHistory.Contains((pairId, scanId)))
+                {
+                    if (!_deletedDelta.TryGetValue(pairId, out var delta))
+                        _deletedDelta[pairId] = delta = new HashSet<string>(StringComparer.Ordinal);
+                    if (!DeletedNameSpent(pairId, ownKey)) delta.Add(ownKey);
+                }
+                else if (side == Side.Dropbox && _scans.TryGetValue((pairId, scanId), out var discovery) && discovery.Discovery)
                 {
                     if (!_deletedNames.TryGetValue(pairId, out var names))
                         _deletedNames[pairId] = names = new HashSet<string>(StringComparer.Ordinal);
-                    names.Add(ownKey);
+                    if (!DeletedNameSpent(pairId, ownKey)) names.Add(ownKey);
                 }
-                _scan.RemoveAll(row => row.PairId == pairId && row.Side == side && IsSelfOrDescendant(row.OwnKey, ownKey));
+                _scan.RemoveAll(row => row.PairId == pairId && row.ScanId == scanId && row.Side == side && IsSelfOrDescendant(row.OwnKey, ownKey));
                 return;
             }
-            if (side == Side.Dropbox && _resumedHistory.Contains(pairId) && _deletedNames.TryGetValue(pairId, out var deleted)) deleted.Remove(ownKey);
+            if (side == Side.Dropbox && _resumedHistory.Contains((pairId, scanId)) && _deletedNames.TryGetValue(pairId, out var deleted)) deleted.Remove(ownKey);
             if (!entry.IsFolder)
-                _scan.RemoveAll(row => row.PairId == pairId && row.Side == side && IsDescendant(row.OwnKey, ownKey));
-            var scanned = new ScanRow(pairId, side, ownKey,
+                _scan.RemoveAll(row => row.PairId == pairId && row.ScanId == scanId && row.Side == side && IsDescendant(row.OwnKey, ownKey));
+            var scanned = new ScanRow(pairId, scanId, side, ownKey,
                 side == Side.Local ? ownKey : PathNames.DropboxKey(item.Path), item.Path, entry.IsFolder,
                 entry.Size, entry.Modified.UtcTicks, entry.Id, entry.Revision, entry.ContentHash, entry.Skip);
-            var index = _scan.FindIndex(row => row.PairId == pairId && row.Side == side && row.OwnKey == ownKey);
+            var index = _scan.FindIndex(row => row.PairId == pairId && row.ScanId == scanId && row.Side == side && row.OwnKey == ownKey);
             if (index >= 0) _scan[index] = scanned;
             else _scan.Add(scanned);
         }
@@ -3367,23 +3593,26 @@ public sealed class InMemoryStateStore : IStateStore
         public List<FolderRemovalEffect> Effects { get; } = [];
     }
 
-    private sealed record Pass(long Generation, long After, long Through, PathScope Scope)
+    private sealed record Pass(long Generation, long After, long Through, PathScope? Scope)
     {
         internal long NetRetired { get; set; }
+        internal bool Released { get; set; }
         internal string[]? LocalEchoResponsibility { get; set; }
         internal HashSet<long> Attempted { get; } = [];
+        internal Dictionary<long, WorkSelection> Claims { get; } = [];
     }
 
-    private sealed record ScanRow(string PairId, Side Side, string OwnKey, string Key, string Path, bool IsFolder,
+    private sealed record ScanRow(string PairId, Guid ScanId, Side Side, string OwnKey, string Key, string Path, bool IsFolder,
         long Size, long ModifiedTicks, string Id, string Revision, string ContentHash, string? Skip);
 
     private sealed record RowParts(string Key, Entry? Local, Entry? Dropbox, SyncedEntry? Synced, List<Entry> Extra);
 
-    private sealed class ScanSink(InMemoryStateStore store, string pairId, Side side, Guid? token) : IScanSink
+    private sealed class ScanSink(InMemoryStateStore store, string pairId, Side side, Guid token) : IScanSink
     {
         public Task AddAsync(Listed item, CancellationToken ct)
         {
-            store.AddScan(pairId, side, item);
+            ct.ThrowIfCancellationRequested();
+            store.AddScan(pairId, token, side, item);
             return Task.CompletedTask;
         }
 
@@ -3392,8 +3621,8 @@ public sealed class InMemoryStateStore : IStateStore
         public Task AbortAsync()
         {
             lock (store._gate)
-                if (store._scans.TryGetValue(pairId, out var scan) && scan.Token == token)
-                    store._scans.Remove(pairId);
+                if (store._scans.TryGetValue((pairId, token), out var scan))
+                    store._scans.Remove((pairId, token));
             return Task.CompletedTask;
         }
     }

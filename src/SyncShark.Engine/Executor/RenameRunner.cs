@@ -164,12 +164,12 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
     private (Observations Observations, RenameDecision Decision)? ListedAdoption(IReadOnlyList<RenameCandidate> group, SyncedEntry synced,
         Entry? localById, IReadOnlyList<(Side Side, string Path, bool Destination)> paths)
     {
-        if (!completedScan) return null;
+        if (!completedScan || context.ScanId == Guid.Empty) return null;
         var local = Renames.FirstOn(group, Side.Local)?.Moved;
         var dropbox = Renames.FirstOn(group, Side.Dropbox)?.Moved;
-        local = context.Store.ScanEntry(context.Pair.PairId, Side.Local,
+        local = context.Store.ScanEntry(context.Pair.PairId, context.ScanId, Side.Local,
             local is null ? synced.LocalKey : PathNames.KeyFor(Side.Local, local.Path));
-        dropbox = context.Store.ScanEntry(context.Pair.PairId, Side.Dropbox,
+        dropbox = context.Store.ScanEntry(context.Pair.PairId, context.ScanId, Side.Dropbox,
             dropbox is null ? synced.DropboxKey : PathNames.KeyFor(Side.Dropbox, dropbox.Path));
         if (local is null || dropbox is null || local.Id.Length == 0 || dropbox.Id.Length == 0 ||
             local.Id != synced.LocalId || dropbox.Id != synced.DropboxId ||

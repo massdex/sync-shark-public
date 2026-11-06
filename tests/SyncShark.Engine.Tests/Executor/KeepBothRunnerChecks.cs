@@ -1,5 +1,7 @@
 // HANDOFF: StateChange.ClearPending was removed from the landed contract, so both "does not clear pending" clauses were superseded and dropped; the remaining forget/rename assertions are unchanged.
 using System.Text;
+using Massdex.SyncShark.Engine.Edge;
+using Massdex.SyncShark.Engine.Planner;
 using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Local;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
@@ -106,8 +108,10 @@ public static class KeepBothRunnerChecks
             && change.Raise[0].Cause == TextKey.InfoKeptBoth
             && change.Raise[0].Subject.Items.SequenceEqual(new IssueItem[]
             {
-                new(Side.Local, local.Path, local.Id), new(Side.Dropbox, dropbox.Path, dropbox.Id)
-            }), "The InfoKeptBoth subject contains both original identities.");
+                new(Side.Local, local.Path, local.Id), new(Side.Dropbox, dropbox.Path, dropbox.Id),
+                new(Side.Dropbox, labels.DropboxLabel!, (await context.Dropbox.ReadOneAsync(labels.DropboxLabel!, default))!.Id),
+                new(Side.Local, labels.LocalLabel!, (await context.Local.ReadOneAsync(labels.LocalLabel!, default))!.Id)
+            }), "The InfoKeptBoth subject contains originals followed by actual copy identities.");
         Check.Require(new[] { local.Path, dropbox.Path }.All(path => change.Close.Any(close =>
             close.Path == path && close.Kinds.Contains(IssueKind.Failure) && close.Kinds.Contains(IssueKind.Tie))),
             "Failures and ties on both originals are closed.");
@@ -115,6 +119,31 @@ public static class KeepBothRunnerChecks
             "Keeping both neither replaces, renames nor forgets a subtree.");
         store.Commit(context.Pair.PairId, change);
         await VerifyCopiesAsync(context, local, dropbox, labels);
+        var notice = store.Issues(context.Pair.PairId).Single();
+        Check.Require(notice.Subject.Items.SequenceEqual(change.Raise[0].Subject.Items) &&
+            !IssuePolicy.Holds(notice.Kind, notice.Cause) &&
+            IssuePresentation.Options(notice).Select(option => option.Choice).SequenceEqual(
+                new[] { ResolutionChoice.Dismiss.ToString(), ResolutionChoice.Ignore.ToString() }),
+            "The enriched stored notice remains non-holding with Dismiss and visibility choices.");
+        store.Commit(context.Pair.PairId, StateChange.Empty with { Raise = change.Raise });
+        Check.Require(store.Issues(context.Pair.PairId).Single().Id == notice.Id,
+            "Repeated enriched notices deduplicate.");
+        foreach (var binding in change.Record)
+        foreach (var missing in new[] { Side.Local, Side.Dropbox })
+        foreach (var edited in new[] { false, true })
+        {
+            var remainingLocal = missing == Side.Local ? null : await context.Local.ReadOneAsync(binding.LocalPath, default);
+            var remainingDropbox = missing == Side.Dropbox ? null : await context.Dropbox.ReadOneAsync(binding.DropboxPath, default);
+            if (edited && remainingLocal is not null) remainingLocal = remainingLocal with { Size = remainingLocal.Size + 1 };
+            if (edited && remainingDropbox is not null) remainingDropbox = remainingDropbox with { ContentHash = "edited" };
+            var linked = row with { Local = remainingLocal, Dropbox = remainingDropbox, Synced = binding };
+            var action = Decide.For(linked, context.Pair.FirstRun, DateTimeOffset.UtcNow, false);
+            var expected = missing == Side.Local
+                ? (edited ? ActionKind.Download : ActionKind.DeleteDropbox)
+                : (edited ? ActionKind.Upload : ActionKind.DeleteLocal);
+            Check.Require(action.Kind == expected && action.InfoAfter == (edited ? TextKey.InfoEditBeatsDelete : null),
+                "Crossed bindings preserve deletion propagation and edited-counterpart restoration.");
+        }
         if (priorLocal is not null)
             Check.Require(await context.Local.ReadOneAsync(labels.LocalLabel!, CancellationToken.None) == priorLocal,
                 "Reused local copies retain their identity.");
@@ -179,8 +208,16 @@ public static class KeepBothRunnerChecks
             && change.Raise[0].Cause == TextKey.InfoKeptBoth
             && change.Raise[0].Subject.Items.SequenceEqual(new IssueItem[]
             {
-                new(Side.Local, local.Path, local.Id), new(Side.Dropbox, dropbox.Path, dropbox.Id)
-            }), "The one-leg InfoKeptBoth subject contains both original identities.");
+                new(Side.Local, local.Path, local.Id), new(Side.Dropbox, dropbox.Path, dropbox.Id),
+                new(keptSide, copy!.Path, copy.Id)
+            }), "The one-leg InfoKeptBoth subject contains originals followed by its actual retained copy.");
+        var notice = new Issue(1, IssueKind.Info, TextKey.InfoKeptBoth, local.Path,
+            change.Raise[0].Subject, DateTimeOffset.UnixEpoch, false);
+        var text = IssuePresentation.Render(notice, new(RetryPresentationState.Unavailable));
+        Check.Require(!text.Contains(source.Path, StringComparison.Ordinal) &&
+            text.Contains(original.Path, StringComparison.Ordinal) && text.Contains(copy!.Path, StringComparison.Ordinal) &&
+            !text.Contains("counterpart", StringComparison.Ordinal) && !text.Contains("Linked", StringComparison.Ordinal),
+            "A one-leg notice names only kept-side locations and makes no cross-side link claim.");
         Check.Require(new[] { local.Path, dropbox.Path }.All(path => change.Close.Any(close =>
             close.Path == path && close.Kinds.Contains(IssueKind.Failure) && close.Kinds.Contains(IssueKind.Tie))),
             "One-leg keep-both closes failures and ties on both originals.");

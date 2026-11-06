@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Text.Json;
 
 namespace Massdex.SyncShark.Engine.Storage;
 
@@ -7,8 +8,8 @@ public static class StateCommitter
 {
     /// <summary>Applies the change; the caller states whether first-run Record writes keep the in-place update path,
     /// and raised collects each raised issue for the caller to report once its transaction has committed.</summary>
-    internal static void Commit(SqliteConnection connection, SqliteTransaction transaction, string pairId,
-        StateChange change, DateTimeOffset now, bool narrowRecordUpdates, ICollection<Issue>? raised)
+    internal static void Commit(SqliteConnection connection, SqliteTransaction transaction, ChangeTable changes, string pairId,
+        StateChange change, DateTimeOffset now, bool narrowRecordUpdates, ICollection<Issue>? raised, IEnumerable<byte[]>? scans = null)
     {
         if (change.FirstRunAcknowledged.Any(item => item.Side != Side.Local))
             throw new ArgumentException(null, nameof(change));
@@ -19,31 +20,44 @@ public static class StateCommitter
             RequireLocalKey(rename.After);
         }
         foreach (var rename in change.Renames)
-            ApplyRename(connection, transaction, pairId, rename);
+            ApplyRename(connection, transaction, pairId, rename, scans);
 
+        HashSet<(Side Side, string Path, string Id)>? released = null;
         foreach (var (side, key) in change.ForgetSelf)
-            Execute(connection, transaction,
+        {
+            var spent = RetireBindings(connection, transaction, pairId, change, ref released, true,
                 side == Side.Local ? StateSchema.DeleteSyncedLocalKey : StateSchema.DeleteSyncedDropboxKey,
                 (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, key));
+            if (side == Side.Local && !spent) DeletedHistory.Spend(connection, transaction, pairId, PathNames.DropboxKey(key));
+        }
+
+        var retained = change.ForgetSubtrees.Count != 0 || change.ForgetBothSubtrees.Count != 0
+            ? JsonSerializer.Serialize(change.Record.Select(entry => entry.LocalKey)
+                .Concat(change.Renames.Select(rename => rename.After.LocalKey))) : null;
 
         foreach (var (side, key) in change.ForgetSubtrees)
             Execute(connection, transaction,
                 side == Side.Local ? StateSchema.DeleteSyncedSubtreeLocal : StateSchema.DeleteSyncedSubtreeDropbox,
-                (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, key));
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, key), (StateSchema.ParamRetained, retained));
 
         foreach (var (localKey, dropboxKey) in change.ForgetBothSubtrees)
             Execute(connection, transaction, StateSchema.DeleteSyncedBothSubtrees,
-                (StateSchema.ParamPair, pairId), (StateSchema.ParamLocalKey, localKey), (StateSchema.ParamDropboxKey, dropboxKey));
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamLocalKey, localKey), (StateSchema.ParamDropboxKey, dropboxKey),
+                (StateSchema.ParamRetained, retained));
 
-        RetireStaleBindings(connection, transaction, pairId, change);
+        RetireStaleBindings(connection, transaction, pairId, change, ref released);
         foreach (var entry in change.Record)
         {
             if (narrowRecordUpdates && TryUpdateSameKeys(connection, transaction, pairId, entry)) continue;
-            Execute(connection, transaction, StateSchema.DeleteSyncedEitherKey,
+            RetireBindings(connection, transaction, pairId, change, ref released, true, StateSchema.DeleteSyncedEitherKey,
                 (StateSchema.ParamPair, pairId), (StateSchema.ParamLocalKey, entry.LocalKey),
                 (StateSchema.ParamDropboxKey, entry.DropboxKey));
             Insert(connection, transaction, pairId, entry);
         }
+
+        if (released is not null)
+            foreach (var endpoint in released)
+                changes.RegisterReleasedEndpoint(transaction, pairId, endpoint.Side, endpoint.Path, endpoint.Id);
 
         // Acknowledged first: Close leaves a Failure in place while it still carries unfinished first-run work.
         foreach (var item in change.FirstRunAcknowledged)
@@ -53,8 +67,16 @@ public static class StateCommitter
             IssueTable.Raise(connection, transaction, pairId, kind, cause, path, subject, now, raised);
     }
 
+    internal static Side? ReleasedSide(SyncedEntry removed, StateChange change)
+    {
+        if (removed.IsFolder || removed.LocalKey == removed.DropboxKey) return null;
+        var local = change.Record.Any(entry => entry.LocalKey == removed.LocalKey);
+        var dropbox = change.Record.Any(entry => entry.DropboxKey == removed.DropboxKey);
+        return local == dropbox ? null : local ? Side.Dropbox : Side.Local;
+    }
+
     private static void RetireStaleBindings(SqliteConnection connection, SqliteTransaction transaction,
-        string pairId, StateChange change)
+        string pairId, StateChange change, ref HashSet<(Side Side, string Path, string Id)>? released)
     {
         foreach (var before in change.StaleBindings)
         {
@@ -68,9 +90,40 @@ public static class StateCommitter
                 if (!reader.Read() || StateEncoding.ReadSynced(reader,
                     reader.GetString(StateSchema.SyncedLocalKey), StateSchema.SyncedLocalPath) != before) continue;
             }
-            Execute(connection, transaction, StateSchema.DeleteSyncedLocalKey,
+            RetireBindings(connection, transaction, pairId, change, ref released, false, StateSchema.DeleteSyncedLocalKey,
                 (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, before.LocalKey));
         }
+    }
+
+    private static bool RetireBindings(SqliteConnection connection, SqliteTransaction transaction,
+        string pairId, StateChange change, ref HashSet<(Side Side, string Path, string Id)>? released,
+        bool releaseEndpoints, string sql, params (string Name, object? Value)[] arguments)
+    {
+        // Exact-key deletes return at most the two endpoint collisions, never a whole subtree.
+        var retired = new List<SyncedEntry>();
+        using (var command = StorageCommand.Create(connection, transaction, sql, arguments))
+        using (var reader = command.ExecuteReader())
+        {
+            do
+            {
+                while (reader.Read())
+                    retired.Add(StateEncoding.ReadSynced(reader,
+                        reader.GetString(StateSchema.SyncedLocalKey), StateSchema.SyncedLocalPath));
+            } while (reader.NextResult());
+        }
+        var spent = false;
+        foreach (var entry in retired)
+        {
+            if (releaseEndpoints && ReleasedSide(entry, change) is { } side)
+                (released ??= []).Add((side, entry.PathOn(side), entry.IdOn(side)));
+            if (!change.Record.Any(record => record.LocalKey == entry.LocalKey) &&
+                !change.Renames.Any(rename => rename.After.LocalKey == entry.LocalKey))
+            {
+                DeletedHistory.Spend(connection, transaction, pairId, PathNames.DropboxKey(entry.LocalPath));
+                spent = true;
+            }
+        }
+        return spent;
     }
 
     private static void RequireLocalKey(SyncedEntry entry)
@@ -81,7 +134,7 @@ public static class StateCommitter
     }
 
     private static void ApplyRename(SqliteConnection connection, SqliteTransaction transaction, string pairId,
-        RenameApplied rename)
+        RenameApplied rename, IEnumerable<byte[]>? scans)
     {
         var before = rename.Before;
         var after = rename.After;
@@ -149,8 +202,9 @@ public static class StateCommitter
         {
             var oldOwnKey = PathNames.Key(counterpartOldPath);
             var newOwnKey = PathNames.Key(counterpartNewPath);
-            Execute(connection, transaction, StateSchema.MoveScanSubtree,
-                (StateSchema.ParamPair, pairId), (StateSchema.ParamSide, (int)counterpartSide),
+            foreach (var scan in scans ?? [])
+                Execute(connection, transaction, StateSchema.MoveScanSubtree,
+                (StateSchema.ParamScan, scan), (StateSchema.ParamPair, pairId), (StateSchema.ParamSide, (int)counterpartSide),
                 (StateSchema.ParamOldOwnKey, oldOwnKey), (StateSchema.ParamNewOwnKey, newOwnKey),
                 (StateSchema.ParamOldKey, PathNames.KeyFor(counterpartSide, counterpartOldPath, oldOwnKey)),
                 (StateSchema.ParamNewKey, PathNames.KeyFor(counterpartSide, counterpartNewPath, newOwnKey)),

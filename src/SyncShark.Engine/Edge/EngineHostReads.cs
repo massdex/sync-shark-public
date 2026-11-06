@@ -61,7 +61,7 @@ public static class EngineHostReads
         if (invocation.PairId is { } pairId) _ = operations.Pair(pairId);
         var search = string.IsNullOrEmpty(invocation.Search) ? null : invocation.Search;
         var (page, total) = operations.OpenIssuePage(invocation.PairId, invocation.AccountId, search, null,
-            invocation.Limit, invocation.Offset);
+            invocation.Limit, invocation.Offset, invocation.Flag(EngineCliCatalog.Flag(EngineOptionKey.Ignored)));
         var retry = RetryViews(operations, [page]);
         var items = page.Select(row => new SyncCliConflictData(row.Issue.Id.ToString(CultureInfo.InvariantCulture),
             row.PairId, row.Issue.Path, 0, null, null, null, null, null, null, row.Issue.Kind.ToString(),

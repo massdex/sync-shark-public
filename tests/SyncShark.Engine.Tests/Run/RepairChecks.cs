@@ -37,6 +37,8 @@ public static class RepairChecks
 
     public static void Run() => RunAsync().GetAwaiter().GetResult();
 
+    public static void DirectRepair() => ProductionDirectRepairAsync().GetAwaiter().GetResult();
+
     private static async Task RunAsync()
     {
         DeletingSideAllocatesNothing();
@@ -149,10 +151,6 @@ public static class RepairChecks
                     lock (messages) messages.Add(message);
                 }, Settings.LogBufferCharacters);
                 await rig.RunAsync(log, CancellationToken.None);
-                var count = baseline
-                    ? Text.Get(TextKey.ListingEstimate, (TextArg.Count, 2.ToString("N0")),
-                        (TextArg.SourceCount, 1.ToString("N0")), (TextArg.Value, 2d.ToString("P0", CultureInfo.InvariantCulture)))
-                    : Text.Get(TextKey.ListingCount, (TextArg.Count, 2.ToString("N0")));
                 var events = Lines(log.Path);
                 foreach (var (listingKey, saveKey) in new[]
                 {
@@ -167,17 +165,29 @@ public static class RepairChecks
                         "each listing ends before its separately timed save drain starts and finishes");
                 }
                 var listings = events.Where(fields => fields[1] == nameof(ListingProgress)).ToArray();
-                Check.Require(listings.Length == 2 && listings.Select(fields => fields[2]).ToHashSet()
-                    .SetEquals([nameof(Side.Local), nameof(Side.Dropbox)]),
-                    "short listings publish one final snapshot per side, not each folder or page");
-                foreach (var listing in listings)
+                // D-1105-41 / RQ-178 adds a history continuation before the ordinary current-live listing.
+                Check.Require(listings.Length == (baseline ? 3 : 2) &&
+                    listings.Count(fields => fields[2] == nameof(Side.Local)) == 1 &&
+                    listings.Count(fields => fields[2] == nameof(Side.Dropbox)) == (baseline ? 2 : 1),
+                    "short listings publish one final snapshot per acquisition, including retained history");
+                foreach (var side in new[] { Side.Local, Side.Dropbox })
                 {
-                    var key = listing[2] == nameof(Side.Local)
-                        ? TextKey.StageListingLocal : TextKey.StageListingDropbox;
-                    var expected = Text.Get(key, (TextArg.Count, 1.ToString("N0")),
-                        (TextArg.Message, count), (TextArg.Path, listing[3]));
-                    Check.Require(listing[4] == expected && messages.Contains(expected),
-                        "final observations and baseline estimate reach both sinks");
+                    var sideListings = listings.Where(fields => fields[2] == side.ToString()).ToArray();
+                    for (var index = 0; index < sideListings.Length; index++)
+                    {
+                        var listing = sideListings[index];
+                        var observations = baseline && side == Side.Dropbox && index == 0 ? 0 : 2;
+                        var count = baseline
+                            ? Text.Get(TextKey.ListingEstimate, (TextArg.Count, observations.ToString("N0")),
+                                (TextArg.SourceCount, 1.ToString("N0")),
+                                (TextArg.Value, ((double)observations).ToString("P0", CultureInfo.InvariantCulture)))
+                            : Text.Get(TextKey.ListingCount, (TextArg.Count, observations.ToString("N0")));
+                        var key = side == Side.Local ? TextKey.StageListingLocal : TextKey.StageListingDropbox;
+                        var expected = Text.Get(key, (TextArg.Count, 1.ToString("N0")),
+                            (TextArg.Message, count), (TextArg.Path, listing[3]));
+                        Check.Require(listing[4] == expected && messages.Contains(expected),
+                            "each acquisition's final observations and baseline estimate reach both sinks");
+                    }
                 }
             });
         }
@@ -219,9 +229,9 @@ public static class RepairChecks
 
     private static async Task ProductionDirectRepairAsync()
     {
-        foreach (var offline in new[] { false, true })
+        foreach (var failureMode in new[] { "none", "transient", "permanent" })
         {
-            await WithFolder(nameof(ProductionDirectRepairAsync) + offline, async folder =>
+            await WithFolder(nameof(ProductionDirectRepairAsync) + failureMode, async folder =>
             {
                 var pair = Pair();
                 var connection = DropboxConnectionBinding.CreateConnectionId("account-a");
@@ -235,7 +245,9 @@ public static class RepairChecks
                 var lists = 0;
                 var accounts = 0;
                 var metadata = 0;
-                using var http = new HttpClient(new SourceHandler((request, _) =>
+                using var stop = new CancellationTokenSource();
+                const int cancelOnCapture = 3;
+                using var http = new HttpClient(new SourceHandler((request, token) =>
                 {
                     var route = request.RequestUri!.AbsolutePath;
                     if (route == "/oauth2/token") return Task.FromResult(JsonResponse(new
@@ -264,7 +276,20 @@ public static class RepairChecks
                     if (route.EndsWith("get_latest_cursor", StringComparison.Ordinal))
                     {
                         captures++;
-                        if (offline) return Task.FromException<HttpResponseMessage>(new HttpRequestException(nameof(offline)));
+                        if (failureMode == "transient" && captures == cancelOnCapture)
+                        {
+                            stop.Cancel();
+                            token.ThrowIfCancellationRequested();
+                        }
+                        if (failureMode != "none")
+                        {
+                            var response = JsonResponse(new { error_summary = failureMode == "transient"
+                                ? "too_many_requests/.." : "path/not_found/.." });
+                            response.StatusCode = failureMode == "transient" ? HttpStatusCode.TooManyRequests : HttpStatusCode.Conflict;
+                            if (failureMode == "transient") response.Headers.RetryAfter =
+                                new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.Zero);
+                            return Task.FromResult(response);
+                        }
                     }
                     return Task.FromResult(SourceHandler.DefaultResponse(request));
                 }));
@@ -274,15 +299,22 @@ public static class RepairChecks
                     validator => StateStore.Open(StateStore.DatabasePath(folder), validator), EngineHost.Mode.Direct,
                     new EngineExternals(new SyntheticCredentials(), _ => new HttpClient(new SourceHandler())));
                 host.Store.SavePair(pair);
-                if (offline)
+                if (failureMode != "none")
                 {
                     Exception? failure = null;
-                    try { await host.Operations.RepairAsync(pair.PairId, CancellationToken.None); }
+                    try { await host.Operations.RepairAsync(pair.PairId, stop.Token); }
                     catch (Exception error) { failure = error; }
-                    Check.Require(failure is not null && lists == 0 && captures == 1 &&
-                        host.Store.ReadPrerequisiteRetry(pair.PairId)?.Attempts == 1 &&
-                        host.Store.Issues(pair.PairId).Count(issue => issue.Cause == TextKey.RequiredRepairRetry) == 1,
-                        "a finite failed base capture records one prerequisite failure before any listing");
+                    if (failureMode == "transient")
+                        Check.Require(failure is OperationCanceledException && stop.IsCancellationRequested &&
+                            lists == 0 && captures == cancelOnCapture &&
+                            host.Store.ReadPrerequisiteRetry(pair.PairId) is null && host.Store.Obligated(pair.PairId) &&
+                            host.Store.LastRepair(pair.PairId) is null,
+                            "persistent transient capture retries only that request until cancellation, without relisting or a second retry episode");
+                    else
+                        Check.Require(failure is not null && lists == 0 && captures == 1 &&
+                            host.Store.ReadPrerequisiteRetry(pair.PairId)?.Attempts == 1 &&
+                            host.Store.Issues(pair.PairId).Count(issue => issue.Cause == TextKey.RequiredRepairRetry) == 1,
+                            "a permanent failed base capture records one prerequisite failure before any listing");
                     return;
                 }
                 var first = await host.Operations.RepairAsync(pair.PairId, CancellationToken.None);
@@ -292,6 +324,9 @@ public static class RepairChecks
                 var second = await host.Operations.RepairAsync(pair.PairId, CancellationToken.None);
                 Check.Require(second.Completed && !second.FirstRun && captures == 1 && lists == 2,
                     "a current source base is reused while the next real Repair starts a fresh listing");
+                var beforeExecution = host.Store.ReadPairExecution(pair.PairId);
+                var beforeLocalSource = host.Store.ReadSource(pair.PairId, Side.Local);
+                var beforeDropboxSource = host.Store.ReadSource(pair.PairId, Side.Dropbox);
                 var beforeAccounts = accounts;
                 var beforeMetadata = metadata;
                 var rebound = await host.Operations.BindRootsAsync(pair.PairId, CancellationToken.None);
@@ -302,6 +337,22 @@ public static class RepairChecks
                     "(one auth verification plus the root account read): " +
                     "roots=" + (rebound.Roots == pair.Roots) + " accounts=" + (accounts - beforeAccounts) +
                     " metadata=" + (metadata - beforeMetadata) + " lists=" + lists);
+                Check.Require(host.Store.ReadPairExecution(pair.PairId)!.Value.Generation == beforeExecution!.Value.Generation &&
+                    host.Store.ReadPairExecution(pair.PairId)!.Value.Pair.Roots == beforeExecution.Value.Pair.Roots &&
+                    host.Store.ReadSource(pair.PairId, Side.Local) == beforeLocalSource &&
+                    host.Store.ReadSource(pair.PairId, Side.Dropbox) == beforeDropboxSource,
+                    "matching rebind preserves generation, cursors, epochs and source obligations");
+                host.Store.Commit(pair.PairId, StateChange.Empty with
+                { Raise = [(IssueKind.RootIdentity, TextKey.RootUnavailable, string.Empty, new IssueSubject([], null))] });
+                var rootNotice = host.Store.Issues(pair.PairId, [IssueKind.RootIdentity]).Single();
+                var resolved = await host.Operations.ResolveAsync(pair.PairId, rootNotice.Id,
+                    ResolutionChoice.BindRoots, null, null, false, null, CancellationToken.None);
+                Check.Require(resolved.Resolved && host.Store.IssueById(pair.PairId, rootNotice.Id) is null &&
+                    host.Store.ReadPairExecution(pair.PairId)!.Value.Generation == beforeExecution!.Value.Generation &&
+                    host.Store.ReadPairExecution(pair.PairId)!.Value.Pair.Roots == beforeExecution.Value.Pair.Roots &&
+                    host.Store.ReadSource(pair.PairId, Side.Local) == beforeLocalSource &&
+                    host.Store.ReadSource(pair.PairId, Side.Dropbox) == beforeDropboxSource && lists == 2,
+                    "the root notice action closes its exact notice without listing or invalidating sources");
                 await host.DisposeAsync();
                 using var stillBorrowed = await http.SendAsync(new HttpRequestMessage(HttpMethod.Post,
                     "https://fixture.invalid/get_latest_cursor"));
@@ -413,6 +464,7 @@ public static class RepairChecks
         var generation = rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation;
         var old = rig.Store.BeginScan(rig.Pair.PairId, generation, true);
         var writer = rig.Store.OpenScan(rig.Pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows);
+        await writer.AbortAsync();
         var replacement = rig.Store.BeginScan(rig.Pair.PairId, generation, false);
         Exception? refused = null;
         try { await writer.AddAsync(new Listed("Old", null), default); await writer.CompleteAsync(); }
@@ -846,9 +898,9 @@ public static class RepairChecks
                     });
                 });
                 Check.Require(composedResult.Completed && composedResult.FirstRun == first &&
-                    composed.Store.DiscoveryStarts.SequenceEqual(new[] { discovery }) &&
+                    composed.Store.DiscoveryStarts.SequenceEqual(new[] { true }) &&
                     recovery.Reads - reads == 1 && composed.Store.ScanPasses - passes == 1 &&
-                    composed.Store.DiscoveryExistenceReads - existence == (discovery ? 1 : 0) &&
+                    composed.Store.DiscoveryExistenceReads - existence == 1 &&
                     composed.Wire.MetadataPaths.Count(path => path == DropboxWire.RootId || path == composed.Pair.DropboxRoot) == 2 &&
                     composed.Wire.Calls.Count(route => route.EndsWith("/list_folder", StringComparison.Ordinal)) == 1,
                     "H_pre/H_post surround exactly one acquisition; no finish read or non-discovery relation query: " +
@@ -2227,6 +2279,17 @@ public static class RepairChecks
         Check.Require(listingFlags.SequenceEqual(new[] { reset }) && continued.Contains("listing-done") && resetReturned == reset,
             "After abort, continue discovery then list live only; invalid cursors fall back to full discovery.");
         Check.Require(rig.Wire.Snapshot().Any(item => item.Path == "a.txt"), "Fresh row work is not skipped by retained history.");
+        listingFlags.Clear();
+        continued.Clear();
+        using (var log = rig.Log(folder, "ordinary"))
+            Check.Require((await rig.RunAsync(log, CancellationToken.None)).Completed, "Ordinary retained-history Repair completes.");
+        // D-1105-41 / RQ-178 retains the resumed acquisition's advanced cursor, not its original cursor.
+        var retainedCursor = reset ? "listing-done" : "listing-done-end";
+        Check.Require(listingFlags.SequenceEqual(new[] { false }) &&
+            continued.Where(cursor => cursor.StartsWith("listing-done", StringComparison.Ordinal))
+                .SequenceEqual(new[] { retainedCursor }),
+            "An unchanged ordinary Repair continues the last published history cursor exactly once and lists current live items once: " +
+            string.Join(",", continued));
     });
 
     private static Task AbortBothSinksAsync() => WithFolder("abort-both-sinks", async folder =>

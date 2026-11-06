@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSVersion -lt [version]'7.4') {
+    throw 'Release preparation, installation and updates require PowerShell 7.4 or newer. Use system pwsh.exe or set SYNCSHARK_PWSH_PATH to the bundled pwsh.exe; Windows PowerShell 5.1 is not supported.'
+}
 
 # The signer identity is the single source of truth for release trust and accepts
 # a LIST per role so an old and a replacement key verify during the switch. The
@@ -139,6 +142,29 @@ function Resolve-SyncSharkProductRoot([string]$TestProductRoot) {
     $resolved
 }
 
+function Resolve-SyncSharkDataRoot([string]$InstallationRoot, [switch]$AllowMissingLeaf) {
+    $pointer = Join-Path $InstallationRoot 'product-root.txt'
+    if (-not (Test-Path -LiteralPath $pointer)) { return $InstallationRoot }
+    $item = Get-Item -LiteralPath $pointer -Force
+    if ($item.PSIsContainer -or ($item.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Offline))) {
+        throw 'The data-location pointer must be an ordinary local file.'
+    }
+    $lines = [IO.File]::ReadAllLines($pointer)
+    if ($lines.Count -ne 1 -or $lines[0] -notmatch '^[A-Za-z]:[\\/]' -or
+        -not [IO.Path]::IsPathFullyQualified($lines[0])) {
+        throw 'Invalid product-root.txt: expected one absolute local data folder; no fallback was used.'
+    }
+    $root = Get-SyncSharkNormalizedPath $lines[0]
+    $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($root))
+    if ($drive.DriveType -notin @([IO.DriveType]::Fixed,[IO.DriveType]::Removable)) {
+        throw 'The data location must be on a local drive.'
+    }
+    for ($directory = [IO.DirectoryInfo]::new($root); $null -ne $directory; $directory = $directory.Parent) {
+        Assert-SyncSharkOrdinaryTree $directory.FullName -RootOnly -AllowMissing:($AllowMissingLeaf -and $directory.FullName -ieq $root)
+    }
+    $root
+}
+
 function Resolve-SyncSharkRuntimeRoot([string]$Version,[string]$TestProductRoot='') {
     if($Version -cnotmatch '^\d+\.\d+\.\d+$'){throw 'An exact runtime version is required.'}
     if($TestProductRoot){return Join-Path (Resolve-SyncSharkProductRoot $TestProductRoot) ('versions\'+$Version)}
@@ -163,6 +189,19 @@ function Assert-SyncSharkProtectedRuntime([string]$Runtime) {
     for($directory=[IO.DirectoryInfo]$path;$null -ne $directory;$directory=$directory.Parent){ProtectedAcl $directory.FullName ($null -eq $directory.Parent)}
     Assert-SyncSharkOrdinaryTree $path
     foreach($item in Get-ChildItem -LiteralPath $path -Recurse -Force){ProtectedAcl $item.FullName}
+}
+
+function Invoke-SyncSharkRollbackReadiness {
+    param([string]$Active,[string]$Target,[scriptblock]$AssertPackage)
+    Assert-SyncSharkJunction $Active $Target
+    Assert-SyncSharkProtectedRuntime $Target
+    & $AssertPackage $Target
+    $check = Start-Process -FilePath (Join-Path $Target 'SyncShark.exe') -ArgumentList '--check-rollback-ready' -WindowStyle Hidden -PassThru
+    try {
+        if (-not $check.WaitForExit(30000)) { $check.Kill(); $check.WaitForExit(5000) | Out-Null; throw 'Rollback readiness did not complete. No state was changed.' }
+        if ($check.ExitCode -ne 0) { throw 'Prepare for Removal and safely Exit before rollback. Managed storage or Explorer registration remains.' }
+    }
+    finally { $check.Dispose() }
 }
 
 function Invoke-SyncSharkProtectedRuntime {
@@ -456,6 +495,14 @@ function Read-SyncSharkJournal([string]$Path, [string]$Operation, [string]$Versi
     $journal
 }
 
+function Get-SyncSharkAtomicReplacePolicy {
+    # The bounded atomic-replace wait (#135) mirrors src/SyncShark.Engine/engine-settings.json
+    # (AtomicReplaceAttempts and AtomicReplaceInitialDelayMilliseconds). An install can run before any
+    # product file exists, so the numbers are carried here like the generated signer identity above;
+    # Test-SyncSharkJournalRetry.ps1 fails if they drift from that defaults file.
+    [pscustomobject]@{ Attempts = 5; InitialDelayMilliseconds = 50 }
+}
+
 function Write-SyncSharkJournal([string]$Path, [object]$Journal,
     [string]$CrashAfter = '', [string]$CrashPrefix = 'journal') {
     $parent = [IO.Path]::GetDirectoryName($Path)
@@ -479,7 +526,22 @@ function Write-SyncSharkJournal([string]$Path, [object]$Journal,
         $stream.Flush($true)
     } finally { $stream.Dispose() }
     Invoke-SyncSharkCrashPoint "$CrashPrefix-after-temp-write" $CrashAfter
-    [IO.File]::Move($temporary, $Path, $true)
+    # A brief antivirus/indexer hold must not fail the journal: the product's short exponential backoff,
+    # then the original failure is rethrown to the existing notice path (#135).
+    $policy = Get-SyncSharkAtomicReplacePolicy
+    $delay = $policy.InitialDelayMilliseconds
+    for ($attempt = 1; ; $attempt++) {
+        try { [IO.File]::Move($temporary, $Path, $true); break }
+        catch {
+            $failure = $_.Exception
+            while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+            $transient = $failure -is [UnauthorizedAccessException] -or
+                ($failure -is [IO.IOException] -and ($failure.HResult -eq -2147024864 -or $failure.HResult -eq -2147024891))
+            if (-not $transient -or $attempt -ge $policy.Attempts) { throw }
+            Start-Sleep -Milliseconds $delay
+            $delay *= 2
+        }
+    }
 }
 
 function Copy-SyncSharkTreeToStaging([string]$Source, [string]$Destination,
@@ -633,14 +695,15 @@ function Assert-SyncSharkExplorerReplacement {
 # sharing keeps byte-exact backup and hashing of the non-authorizing process-id
 # file possible, and does not infer quiescence from process enumeration.
 $script:SyncSharkMaintenanceLease = $null
+$script:SyncSharkMaintenanceAdmissionFailure = 'The installed application state lock could not be held for maintenance. Nothing was changed.'
 
 function Resolve-SyncSharkMaintenanceLeaseRoot([string]$ProductRoot) {
     if ([string]::IsNullOrWhiteSpace($ProductRoot)) { throw 'An exact product root is required for release maintenance.' }
     $resolved = Get-SyncSharkNormalizedPath $ProductRoot
-    if ($resolved -ieq (Get-SyncSharkNormalizedPath (Resolve-SyncSharkProductRoot ''))) { return $resolved }
+    if ($resolved -ieq (Get-SyncSharkNormalizedPath (Resolve-SyncSharkProductRoot ''))) { return Resolve-SyncSharkDataRoot $resolved }
     # Any other root must be the exact isolated release-test root, which the
     # existing seam resolves or refuses; no caller-supplied substitute root.
-    Resolve-SyncSharkProductRoot $resolved
+    Resolve-SyncSharkDataRoot (Resolve-SyncSharkProductRoot $resolved)
 }
 
 function Get-SyncSharkLiveMaintenanceLease([string]$ProductRoot) {
@@ -648,9 +711,10 @@ function Get-SyncSharkLiveMaintenanceLease([string]$ProductRoot) {
     # $null. Only the maintenance wrapper creates it, in module-private scope.
     $lease = $script:SyncSharkMaintenanceLease
     if ($null -eq $lease) { return $null }
-    $resolved = Get-SyncSharkNormalizedPath $ProductRoot
+    $resolved = Resolve-SyncSharkMaintenanceLeaseRoot $ProductRoot
     if ($lease.Root -ine $resolved) { return $null }
-    if ($null -eq $lease.Stream -or $lease.Stream.SafeFileHandle.IsClosed -or -not $lease.Stream.CanRead) {
+    if ($null -eq $lease.Mutex -or $lease.Mutex.SafeWaitHandle.IsClosed -or
+        $null -eq $lease.Stream -or $lease.Stream.SafeFileHandle.IsClosed -or -not $lease.Stream.CanRead) {
         throw 'The held maintenance lease is no longer readable. Nothing was changed.'
     }
     if ((Get-SyncSharkNormalizedPath ([string]$lease.LockPath)) -cne
@@ -664,23 +728,44 @@ function Open-SyncSharkInstanceExclusion([string]$ProductRoot) {
     # Reuse ONLY the exact live maintenance lease for this same resolved product
     # root. Otherwise take the current independent exclusive lock. A reused lease
     # stays owned by its wrapper scope and is never disposed here.
-    $resolved = Get-SyncSharkNormalizedPath $ProductRoot
-    $lease = Get-SyncSharkLiveMaintenanceLease $resolved
+    $resolved = Resolve-SyncSharkMaintenanceLeaseRoot $ProductRoot
+    $lease = Get-SyncSharkLiveMaintenanceLease $ProductRoot
     if ($null -ne $lease) { return [pscustomobject]@{ Stream = $lease.Stream; Owned = $false } }
     [pscustomobject]@{ Owned = $true; Stream = [IO.File]::Open((Join-Path $resolved 'state\instance.lock'),
         [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
 }
 
+function Enter-SyncSharkMaintenanceMutex([string]$ProductRoot) {
+    $installation = Get-SyncSharkNormalizedPath $ProductRoot
+    $normal = Get-SyncSharkNormalizedPath (Resolve-SyncSharkProductRoot '')
+    if ($installation -ine $normal) { $installation = Resolve-SyncSharkProductRoot $ProductRoot }
+    $identity = [Text.Encoding]::UTF8.GetBytes($installation.ToUpperInvariant())
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try { $name = 'Global\SyncShark.Maintenance.' + ([BitConverter]::ToString($hash.ComputeHash($identity))).Replace('-', '') }
+    finally { $hash.Dispose() }
+    $mutex = [Threading.Mutex]::new($false, $name)
+    $owned = $false
+    try {
+        try { $owned = $mutex.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw $script:SyncSharkMaintenanceAdmissionFailure }
+        return $mutex
+    }
+    catch { $mutex.Dispose(); throw }
+}
+
 function Invoke-SyncSharkWithInstanceMaintenanceLease {
     param([string]$ProductRoot,[scriptblock]$Body)
     if ($null -eq $Body) { throw 'A release transaction body is required.' }
+    if ($null -ne $script:SyncSharkMaintenanceLease) {
+        throw 'A release maintenance lease is already held by this session; nested acquisition is refused.'
+    }
+    $mutex = Enter-SyncSharkMaintenanceMutex $ProductRoot
+    try {
     $root = Resolve-SyncSharkMaintenanceLeaseRoot $ProductRoot
     Assert-SyncSharkOrdinaryTree $root -RootOnly
     $state = Join-Path $root 'state'
     Assert-SyncSharkOrdinaryTree $state -RootOnly
-    if ($null -ne $script:SyncSharkMaintenanceLease) {
-        throw 'A release maintenance lease is already held by this session; nested acquisition is refused.'
-    }
     $lock = Join-Path $state 'instance.lock'
     $item = Get-Item -LiteralPath $lock -Force -ErrorAction SilentlyContinue
     if ($null -eq $item) { throw 'The installed application state lock is missing. Nothing was changed.' }
@@ -690,14 +775,101 @@ function Invoke-SyncSharkWithInstanceMaintenanceLease {
     $stream = [IO.File]::Open($lock, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     if (-not $stream.CanRead -or $stream.SafeFileHandle.IsClosed) {
         $stream.Dispose()
-        throw 'The installed application state lock could not be held for maintenance. Nothing was changed.'
+        throw $script:SyncSharkMaintenanceAdmissionFailure
     }
     $previous = $script:SyncSharkMaintenanceLease
-    $script:SyncSharkMaintenanceLease = [pscustomobject]@{ Root = $root; LockPath = (Get-SyncSharkNormalizedPath $lock); Stream = $stream }
-    try { & $Body }
+    $script:SyncSharkMaintenanceLease = [pscustomobject]@{ Root = $root; LockPath = (Get-SyncSharkNormalizedPath $lock); Stream = $stream; Mutex = $mutex }
+    try {
+        if ($root -ine (Resolve-SyncSharkMaintenanceLeaseRoot $ProductRoot)) {
+            throw 'The data location changed while acquiring maintenance. Nothing was changed.'
+        }
+        & $Body
+    }
     finally {
         $script:SyncSharkMaintenanceLease = $previous
         $stream.Dispose()
+    }
+    }
+    finally {
+        $mutex.ReleaseMutex()
+        $mutex.Dispose()
+    }
+}
+
+# Windows ARP values: https://learn.microsoft.com/windows/win32/msi/uninstall-registry-key
+# Per-user Programs folder / shell links: https://learn.microsoft.com/windows/win32/shell/links
+function Invoke-SyncSharkAppRegistration {
+    param([string]$Version,[ValidateSet('Register','Remove','Verify','VerifyAbsent')][string]$Operation)
+    if ($Version -cnotmatch '^\d+\.\d+\.\d+$') { throw 'An exact registration version is required.' }
+    $root = Resolve-SyncSharkProductRoot ''
+    $runtime = Join-Path $root 'active'
+    $executable = Join-Path $runtime 'SyncShark.exe'
+    $uninstall = '"' + (Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe') + '" -NoProfile -ExecutionPolicy Bypass -File "' +
+        (Join-Path $runtime 'tools\SyncShark.Uninstall.ps1') + '"'
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Massdex.SyncShark'
+    $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Massdex\Sync Shark.lnk'
+    $owner = 'Massdex.SyncShark:' + $root
+    $values = @{ DisplayName='Sync Shark'; DisplayVersion=$Version; Publisher='Massdex';
+        InstallLocation=(Resolve-SyncSharkRuntimeRoot $Version); UninstallString=$uninstall; SyncSharkOwner=$owner }
+    $existing = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+    # An empty key can survive creation before the first value; provider metadata is not a value.
+    $keyExists = Test-Path -LiteralPath $key
+    $emptyKey = $false
+    if ($keyExists) {
+        $registryKey = Get-Item -LiteralPath $key -ErrorAction Stop
+        try { $emptyKey = $registryKey.ValueCount -eq 0 -and $registryKey.SubKeyCount -eq 0 }
+        finally { if ($registryKey -is [IDisposable]) { $registryKey.Dispose() } }
+    }
+    if ($keyExists -and -not $emptyKey -and ($null -eq $existing -or $null -eq $existing.PSObject.Properties['SyncSharkOwner'] -or
+            $existing.SyncSharkOwner -cne $owner)) {
+        throw 'Another installation owns the uninstall registration. Nothing was changed.'
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $link = $null
+        if (Test-Path -LiteralPath $shortcut) {
+            $item = Get-Item -LiteralPath $shortcut -Force
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'The Start-menu shortcut must be an ordinary file.'
+            }
+            $link = $shell.CreateShortcut($shortcut)
+            if ($link.TargetPath -ine $executable -or $link.Arguments -notin @('', '--cli engine host start --yes')) {
+                throw 'Another application owns the Start-menu shortcut. Nothing was changed.'
+            }
+        }
+        if ($Operation -eq 'Register') {
+            Assert-SyncSharkJunction $runtime $values.InstallLocation
+            if (-not (Test-Path -LiteralPath (Join-Path $runtime 'tools\SyncShark.Uninstall.ps1') -PathType Leaf)) {
+                throw 'The installed uninstall entry point is missing.'
+            }
+            if (-not $keyExists) { New-Item -Path $key | Out-Null }
+            # Ownership precedes descriptive fields so an interrupted owned write can be replayed.
+            New-ItemProperty -LiteralPath $key -Name 'SyncSharkOwner' -Value $owner -PropertyType String -Force | Out-Null
+            foreach ($name in $values.Keys | Where-Object { $_ -cne 'SyncSharkOwner' }) {
+                New-ItemProperty -LiteralPath $key -Name $name -Value $values[$name] -PropertyType String -Force | Out-Null
+            }
+            if ($null -eq $link) {
+                $folder = Split-Path -Parent $shortcut
+                Assert-SyncSharkOrdinaryTree $folder -RootOnly -AllowMissing
+                [void][IO.Directory]::CreateDirectory($folder)
+                $link = $shell.CreateShortcut($shortcut)
+            }
+            $link.TargetPath=$executable; $link.Arguments='--cli engine host start --yes'; $link.WorkingDirectory=$runtime; $link.Save()
+        } elseif ($Operation -eq 'Remove') {
+            if ($null -ne $link) { Remove-Item -LiteralPath $shortcut }
+            if ($keyExists) { Remove-Item -LiteralPath $key }
+        } elseif ($Operation -eq 'VerifyAbsent') {
+            if ($null -ne $link -or $keyExists) { throw 'Application registration remains.' }
+        } else {
+            if ($null -eq $link -or $null -eq $existing) { throw 'Application registration is missing.' }
+            if ($link.Arguments -cne '--cli engine host start --yes') { throw 'Start menu must launch the engine host.' }
+            foreach ($name in $values.Keys) {
+                if ($existing.$name -cne $values[$name]) { throw "Application registration differs: $name" }
+            }
+        }
+    } finally {
+        if ($null -ne $link -and [Runtime.InteropServices.Marshal]::IsComObject($link)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
+        if ([Runtime.InteropServices.Marshal]::IsComObject($shell)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
     }
 }
 
@@ -1144,10 +1316,11 @@ Export-ModuleMember -Function Get-SyncSharkSha256, Get-SyncSharkNormalizedPath,
     Get-SyncSharkSignerIdentity,
     Assert-SyncSharkWithin, Assert-SyncSharkOrdinaryTree, Assert-SyncSharkTransactionTree, Get-SyncSharkTreeManifest,
     Assert-SyncSharkTreeMatch, Get-SyncSharkTreeIdentity, Get-SyncSharkJunctionTarget, Assert-SyncSharkJunction,
-    Resolve-SyncSharkProductRoot, Read-SyncSharkJournal, Write-SyncSharkJournal, Copy-SyncSharkTreeToStaging,
+    Resolve-SyncSharkProductRoot, Read-SyncSharkJournal, Write-SyncSharkJournal,
+    Get-SyncSharkAtomicReplacePolicy, Copy-SyncSharkTreeToStaging,
     Invoke-SyncSharkCrashPoint, Invoke-SyncSharkJournalStep, Get-SyncSharkSignatureObservation,
     Assert-SyncSharkSignatureObservation, Get-SyncSharkSignedMemberHashes, Assert-SyncSharkExactPackage,
     Invoke-SyncSharkExplorerPackage, Set-SyncSharkRuntimeSystemReadAccess, Assert-SyncSharkRuntimeSystemReadAccess
 Export-ModuleMember -Function Resolve-SyncSharkRuntimeRoot, Assert-SyncSharkProtectedRuntime, Invoke-SyncSharkProtectedRuntime
-Export-ModuleMember -Function Read-SyncSharkUpdaterRelease
-Export-ModuleMember -Function Invoke-SyncSharkWithInstanceMaintenanceLease
+Export-ModuleMember -Function Read-SyncSharkUpdaterRelease, Resolve-SyncSharkDataRoot, Invoke-SyncSharkAppRegistration
+Export-ModuleMember -Function Invoke-SyncSharkWithInstanceMaintenanceLease, Invoke-SyncSharkRollbackReadiness, Enter-SyncSharkMaintenanceMutex

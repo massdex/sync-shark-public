@@ -108,8 +108,8 @@ internal sealed class SyncLocalFileAuthority : IDisposable, IAsyncDisposable
     internal static SyncLocalFileAuthority OpenExistingMutableReadGuard(string path) =>
         Open(path, GenericRead, ShareRead | ShareWrite, OpenExistingDisposition, FileAccess.Read);
 
-    internal static SyncLocalFileAuthority CreateNewUnprotectedFile(string path) =>
-        Open(path, DeleteAccess | GenericRead | GenericWrite, 0, CreateNew, FileAccess.ReadWrite);
+    internal static SyncLocalFileAuthority CreateNewUnprotectedFile(string path, bool writeThrough = true) =>
+        Open(path, DeleteAccess | GenericRead | GenericWrite, 0, CreateNew, FileAccess.ReadWrite, writeThrough);
 
     public static SyncLocalFileAuthority CreateNewFile(string path)
     {
@@ -260,10 +260,11 @@ internal sealed class SyncLocalFileAuthority : IDisposable, IAsyncDisposable
     internal static string RecoverySidecarPath(string protectedObjectPath) =>
         Path.GetFullPath(protectedObjectPath) + AccessRecoverySuffix;
 
-    private static SyncLocalFileAuthority Open(string path, uint desiredAccess, uint shareMode, uint creationDisposition, FileAccess access)
+    private static SyncLocalFileAuthority Open(string path, uint desiredAccess, uint shareMode, uint creationDisposition, FileAccess access,
+        bool writeThrough = true)
     {
         var handle = CreateFileW(ExtendedPath(path), desiredAccess, shareMode, IntPtr.Zero,
-            creationDisposition, FileAttributeNormal | FileFlagWriteThrough | FileFlagOpenReparsePoint, IntPtr.Zero);
+            creationDisposition, FileAttributeNormal | FileFlagOpenReparsePoint | (writeThrough ? FileFlagWriteThrough : 0), IntPtr.Zero);
         if (handle.IsInvalid)
         {
             var error = Marshal.GetLastWin32Error();
@@ -300,6 +301,16 @@ internal sealed class SyncLocalFileAuthority : IDisposable, IAsyncDisposable
             throw new IOException("The writable local object is not an exclusive single-link file.");
         return new PilotDirectoryIdentity(information.VolumeSerialNumber,
             ((ulong)information.FileIndexHigh << 32) | information.FileIndexLow);
+    }
+
+    internal PilotDirectoryIdentity VerifyMigrationFile(string path)
+    {
+        var identity = VerifySingleLink();
+        if (!PilotDirectoryLease.GetFileInformationByHandle(Handle, out var information) ||
+            (information.FileAttributes & (FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Offline)) != 0 ||
+            !string.Equals(FinalPath, System.IO.Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))
+            throw new IOException(SyncDataLocation.MoveText("data-move-unsafe-object"));
+        return identity;
     }
 
     public PilotDirectoryIdentity VerifySameSingleLink(PilotDirectoryIdentity expected)

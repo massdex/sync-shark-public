@@ -36,6 +36,23 @@ public sealed record IssueSubject(
     /// not compared (D20 continuation).</summary>
     public bool HasSameItems(IssueSubject other) => new HashSet<IssueItem>(Items).SetEquals(other.Items);
 
+    /// <summary>Indexes subjects by their item sets without retaining a second copy of the items.</summary>
+    public static IEqualityComparer<IssueSubject> ItemSetComparer { get; } = new ItemComparer();
+
+    private sealed class ItemComparer : IEqualityComparer<IssueSubject>
+    {
+        public bool Equals(IssueSubject? left, IssueSubject? right) =>
+            ReferenceEquals(left, right) || left is not null && right is not null && left.HasSameItems(right);
+
+        public int GetHashCode(IssueSubject subject)
+        {
+            if (subject.Items.Count == 1) return subject.Items[0]?.GetHashCode() ?? 0;
+            var hash = 0;
+            foreach (var item in new HashSet<IssueItem>(subject.Items)) hash ^= item?.GetHashCode() ?? 0;
+            return hash;
+        }
+    }
+
     /// <summary>The distinct items of a supplied sequence, in first-occurrence order; the one distinct-array rule.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static IssueItem[] DistinctItems(IEnumerable<IssueItem> items) => items.Distinct().ToArray();

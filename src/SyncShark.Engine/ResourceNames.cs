@@ -14,8 +14,8 @@ public static class ResourceNames
     public const string PathCase = "SyncShark.EnginePathCase.json";
 
     /// <summary>Folder under the product root holding the engine database and logs.</summary>
-    public const string EngineFolder = SyncDataLocation.EngineFolder;
-    public const string DatabaseFile = SyncDataLocation.EngineDatabaseFile;
+    public const string EngineFolder = "engine";
+    public const string DatabaseFile = "state.db";
     /// <summary>File name of the user's partial settings overlay.</summary>
     public const string UserSettingsFile = "settings.json";
     /// <summary>Owned replacement written and renamed into place so a settings publication is old-or-new.</summary>

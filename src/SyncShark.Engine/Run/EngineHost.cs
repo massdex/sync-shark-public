@@ -62,9 +62,11 @@ internal sealed class EngineHost : IAsyncDisposable
             foreach (var id in _resources.Keys) _closed.Add(id);
             _sourceCancellation = _stop.CancelAsync();
             PublishStatus();
+            foreach (var channel in _statusSubscribers) channel.Writer.TryComplete();
         }
-        _stopSupervision?.Invoke();
     }
+
+    internal CancellationToken Stopping => _stop.Token;
 
     private async Task ObserveSourceAsync(Task source, CancellationToken cancellation)
     {
@@ -186,7 +188,7 @@ internal sealed class EngineHost : IAsyncDisposable
             var delivery = new SuppressingProgress(progress, error => startupLog?.Failed(error));
             startupMonitor?.Observe(() =>
             {
-                var message = Text.Get(TextKey.StatusStillWorking, (TextArg.Name, string.Empty));
+                var message = Text.Get(TextKey.StatusStillQuiet);
                 if (startupLog is null) delivery.Publish(message);
                 else startupLog.ReportProgress(message);
                 return true;
@@ -314,7 +316,8 @@ internal sealed class EngineHost : IAsyncDisposable
 
     /// <summary>The one pair-operation start: open its log, recompose, admit the pair and open its session.</summary>
     internal async Task<T> DispatchSessionAsync<T>(string pairId, Func<RunLog?> openLog,
-        Func<PairSession, CancellationToken, Task<T>> execute, CancellationToken ct, RunLog? startupLog = null)
+        Func<PairSession, CancellationToken, Task<T>> execute, CancellationToken ct, RunLog? startupLog = null,
+        bool prerequisite = false)
     {
         ArgumentNullException.ThrowIfNull(openLog);
         ArgumentNullException.ThrowIfNull(execute);
@@ -323,7 +326,8 @@ internal sealed class EngineHost : IAsyncDisposable
         try
         {
             await RecomposeCurrentAsync(pairId, ct, log).ConfigureAwait(false);
-            return await DispatchAsync(pairId, async (registration, pair, generation, token) =>
+            return await ExecuteInGenerationAsync(pairId, RegistrationKind.Dispatch, mutationAuthorized: true,
+                async (registration, pair, generation, token) =>
             {
                 using var observations = DropboxApi.ObserveRequests(log is null ? null : log.Event);
                 lock (_gate) ((Registration)registration).Log = log;
@@ -332,14 +336,14 @@ internal sealed class EngineHost : IAsyncDisposable
                     return await execute(OpenForRegistration(registration, pair, generation, log), token).ConfigureAwait(false);
                 }
                 finally { lock (_gate) ((Registration)registration).Log = null; }
-            }, ct).ConfigureAwait(false);
+            }, ct, prerequisite).ConfigureAwait(false);
         }
         catch (Exception error) { log?.Failed(error); throw; }
     }
 
     private async Task<T> ExecuteInGenerationAsync<T>(string pairId, RegistrationKind kind,
         bool mutationAuthorized, Func<object, PairConfig, long, CancellationToken, Task<T>> execute,
-        CancellationToken ct)
+        CancellationToken ct, bool prerequisite = false)
     {
         ArgumentException.ThrowIfNullOrEmpty(pairId);
         ArgumentNullException.ThrowIfNull(execute);
@@ -349,8 +353,13 @@ internal sealed class EngineHost : IAsyncDisposable
         lock (_gate)
         {
             _sourceFailure?.Throw();
-            if (_stopping || _closed.Contains(pairId) || kind == RegistrationKind.Dispatch && IsPaused(pairId))
+            if (_stopping || _closed.Contains(pairId)) throw Stale();
+            if (kind == RegistrationKind.Dispatch && IsPaused(pairId))
+            {
+                if (prerequisite && _prerequisites.TryGetValue(pairId, out var pending) && IsCallerStopped(pending.Cause))
+                    throw new PrerequisiteStoppedException(new OperationCanceledException(ct));
                 throw Stale();
+            }
             if (mutationAuthorized && _mode == Mode.Preview) throw new InvalidOperationException();
             var current = Store.ReadPairExecution(pairId) ?? throw Unknown(pairId);
             capturedPair = current.Pair;
@@ -400,7 +409,16 @@ internal sealed class EngineHost : IAsyncDisposable
         lock (_gate)
         {
             if (!_registrations.TryGetValue(registration, out var current) || current.PairId != pairId ||
-                current.Generation != generation || !CanAdmit(current)) throw Stale();
+                current.Generation != generation) throw Stale();
+            if (!CanAdmit(current))
+            {
+                // A drain closes admission before cancellation is delivered; this is the same caller stop.
+                if (current.State == RegistrationState.Draining && !_closed.Contains(pairId) &&
+                    _prerequisites.TryGetValue(pairId, out var pending) && pending.Generation == generation &&
+                    IsCallerStopped(pending.Cause))
+                    throw new OperationCanceledException(current.Cancellation.Token);
+                throw Stale();
+            }
         }
     }
 
@@ -774,7 +792,7 @@ internal sealed class EngineHost : IAsyncDisposable
         {
             var members = volume.Members ?? volume.Frozen;
             volume.Members = members.Where(member => member.Pair.PairId != pair.PairId)
-                .Append(new JournalSource.Member(pair, generation, source.Epoch, source.Revision, false,
+                .Append(new JournalSource.Member(pair, generation, source.Epoch, source.Revision,
                     resources.Paths, pair.Drive)).ToArray();
             volume.Frozen = volume.Members;
         }
@@ -988,23 +1006,30 @@ internal sealed class EngineHost : IAsyncDisposable
     internal async Task<RepairSummary?> RunPrerequisiteAsync(string pairId, CancellationToken ct,
         RunLog? startupLog = null)
     {
-        Prerequisite attempt;
-        lock (_gate)
-        {
-            var current = Store.ReadPairExecution(pairId);
-            if (_stopping || _prerequisites.ContainsKey(pairId) || current is null ||
-                Admission(pairId, current.Value.Pair) != PairAdmission.Admitted ||
-                !Store.Obligated(pairId) && Store.ReadPrerequisiteRetry(pairId) is null) return null;
-            attempt = new Prerequisite(current.Value.Pair, current.Value.Generation);
-            _prerequisites.Add(pairId, attempt);
-        }
+        Prerequisite? attempt = null;
+        long generation = 0;
         RepairSummary? summary = null;
         Exception? failure = null;
-        using var cancel = ct.Register(() => { lock (_gate) attempt.Cause = PrerequisiteStopCause.UserCancellation; });
         RunLog? ownedLog = null;
-        var log = startupLog;
+        RunLog? log = startupLog;
+        CancellationTokenRegistration stop = default;
         try
         {
+            lock (_gate)
+            {
+                var current = Store.ReadPairExecution(pairId);
+                if (_stopping || _prerequisites.ContainsKey(pairId) || current is null ||
+                    Admission(pairId, current.Value.Pair) != PairAdmission.Admitted ||
+                    !Store.Obligated(pairId) && Store.ReadPrerequisiteRetry(pairId) is null) return null;
+                attempt = new Prerequisite(current.Value.Pair, current.Value.Generation);
+                generation = current.Value.Generation;
+                _prerequisites.Add(pairId, attempt);
+            }
+            // Registered after the attempt exists so an already-cancelled caller still classifies it.
+            stop = ct.Register(() =>
+            {
+                lock (_gate) attempt!.Cause = PrerequisiteStopCause.UserCancellation;
+            });
             ownedLog = startupLog is null ? _openLog(pairId) : null;
             log ??= ownedLog;
             await RecomposeCurrentAsync(pairId, ct, log).ConfigureAwait(false);
@@ -1015,27 +1040,55 @@ internal sealed class EngineHost : IAsyncDisposable
                 var dropbox = Store.ReadSource(pairId, Side.Dropbox) ?? throw Stale();
                 var retry = Store.ReadPrerequisiteRetry(pairId);
                 if (retry is not null)
-                    Store.CompleteRecomposition(pairId, attempt.Generation, local.Epoch, dropbox.Epoch,
+                    Store.CompleteRecomposition(pairId, generation, local.Epoch, dropbox.Epoch,
                         local.Revision, dropbox.Revision, retry.Value);
                 Wake(pairId);
                 return null;
             }
             summary = await DispatchSessionAsync(pairId, () => log,
-                (session, token) => Repair.RunAsync(session, token), ct, log).ConfigureAwait(false);
+                (session, token) => Repair.RunAsync(session, token), ct, log, prerequisite: true).ConfigureAwait(false);
             if (summary is { Completed: true }) Wake(pairId);
             return summary;
         }
-        catch (Exception error) { failure = error; log?.Failed(error); throw; }
+        catch (Exception error)
+        {
+            failure = error;
+            // Admission precedes the owned log, so a failure in that read still gets one.
+            if (log is null) ownedLog = _openLog(pairId);
+            log ??= ownedLog;
+            log?.Failed(error);
+            // A caller stop is CallerStopped and counts nothing (engine.md 5.6). Its classification travels with the
+            // exception, so a resume that clears the pause flag cannot turn the stop back into a failure.
+            PrerequisiteStopCause cause;
+            lock (_gate) cause = attempt?.Cause ?? PrerequisiteStopCause.None;
+            if (error is OperationCanceledException cancellation && error is not PrerequisiteStoppedException &&
+                IsCallerStopped(cause))
+                throw new PrerequisiteStoppedException(cancellation);
+            throw;
+        }
         finally
         {
-            try { await CompletePrerequisiteAsync(attempt, summary, failure).ConfigureAwait(false); }
+            try
+            {
+                if (attempt is not null)
+                {
+                    try { await CompletePrerequisiteAsync(attempt, summary, failure).ConfigureAwait(false); }
+                    catch (Exception error) { log?.Failed(error); throw; }
+                }
+            }
             finally
             {
-                lock (_gate) _prerequisites.Remove(pairId);
+                if (attempt is not null) lock (_gate) _prerequisites.Remove(pairId);
                 ownedLog?.Dispose();
+                stop.Dispose();
             }
         }
     }
+
+    /// <summary>engine.md 5.6: a pause, disable or cancel is CallerStopped and counts nothing.</summary>
+    private static bool IsCallerStopped(PrerequisiteStopCause cause) =>
+        cause is PrerequisiteStopCause.UserCancellation or PrerequisiteStopCause.Stop or
+            PrerequisiteStopCause.Pause or PrerequisiteStopCause.Disable;
 
     private async Task RecordCompositionFailureAsync(string pairId, Exception error)
     {
@@ -1196,14 +1249,14 @@ internal sealed class EngineHost : IAsyncDisposable
                 selected.RequireFor(operation.PairId, operation.Generation);
             }
             if (operation.Consumed.TryGetValue(opportunity, out var consumed) &&
-                consumed.Any(previous => previous.HasSameItems(subject))) throw SelectionStale();
+                consumed.Contains(subject)) throw SelectionStale();
             if (expected is not null && (expected.PairId != operation.PairId ||
                 expected.Token.PairGeneration != operation.Generation || !expected.Token.Subject.HasSameItems(subject)))
                 throw SelectionStale();
             if (_items.Values.Any(active => active.Operation.PairId == operation.PairId &&
                 (active.Subject.Items.Intersect(subject.Items).Any() || expected is not null &&
                  active.Authority?.IssueId == expected.Token.IssueId))) throw SelectionStale();
-            if (consumed is null) operation.Consumed.Add(opportunity, consumed = []);
+            if (consumed is null) operation.Consumed.Add(opportunity, consumed = new(IssueSubject.ItemSetComparer));
             consumed.Add(subject);
             var item = new ItemAttempt(ResourceNames.NewAttemptId(), operation, opportunity, subject, expected?.Token);
             _items.TryAdd(item.Id, item);
@@ -1411,7 +1464,8 @@ internal sealed class EngineHost : IAsyncDisposable
                 }, ct).ConfigureAwait(false);
         _monitor.Start();
         _auto.Start();
-        foreach (var pair in Store.Pairs()) if (pair.Enabled) Wake(pair.PairId);
+        // AutoSync.Start owns its startup opportunity; only Repair still needs its wake.
+        foreach (var pair in Store.Pairs()) if (pair.Enabled) _monitor.Wake(pair.PairId);
     }
 
     internal Task<UiPreferences> ReadPreferencesAsync(CancellationToken ct)
@@ -1465,7 +1519,7 @@ internal sealed class EngineHost : IAsyncDisposable
             if (active.Length == 0 && _startupLogs.Count == 0) return false;
             message = _listingWaits.Count != 0
                 ? Text.Get(TextKey.StatusStillWaiting, (TextArg.Reason, nameof(AttemptOwner.Prerequisite)))
-                : Text.Get(TextKey.StatusStillWorking, (TextArg.Name, string.Empty));
+                : Text.Get(TextKey.StatusStillQuiet);
             logs = active.Select(value => value.Log).OfType<RunLog>().Concat(_startupLogs).Distinct().ToArray();
         }
         var reported = false;
@@ -1525,7 +1579,7 @@ internal sealed class EngineHost : IAsyncDisposable
             });
         lock (_gate)
         {
-            if (_stopping) yield break;
+            if (_stopping || _sourceFailure is not null) yield break;
             _statusSubscribers.Add(channel);
             var status = Status();
             channel.Writer.TryWrite(new HostStatusUpdate(status.Status, status.Detail, null));
@@ -1636,7 +1690,7 @@ internal sealed class EngineHost : IAsyncDisposable
         internal PairGenerationResources? Resources;
         internal RunLog? Log;
         internal HashSet<Guid> Items { get; } = [];
-        internal Dictionary<object, List<IssueSubject>> Consumed { get; } = new(ReferenceEqualityComparer.Instance);
+        internal Dictionary<object, HashSet<IssueSubject>> Consumed { get; } = new(ReferenceEqualityComparer.Instance);
         internal TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal object InventoryGate { get; } = new();
         internal long? InventoryEpoch;

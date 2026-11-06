@@ -33,6 +33,8 @@ public static class ScanWriterChecks
             FullQueueCancelCases(connection);
             FullQueueAbortCases(connection);
             FullQueueFailureCases(connection);
+            FreshDescendantCases(connection);
+            FreshStatementCases(connection);
             OrderedEventCases(connection);
             DeletedNameCases(connection);
             MixedBoundaryCases(connection);
@@ -52,7 +54,7 @@ public static class ScanWriterChecks
     {
         const string pair = "scan-row";
         AddPair(connection, pair);
-        Write(connection, pair, Side.Local,
+        Write(connection, pair, Side.Local, begunEmpty: false,
             new Listed("a.txt", FileEntry("a.txt", 10, "id-a", "", "")),
             new Listed("dir", FolderEntry("dir", "id-d")),
             new Listed("dir/b.txt", FileEntry("dir/b.txt", 3, "id-b", "rev-b", "", TextKey.SkipLink.ToString())));
@@ -78,9 +80,9 @@ public static class ScanWriterChecks
     {
         const string pair = "scan-dropbox";
         AddPair(connection, pair);
-        Write(connection, pair, Side.Local,
+        Write(connection, pair, Side.Local, begunEmpty: false,
             new Listed("f:x.txt", FileEntry("f:x.txt", 1, "id-l", "", "")));
-        Write(connection, pair, Side.Dropbox,
+        Write(connection, pair, Side.Dropbox, begunEmpty: false,
             new Listed("f:x.txt", FileEntry("f:x.txt", 2, "id-r", "rev-r", "hash-r")));
 
         var rows = Rows(connection, pair);
@@ -100,13 +102,13 @@ public static class ScanWriterChecks
     {
         const string pair = "scan-replace";
         AddPair(connection, pair);
-        Write(connection, pair, Side.Local,
+        Write(connection, pair, Side.Local, begunEmpty: false,
             new Listed("d", FolderEntry("d", "id-d")),
             new Listed("d/x.txt", FileEntry("d/x.txt", 1, "id-x", "", "")),
             new Listed("d/y/z.txt", FileEntry("d/y/z.txt", 2, "id-z", "", "")));
         Check.Require(Rows(connection, pair).Count == 3, "a folder and its descendants are listed");
 
-        Write(connection, pair, Side.Local,
+        Write(connection, pair, Side.Local, begunEmpty: false,
             new Listed("d", FileEntry("d", 7, "id-replacement", "", "")));
 
         var rows = Rows(connection, pair);
@@ -118,21 +120,21 @@ public static class ScanWriterChecks
     {
         const string pair = "scan-delete";
         AddPair(connection, pair);
-        Write(connection, pair, Side.Local,
+        Write(connection, pair, Side.Local, begunEmpty: false,
             new Listed("d", FolderEntry("d", "id-d")),
             new Listed("d/x.txt", FileEntry("d/x.txt", 1, "id-x", "", "")),
             new Listed("dx", FolderEntry("dx", "id-dx")),
             new Listed("dx/y.txt", FileEntry("dx/y.txt", 2, "id-y", "", "")),
             new Listed("keep.txt", FileEntry("keep.txt", 3, "id-k", "", "")));
 
-        Write(connection, pair, Side.Local, new Listed("d", null));
+        Write(connection, pair, Side.Local, begunEmpty: false, new Listed("d", null));
 
         var rows = Rows(connection, pair);
         Check.Require(rows.Select(row => row.Path).OrderBy(path => path, StringComparer.Ordinal)
             .SequenceEqual(["dx", "dx/y.txt", "keep.txt"]),
             "an absence deletes the path and its descendants but not a shared prefix");
 
-        Write(connection, pair, Side.Local, new Listed("keep.txt", null));
+        Write(connection, pair, Side.Local, begunEmpty: false, new Listed("keep.txt", null));
         Check.Require(Rows(connection, pair).Count == 2, "an absence of a file deletes just that row");
     }
 
@@ -143,12 +145,12 @@ public static class ScanWriterChecks
             var pair = "tombstone-range-" + hasSelf;
             AddPair(connection, pair);
             if (hasSelf)
-                Write(connection, pair, Side.Dropbox, new Listed("a%_é", FileEntry("a%_é", 1, "self", "", "")));
+                Write(connection, pair, Side.Dropbox, begunEmpty: false, new Listed("a%_é", FileEntry("a%_é", 1, "self", "", "")));
             // A listing stream may already contain children when its parent tombstone arrives.
-            Write(connection, pair, Side.Dropbox,
+            Write(connection, pair, Side.Dropbox, begunEmpty: false,
                 new Listed("a%_é/雪", FileEntry("a%_é/雪", 1, "child", "", "")),
                 new Listed("a%_é0", FileEntry("a%_é0", 1, "adjacent", "", "")));
-            Write(connection, pair, Side.Dropbox, new Listed("a%_é", null));
+            Write(connection, pair, Side.Dropbox, begunEmpty: false, new Listed("a%_é", null));
             Check.Require(Rows(connection, pair).Select(row => row.Path).SequenceEqual(["a%_é0"]),
                 "tombstones remove descendants even without a folder self, preserving the upper range boundary");
         }
@@ -158,18 +160,18 @@ public static class ScanWriterChecks
     {
         const string pair = "scan-upsert";
         AddPair(connection, pair);
-        Write(connection, pair, Side.Local, new Listed("A.txt", FileEntry("A.txt", 1, "id-old", "", "")));
-        Write(connection, pair, Side.Local, new Listed("a.txt", FileEntry("a.txt", 2, "id-new", "", "")));
+        Write(connection, pair, Side.Local, begunEmpty: false, new Listed("A.txt", FileEntry("A.txt", 1, "id-old", "", "")));
+        Write(connection, pair, Side.Local, begunEmpty: false, new Listed("a.txt", FileEntry("a.txt", 2, "id-new", "", "")));
 
         var rows = Rows(connection, pair);
         Check.Require(rows.Count == 1 && rows[0].Path == "a.txt" && rows[0].Size == 2 && rows[0].Id == "id-new",
             "entries that share an own_key upsert one row");
 
         var changes = Number(connection, "SELECT total_changes();");
-        Write(connection, pair, Side.Local, new Listed("a.txt", FileEntry("a.txt", 2, "id-new", "", "")));
+        Write(connection, pair, Side.Local, begunEmpty: false, new Listed("a.txt", FileEntry("a.txt", 2, "id-new", "", "")));
         Check.Require(Number(connection, "SELECT total_changes();") == changes,
             "an identical scan event changes no row");
-        Write(connection, pair, Side.Local, new Listed("A.txt", FileEntry("A.txt", 2, "id-new", "", "")));
+        Write(connection, pair, Side.Local, begunEmpty: false, new Listed("A.txt", FileEntry("A.txt", 2, "id-new", "", "")));
         Check.Require(Number(connection, "SELECT total_changes();") == changes + 1 &&
             Rows(connection, pair).Single().Path == "A.txt",
             "a case-only spelling change still updates the row");
@@ -186,6 +188,7 @@ public static class ScanWriterChecks
         {
             var before = Number(connection, "SELECT total_changes();");
             Execute(connection, StateSchema.ScanUpsert,
+            (StateSchema.ParamScan, Guid.Empty.ToByteArray()),
                 (StateSchema.ParamPair, pair), (StateSchema.ParamSide, (int)Side.Local),
                 (StateSchema.ParamJoinKey, key), (StateSchema.ParamOwnKey, key),
                 (StateSchema.ParamPath, path), (StateSchema.ParamIsFolder, folder),
@@ -226,6 +229,7 @@ public static class ScanWriterChecks
         {
             var before = Number(connection, "SELECT total_changes();");
             Execute(connection, StateSchema.ScanUpsert,
+            (StateSchema.ParamScan, Guid.Empty.ToByteArray()),
                 (StateSchema.ParamPair, pair), (StateSchema.ParamSide, (int)Side.Dropbox),
                 (StateSchema.ParamJoinKey, joinKey), (StateSchema.ParamOwnKey, ownKey),
                 (StateSchema.ParamPath, "delta.txt"), (StateSchema.ParamIsFolder, false),
@@ -249,7 +253,7 @@ public static class ScanWriterChecks
     {
         const string pair = "scan-abort";
         AddPair(connection, pair);
-        Write(connection, pair, Side.Local, new Listed("kept.txt", FileEntry("kept.txt", 1, "id-k", "", "")));
+        Write(connection, pair, Side.Local, begunEmpty: false, new Listed("kept.txt", FileEntry("kept.txt", 1, "id-k", "", "")));
 
         var writer = new ScanWriter(connection, WriteLock, pair, Side.Local, static () => { }, ScanTestSettings.BatchRows);
         Task aborting;
@@ -632,6 +636,147 @@ public static class ScanWriterChecks
             "a duplicate marker is kept once, and a later failing chunk rolls back its own marker");
     }
 
+    // #129: a scan that began empty is not provably childless once its own events have inserted descendants.
+    private static void FreshDescendantCases(SqliteConnection connection)
+    {
+        var replacement = FileEntry("a", 7, "id-a-new", "rev-new", "hash-new");
+
+        // A child listed before its parent file, with no parent folder event of any kind.
+        const string childFirst = "fresh-child-first";
+        AddPair(connection, childFirst);
+        Write(connection, childFirst, Side.Local, begunEmpty: true,
+            new Listed("a/b", FileEntry("a/b", 1, "id-ab", "", "")), new Listed("a", replacement));
+        Check.Require(Rows(connection, childFirst).Select(row => row.Path).SequenceEqual(["a"]),
+            "a fresh scan's later file removes a child listed before it");
+
+        // A folder and a deeper descendant, then the file.
+        const string folderFirst = "fresh-folder-first";
+        AddPair(connection, folderFirst);
+        Write(connection, folderFirst, Side.Local, begunEmpty: true,
+            new Listed("a", FolderEntry("a", "id-a")),
+            new Listed("a/b", FileEntry("a/b", 1, "id-ab", "", "")),
+            new Listed("a/b/c", FileEntry("a/b/c", 2, "id-abc", "", "")),
+            new Listed("a", replacement));
+        Check.Require(Rows(connection, folderFirst).Select(row => row.Path).SequenceEqual(["a"]),
+            "a fresh scan's later file removes a folder's remaining descendants");
+
+        // The same sequence across real batches of one writer: batchRows 1 commits one event per transaction.
+        const string acrossBatches = "fresh-across-batches";
+        AddPair(connection, acrossBatches);
+        var writer = new ScanWriter(connection, WriteLock, acrossBatches, Side.Local, static () => { },
+            batchRows: 1, begunEmpty: true);
+        writer.AddAsync(new Listed("a/b", FileEntry("a/b", 1, "id-ab", "", "")), default).GetAwaiter().GetResult();
+        writer.AddAsync(new Listed("a", replacement), default).GetAwaiter().GetResult();
+        writer.CompleteAsync().GetAwaiter().GetResult();
+        Check.Require(Rows(connection, acrossBatches).Select(row => row.Path).SequenceEqual(["a"]),
+            "the probe sees a descendant committed by an earlier batch of the same fresh writer");
+
+        // An identical re-upsert of the file changes no row but must still remove the child; a RETURNING-only
+        // probe would miss it.
+        const string identicalAgain = "fresh-identical-again";
+        AddPair(connection, identicalAgain);
+        var same = FileEntry("a", 7, "id-a-new", "rev-new", "hash-new");
+        Write(connection, identicalAgain, Side.Local, begunEmpty: true,
+            new Listed("a", same), new Listed("a/b", FileEntry("a/b", 1, "id-ab", "", "")), new Listed("a", same));
+        Check.Require(Rows(connection, identicalAgain).Select(row => row.Path).SequenceEqual(["a"]),
+            "an identical file event still removes a descendant added after it");
+
+        // Deep removal leaves prefix neighbours on the same side and other sides and pairs untouched.
+        const string ranges = "fresh-ranges";
+        AddPair(connection, ranges);
+        AddPair(connection, "fresh-ranges-other");
+        Write(connection, ranges, Side.Dropbox, begunEmpty: false, new Listed("a/b", FileEntry("a/b", 1, "id-dbox-child", "", "")));
+        Write(connection, "fresh-ranges-other", Side.Local, begunEmpty: false,
+            new Listed("a/b", FileEntry("a/b", 2, "id-other-child", "", "")));
+        Write(connection, ranges, Side.Local, begunEmpty: false, new Listed("keep", FileEntry("keep", 1, "id-keep", "", "")));
+        Write(connection, ranges, Side.Local, begunEmpty: true,
+            new Listed("a", FolderEntry("a", "id-a")),
+            new Listed("a/b", FileEntry("a/b", 1, "id-ab", "", "")),
+            new Listed("a/b/c", FileEntry("a/b/c", 2, "id-abc", "", "")),
+            new Listed("ab", FileEntry("ab", 3, "id-ab-neighbour", "", "")),
+            new Listed("a0", FileEntry("a0", 4, "id-a0", "", "")),
+            new Listed("a", replacement));
+        Check.Require(Rows(connection, ranges).Where(row => row.Side == (int)Side.Local).Select(row => row.Path)
+                .OrderBy(path => path, StringComparer.Ordinal).SequenceEqual(["a", "a0", "ab", "keep"]),
+            "a fresh file removes every descendant but no prefix neighbour");
+        Check.Require(Rows(connection, ranges).Where(row => row.Side == (int)Side.Dropbox)
+                .Select(row => (row.Path, row.Id)).SequenceEqual([("a/b", "id-dbox-child")]),
+            "the opposite side's descendant is untouched");
+        Check.Require(Rows(connection, "fresh-ranges-other")
+                .Select(row => (row.Path, row.Id)).SequenceEqual([("a/b", "id-other-child")]),
+            "another pair's descendant is untouched");
+
+        // Case variants, pattern characters and supplementary characters use the native-key range, never LIKE.
+        const string natives = "fresh-natives";
+        AddPair(connection, natives);
+        Write(connection, natives, Side.Local, begunEmpty: true,
+            new Listed("A%_é", FolderEntry("A%_é", "id-native")),
+            new Listed("A%_é/𝄞", FileEntry("A%_é/𝄞", 1, "id-music", "", "")),
+            new Listed("A%_é/雪", FileEntry("A%_é/雪", 2, "id-snow", "", "")),
+            new Listed("A%_é0", FileEntry("A%_é0", 3, "id-adjacent", "", "")),
+            new Listed("a%_é", FileEntry("a%_é", 4, "id-replacement", "", "")));
+        Check.Require(Rows(connection, natives).Select(row => row.Path)
+                .OrderBy(path => path, StringComparer.Ordinal).SequenceEqual(["A%_é0", "a%_é"]),
+            "a case-variant file removes native-key descendants and keeps the upper boundary neighbour");
+
+        // A fresh leaf writes only its own row, and an identical repeat changes none. The traced fixture below
+        // proves the leaf's statement count.
+        const string freshLeaf = "fresh-leaf";
+        AddPair(connection, freshLeaf);
+        var before = Number(connection, "SELECT total_changes();");
+        Write(connection, freshLeaf, Side.Local, begunEmpty: true, new Listed("leaf", FileEntry("leaf", 1, "id-leaf", "", "")));
+        Check.Require(Number(connection, "SELECT total_changes();") == before + 1 &&
+            Rows(connection, freshLeaf).Select(row => row.Path).SequenceEqual(["leaf"]),
+            "a fresh leaf insert changes only its own row");
+        Write(connection, freshLeaf, Side.Local, begunEmpty: true, new Listed("leaf", FileEntry("leaf", 1, "id-leaf", "", "")));
+        Check.Require(Number(connection, "SELECT total_changes();") == before + 1,
+            "an identical fresh leaf event changes no row");
+    }
+
+    // #129 statement counts, traced the same way StoredFolderPlanChecks counts frozen reads. Row counts cannot
+    // distinguish an executed empty DELETE from a skipped one; the trace reports the statement itself.
+    private static void FreshStatementCases(SqliteConnection connection)
+    {
+        var traced = new List<string>();
+        // Trace expands bound parameters, so identify each statement before its first parameter.
+        int Probes() => traced.Count(sql =>
+            sql.StartsWith(StateSchema.ScanHasDescendants.Split(StateSchema.ParamPair)[0], StringComparison.Ordinal));
+        int DescendantDeletes() => traced.Count(sql =>
+            sql.StartsWith(StateSchema.ScanDeleteDescendants.Split(StateSchema.ParamPair)[0], StringComparison.Ordinal));
+        SQLitePCL.raw.sqlite3_trace(connection.Handle,
+            (SQLitePCL.delegate_trace)((_, sql) => traced.Add(sql.utf8_to_string())), null);
+        try
+        {
+            const string leaf = "traced-fresh-leaf";
+            AddPair(connection, leaf);
+            traced.Clear();
+            Write(connection, leaf, Side.Local, begunEmpty: true, new Listed("leaf", FileEntry("leaf", 1, "id-leaf", "", "")));
+            Check.Require(Probes() == 1 && DescendantDeletes() == 0,
+                "a fresh leaf runs one existence probe and no descendant delete");
+
+            const string replaced = "traced-fresh-replacement";
+            AddPair(connection, replaced);
+            traced.Clear();
+            Write(connection, replaced, Side.Local, begunEmpty: true,
+                new Listed("a/b", FileEntry("a/b", 1, "id-ab", "", "")),
+                new Listed("a", FileEntry("a", 2, "id-a", "", "")));
+            Check.Require(Probes() == 2 && DescendantDeletes() == 1,
+                "each fresh file probes once and only the replacement deletes a descendant");
+
+            const string seeded = "traced-nonempty";
+            AddPair(connection, seeded);
+            Write(connection, seeded, Side.Local, begunEmpty: false, new Listed("a/b", FileEntry("a/b", 1, "id-ab", "", "")));
+            traced.Clear();
+            Write(connection, seeded, Side.Local, begunEmpty: false, new Listed("a", FileEntry("a", 2, "id-a", "", "")));
+            Check.Require(Probes() == 0 && DescendantDeletes() == 1,
+                "a non-empty scan file keeps the unconditional delete and adds no probe");
+        }
+        finally
+        {
+            SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null);
+        }
+    }
+
     private static void OrderedEventCases(SqliteConnection connection)
     {
         var folder = FolderEntry("d", "folder");
@@ -648,41 +793,41 @@ public static class ScanWriterChecks
         var invalidChild = FileEntry("f:x/child", 5, "invalid-child", "rev-invalid", "hash-invalid");
         var underscoreFolder = FolderEntry("f_x", "underscore-folder");
         var underscoreChild = FileEntry("f_x/child", 6, "underscore-child", "", "");
-        (string Name, Listed[] Events, Entry[] Expected, Entry[]? FreshExpected)[] cases =
+        (string Name, Listed[] Events, Entry[] Expected)[] cases =
         [
             ("parent-tombstone", [new(folder.Path, folder), new(child.Path, child),
-                new(neighbor.Path, neighbor), new(folder.Path, null)], [neighbor], null),
+                new(neighbor.Path, neighbor), new(folder.Path, null)], [neighbor]),
             ("absent-parent-tombstone", [new(child.Path, child), new(neighbor.Path, neighbor),
-                new(folder.Path, null)], [neighbor], null),
+                new(folder.Path, null)], [neighbor]),
             ("tombstone-then-child", [new(child.Path, child), new(folder.Path, null),
-                new(child.Path, child)], [child], null),
+                new(child.Path, child)], [child]),
             ("child-before-file-parent", [new(child.Path, child), new(replacement.Path, replacement)],
-                [replacement], [replacement, child]),
+                [replacement]),
             ("file-replaces-folder", [new(folder.Path, folder), new(child.Path, child),
-                new(replacement.Path, replacement)], [replacement], [replacement, child]),
+                new(replacement.Path, replacement)], [replacement]),
             ("folder-replaces-file", [new(replacement.Path, replacement), new(folder.Path, folder),
-                new(child.Path, child)], [folder, child], null),
+                new(child.Path, child)], [folder, child]),
             ("equal-key-history", [new(earlier.Path, earlier), new(later.Path, later),
-                new(later.Path, later)], [later], null),
+                new(later.Path, later)], [later]),
             ("unreadable-before-child", [new(folder.Path, folder), new(folder.Path, unreadable),
-                new(child.Path, child)], [unreadable, child], null),
+                new(child.Path, child)], [unreadable, child]),
             ("unreadable-after-child", [new(folder.Path, folder), new(child.Path, child),
-                new(folder.Path, unreadable), new(folder.Path, unreadable)], [unreadable, child], null),
+                new(folder.Path, unreadable), new(folder.Path, unreadable)], [unreadable, child]),
             ("readable-again", [new(folder.Path, unreadable), new(child.Path, child),
-                new(folder.Path, folder)], [folder, child], null),
+                new(folder.Path, folder)], [folder, child]),
             ("invalid-beside-underscore", [new(invalidFolder.Path, invalidFolder), new(underscoreFolder.Path, underscoreFolder),
                 new(invalidChild.Path, invalidChild), new(underscoreChild.Path, underscoreChild)],
-                [invalidFolder, underscoreFolder, invalidChild, underscoreChild], null),
+                [invalidFolder, underscoreFolder, invalidChild, underscoreChild]),
             ("invalid-tombstone-beside-underscore", [new(invalidFolder.Path, invalidFolder), new(underscoreFolder.Path, underscoreFolder),
                 new(invalidChild.Path, invalidChild), new(underscoreChild.Path, underscoreChild),
-                new(invalidFolder.Path, null)], [underscoreFolder, underscoreChild], null)
+                new(invalidFolder.Path, null)], [underscoreFolder, underscoreChild])
         ];
 
         foreach (var side in new[] { Side.Local, Side.Dropbox })
         foreach (var begunEmpty in new[] { false, true })
         foreach (var test in cases)
         {
-            var expected = (begunEmpty ? test.FreshExpected ?? test.Expected : test.Expected)
+            var expected = test.Expected
                 .Select(entry => new StoredRow((int)side, PathNames.Key(entry.Path),
                     PathNames.KeyFor(side, entry.Path), entry.Path, entry.IsFolder, entry.Size,
                     entry.Modified.UtcTicks, entry.Id, entry.Revision, entry.ContentHash, entry.Skip))
@@ -746,7 +891,7 @@ public static class ScanWriterChecks
         // An ordinary writer never receives the numeric discovery row, so it must not touch the relation's table.
         const string plain = "deleted-plain";
         AddPair(connection, plain);
-        Write(connection, plain, Side.Dropbox,
+        Write(connection, plain, Side.Dropbox, begunEmpty: false,
             new Listed("gone", null),
             new Listed("kept", FileEntry("kept", 1, "id-k", "", "")));
         Check.Require(Rows(connection, plain).Select(row => row.Path).SequenceEqual(["kept"]),
@@ -757,7 +902,7 @@ public static class ScanWriterChecks
 
         const string nonDiscovery = "deleted-non-discovery";
         AddPair(connection, nonDiscovery);
-        Write(connection, nonDiscovery, Side.Dropbox,
+        Write(connection, nonDiscovery, Side.Dropbox, begunEmpty: false,
             new Listed("live", FileEntry("live", 1, "id-l", "", "")),
             new Listed("live", null));
         Check.Require(!Rows(connection, nonDiscovery).Any() && Markers(connection, nonDiscovery).Count == 0,
@@ -855,7 +1000,7 @@ public static class ScanWriterChecks
         const string pair = "tombstone-run-order";
         AddPair(connection, pair);
         string[] paths = ["z", "\U00010000", "", "a"];
-        Write(connection, pair, Side.Dropbox,
+        Write(connection, pair, Side.Dropbox, begunEmpty: false,
             paths.Select(path => new Listed(path, FileEntry(path, 1, path, "", ""))).ToArray());
         Execute(connection, "CREATE TABLE scan_state.delete_order(path TEXT);");
         Execute(connection, "CREATE TRIGGER scan_state.trace_delete BEFORE DELETE ON scan BEGIN INSERT INTO delete_order VALUES(OLD.path); END;");
@@ -889,7 +1034,7 @@ public static class ScanWriterChecks
         {
             Execute(connection, "DELETE FROM scan_state.scan WHERE pair_id=$pair; DELETE FROM scan_state.deleted_name WHERE pair_id=$pair;", ("$pair", pairRow));
             var child = FileEntry("p/child", 5, "child", "revision", "");
-            Write(connection, pair, Side.Dropbox, new("p", FolderEntry("p", "parent")),
+            Write(connection, pair, Side.Dropbox, begunEmpty: false, new("p", FolderEntry("p", "parent")),
                 new(child.Path, child), new("p/other", FileEntry("p/other", 3, "other", "", "")),
                 new("prefix", FileEntry("prefix", 2, "neighbor", "", "")));
             Listed[] deletes = reverse ? [new(child.Path, null), new("p", null)] :
@@ -1032,7 +1177,8 @@ public static class ScanWriterChecks
         var connection = new SqliteConnection($"Data Source={path}");
         StateStore.OpenConnection(connection);
         Execute(connection, StateSchema.Pragmas);
-        Execute(connection, StateSchema.Create);
+        Execute(connection, StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema +
+            StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory);
         Execute(connection, StateSchema.AttachScan, (StateSchema.ParamPath, StateSchema.EmptyScan));
         Execute(connection, StateSchema.ScanPragmas);
         Execute(connection, StateSchema.CreateScan);
@@ -1043,9 +1189,11 @@ public static class ScanWriterChecks
         Execute(connection, StateSchema.UpsertPair,
             (StateSchema.ParamPair, pairId), (StateSchema.ParamDef, "{}"));
 
-    private static void Write(SqliteConnection connection, string pairId, Side side, params Listed[] items)
+    private static void Write(SqliteConnection connection, string pairId, Side side, bool begunEmpty,
+        params Listed[] items)
     {
-        var writer = new ScanWriter(connection, WriteLock, pairId, side, static () => { }, ScanTestSettings.BatchRows);
+        var writer = new ScanWriter(connection, WriteLock, pairId, side, static () => { },
+            ScanTestSettings.BatchRows, begunEmpty: begunEmpty);
         foreach (var item in items) writer.AddAsync(item, default).GetAwaiter().GetResult();
         writer.CompleteAsync().GetAwaiter().GetResult();
     }

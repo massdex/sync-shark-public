@@ -16,20 +16,25 @@ public sealed class ScanWriter : IScanSink
     private readonly bool _begunEmpty;
     private readonly bool _liveOverrides;
     private readonly long? _deletedNamePairRow;
+    private readonly long? _deletedDeltaPairRow;
     private readonly Action? _attach;
     private readonly Action _abortScan;
     private readonly Channel<Listed> _queued;
+    private readonly byte[] _scanId;
+    private readonly Action? _release;
     private readonly Task _loop;
     private volatile bool _aborted;
 
     /// <summary>Starts one side's queued listing writer; only a fresh Local listing can skip descendant deletion.
     /// <paramref name="batchRows"/> bounds both the in-flight queue and one save transaction.</summary>
     public ScanWriter(SqliteConnection connection, object writeLock, string pairId, Side side, Action abortScan,
-        int batchRows, bool begunEmpty = false, Action? attach = null, long? deletedNamePairRow = null, bool liveOverrides = false)
+        int batchRows, bool begunEmpty = false, Action? attach = null, long? deletedNamePairRow = null, bool liveOverrides = false, long? deletedDeltaPairRow = null, byte[]? scanId = null, Action? release = null)
     {
         ArgumentNullException.ThrowIfNull(abortScan);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(batchRows);
         _abortScan = abortScan;
+        _scanId = scanId ?? Guid.Empty.ToByteArray();
+        _release = release;
         _connection = connection;
         _writeLock = writeLock;
         _pairId = pairId;
@@ -38,6 +43,7 @@ public sealed class ScanWriter : IScanSink
         _liveOverrides = liveOverrides;
         _attach = attach;
         _deletedNamePairRow = deletedNamePairRow;
+        _deletedDeltaPairRow = deletedDeltaPairRow;
         _queued = Channel.CreateBounded<Listed>(new BoundedChannelOptions(batchRows)
         {
             SingleReader = true,
@@ -68,7 +74,7 @@ public sealed class ScanWriter : IScanSink
     }
 
     /// <summary>Discards the uncommitted remainder and joins the writer; a batch already committed is kept, and the
-    /// aborted repair's scan file is discarded by ResetScan rather than rolled back here.</summary>
+    /// aborted operation's partition is discarded by EndScanAsync rather than rolled back here.</summary>
     public Task AbortAsync()
     {
         _aborted = true;
@@ -92,7 +98,7 @@ public sealed class ScanWriter : IScanSink
                     if (_aborted) return;
                     _attach?.Invoke();
                     using var transaction = _connection.BeginTransaction();
-                    using var entries = new ScanEntries(_connection, _pairId, _side, _begunEmpty, _deletedNamePairRow, _liveOverrides);
+                    using var entries = new ScanEntries(_connection, _pairId, _side, _begunEmpty, _deletedNamePairRow, _liveOverrides, _deletedDeltaPairRow, _scanId);
                     entries.ApplyBatch(transaction, batch);
                     entries.SaveDeletedNames(transaction);
                     transaction.Commit();
@@ -109,6 +115,7 @@ public sealed class ScanWriter : IScanSink
         {
             // Close the producer side so a blocked producer wakes even when a consumer ends abruptly.
             _queued.Writer.TryComplete();
+            lock (_writeLock) _release?.Invoke();
         }
     }
 }

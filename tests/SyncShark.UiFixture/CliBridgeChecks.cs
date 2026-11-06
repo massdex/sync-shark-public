@@ -776,7 +776,7 @@ internal static class CliBridgeChecks
             Require(restarted.HasExited, "the restarted owner stopped cleanly at the parent's request");
         }
 
-        // Root sshark:391-r1/r3: an unproven queue must terminate the route as FAILURE with a nonzero exit.
+        // An unproven queue must terminate the route as FAILURE with a nonzero exit.
         Require(queuedSeeded, "a real queued operation was retained for the required persistence proof: " +
             queuedSeedDetail);
         Console.WriteLine(Json("PASS", checks));

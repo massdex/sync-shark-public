@@ -426,7 +426,7 @@ public sealed class PilotLocalScanner
                         decisions.Add(LocalScanEntries.AmbiguousRefreshPath(relative));
                         continue;
                     }
-                    // Astra fix 3: a known link tag wins over online-only bits (a file symlink can carry OFFLINE/RECALL).
+                    // fix 3: a known link tag wins over online-only bits (a file symlink can carry OFFLINE/RECALL).
                     var kind = listed is null ? ForeignObjectKind.None
                         : PilotPath.ClassifyForeign(listed.Attributes, listed.ReparseTag);
                     if (listed is not null && kind == ForeignObjectKind.Link)

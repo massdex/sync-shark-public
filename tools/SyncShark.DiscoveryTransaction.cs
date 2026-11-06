@@ -439,7 +439,7 @@ public sealed class SyncSharkProtectedRuntimeTransaction
         "SQLitePCLRaw.batteries_v2.dll", "SQLitePCLRaw.core.dll", "SQLitePCLRaw.provider.e_sqlite3.dll",
         "SyncShark.Core.dll", "SyncShark.Engine.dll", "SyncShark.Explorer.dll", "SyncShark.deps.json", "SyncShark.dll",
         "SyncShark.exe", "SyncShark.msix", "SyncShark.runtimeconfig.json", "SyncSharkDiscovery.exe",
-        "WinRT.Runtime.dll", "e_sqlite3.dll"
+        "WinRT.Runtime.dll", "e_sqlite3.dll", "tools/SyncShark.Uninstall.ps1"
     };
     private readonly string root, target, stage, retired;
     private readonly string[] hashes;
@@ -487,10 +487,10 @@ public sealed class SyncSharkProtectedRuntimeTransaction
         Hold(directory,true);
         foreach(string entry in Directory.EnumerateFileSystemEntries(directory)) {
             string name=Path.GetFileName(entry);
-            if(name=="Assets") {
+            if(name=="Assets" || name=="tools") {
                 Hold(entry,true);
                 foreach(string asset in Directory.EnumerateFileSystemEntries(entry)) {
-                    if(Path.GetFileName(asset)!="SyncShark-64.png")throw new IOException("Unexpected protected runtime asset.");
+                    if(!Members.Contains(name+"/"+Path.GetFileName(asset)))throw new IOException("Unexpected protected runtime asset.");
                     Hold(asset,false);
                 }
             } else {
@@ -520,6 +520,8 @@ public sealed class SyncSharkProtectedRuntimeTransaction
         string assets=Path.Combine(stage,"Assets");if(!Directory.Exists(assets))CreateDirectory(assets);
         for(int i=0;i<Members.Length;i++) {
             string destination=Member(stage,i);
+            string parent=Path.GetDirectoryName(destination);
+            if(!Directory.Exists(parent))CreateDirectory(parent);
             if(File.Exists(destination)) {
                 if(Matches(destination,i))continue;
                 // Only this unpublished, protected, fixed contract member can be

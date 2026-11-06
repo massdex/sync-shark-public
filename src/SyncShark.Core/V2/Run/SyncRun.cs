@@ -677,7 +677,7 @@ public sealed partial class SyncRun : ISyncRun
         approved = GuardReviewedRecoveryRestores(pair, approved);
         var actionPredicates = ActionPredicates(pair, applyLinks, reviewedSelection);
         approved = ApplySafetyFilter(pair, actionPredicates, approved);
-        // Astra fix 1: a link or stub created on the local side after the preview is not in the store yet. Every
+        // fix 1: a link or stub created on the local side after the preview is not in the store yet. Every
         // destructive effect is re-checked against the local filesystem (its path and ancestors, listing only) and
         // dropped when it reaches one; the standing notice says so.
         var reviewed = approved.Actions.Count;
@@ -897,7 +897,7 @@ public sealed partial class SyncRun : ISyncRun
         IReadOnlyList<string> recoveryTouched = batch is null && rootsComplete && _endpoints is not PlanOnlyEndpoints
             ? await RefreshRecoveryRestoresAsync(pair, scan, ct) : [];
         if (batch is null) CloseObservedRepairs(pair, scan);
-        // Finding 1 (Astra): a link or stub that disappears in this run still protects its path for the whole run.
+        // Finding 1: a link or stub that disappears in this run still protects its path for the whole run.
         // The restore refresh above may have frozen a new intent; take the run's hold snapshot after it.
         ResetRecoveryProtection();
         var retryCount = _store.CountSyncRetries(pairId);
@@ -1190,7 +1190,7 @@ public sealed partial class SyncRun : ISyncRun
         return _store.UnresolvedNotices(pairId).SelectMany(HeldPaths).ToArray();
     }
 
-    // Decision 64: a decided notice closes with the chosen side only on evidence (Astra): the winner's effect
+    // Decision 64: a decided notice closes with the chosen side only on evidence: the winner's effect
     // completed Done, or after the run both sides hold equal content at the path. Anything else — the chosen side
     // gone, the path protected (excluded, a link or unreadable), or the effect failed — keeps the notice open so
     // the user can decide again; ResolveDecisionAsync reports it as "decision could not be applied".
@@ -1203,7 +1203,7 @@ public sealed partial class SyncRun : ISyncRun
         {
             if (notice.Kind != NoticeKind.UserDecision || notice.NoticeId is null ||
                 !decisions.TryGetValue(notice.Path, out var winner)) continue;
-            // Astra (9b2b161): close only the exact notice the user decided, never a case-variant notice at the same
+            // 9b2b161: close only the exact notice the user decided, never a case-variant notice at the same
             // path, and never while any effect on the decision's subtree — its path or a from-path under it — is
             // unfinished, so one successful descendant cannot close a partially applied folder decision. Then close
             // only on positive evidence: the winner's effect completed, or both sides equal.
@@ -1310,7 +1310,7 @@ public sealed partial class SyncRun : ISyncRun
         guard.RebuildableFolders is { } folders && folders.Contains(action.Path) &&
         guard.RebuildableDelete is not null;
 
-    // Astra (dfab3c5) fixes: each destructive effect is re-checked on the local side right before the apply.
+    // dfab3c5 fixes: each destructive effect is re-checked on the local side right before the apply.
     // * Its path or an ancestor is now a link or a left-alone stub: dropped.
     // * Its path could not be inspected (access denied, I/O): dropped (a failed check is never "nothing there").
     // * A delete on the other side of a path the local side did not hold at preview (one-sided removal) whose local

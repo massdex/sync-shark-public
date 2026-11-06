@@ -271,6 +271,54 @@ public sealed partial class PilotDirectoryLease : IDisposable
     internal static PilotDirectoryLease OpenProductDirectoryReadGuard(string path)
         => OpenCore(path, expected: null, allowProductState: true, directoryReadAccess: true);
 
+    internal static PilotDirectoryLease OpenMigrationDirectory(string path, bool delete = false, bool denyWrite = false)
+    {
+        var volume = System.IO.Path.GetPathRoot(path)!;
+        var isRoot = string.Equals(System.IO.Path.GetFullPath(path), volume, StringComparison.OrdinalIgnoreCase);
+        if (delete && isRoot) throw new IOException(SyncDataLocation.MoveText("data-move-unsafe-object"));
+        var lease = OpenCore(path, null, allowProductState: true, deleteAccess: delete,
+            allowVolumeRoot: isRoot, directoryReadAccess: !delete, denyWrite: denyWrite);
+        try { lease.VerifyMigrationBinding(); return lease; }
+        catch { lease.Dispose(); throw; }
+    }
+
+    internal void VerifyMigrationBinding()
+    {
+        VerifyBinding();
+        if (!GetFileInformationByHandle(_handle, out var information) ||
+            (information.FileAttributes & (FileAttributes.ReparsePoint | FileAttributes.Offline)) != 0)
+            throw new IOException(SyncDataLocation.MoveText("data-move-unsafe-object"));
+    }
+
+    internal sealed class MigrationChain : IDisposable
+    {
+        private readonly List<PilotDirectoryLease> _leases = [];
+
+        internal MigrationChain(string path, bool denyWrite = false)
+        {
+            try
+            {
+                var parents = new Stack<string>();
+                for (var directory = new DirectoryInfo(path); directory is not null; directory = directory.Parent)
+                    parents.Push(directory.FullName);
+                while (parents.TryPop(out var parent)) _leases.Add(OpenMigrationDirectory(parent, denyWrite: denyWrite));
+                Verify();
+            }
+            catch { Dispose(); throw; }
+        }
+
+        internal void Verify()
+        {
+            foreach (var lease in _leases) lease.VerifyMigrationBinding();
+        }
+
+        public void Dispose()
+        {
+            for (var index = _leases.Count - 1; index >= 0; index--) _leases[index].Dispose();
+            _leases.Clear();
+        }
+    }
+
     public static PilotDirectoryLease OpenInstalledRuntime(string directory)
     {
         var full = System.IO.Path.GetFullPath(directory).TrimEnd(System.IO.Path.DirectorySeparatorChar);
@@ -321,7 +369,7 @@ public sealed partial class PilotDirectoryLease : IDisposable
         => OpenCore(path, expected, allowProductState: false, directoryReadAccess: true);
 
     private static PilotDirectoryLease OpenCore(string path, PilotDirectoryIdentity? expected, bool allowProductState,
-        bool deleteAccess = false, bool allowVolumeRoot = false, bool directoryReadAccess = false)
+        bool deleteAccess = false, bool allowVolumeRoot = false, bool directoryReadAccess = false, bool denyWrite = false)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Sync Shark requires Windows NTFS directory identities.");
         var normalized = allowVolumeRoot
@@ -349,7 +397,7 @@ public sealed partial class PilotDirectoryLease : IDisposable
         // compared path, the final-path check and every access/share/reparse/NTFS/DACL/identity check below
         // continue to use the exact normalized path unchanged.
         var handle = CreateFile(normalized, desiredAccess,
-            FileShare.Read | FileShare.Write, IntPtr.Zero,
+            denyWrite ? FileShare.Read : FileShare.Read | FileShare.Write, IntPtr.Zero,
             OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
         if (handle.IsInvalid)
         {
@@ -1013,7 +1061,7 @@ public sealed class PilotInstanceLock : IDisposable
         {
             if (!SyncSharkRuntimePaths.HasTestProductRoot)
             {
-                SyncDataLocation.CheckMoveMarker(authority.ProductRoot);
+                SyncDataLocation.CheckMoveMarker(authority);
             }
             return new(authority);
         }

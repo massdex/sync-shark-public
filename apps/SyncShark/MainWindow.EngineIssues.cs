@@ -10,6 +10,8 @@ public partial class MainWindow
 {
     // The row association: the exact issue id owns the one row that shows it, never a match on rendered text.
     private readonly Dictionary<long, DecisionRow> _engineIssueRows = [];
+    private readonly Dictionary<long, Issue> _engineIssues = [];
+    private bool _engineIgnored;
 
     /// <summary>Reprojects the selected pair's notices from the authoritative issue list. An existing row keeps its
     /// exact issue id and takes the shared renderer's cause and guidance; an id now naming a different issue record
@@ -33,10 +35,12 @@ public partial class MainWindow
             foreach (var row in _engineIssueRows.Values) ConflictRows.Remove(row);
             _engineIssueRows.Clear();
         }
+        _engineIssues.Clear();
         var positions = RowPositions();
         var current = new HashSet<long>();
         foreach (var issue in issues)
         {
+            _engineIssues[issue.Id] = issue;
             current.Add(issue.Id);
             var view = IssuePresentation.View(retryViews, issue);
             DecisionRow? candidate = _engineIssueRows.TryGetValue(issue.Id, out var existing)

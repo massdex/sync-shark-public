@@ -12,6 +12,7 @@ public static class IssueTableChecks
     public static void Run()
     {
         using var connection = Open();
+        VisibilityCases();
         RaiseCases(connection);
         CloseCases(connection);
         ReadCases(connection);
@@ -29,6 +30,59 @@ public static class IssueTableChecks
         KeepFolderAlwaysCases();
         NoticeFailureAndConfigurationCases();
         PageSnapshotAndSearchCases();
+        ScopedIssueCases();
+    }
+
+    private static void ScopedIssueCases()
+    {
+        WithRealStore(store => CheckStore(store));
+        using var memory = new TestDoubles.InMemoryStateStore();
+        memory.SavePair(new PairConfig(ContractPair, ContractPair, ContractRoot, ContractRemote,
+            ContractConnection, [], [], FirstRunPolicy.NewestWins, true, null));
+        CheckStore(memory);
+
+        static void CheckStore(IStateStore store)
+        {
+            store.Commit(ContractPair, StateChange.Empty with
+            {
+                Raise =
+                [
+                    (IssueKind.Failure, TextKey.FailChanged, "Outside/Display",
+                        new IssueSubject([Local("Outside/First"), Dropbox("Parent/Remote"), Local("Parent/Local")], null)),
+                    (IssueKind.Tie, TextKey.TieEqualTimes, "Parent/EmptyTie", new IssueSubject([], null)),
+                    (IssueKind.NameClash, TextKey.ClashNameTaken, "Parent/EmptyClash", new IssueSubject([], null)),
+                    (IssueKind.Failure, TextKey.FailChanged, "Parent/EmptyFailure", new IssueSubject([], null)),
+                    (IssueKind.Failure, TextKey.FailChanged, "Parent", new IssueSubject([Local("Parent")], null)),
+                    (IssueKind.Failure, TextKey.FailChanged, "Parent2/Child", new IssueSubject([Local("Parent2/Child")], null)),
+                    (IssueKind.Info, TextKey.InfoDropboxHistoryUnchecked, "Parent/EmptyInfo", new IssueSubject([], null)),
+                    (IssueKind.Info, TextKey.InfoDropboxHistoryUnchecked, "Outside/Info", new IssueSubject([Dropbox("Parent/Info")], null))
+                ]
+            });
+            var original = store.Issues(ContractPair);
+            store.DismissIssue(ContractPair, original.Single(issue => issue.Path == "Outside/Display").Id);
+            var expectedPaths = new[] { "Outside/Display", "Parent/EmptyTie", "Parent/EmptyClash",
+                "Parent/EmptyFailure", "Parent", "Outside/Info" }.ToHashSet(StringComparer.Ordinal);
+            foreach (var kinds in new IReadOnlyList<IssueKind>?[] { null, [IssueKind.Failure], [], IssueClosure.AfterHeldInSync })
+            {
+                var all = store.Issues(ContractPair, kinds);
+                Check.Require(System.Text.Json.JsonSerializer.Serialize(store.OpenIssuesUnder(ContractPair, string.Empty, kinds)) ==
+                    System.Text.Json.JsonSerializer.Serialize(all),
+                    "Empty scope equals Issues, including dismissed and item-less rows.");
+                var scoped = store.OpenIssuesUnder(ContractPair, PathNames.Key("pArEnT"), kinds).ToArray();
+                Check.Require(scoped.Select(issue => issue.Id).SequenceEqual(
+                    all.Where(issue => expectedPaths.Contains(issue.Path)).Select(issue => issue.Id)) &&
+                    scoped.Select(issue => issue.Id).Distinct().Count() == scoped.Length,
+                    "Scope matches any side-specific subject, item-less operational path, and case, once in id order.");
+                Check.Require(!store.OpenIssuesUnder(ContractPair, PathNames.Key("Missing"), kinds).Any(),
+                    "An unrelated scope contains no issues.");
+            }
+            Check.Require(store.OpenIssuesUnder(ContractPair, PathNames.Key("Parent")).Any(issue => issue.Dismissed),
+                "Dismissal does not remove scoped membership.");
+            Check.Require(!store.OpenIssuesUnder("missing-pair", string.Empty).Any(), "Pair membership remains isolated.");
+            using (var read = store.OpenIssuesUnder(ContractPair, string.Empty).GetEnumerator())
+                Check.Require(read.MoveNext(), "A streamed issue reader can stop before consuming the whole pair.");
+            Check.Require(store.Issues(ContractPair).Count == original.Count, "Disposing a partial reader leaves issue state unchanged.");
+        }
     }
 
     // R2/R3: real SQLite, two connections. One open-read transaction keeps the page and count on one snapshot even
@@ -62,9 +116,9 @@ public static class IssueTableChecks
                     Raise(writer, "pair-c", IssueKind.Failure, TextKey.FailChanged, name);
             });
             var live = writer.Issues("pair-c");
-            Check.Require(live.Select(issue => issue.Id).SequenceEqual(seeded) &&
+            Check.Require(live.All(issue => issue.Id > seeded.Max()) &&
                 live.Select(issue => issue.Path).SequenceEqual(["x.txt", "y.txt", "z.txt"]),
-                "the replacing writes reuse the deleted issue ids");
+                "the replacing writes allocate ids above the deleted high-water mark");
             Check.Require(rows.Select(row => row.Issue.Id).SequenceEqual(before.Select(row => row.Issue.Id)) &&
                 rows.Select(row => row.Issue.Path).SequenceEqual(before.Select(row => row.Issue.Path)) &&
                 rows.Select(row => row.Issue.Id).Distinct().Count() == rows.Count && total == before.Count &&
@@ -107,15 +161,16 @@ public static class IssueTableChecks
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
 
-        static PairConfig Pair(string pairId, string connectionId) => new(pairId, pairId,
+    }
+
+        private static PairConfig Pair(string pairId, string connectionId) => new(pairId, pairId,
             "C:/" + pairId, "/" + pairId, connectionId, [], [], FirstRunPolicy.NewestWins, true, null);
 
-        static void Raise(StateStore store, string pairId, IssueKind kind, TextKey cause, string issuePath) =>
+        private static void Raise(StateStore store, string pairId, IssueKind kind, TextKey cause, string issuePath) =>
             store.Commit(pairId, StateChange.Empty with
             {
                 Raise = [(kind, cause, issuePath, new IssueSubject([], null))]
             });
-    }
 
     private static void RaiseCases(SqliteConnection connection)
     {
@@ -369,7 +424,7 @@ public static class IssueTableChecks
         using var transaction = connection.BeginTransaction();
         try
         {
-            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair), entries, Now);
+            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair), Guid.Empty.ToByteArray(), entries, Now);
         }
         catch (InvalidOperationException error)
         {
@@ -397,7 +452,7 @@ public static class IssueTableChecks
 
         using (var transaction = connection.BeginTransaction())
         {
-            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair),
+            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair), Guid.Empty.ToByteArray(),
                 [("s1.txt", TextKey.SkipLink, Subject(Local("s1.txt"))),
                  ("s2.txt", TextKey.SkipSpecial, Subject(Local("s2.txt")))], Now);
             transaction.Commit();
@@ -411,7 +466,7 @@ public static class IssueTableChecks
 
         using (var transaction = connection.BeginTransaction())
         {
-            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair),
+            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair), Guid.Empty.ToByteArray(),
                 [("s3.txt", TextKey.SkipOnlineOnly, Subject(Local("s3.txt")))], Now.AddHours(1));
             transaction.Commit();
         }
@@ -426,7 +481,7 @@ public static class IssueTableChecks
 
         using (var transaction = connection.BeginTransaction())
         {
-            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair),
+            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair), Guid.Empty.ToByteArray(),
                 [("both.txt", TextKey.SkipReservedName, Subject(Local("both.txt"))),
                  ("both.txt", TextKey.SkipReservedName, Subject(Dropbox("both.txt")))], Now.AddHours(2));
             transaction.Commit();
@@ -439,7 +494,7 @@ public static class IssueTableChecks
         IssueTable.Dismiss(connection, pair, both[0].Id);
         using (var transaction = connection.BeginTransaction())
         {
-            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair),
+            IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair), Guid.Empty.ToByteArray(),
                 [("both.txt", TextKey.SkipReservedName, Subject(Dropbox("both.txt"), Local("both.txt")))],
                 Now.AddHours(3));
             transaction.Commit();
@@ -474,7 +529,7 @@ public static class IssueTableChecks
             IssueTable.Counts(connection, "narrow-other").Count == 0,
             "filtered reads exclude unrelated malformed subjects and honor empty kinds and pair scope");
         using var transaction = connection.BeginTransaction();
-        IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair),
+        IssueTable.ReplaceSkipped(connection, transaction, pair, PairRow(connection, transaction, pair), Guid.Empty.ToByteArray(),
             [("skip", TextKey.SkipLink, new IssueSubject([Local("skip")], null)),
              ("skip", TextKey.SkipSpecial, new IssueSubject([Dropbox("skip"), Local("skip")], Side.Dropbox))], Now);
         transaction.Commit();
@@ -589,10 +644,12 @@ public static class IssueTableChecks
         }
     }
 
-    private static void Refuses(Action action)
+    private static void Refuses(Action action) => Refuses<InvalidOperationException>(action);
+
+    private static void Refuses<T>(Action action) where T : Exception
     {
         try { action(); }
-        catch (InvalidOperationException) { return; }
+        catch (T) { return; }
         throw new InvalidOperationException(ContractAssertion);
     }
 
@@ -659,7 +716,7 @@ public static class IssueTableChecks
                 (TextKey.SkipReservedName, subject));
             Check.Require(store.IssueById(ContractPair, issue.Id) is { Dismissed: true }, ContractAssertion);
             var replacement = store.BeginScan(ContractPair, generation, includeDeleted: false);
-            Refuses(() => store.ReplaceSkipped(ContractPair, token, []));
+            Refuses<LiveAdmissionStaleException>(() => store.ReplaceSkipped(ContractPair, token, []));
             store.ReplaceSkipped(ContractPair, replacement, []);
             Check.Require(store.Issues(ContractPair).Count == 0, ContractAssertion);
         });
@@ -807,6 +864,72 @@ public static class IssueTableChecks
             reopened.Issues(ContractPair).Single().Cause == TextKey.RequiredRepairRetry, ContractAssertion);
     });
 
+    private static void VisibilityCases()
+    {
+        var folder = Directory.CreateTempSubdirectory("issue-visibility-").FullName;
+        var path = Path.Combine(folder, "state.db");
+        try
+        {
+            long previous;
+            using (var store = StateStore.Open(path))
+            {
+                store.SavePair(Pair("pair-a", "account"));
+                Raise(store, "pair-a", IssueKind.Failure, TextKey.FailChanged, "a.txt");
+                var original = store.Issues("pair-a").Single();
+                previous = original.Id;
+                Check.Require(!store.SetIssueIgnored("other", previous, true) &&
+                    !store.SetIssueIgnored("pair-a", previous + 1, true), "visibility refuses foreign and missing ids");
+                Check.Require(store.SetIssueIgnored("pair-a", previous, true) &&
+                    store.SetIssueIgnored("pair-a", previous, true), "ignore is idempotent");
+                Check.Require(System.Text.Json.JsonSerializer.Serialize(store.IssueById("pair-a", previous)) ==
+                    System.Text.Json.JsonSerializer.Serialize(original with { Ignored = true }),
+                    "ignore preserves every other persisted issue field");
+                Check.Require(store.OpenIssuePage("pair-a", null, null, null, 10, 0).Total == 0 &&
+                    store.OpenIssuePage("pair-a", null, null, null, 10, 0, true).Total == 1 &&
+                    store.IssueCounts("pair-a").Values.Sum() == 1 &&
+                    store.IssueCounts("pair-a", false).Count == 0, "presentation hides, safety still sees");
+                Raise(store, "pair-a", IssueKind.Failure, TextKey.FailChanged, "a.txt");
+                Check.Require(store.IssueById("pair-a", previous)!.Ignored, "identical cause stays ignored");
+                store.DismissIssue("pair-a", previous);
+                Check.Require(store.OpenIssuePage("pair-a", null, null, null, 10, 0, true).Total == 0,
+                    "dismiss wins over ignored visibility");
+                Raise(store, "pair-a", IssueKind.Failure, TextKey.FailDropboxNameRejected, "a.txt");
+                Check.Require(!store.IssueById("pair-a", previous)!.Ignored, "changed cause resets ignore and dismiss");
+                Raise(store, "pair-a", IssueKind.Failure, TextKey.FailChanged, "a.txt");
+                Check.Require(store.SetIssueIgnored("pair-a", previous, false) &&
+                    store.SetIssueIgnored("pair-a", previous, false), "restore is idempotent");
+                store.SetIssueIgnored("pair-a", previous, true);
+                Raise(store, "pair-a", IssueKind.Failure, TextKey.FailDropboxNameRejected, "a.txt");
+                Check.Require(!store.IssueById("pair-a", previous)!.Ignored, "changed cause restores visibility");
+                store.SetIssueIgnored("pair-a", previous, true);
+                store.Commit("pair-a", StateChange.Empty with { Close = [("a.txt", [IssueKind.Failure])] });
+                Check.Require(!store.SetIssueIgnored("pair-a", previous, false), "closed notice cannot resurrect");
+                Raise(store, "pair-a", IssueKind.Failure, TextKey.FailChanged, "b.txt");
+                var next = store.Issues("pair-a").Single();
+                Check.Require(next.Id > previous && !next.Ignored, "new episode gets fresh active identity");
+                previous = next.Id;
+                store.Commit("pair-a", StateChange.Empty with { Close = [("b.txt", [IssueKind.Failure])] });
+            }
+            using var reopened = StateStore.Open(path);
+            using (var connection = StateStore.Connect(path, SqliteOpenMode.ReadWrite))
+            using (var transaction = connection.BeginTransaction())
+            {
+                IssueTable.Raise(connection, transaction, "pair-a", IssueKind.Info, TextKey.FailChanged, "same", Subject(), Now);
+                using var maximum = StorageCommand.Create(connection, transaction, "SELECT max(issue_id) FROM issue;");
+                var first = (long)maximum.ExecuteScalar()!;
+                IssueTable.Close(connection, transaction, "pair-a", "same", [IssueKind.Info]);
+                IssueTable.Raise(connection, transaction, "pair-a", IssueKind.Info, TextKey.FailChanged, "same", Subject(), Now);
+                Check.Require((long)maximum.ExecuteScalar()! > first, "same transaction never reuses a deleted id");
+                IssueTable.Close(connection, transaction, "pair-a", "same", [IssueKind.Info]);
+                transaction.Commit();
+            }
+            Raise(reopened, "pair-a", IssueKind.Failure, TextKey.FailChanged, "c.txt");
+            Check.Require(reopened.Issues("pair-a").Single().Id > previous &&
+                !reopened.SetIssueIgnored("pair-a", previous, true), "restart retains the high-water mark");
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
     private static SqliteConnection Open()
     {
         var connection = new SqliteConnection("Data Source=:memory:");
@@ -814,7 +937,7 @@ public static class IssueTableChecks
         Execute(connection, null, StateSchema.Pragmas);
         Execute(connection, null, StateSchema.Create);
         Execute(connection, null, StateSchema.SchemaAdditions);
-        Execute(connection, null, StateSchema.DeletedHistorySchema);
+        Execute(connection, null, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory);
         Execute(connection, null, StateSchema.AttachScan, (StateSchema.ParamPath, StateSchema.EmptyScan));
         Execute(connection, null, StateSchema.CreateSkipTouched);
         return connection;

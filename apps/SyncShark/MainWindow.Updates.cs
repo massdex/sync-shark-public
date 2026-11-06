@@ -623,10 +623,9 @@ public partial class MainWindow
             Environment.GetEnvironmentVariable("SYNCSHARK_PWSH_PATH"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PowerShell", "7", "pwsh.exe") }
             .Concat((Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator,
-                StringSplitOptions.RemoveEmptyEntries).Select(directory => Path.Combine(directory.Trim('"'), "pwsh.exe")))
-            .Append(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"));
+                StringSplitOptions.RemoveEmptyEntries).Select(directory => Path.Combine(directory.Trim('"'), "pwsh.exe")));
         var runtime = candidates.FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
-            ?? throw new InvalidOperationException("PowerShell was not found. Set SYNCSHARK_PWSH_PATH to an installed PowerShell executable.");
+            ?? throw new InvalidOperationException("PowerShell 7.4 or newer is required. Set SYNCSHARK_PWSH_PATH to a system or bundled pwsh.exe; Windows PowerShell 5.1 is not supported.");
         var start = new ProcessStartInfo(runtime) { UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var argument in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-" }) start.ArgumentList.Add(argument);

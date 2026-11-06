@@ -293,7 +293,7 @@ internal static partial class DropboxChecks
             await ExpectAsync<Exception>(() => away.Inventory.ChangesSinceAsync("m1", 7, _ => true, CancellationToken.None));
         }
 
-        // Astra re-review 3: a malformed provider path is unknown membership, never a proven departure.
+        // re-review 3: a malformed provider path is unknown membership, never a proven departure.
         foreach (var malformed in new[] { "", "Elsewhere//A.txt", "Elsewhere/", "Elsewhere/../Pilot/Docs/B.txt",
                      "Elsewhere/./A.txt", "Elsewhere/A\u0001.txt" })
         {

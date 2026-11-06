@@ -28,9 +28,9 @@ internal sealed class AutoSync
         {
             if (_loop is not null) return;
             _stop = new CancellationTokenSource();
+            Kick(null);
             _loop = RunAsync(_stop.Token);
         }
-        Kick(null);
     }
 
     internal void Kick(string? pairId, bool receiptsOnly = false)

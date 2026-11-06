@@ -48,7 +48,8 @@
       "syncshark": {
         "type": "Project",
         "dependencies": {
-          "SyncShark.Core": "[0.3.18, )"
+          "SyncShark.Core": "[0.3.74, )",
+          "SyncShark.Engine": "[0.3.74, )"
         }
       },
       "syncshark.core": {
@@ -56,6 +57,12 @@
         "dependencies": {
           "Microsoft.Data.Sqlite.Core": "[10.0.11, )",
           "SQLitePCLRaw.bundle_e_sqlite3": "[3.0.5, )"
+        }
+      },
+      "syncshark.engine": {
+        "type": "Project",
+        "dependencies": {
+          "SyncShark.Core": "[0.3.74, )"
         }
       }
     }

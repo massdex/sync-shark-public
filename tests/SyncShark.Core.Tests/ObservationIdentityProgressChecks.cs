@@ -10,6 +10,7 @@ internal static class ObservationIdentityProgressChecks
     internal static async Task ProfileRetainedAsync(string source, string root, string pairId)
     {
         var diagnosticRoot = DiagnosticPaths.RequireRoot();
+        var retainedPairId = DiagnosticPaths.RequireJourneyIdentity("observationPairId");
         var allocation = Path.Combine(diagnosticRoot, "recovery", "root703-atomic-proof");
         var localAllocation = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TestData", "Projects", "sync-shark", "build");
@@ -18,7 +19,7 @@ internal static class ObservationIdentityProgressChecks
         if (!string.Equals(source, stagedSource, StringComparison.OrdinalIgnoreCase) ||
             !(root.StartsWith(allocation + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
               root.StartsWith(localAllocation + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) ||
-            pairId != "f00d0000000000000028")
+            pairId != retainedPairId)
             throw new IOException("Use the closed actual staged database, exact parent pair and one fresh owned profiling directory.");
         foreach (var path in new[] { source, root })
             for (var item = path; !string.IsNullOrEmpty(item); item = Path.GetDirectoryName(item))

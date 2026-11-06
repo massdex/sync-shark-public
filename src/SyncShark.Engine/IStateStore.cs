@@ -76,7 +76,7 @@ public interface IStateStore : IDisposable
     /// Invalid inputs and genuine failures throw; uncertain acknowledgment requires authoritative readback, not replay.</summary>
     long? AcquireJournalPage(string volumeKey, JournalPosition? expected, JournalPosition next,
         IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision,
-            bool Suspended, bool LostInterval)> members,
+            bool LostInterval)> members,
         IEnumerable<(string PairId, ChangeNotice Notice)> notices);
 
     /// <summary>The obligation a lost source interval installs: Bootstrap before the pair's first completion,
@@ -236,12 +236,16 @@ public interface IStateStore : IDisposable
     /// filtered total in the same read transaction. Dismissed rows never page; only the page is decoded, and only
     /// page rows cost retry projection.</summary>
     (IReadOnlyList<(string PairId, Issue Issue)> Page, int Total) OpenIssuePage(string? pairId, string? account,
-        string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset);
+        string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset, bool ignored = false);
     /// <summary>Every open issue of the requested kinds in issue-id order and the filtered total, read in one
     /// read-only snapshot: a concurrent commit can neither hide a notice behind a reused issue id nor make the
     /// count disagree with the rows.</summary>
     (IReadOnlyList<(string PairId, Issue Issue)> Rows, int Total) OpenIssueSnapshot(IReadOnlyList<IssueKind>? kinds,
         int pageSize);
+    bool SetIssueIgnored(string pairId, long id, bool ignored);
+    /// <summary>Streams requested issue kinds under any subject's side-specific key, in distinct id order.
+    /// Includes dismissed rows; empty scope equals Issues. Item-less operational notices use their issue path.</summary>
+    IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null);
     Issue? IssueById(string pairId, long id);
     IssueKind? HeldKind(string pairId, Row row, IReadOnlySet<long>? exceptIssues);
     bool HeldCovers(string pairId, string key, IReadOnlySet<long>? exceptIssues);
@@ -250,7 +254,7 @@ public interface IStateStore : IDisposable
     Issue? HoldingIssue(string pairId, Row row);
     IReadOnlyDictionary<string, IssueSubject> RetainedFirstRun(string pairId);
     /// <summary>Open (not dismissed) issues per kind; kinds with none are absent. Subjects are not read.</summary>
-    IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId);
+    IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId, bool? ignored = null);
     /// <summary>Saved matched items, files and folders; each row represents one item on each side.</summary>
     long SyncedCount(string pairId);
     /// <summary>Reconciles only untouched sides of the completed scan; stale or restarted scan tokens refuse.</summary>
@@ -270,21 +274,34 @@ public interface IStateStore : IDisposable
 
     /// <summary>Starts the disposable scan and its process-local skip overlay before either listing.
     /// Discovery is selected once by Repair; no independent plan scratch is removed.</summary>
-    Guid BeginScan(string pairId, long expectedGeneration, bool includeDeleted);
+    Guid BeginScan(string pairId, Guid scanId, long expectedGeneration, bool includeDeleted, string? scope = null);
     /// <summary>Returns the immutable pre-list responsibility of the exact current scan; stale tokens refuse.</summary>
     ScanRecord ReadScan(string pairId, Guid scanToken);
     /// <summary>Checks the completed discovery relation once per immutable scan, bypassing per-row work when empty.</summary>
-    bool HasDeletedNames(string pairId);
-    /// <summary>Probes one path-owner-supplied exact key in the completed discovery scan; a match is not deletion proof.</summary>
-    bool DeletedNameExact(string pairId, string key);
+    bool HasDeletedNames(string pairId, Guid scanId);
+    /// <summary>Probes one path-owner-supplied exact key in discovery or retained history, masked by spent state; a match is not deletion proof.</summary>
+    bool DeletedNameExact(string pairId, Guid scanId, string key);
+    /// <summary>Whether this exact history key was consumed by committed Local removal or endpoint retirement; independent of scans.</summary>
+    bool DeletedNameSpent(string pairId, string key);
     /// <summary>Opens a side writer whose queue and save transaction are bounded by <paramref name="batchRows"/>.</summary>
-    IScanSink OpenScan(string pairId, Side side, int batchRows);
-    /// <summary>Seeds this first Repair's deleted names from its completed discovery, returning its own cursor.</summary>
+    IScanSink OpenScan(string pairId, Guid scanId, Side side, int batchRows);
+    /// <summary>Whether a full deleted-name acquisition is still owed, independently of first-Repair completion.</summary>
+    bool DeletedHistoryOwed(string pairId);
+    /// <summary>Exact membership in completed durable history; a match selects evidence, never removal authority.</summary>
+    bool SavedDeletedNameExact(string pairId, string key);
+    /// <summary>Seeds deleted names from a completed acquisition, returning its own continuation cursor.</summary>
     string? RestoreDeletedHistory(string pairId, Guid scanToken);
+
+    /// <summary>Continues the published history cursor without restoring blocks; new names stay in the durable delta relation.</summary>
+    string? ContinueDeletedHistory(string pairId, Guid scanToken);
     /// <summary>Clears this scan's remote live rows; optionally discards invalid saved discovery after cursor reset.</summary>
     void ResetDeletedHistory(string pairId, Guid scanToken, bool discardNames);
     /// <summary>Atomically retains joined discovery names and their terminal cursor; never a deletion decision.</summary>
     void SaveDeletedHistory(string pairId, Guid scanToken, string cursor);
+    /// <summary>Closes an operation's partition after its borrowers join; cleanup is not cancelled midway.</summary>
+    Task EndScanAsync(string pairId, Guid scanId, int pageSize);
+    /// <summary>Closes only an unchanged issue covered by this scan's pre-list evidence, including its acknowledgements.</summary>
+    bool CloseScanIssue(string pairId, Guid scanId, Issue expected);
     FolderPlan OpenFolderPlan(string pairId, Row folder, Side deletingFrom);
     /// <summary>Whether a protecting Local member sits at the key, at an ancestor or, when isFolder, below it. isFolder
     /// describes the affected old footprint. A file action runs no range.</summary>
@@ -297,11 +314,11 @@ public interface IStateStore : IDisposable
     /// <summary>Whether either exact affected forget range touches a protecting Local member directly or through a saved
     /// binding; an empty footprint is false without a statement.</summary>
     bool ForgetTouchesUnreadable(string pairId, IReadOnlyList<(Side Side, string Key)> roots, CancellationToken ct);
-    IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context);
-    IReadOnlyList<RenameCandidate> ScanRenames(string pairId);
+    IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context);
+    IReadOnlyList<RenameCandidate> ScanRenames(string pairId, Guid scanId);
     /// <summary>This run's scan entry on that side whose own key is that key; null when absent (Repair: the local
     /// entry of an interrupted case rename, matched by id by the caller).</summary>
-    Entry? ScanEntry(string pairId, Side side, string key);
+    Entry? ScanEntry(string pairId, Guid scanId, Side side, string key);
     /// <summary>Whether this run's listing of that side holds the join key (absent = arrived later).</summary>
-    bool InScan(string pairId, Side side, string key);
+    bool InScan(string pairId, Guid scanId, Side side, string key);
 }

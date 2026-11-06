@@ -89,6 +89,9 @@ public static class EngineHostTransportChecks
         EofAndDisconnectUnsubscribeAndJoinTheSender();
         CancelledSubscriptionUnsubscribesAndJoinsTheSender();
         SlowSubscriberGetsOnlyTheLatestState();
+        IntakeStopClosesHungRequest();
+        IntakeStopPreservesRunningCommand();
+        StopCommandReportsSuccess();
     }
 
     // The shared trust owner refuses a peer that is this process, so no production same-process bypass exists and
@@ -574,6 +577,21 @@ public static class EngineHostTransportChecks
     // The one fixture role: the child performs the real client call and reports its outcome to the parent.
     private static bool RunFixtureClient()
     {
+        if (Environment.GetEnvironmentVariable(FixtureStatusVariable) == "HungRequest")
+        {
+            var name = Environment.GetEnvironmentVariable(FixturePipeVariable)!;
+            using var client = new NamedPipeClientStream(LocalServer, name, PipeDirection.InOut,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            Await(client.ConnectAsync(FixtureConnectionDeadlineMilliseconds));
+            client.WriteByte((byte)EngineHostFrameKind.Arguments);
+            client.Flush();
+            using var sent = EventWaitHandle.OpenExisting(name + ".Sent");
+            sent.Set();
+            var received = client.ReadByte();
+            File.WriteAllText(Environment.GetEnvironmentVariable(FixtureReceiptVariable)!,
+                JsonSerializer.Serialize(new FixtureReceipt(ExitOutcome, received, "", "", null, false)));
+            return true;
+        }
         if (RunStatusFixtureClient()) return true;
         var pipe = Environment.GetEnvironmentVariable(FixturePipeVariable);
         if (string.IsNullOrEmpty(pipe)) return false;
@@ -734,6 +752,77 @@ public static class EngineHostTransportChecks
         {
             TryDeleteFile(receiptPath);
             TryDeleteDirectory(workDirectory);
+        }
+    }
+
+    private static void IntakeStopClosesHungRequest() => WithIntakeFixture(hung: true, stop: false);
+
+    private static void IntakeStopPreservesRunningCommand() => WithIntakeFixture(hung: false, stop: false);
+
+    private static void StopCommandReportsSuccess() => WithIntakeFixture(hung: false, stop: true);
+
+    private static void WithIntakeFixture(bool hung, bool stop)
+    {
+        var pipeName = NewPipeName();
+        var work = Directory.CreateTempSubdirectory("sync-shark-intake-").FullName;
+        var receiptPath = Path.Combine(work, "receipt.json");
+        using var pipe = NewListener(pipeName);
+        using var intake = new CancellationTokenSource();
+        using var bound = new CancellationTokenSource(FixtureChildTimeoutMilliseconds);
+        using var sent = new EventWaitHandle(false, EventResetMode.ManualReset, pipeName + ".Sent");
+        var running = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationToken commandToken = default;
+        var called = false;
+        var server = new EngineHostServer(async (_, _, _, token) =>
+        {
+            called = true;
+            commandToken = token;
+            if (stop) intake.Cancel();
+            else
+            {
+                running.SetResult();
+                await release.Task.WaitAsync(bound.Token);
+            }
+            token.ThrowIfCancellationRequested();
+            return (int)SyncCliExitCode.Success;
+        });
+        var accepting = pipe.WaitForConnectionAsync(bound.Token);
+        using var child = StartFixtureChild(pipeName, ShowArguments, receiptPath, null, work,
+            hung ? "HungRequest" : null);
+        var output = child.StandardOutput.ReadToEndAsync();
+        var error = child.StandardError.ReadToEndAsync();
+        try
+        {
+            Await(accepting);
+            var serving = server.ServeAsync(pipe, intake.Token);
+            if (hung)
+            {
+                Check.Require(sent.WaitOne(FixtureChildTimeoutMilliseconds), "the child sent a partial header");
+                intake.Cancel();
+            }
+            else if (!stop)
+            {
+                Await(running.Task.WaitAsync(bound.Token));
+                intake.Cancel();
+                release.SetResult();
+            }
+            Await(serving.WaitAsync(bound.Token));
+            Check.Require(child.WaitForExit(FixtureChildTimeoutMilliseconds), "the intake fixture child completed");
+            Check.Require(File.Exists(receiptPath), "the intake child wrote its receipt: " + Await(output) + Await(error));
+            var receipt = JsonSerializer.Deserialize<FixtureReceipt>(File.ReadAllText(receiptPath))!;
+            Check.Require(receipt.Outcome == ExitOutcome && receipt.ExitCode ==
+                (hung ? -1 : (int)SyncCliExitCode.Success),
+                "intake stop closes an unread frame silently and preserves accepted Exit: " + Describe(receipt));
+            Check.Require(hung ? !called : called && !commandToken.IsCancellationRequested,
+                "intake cancellation never cancels an accepted command or executes a partial frame");
+        }
+        finally
+        {
+            release.TrySetResult();
+            if (!child.HasExited) child.Kill(entireProcessTree: true);
+            child.WaitForExit();
+            TryDeleteDirectory(work);
         }
     }
 

@@ -90,9 +90,9 @@ public static partial class CallBudgetChecks
         internal double CommitMs;
         internal double ContextMs;
         private long start;
-        public override IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context)
+        public override IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context)
         {
-            using var rows = base.ScanRows(pairId, row =>
+            using var rows = base.ScanRows(pairId, scanId, row =>
             {
                 var before = Stopwatch.GetTimestamp();
                 try { return context(row); }
@@ -121,9 +121,9 @@ public static partial class CallBudgetChecks
             try { base.SettlePending(pairId, expected, change, selection, committedIssue); }
             finally { CommitMs += Stopwatch.GetElapsedTime(before).TotalMilliseconds; }
         }
-        public override IScanSink OpenScan(string pairId, Side side, int batchRows)
+        public override IScanSink OpenScan(string pairId, Guid scanId, Side side, int batchRows)
         {
-            var sink = base.OpenScan(pairId, side, batchRows);
+            var sink = base.OpenScan(pairId, scanId, side, batchRows);
             if (side == Side.Local) start = Stopwatch.GetTimestamp();
             return new SpeedSink(sink, this, side);
         }

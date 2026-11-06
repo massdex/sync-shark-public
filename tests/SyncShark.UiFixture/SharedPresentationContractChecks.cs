@@ -13,7 +13,7 @@ using ShapePath = System.Windows.Shapes.Path;
 
 namespace SyncShark.UiFixture;
 
-// U1 checks for job ds--u1-001: the frozen shared presentation contract.
+// U1 checks: the frozen shared presentation contract.
 //
 // These are structural, layout, preference-store and real-control-tree checks over the shared
 // contract. They are not installed-product, provider, click or user-interaction evidence, and

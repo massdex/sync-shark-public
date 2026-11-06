@@ -331,7 +331,7 @@ public static class LiveFenceChecks
             var local = Store.ReadSource(PairId, Side.Local)!.Value;
             var position = new JournalPosition(Volume, 0);
             var through = Store.AcquireJournalPage(VolumeKey, null, position,
-                [(PairId, 0, local.Epoch, local.Revision, false, false)],
+                [(PairId, 0, local.Epoch, local.Revision, false)],
                 [(PairId, new ChangeNotice(Side.Local, ChangeKind.Changed, File, null, Identity, null, true, false))])!.Value;
             Selection = Store.SelectWork(PairId, 0, new PathScope(Pair(), [])) ?? throw new InvalidOperationException("selection");
             _coverage = Store.CaptureLiveCoverage(Selection,

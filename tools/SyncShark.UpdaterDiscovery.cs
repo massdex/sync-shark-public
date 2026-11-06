@@ -160,9 +160,10 @@ public sealed class SyncSharkOriginalDiscovery : IDisposable
             SyncSharkUpdaterData.Integer(manifest["schemaVersion"])==1 && SyncSharkUpdaterData.Text(manifest["userSid"])==user,"Original manifest identity changed.");
         pair.Root=Path.Combine(SyncSharkUpdaterContract.ProtectedRoot,"versions",pair.Version.Split('+')[0]);pair.Worker=Path.Combine(pair.Root,"SyncSharkDiscovery.exe");
         SyncSharkUpdaterContract.Require(SyncSharkUpdaterData.Text(manifest["appDirectory"])==pair.Root,"Original manifest cannot select a restore path.");
-        pair.Members=SyncSharkUpdaterData.Array(manifest["members"],16).Select(row=>
+        pair.Members=SyncSharkUpdaterData.Array(manifest["members"],SyncSharkProtectedRuntimeTransaction.Members.Length).Select(row=>
         {var member=SyncSharkUpdaterData.Object(row,"path","sha256");return new SyncSharkUpdaterContract.Member(SyncSharkUpdaterData.Text(member["path"]).Replace('\\','/'),SyncSharkUpdaterData.Text(member["sha256"]),0);}).ToArray();
-        SyncSharkUpdaterContract.Require(pair.Members.Length==16 && pair.Members.Select(m=>m.Path).Distinct(StringComparer.Ordinal).Count()==16 &&
+        SyncSharkUpdaterContract.Require(pair.Members.Select(m=>m.Path).Distinct(StringComparer.Ordinal).Count()==pair.Members.Length &&
+            SyncSharkProtectedRuntimeTransaction.Members.Where(name=>!SyncSharkUpdaterFiles.IsPredecessorAddition(name)).All(name=>pair.Members.Any(m=>m.Path==name)) &&
             pair.Members.All(m=>SyncSharkProtectedRuntimeTransaction.Members.Contains(m.Path,StringComparer.Ordinal) && SyncSharkUpdaterContract.IsHex(m.Sha256,64)) &&
             pair.Members.Single(m=>m.Path=="SyncSharkDiscovery.exe").Sha256==pair.WorkerHash,"Original manifest member set changed.");
         return pair;

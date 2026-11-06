@@ -39,7 +39,7 @@ public partial class MainWindow
             if (value is null) return;
             options.Add((input, value));
         }
-        if (!AppDialogWindow.Confirm(this, option.Label, row.Path, row.Reason + Environment.NewLine + Massdex.SyncShark.Engine.Edge.IssuePresentation.ResolutionConfirmation(Enum.Parse<Massdex.SyncShark.Engine.ResolutionChoice>(option.Choice)), option.Label)) return;
+        if (!AppDialogWindow.Confirm(this, option.Label, row.Path, row.Reason + Environment.NewLine + Massdex.SyncShark.Engine.Edge.IssuePresentation.ResolutionConfirmation(_engineIssues[id], Enum.Parse<Massdex.SyncShark.Engine.ResolutionChoice>(option.Choice)), option.Label)) return;
         if (_closing || !ReferenceEquals(pair, _engineSelectedPair) ||
             !_engineIssueRows.TryGetValue(id, out current) || !ReferenceEquals(current, row) ||
             row.NoticeOptions?.Contains(option) != true) return;

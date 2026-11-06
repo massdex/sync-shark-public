@@ -238,7 +238,8 @@ public sealed class RunLog : IDisposable, IProgress<RunEvent>
         {
             lock (_gate)
             {
-                if (item.Kind == RunEventKind.Failed && item.Error is { } failure && !_reportedFailures.Add(failure))
+                if (item.Kind == RunEventKind.Failed && item.Error is { } failure &&
+                    !_reportedFailures.Add(failure is PrerequisiteStoppedException stopped ? stopped.InnerException! : failure))
                     return;
                 if (item.StageKey is { } openStage)
                 {
@@ -436,7 +437,7 @@ public sealed class RunLog : IDisposable, IProgress<RunEvent>
                 reason += SyncActivityText.ApplicationLocation(failure);
             item = item with
             {
-                What = item.IssueKind?.ToString() ?? item.Error?.GetType().Name ?? item.What,
+                What = item.IssueKind?.ToString() ?? FailureName(item.Error) ?? item.What,
                 Detail = item.Cause is { } cause
                     ? Text.Get(TextKey.FailureDetail,
                         (TextArg.Name, Text.Get(cause, (TextArg.Path, item.Path), (TextArg.Message, string.Empty))),
@@ -447,6 +448,15 @@ public sealed class RunLog : IDisposable, IProgress<RunEvent>
         return item.EffectKind is { } effect
             ? item with { What = effect.ToString(), Outcome = item.Side?.ToString() ?? string.Empty } : item;
     }
+
+    /// <summary>A stopped prerequisite attempt presents as the cancellation the log and its human projection already
+    /// name, so a stop stays one outcome instead of a new failure vocabulary.</summary>
+    private static string? FailureName(Exception? error) => error switch
+    {
+        null => null,
+        PrerequisiteStoppedException => nameof(OperationCanceledException),
+        _ => error.GetType().Name
+    };
 
     private static string FailureReason(Exception? error)
     {

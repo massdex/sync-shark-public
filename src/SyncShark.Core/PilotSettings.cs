@@ -28,7 +28,7 @@ public static class SyncSharkRuntimePaths
     public const string AutomationStateName = "sync-automation";
     public const string InstanceLockFileName = "instance.lock";
     public const string ReplacementStagingDirectoryName = "replacement-staging";
-    public static string InstallationUserRoot => Path.Combine(
+    public static string InstallationUserRoot => Volatile.Read(ref _productRootForTest) ?? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Massdex", "SyncShark");
     public static string ProductRoot => Volatile.Read(ref _productRootForTest) ?? SyncDataLocation.ProductRoot;
     public static string StateRoot => Path.Combine(ProductRoot, "state");
@@ -115,7 +115,36 @@ public static class SyncSharkRuntimePaths
         return new ProductRootOverride(fullRoot);
     }
 
-    private sealed class ProductRootOverride(string expectedRoot) : IDisposable
+    internal static IDisposable OverrideProductRootForOwnedAllocationTest(string root, string ownedAllocation, string ownershipToken)
+    {
+        var allocation = Path.GetFullPath(ownedAllocation);
+        var fullRoot = Path.GetFullPath(root);
+        // One bounded allocation folder on the operating-system temporary volume, one GUID name, one strict descendant root.
+        var allocationRoot = Path.Combine(Path.GetPathRoot(Path.GetFullPath(Path.GetTempPath()))!, "SyncSharkTest");
+        var name = Path.GetFileName(allocation);
+        if (!string.Equals(Path.GetDirectoryName(allocation), allocationRoot, StringComparison.OrdinalIgnoreCase) ||
+            !name.StartsWith("installer55-", StringComparison.Ordinal) ||
+            !Guid.TryParseExact(name["installer55-".Length..], "N", out _) ||
+            !PilotPath.IsPathInside(allocation, fullRoot) || string.Equals(allocation, fullRoot, StringComparison.OrdinalIgnoreCase) || ownershipToken.Length == 0)
+            throw new InvalidDataException(SyncDataLocation.MoveText("data-move-allocation-invalid"));
+        var chain = new PilotDirectoryLease.MigrationChain(allocation);
+        SyncLocalFileAuthority? receipt = null;
+        try
+        {
+            var receiptPath = Path.Combine(allocation, ".installer55-owner");
+            receipt = SyncLocalFileAuthority.OpenExistingReadGuard(receiptPath);
+            receipt.VerifyMigrationFile(receiptPath);
+            using var reader = new StreamReader(receipt.Stream, leaveOpen: true);
+            if (reader.ReadToEnd() != ownershipToken) throw new InvalidDataException(SyncDataLocation.MoveText("data-move-allocation-invalid"));
+            using var rootChain = new PilotDirectoryLease.MigrationChain(fullRoot);
+            if (Interlocked.CompareExchange(ref _productRootForTest, fullRoot, null) is not null)
+                throw new InvalidOperationException(SyncDataLocation.MoveText("data-move-allocation-invalid"));
+            return new ProductRootOverride(fullRoot, receipt, chain);
+        }
+        catch { receipt?.Dispose(); chain.Dispose(); throw; }
+    }
+
+    private sealed class ProductRootOverride(string expectedRoot, IDisposable? receipt = null, IDisposable? chain = null) : IDisposable
     {
         private string? _expectedRoot = expectedRoot;
 
@@ -123,9 +152,13 @@ public static class SyncSharkRuntimePaths
         {
             var expected = Interlocked.Exchange(ref _expectedRoot, null);
             if (expected is null) return;
-            if (!string.Equals(Interlocked.CompareExchange(ref _productRootForTest, null, expected), expected,
-                    StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("The test product-root override changed unexpectedly.");
+            try
+            {
+                if (!string.Equals(Interlocked.CompareExchange(ref _productRootForTest, null, expected), expected,
+                        StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("The test product-root override changed unexpectedly.");
+            }
+            finally { receipt?.Dispose(); chain?.Dispose(); }
         }
     }
 }

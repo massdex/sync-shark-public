@@ -312,14 +312,14 @@ public static class ActionExecutorChecks
                 probe.Begin();
                 var allocated = GC.GetAllocatedBytesForCurrentThread();
                 var local = probe.Execute(exact ? StateSchema.DeleteSyncedLocalKey : StateSchema.DeleteSyncedSubtreeLocal,
-                    ("$p", fixture.Pair.PairId), ("$k", PathNames.Key("root")));
+                    ("$p", fixture.Pair.PairId), ("$k", PathNames.Key("root")), (StateSchema.ParamRetained, "[]"));
                 var remote = probe.Execute(exact ? StateSchema.DeleteSyncedDropboxKey : StateSchema.DeleteSyncedSubtreeDropbox,
-                    ("$p", fixture.Pair.PairId), ("$k", PathNames.DropboxKey("remote")));
+                    ("$p", fixture.Pair.PairId), ("$k", PathNames.DropboxKey("remote")), (StateSchema.ParamRetained, "[]"));
                 allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
                 var cost = local + remote;
                 probe.Commit();
-                Check.Require(cost.ProbePrepares == (exact ? 2 : 4) && cost.ChangedRows == (exact ? 1 : 4),
-                    "File-sized retirement changes only the root with two indexed statements at every background size.");
+                Check.Require(cost.ProbePrepares == (exact ? 2 : 8) && cost.ChangedRows == (exact ? 1 : 8),
+                    "Exact SQL deletes only the root; subtree SQL spends and deletes exactly four bindings at every background size.");
                 if (previous.TryGetValue(exact, out var before))
                     Check.Require(cost.VmSteps == before.VmSteps && cost.PathKeyCalls == before.PathKeyCalls,
                         "Fixed involved rows cost the same VM work and path-key callbacks as background history grows.");
@@ -2288,7 +2288,7 @@ public static class ActionExecutorChecks
         public JournalPosition? ReadJournal(string volumeKey) => throw new NotSupportedException();
         public long? AcquireJournalPage(string volumeKey, JournalPosition? expected, JournalPosition next,
             IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision,
-                bool Suspended, bool LostInterval)> members,
+                bool LostInterval)> members,
             IEnumerable<(string PairId, ChangeNotice Notice)> notices) => throw new NotSupportedException();
         public (long Epoch, SourceProvenance? Provenance, string? Cursor, SourceObligation? Obligation, long Revision)?
             ReadSource(string pairId, Side side) =>
@@ -2397,10 +2397,13 @@ public static class ActionExecutorChecks
         public IReadOnlyList<Issue> Issues(string pairId, IReadOnlyList<IssueKind>? kinds = null) =>
             throw new NotSupportedException("An ordinary closure must not load issues.");
         public (IReadOnlyList<(string PairId, Issue Issue)> Page, int Total) OpenIssuePage(string? pairId,
-            string? account, string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset) =>
+            string? account, string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset, bool ignored = false) =>
             throw new NotSupportedException();
         public (IReadOnlyList<(string PairId, Issue Issue)> Rows, int Total) OpenIssueSnapshot(
             IReadOnlyList<IssueKind>? kinds, int pageSize) => throw new NotSupportedException();
+        public bool SetIssueIgnored(string pairId, long id, bool ignored) => throw new NotSupportedException();
+        public IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null) =>
+            throw new NotSupportedException();
         public Issue? IssueById(string pairId, long id) => throw new NotSupportedException();
         public IssueKind? HeldKind(string pairId, Row row, IReadOnlySet<long>? exceptIssues) =>
             throw new NotSupportedException();
@@ -2411,7 +2414,7 @@ public static class ActionExecutorChecks
         public Issue? HoldingIssue(string pairId, Row row) => throw new NotSupportedException();
         public IReadOnlyDictionary<string, IssueSubject> RetainedFirstRun(string pairId) =>
             throw new NotSupportedException();
-        public IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId) => throw new NotSupportedException();
+        public IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId, bool? ignored = null) => throw new NotSupportedException();
         public long SyncedCount(string pairId) => throw new NotSupportedException();
         public void ReplaceSkipped(string pairId, Guid scanToken,
             IEnumerable<(string Path, TextKey Cause, IssueSubject Subject)> skipped) =>
@@ -2422,11 +2425,18 @@ public static class ActionExecutorChecks
         public void DismissIssue(string pairId, long id) => throw new NotSupportedException();
         public void KeepFolderAlways(string pairId, long expectedGeneration, Issue expected,
             IReadOnlyList<Massdex.SyncShark.SyncIgnoreRule> keepRules) => throw new NotSupportedException();
-        public Guid BeginScan(string pairId, long expectedGeneration, bool includeDeleted) =>
+        public Task EndScanAsync(string pairId, Guid scanId, int pageSize) => throw new NotSupportedException();
+        public bool CloseScanIssue(string pairId, Guid scanId, Issue expected) => throw new NotSupportedException();
+        public Guid BeginScan(string pairId, Guid scanId, long expectedGeneration, bool includeDeleted, string? scope = null) =>
             throw new NotSupportedException();
-        public bool HasDeletedNames(string pairId) => throw new NotSupportedException();
-        public bool DeletedNameExact(string pairId, string key) => throw new NotSupportedException();
-        public IScanSink OpenScan(string pairId, Side side, int batchRows) => throw new NotSupportedException();
+        public bool HasDeletedNames(string pairId, Guid scanId) => throw new NotSupportedException();
+        public bool DeletedNameExact(string pairId, Guid scanId, string key) => throw new NotSupportedException();
+        public bool SavedDeletedNameExact(string pairId, string key) => (inner ?? throw new NotSupportedException()).SavedDeletedNameExact(pairId, key);
+        public bool DeletedNameSpent(string pairId, string key) => throw new NotSupportedException();
+        public IScanSink OpenScan(string pairId, Guid scanId, Side side, int batchRows) => throw new NotSupportedException();
+        public bool DeletedHistoryOwed(string pairId) => (inner ?? throw new NotSupportedException()).DeletedHistoryOwed(pairId);
+        public string? ContinueDeletedHistory(string pairId, Guid scanToken) => (inner ?? throw new NotSupportedException()).ContinueDeletedHistory(pairId, scanToken);
+
         public string? RestoreDeletedHistory(string pairId, Guid scanToken) => (inner ?? throw new NotSupportedException()).RestoreDeletedHistory(pairId, scanToken);
         public void ResetDeletedHistory(string pairId, Guid scanToken, bool discardNames) => (inner ?? throw new NotSupportedException()).ResetDeletedHistory(pairId, scanToken, discardNames);
         public void SaveDeletedHistory(string pairId, Guid scanToken, string cursor) => (inner ?? throw new NotSupportedException()).SaveDeletedHistory(pairId, scanToken, cursor);
@@ -2438,11 +2448,11 @@ public static class ActionExecutorChecks
             throw new NotSupportedException();
         public bool ForgetTouchesUnreadable(string pairId, IReadOnlyList<(Side Side, string Key)> roots,
             CancellationToken ct) => false;
-        public IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context) =>
+        public IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context) =>
             throw new NotSupportedException();
-        public IReadOnlyList<RenameCandidate> ScanRenames(string pairId) => throw new NotSupportedException();
-        public Entry? ScanEntry(string pairId, Side side, string key) => throw new NotSupportedException();
-        public bool InScan(string pairId, Side side, string key) => throw new NotSupportedException();
+        public IReadOnlyList<RenameCandidate> ScanRenames(string pairId, Guid scanId) => throw new NotSupportedException();
+        public Entry? ScanEntry(string pairId, Guid scanId, Side side, string key) => throw new NotSupportedException();
+        public bool InScan(string pairId, Guid scanId, Side side, string key) => throw new NotSupportedException();
     }
 
     /// <summary>The real item-attempt authority over the in-memory store; it never mints a token itself.</summary>

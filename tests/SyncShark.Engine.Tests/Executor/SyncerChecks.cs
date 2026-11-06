@@ -40,6 +40,8 @@ public static class SyncerChecks
         await StaleTieAsync();
         await UploadFreshnessAsync();
         await FirstRunContentAsync();
+        await SpentRestoreAsync();
+        await RemovedThenRestoredAsync();
         await CopiesAsync();
         await ResolutionFollowUpsAsync();
         await FollowUpReadFailureAsync();
@@ -51,7 +53,10 @@ public static class SyncerChecks
         await OldAppPatternThreeAsync();
         await NewlyLinkedAsync();
         await FreeIncomingAsync();
+        await ReturningOriginalsAsync();
         await MappedReobserveAsync();
+        await ReobserveFailureAsync();
+        await SingleLegKeepBothAsync();
         await LocksAsync();
         await LabelRaceAsync();
         await SkippedDropboxLabelRaceAsync();
@@ -66,7 +71,7 @@ public static class SyncerChecks
             await CounterpartCollisionAsync(folder);
             await CounterpartSelectedBranchAsync(folder);
             await FailedSurvivorAsync(folder);
-            Check.Require(!Directory.EnumerateFiles(folder, "*" + StateSchema.PlanFileSuffix).Any(),
+            Check.Require(!Directory.EnumerateFiles(folder, "*" + StateSchema.PlanFileSuffix + "*" + StateSchema.DatabaseExtension).Any(),
                 "Every completed or failed folder operation disposes its real scratch plan.");
         }
         finally
@@ -104,7 +109,7 @@ public static class SyncerChecks
             var source = store.ReadSource(context.Pair.PairId, Side.Local)!.Value;
             var position = store.ReadJournal("1");
             store.AcquireJournalPage("1", position, position!,
-                [(context.Pair.PairId, generation, source.Epoch, source.Revision, false, false)],
+                [(context.Pair.PairId, generation, source.Epoch, source.Revision, false)],
                 [(context.Pair.PairId, new ChangeNotice(Side.Local, ChangeKind.Changed, "Parent", null,
                     localParent.Id, localParent, false, false))]);
             var folder = kind is ActionKind.EnsureLocalFolder or ActionKind.EnsureDropboxFolder;
@@ -165,7 +170,7 @@ public static class SyncerChecks
                 var source = store.ReadSource(context.Pair.PairId, Side.Local)!.Value;
                 var position = store.ReadJournal("1");
                 store.AcquireJournalPage("1", position, position!,
-                    [(context.Pair.PairId, generation, source.Epoch, source.Revision, false, false)],
+                    [(context.Pair.PairId, generation, source.Epoch, source.Revision, false)],
                     [(context.Pair.PairId, new ChangeNotice(Side.Local, ChangeKind.Changed, "Parent", null,
                         localParent.Id, localParent, false, false))]);
             }
@@ -700,6 +705,7 @@ public static class SyncerChecks
         }
         public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) =>
             Require(pairId, generation, []);
+        public void Revalidate() { }
         public ValueTask ReleaseAdmissionAsync() => throw new NotSupportedException(nameof(ReleaseAdmissionAsync));
         public ValueTask DisposeAsync() => default;
     }
@@ -768,12 +774,15 @@ public static class SyncerChecks
                 saved = Save(context, await PutAsync(context.Local, "elsewhere"), remote);
             else
                 FailReads(context, local.Path, remote.Path);
+            var watermark = store.ReadWorkWatermark();
             var result = await NewJobs(context).Items.RunRowAttemptAsync(row, CancellationToken.None);
-            Check.Require(foreignBinding
-                    ? result.Raised == IssueKind.Failure &&
-                        store.SyncedByKey(context.Pair.PairId, Side.Dropbox, saved!.DropboxKey) == saved
-                    : result == new SyncOutcome(ActionKind.Record, null, EffectKind.Recorded, null, false),
-                "A record row reads neither provider, but differing saved bindings still send it to re-observation");
+            // DESIGN-126-4 §1: this crossed binding qualifies; equal returning-original content records after re-observation.
+            Check.Require(result == new SyncOutcome(ActionKind.Record, null, EffectKind.Recorded, null, false) &&
+                store.SyncedByKey(context.Pair.PairId, Side.Local, PathNames.Key(local.Path)) == SyncedEntries.From(local, remote),
+                "A direct Record avoids provider reads; a stale Record reobserves and adopts equal returning-original content.");
+            Check.Require(store.ReadWorkWatermark() == watermark + (foreignBinding ? 1 : 0) &&
+                (!foreignBinding || store.SyncedByKey(context.Pair.PairId, Side.Local, saved!.LocalKey) is null),
+                "Only the returning-original replacement retires and releases its former partner.");
             Check.Require(((FakeAdmission)context.Admission).Admitted == (foreignBinding ? 1 : 0) &&
                 ((FakeAdmission)context.Admission).Completed == 0,
                 "Only stale Record re-observation admits; a provider-free Record never admits or completes a Dropbox effect.");
@@ -913,6 +922,100 @@ public static class SyncerChecks
             Check.Require(result.Raised == IssueKind.Failure && result.Effect is null &&
                 await context.Dropbox.ReadOneAsync(target, CancellationToken.None) is null,
                 "An upload row still re-reads both sides inside its lock before writing");
+        }
+    }
+
+    private static async Task SpentRestoreAsync()
+    {
+        foreach (var complete in new[] { false, true })
+        foreach (var sameIdentity in new[] { false, true })
+        foreach (var folder in new[] { false, true })
+        {
+            using var store = new InMemoryStateStore();
+            var context = Context(store) with
+            {
+                ReadDeletionEvidenceAsync = (_, _, _) => throw new InvalidOperationException("Spent history requested deletion proof.")
+            };
+            var parent = await context.Local.EnsureFolderAsync("Parent", default);
+            var local = folder ? await context.Local.EnsureFolderAsync("Parent/Child", default) :
+                await PutAsync(context.Local, "Parent/Child");
+            var token = store.BeginScan(context.Pair.PairId, 0, true);
+            var sink = store.OpenScan(context.Pair.PairId, Side.Dropbox, 1);
+            await sink.AddAsync(new Listed(parent.Path, null), default);
+            await sink.CompleteAsync();
+            if (complete) store.SaveDeletedHistory(context.Pair.PairId, token, "cursor");
+            var jobs = NewJobs(context);
+            var rows = jobs.Items.ScanContexts(true, null, null, key => store.DeletedNameExact(context.Pair.PairId, key));
+            var row = Row(local, null, null);
+            row = row with { Context = rows.For(row) with { CompleteInventory = complete } };
+            Check.Require(row.Context.DeletionEligible, "Positive ancestor initially selects the first-run item.");
+            store.Commit(context.Pair.PairId, StateChange.Empty with { ForgetSelf = [(Side.Local, PathNames.Key(local.Path))] });
+            if (!sameIdentity)
+            {
+                local = local with { Id = "restored-identity" };
+                ((FakeSide)context.Local).Seed(local, folder ? null : [1]);
+            }
+            if (!folder)
+            {
+                var action = new SyncAction(ActionKind.DeleteLocal, row, Target: local.Path);
+                var keys = LockKeys.For(action, context.Pair, null);
+                await using var held = await PathLocks.Shared.EnterAsync(keys, default);
+                var stale = await jobs.Items.ExecuteLockedAsync(action, null, keys, keys, default, null, null);
+                Check.Require(stale.Reobserve && stale.Outcome is null,
+                    "A prepared destructive action is invalidated after locking when its eligibility was spent.");
+            }
+            var refreshed = await jobs.Items.ReobserveAsync(row, new Observer(context, new Parents(context)), default);
+            Check.Require(!refreshed.Context.DeletionEligible, "Exact spend overrides ancestor and owed history for both restore identities.");
+            var sibling = Row(local with { Path = "Parent/Sibling" }, null, null);
+            Check.Require(rows.For(sibling).DeletionEligible, "A spent child leaves unrelated ancestor-matching siblings eligible.");
+            var outcome = folder
+                ? await jobs.FirstRunFolders.FinalizeFirstRunFolderAsync(row, false, default, null)
+                : await jobs.Items.RunRowAttemptAsync(refreshed, default);
+            Check.Require(outcome.Raised is null && await context.Dropbox.ReadOneAsync(local.Path, default) is not null &&
+                await context.Local.ReadOneAsync(local.Path, default) is not null,
+                "Restored spent files and folders sync outward instead of being re-deleted.");
+        }
+    }
+
+    private static async Task RemovedThenRestoredAsync()
+    {
+        foreach (var bound in new[] { false, true })
+        {
+            using var store = new InMemoryStateStore();
+            var context = Context(store);
+            var local = await PutAsync(context.Local, "item", [1]);
+            SyncedEntry? saved = null;
+            if (bound)
+            {
+                var remote = await PutAsync(context.Dropbox, local.Path, [1]);
+                saved = Save(context, local, remote);
+                await context.Dropbox.DeleteAsync(remote, null, default);
+            }
+            var hash = await context.Local.ContentHashAsync(local, default);
+            context = context with
+            {
+                ReadDeletionEvidenceAsync = (path, _, _) => Task.FromResult<DeletionEvidence>(
+                    new DeletionEvidence.DeletedFile(path, "domain", "remote", null,
+                        local.Modified.AddDays(1), null, hash, null))
+            };
+            var row = Row(local, null, saved) with
+            {
+                Context = Facts() with { FirstRun = true, CompleteInventory = true, DeletionEligible = !bound }
+            };
+            var removed = await NewJobs(context).Items.RunRowAttemptAsync(row, default);
+            Check.Require(removed.Kind == ActionKind.DeleteLocal && await context.Local.ReadOneAsync(local.Path, default) is null &&
+                store.DeletedNameSpent(context.Pair.PairId, PathNames.DropboxKey(local.Path)),
+                "Both propagated and first-run deletion spend eligibility with their successful removal commit.");
+            ((FakeSide)context.Local).Seed(local, [1]);
+            var restored = Row(local, null, null) with { Context = row.Context with { DeletionEligible = true } };
+            var guarded = context with
+            {
+                ReadDeletionEvidenceAsync = (_, _, _) => throw new InvalidOperationException("Already handled history was checked twice.")
+            };
+            var outcome = await NewJobs(guarded).Items.RunRowAttemptAsync(restored, default);
+            Check.Require(outcome.Kind == ActionKind.Upload && outcome.Raised is null &&
+                await context.Local.ReadOneAsync(local.Path, default) is not null,
+                "Restored old bytes and identity upload without a second history proof or removal.");
         }
     }
 
@@ -1212,7 +1315,7 @@ public static class SyncerChecks
             var domain = context.Pair.Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var position = store.ReadJournal(domain)!;
             Check.Require(store.AcquireJournalPage(domain, position, position,
-                [(context.Pair.PairId, context.ExpectedGeneration, source.Epoch, source.Revision, false, false)],
+                [(context.Pair.PairId, context.ExpectedGeneration, source.Epoch, source.Revision, false)],
                 [(context.Pair.PairId, new ChangeNotice(Side.Local, ChangeKind.Changed, local.Path, null,
                     local.Id, local, true, false))]) is not null, "arrival commits after initial proof");
             var keys = LockKeys.For(prepared, context.Pair, null);
@@ -1356,6 +1459,21 @@ public static class SyncerChecks
                 await hold.DisposeAsync();
             }
             var result = await running!;
+            // DESIGN-126-4 §1: a returning original now replaces its unchanged crossed near endpoint.
+            if (!bindingOnSource)
+            {
+                Check.Require(result.Succeeded() && result.Kind == (side == Side.Local ? ActionKind.Upload : ActionKind.Download) &&
+                    store.Issues(context.Pair.PairId).Count == 0,
+                    "An occupied free-incoming target that qualifies reobserves without narrowing or an ordinary-copy notice.");
+                var copied = await target.ReadOneAsync("item", CancellationToken.None);
+                Check.Require(copied is not null &&
+                    await target.ContentHashAsync(copied, CancellationToken.None) ==
+                    await source.ContentHashAsync(incoming, CancellationToken.None) &&
+                    store.SyncedByKey(context.Pair.PairId, side, PathNames.KeyFor(side, "item"))?.PathOn(other) == "item" &&
+                    store.ReadWorkWatermark() > 0,
+                    "The returning content and same-name binding commit together with durable partner release.");
+                continue;
+            }
             Check.Require(result.Raised == IssueKind.NameClash && result.Effect is null &&
                 result.Kind == (side == Side.Local ? ActionKind.Upload : ActionKind.Download),
                 "A foreign binding leaves a free candidate's create to meet PathOccupied, even after re-observation");
@@ -1379,6 +1497,70 @@ public static class SyncerChecks
         }
     }
 
+    private static async Task ReturningOriginalsAsync()
+    {
+        foreach (var far in new[] { Side.Local, Side.Dropbox })
+        foreach (var (nearByte, farByte, expected) in new[]
+        {
+            (1, 2, far == Side.Local ? ActionKind.Upload : ActionKind.Download),
+            (1, 1, ActionKind.Record),
+            (2, 1, far == Side.Local ? ActionKind.Download : ActionKind.Upload),
+            (2, 2, ActionKind.Record),
+            (2, 3, ActionKind.KeepBoth)
+        })
+        {
+            using var store = new InMemoryStateStore();
+            var context = Context(store);
+            var nearSide = (FakeSide)context.For(PathNames.Other(far));
+            var farSide = (FakeSide)context.For(far);
+            var near = await PutAsync(nearSide, "Original", [1]);
+            var partner = await PutAsync(farSide, "Partner", [1]);
+            var saved = far == Side.Local ? Save(context, partner, near) : Save(context, near, partner);
+            if (nearByte != 1)
+            {
+                var changed = await PutAsync(nearSide, "Original", [(byte)nearByte], near,
+                    near.Modified.AddSeconds(1));
+                near = changed with { Id = near.Id };
+                nearSide.Seed(near, [(byte)nearByte]);
+            }
+            var returning = await PutAsync(farSide, "Original", [(byte)farByte]);
+            var row = far == Side.Local ? Row(returning, near, saved) : Row(near, returning, saved);
+            var losingHash = await context.Local.ContentHashAsync(row.Local!, CancellationToken.None);
+            RemovalSelection? selected = null;
+            context = context with { Local = new ProxySide(context.Local)
+            {
+                OnPublish = (victim, selection) =>
+                {
+                    if (victim is not null) selected = selection;
+                }
+            } };
+            var result = await NewJobs(context).Items.RunRowAttemptAsync(row, CancellationToken.None);
+            Check.Require(result.Succeeded() && result.Kind == expected,
+                $"Returning-original execution preserves the content table: {far}, {nearByte}, {farByte}.");
+            if (expected == ActionKind.KeepBoth)
+            {
+                Check.Require(store.Issues(context.Pair.PairId).Any(issue => issue.Cause == TextKey.InfoKeptBoth),
+                    "Divergent edits retain the existing keep-both notice.");
+                continue;
+            }
+            Check.Require(store.Issues(context.Pair.PairId).Count == 0 &&
+                store.SyncedByKey(context.Pair.PairId, Side.Local, PathNames.Key("Original")) is { } recorded &&
+                recorded.LocalPath == "Original" && recorded.DropboxPath == "Original" &&
+                store.ReadWorkWatermark() > 0,
+                "Copy and equality outcomes bind the original name and durably release the former partner without notice.");
+            if (expected == ActionKind.Download)
+            {
+                var local = row.Local!;
+                var ordinary = row with { Synced = SyncedEntries.From(local, row.Dropbox!), LocalHash = losingHash };
+                var ordinarySelection = await NewJobs(context).Actions.SelectRemovalAsync(ordinary,
+                    Side.Local, local, CancellationToken.None);
+                Check.Require(selected is not null && selected.Saved == saved &&
+                    selected.Proof == ordinarySelection!.Proof && selected.Proof.ContentHash == losingHash,
+                    "Returning-original overwrite forwards the same losing-content proof as an ordinary Local update.");
+            }
+        }
+    }
+
     private static async Task MappedReobserveAsync()
     {
         foreach (var foreignBinding in new[] { false, true })
@@ -1393,21 +1575,101 @@ public static class SyncerChecks
                 saved = Save(context, await PutAsync(context.Local, "elsewhere"), remote);
             var row = Row(local, remote, null);
             if (!foreignBinding) row = row with { Local = local with { Id = "stale" } };
+            var watermark = store.ReadWorkWatermark();
             using var cancellation = new CancellationTokenSource();
             var result = await NewJobs(context).Items.RunRowAttemptAsync(row, cancellation.Token);
-            Check.Require(foreignBinding
-                    ? result.Raised == IssueKind.Failure && store.Issues(context.Pair.PairId).Single().Cause == TextKey.FailChanged
-                    : result.Kind == ActionKind.Record && result.Raised is null,
-                "Mapped re-observation either becomes fresh or reports an unchanged stale binding instead of looping");
+            // DESIGN-126-4 §1: the same-spelling branch is a returning original with equal content, not an unrefreshable row.
+            Check.Require(result.Kind == ActionKind.Record && result.Raised is null &&
+                store.Issues(context.Pair.PairId).Count == 0,
+                "Mapped re-observation settles equal content, including a qualifying returning original, without looping or notice.");
             Check.Require(await context.Local.ReadOneAsync(local.Path, default) == local &&
                 await context.Dropbox.ReadOneAsync(remote.Path, default) == remote &&
                 ((FakeAdmission)context.Admission).Admitted == (foreignBinding ? 1 : 0) &&
                 ((FakeAdmission)context.Admission).Completed == 0,
                 "The store-only Record takes no permit and a foreign binding re-observation takes exactly one, without overwriting mapped content or completing a transfer.");
             if (saved is not null)
-                Check.Require(store.SyncedByKey(context.Pair.PairId, Side.Dropbox, saved.DropboxKey) == saved,
-                    "An unrefreshable free row preserves the foreign mapping");
+                Check.Require(store.SyncedByKey(context.Pair.PairId, Side.Dropbox, saved.DropboxKey) ==
+                        SyncedEntries.From(local, remote) &&
+                    store.SyncedByKey(context.Pair.PairId, Side.Local, saved.LocalKey) is null &&
+                    store.ReadWorkWatermark() == watermark + 1,
+                    "The returning original records the observed endpoints and durably releases the former partner.");
+            else
+                Check.Require(store.ReadWorkWatermark() == watermark,
+                    "An ordinary mapped Record has no crossed partner to release.");
         }
+    }
+
+    private static async Task ReobserveFailureAsync()
+    {
+        using var store = new InMemoryStateStore();
+        var context = Context(store);
+        var local = await PutAsync(context.Local, "item_");
+        var partner = await PutAsync(context.Local, "elsewhere");
+        var remote = await PutAsync(context.Dropbox, "item_");
+        // The binding sits under the other side's key, but its recorded Dropbox identity no longer matches the live
+        // file, so observation cannot adopt it and the Record row re-observes to exactly itself.
+        var saved = Save(context, partner, remote);
+        var replaced = remote with { Id = "replaced", Revision = "replaced-revision" };
+        ((FakeSide)context.Dropbox).Seed(replaced, [1]);
+        var watermark = store.ReadWorkWatermark();
+        var result = await NewJobs(context).Items.RunRowAttemptAsync(Row(local, replaced, null), CancellationToken.None);
+        Check.Require(result.Raised == IssueKind.Failure &&
+            store.Issues(context.Pair.PairId).Single().Cause == TextKey.FailChanged,
+            "An unchanged row that still fails its required re-observation is that item's own Failure, not a silent result.");
+        Check.Require(store.SyncedByKey(context.Pair.PairId, Side.Local, saved.LocalKey) == saved &&
+            store.SyncedByKey(context.Pair.PairId, Side.Dropbox, saved.DropboxKey) == saved &&
+            store.ReadWorkWatermark() == watermark,
+            "The item's Failure keeps custody of the crossed binding and releases neither endpoint as work.");
+        Check.Require(await context.Local.ReadOneAsync(local.Path, CancellationToken.None) == local &&
+            await context.Dropbox.ReadOneAsync(replaced.Path, CancellationToken.None) == replaced,
+            "Neither live endpoint is overwritten, moved or removed by the re-observation Failure.");
+    }
+
+    private static async Task SingleLegKeepBothAsync()
+    {
+        using var store = new InMemoryStateStore();
+        var context = Context(store);
+        var partner = await PutAsync(context.Local, "Partner", [2]);
+        var original = await PutAsync(context.Dropbox, "Original", [3]);
+        // A crossed file binding: the Local name "Partner" still records the Dropbox file now spelled "Original".
+        var saved = SyncedEntries.From(partner, original) with { DropboxContentHash = "previous-content" };
+        store.Commit(context.Pair.PairId, StateChange.Empty with { Record = [saved] });
+        var returning = await PutAsync(context.Local, "Original", [4]);
+        var row = Row(returning, original, saved) with
+        {
+            LocalHash = await context.Local.ContentHashAsync(returning, CancellationToken.None)
+        };
+        Check.Require(Decide.CrossedFar(row.Local, row.Dropbox, saved) == Side.Local &&
+            Decide.For(row, FirstRunPolicy.NewestWins, DateTimeOffset.UnixEpoch.AddDays(1), localContentDirty: false).Kind
+                == ActionKind.KeepBoth,
+            "The fixture is a returning original whose divergent edit decides keep-both.");
+        var watermark = store.ReadWorkWatermark();
+        var jobs = NewJobs(context);
+        var labels = await jobs.KeepBoth.ChooseLabelsAsync(row, CancellationToken.None, Side.Dropbox);
+        Check.Require(labels.DropboxLabel is not null && labels.LocalLabel is null,
+            "An exclusion keeps only the retained side's leg.");
+        store.Commit(context.Pair.PairId, await jobs.KeepBoth.RunAsync(row, labels, CancellationToken.None));
+        var copy = await context.Dropbox.ReadOneAsync(labels.DropboxLabel!, CancellationToken.None);
+        Check.Require(copy is not null && await context.Dropbox.ContentHashAsync(copy, CancellationToken.None) ==
+                await context.Local.ContentHashAsync(returning, CancellationToken.None),
+            "The one kept leg preserves the returning original's exact bytes.");
+        Check.Require(store.SyncedByKey(context.Pair.PairId, Side.Local, saved.LocalKey) is null &&
+            store.SyncedByKey(context.Pair.PairId, Side.Dropbox, saved.DropboxKey) is null &&
+            store.ReadWorkWatermark() == watermark,
+            "Retiring the crossed binding on one leg releases no endpoint, so the far local partner stays unsynced.");
+        Check.Require(await context.Local.ReadOneAsync(partner.Path, CancellationToken.None) == partner &&
+            await context.Dropbox.ReadOneAsync(original.Path, CancellationToken.None) == original &&
+            await context.Local.ReadOneAsync(returning.Path, CancellationToken.None) == returning,
+            "No original is overwritten, moved or removed by the one-leg change.");
+        var edited = await PutAsync(context.Local, partner.Path, [5], partner, partner.Modified.AddSeconds(1));
+        var outcome = await NewJobs(context).Items.SyncPathAsync(Side.Local, edited.Path, CancellationToken.None);
+        var arrived = await context.Dropbox.ReadOneAsync(edited.Path, CancellationToken.None);
+        Check.Require(outcome.Kind == ActionKind.Upload && outcome.Succeeded() && arrived is not null &&
+            await context.Dropbox.ContentHashAsync(arrived, CancellationToken.None) ==
+                await context.Local.ContentHashAsync(edited, CancellationToken.None) &&
+            store.SyncedByKey(context.Pair.PairId, Side.Local, PathNames.Key(edited.Path)) is { } rebuilt &&
+            rebuilt.DropboxPath == edited.Path,
+            "The retained far partner is reached by its change event and converges instead of staying stuck.");
     }
 
     private static async Task LocksAsync()
@@ -1696,7 +1958,7 @@ public static class SyncerChecks
         var restored = await PutAsync(context.Dropbox, "folder/kept");
         Save(context, kept, restored);
         var removed = await PutAsync(context.Local, "folder/removed");
-        store.BeginScan(context.Pair.PairId, 0, false);
+        context = context with { ScanId = store.BeginScan(context.Pair.PairId, 0, false) };
         var scan = store.OpenScan(context.Pair.PairId, Side.Local, ScanTestSettings.BatchRows);
         scan.AddAsync(new Listed(kept.Path, kept), default).GetAwaiter().GetResult();
         scan.AddAsync(new Listed(removed.Path, removed), default).GetAwaiter().GetResult();
@@ -1735,7 +1997,7 @@ public static class SyncerChecks
             if (mappedRoot)
             {
                 removed = await PutAsync(context.Dropbox, remote.Path + "/removed");
-                store.BeginScan(context.Pair.PairId, 0, false);
+                context = context with { ScanId = store.BeginScan(context.Pair.PairId, 0, false) };
                 var scan = store.OpenScan(context.Pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows);
                 scan.AddAsync(new Listed(removed.Path, removed), default).GetAwaiter().GetResult();
                 await scan.CompleteAsync();
@@ -1784,7 +2046,7 @@ public static class SyncerChecks
                 store.SyncedByKey(context.Pair.PairId, Side.Local, saved.LocalKey) == saved &&
                 await context.For(side).ReadOneAsync(child.Path, default) == child &&
                 await context.For(PathNames.Other(side)).ReadOneAsync(child.Path, default) is null &&
-                !Directory.EnumerateFiles(root, "*" + StateSchema.PlanFileSuffix).Any(),
+                !Directory.EnumerateFiles(root, "*" + StateSchema.PlanFileSuffix + "*" + StateSchema.DatabaseExtension).Any(),
                 "A failed survivor preserves its source and parent binding and releases the plan, lock and permit.");
             await jobs.Items.Folders.RemoveFolderAsync(row, side,
                 cancellation.Token);
@@ -1949,6 +2211,21 @@ public static class SyncerChecks
 
     private static async Task PendingAsync()
     {
+        foreach (var outcome in new[] { RemovalOutcome.Removed, RemovalOutcome.NoEffect, RemovalOutcome.Unknown })
+        {
+            using var store = new InMemoryStateStore();
+            var context = Context(store);
+            var local = await PutAsync(context.Local, "removed", [1]);
+            var pending = new PendingEffect(1, "removal", 0, PendingKind.LocalDelete,
+                outcome == RemovalOutcome.Removed ? PendingPhase.Removed : PendingPhase.Armed,
+                local.Path, new RemovalProof(local, "volume-a", await context.Local.ContentHashAsync(local, default)), null, null, null,
+                null, null, false, null);
+            store.SetPending(context.Pair.PairId, pending);
+            ((FakeRecovery)context.Recovery).Result = new RemovalResult(outcome, null, null, null);
+            await NewJobs(context).Recovery.ResolvePendingAsync(store.Pending(context.Pair.PairId), RecoveryChoice.Check, default);
+            Check.Require(store.DeletedNameSpent(context.Pair.PairId, PathNames.DropboxKey(local.Path)) ==
+                (outcome == RemovalOutcome.Removed), "Pending recovery spends only confirmed Removed, not Unknown or no-effect.");
+        }
         foreach (var published in new[] { true, false })
         {
             using var store = new InMemoryStateStore();
@@ -2438,6 +2715,7 @@ public static class SyncerChecks
 
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> required) =>
                 Require(pairId, generation, required.Select(scope => scope.Key).ToArray());
+            public void Revalidate() { }
             public ValueTask ReleaseAdmissionAsync() => default;
             public ValueTask DisposeAsync() => default;
         }
@@ -2493,6 +2771,7 @@ public static class SyncerChecks
             public void Require(string pairId, long generation, IReadOnlyList<string> requiredLockKeys) =>
                 call.Required.AddRange(requiredLockKeys);
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) { }
+            public void Revalidate() { }
             public ValueTask ReleaseAdmissionAsync() => default;
             public ValueTask DisposeAsync() => default;
         }

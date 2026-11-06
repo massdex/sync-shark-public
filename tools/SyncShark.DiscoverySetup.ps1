@@ -516,7 +516,12 @@ function Invoke-SyncSharkProtectedRuntimeSetup {
         if($actual.Count -ne [SyncSharkProtectedRuntimeTransaction]::Members.Length){throw 'Unexpected runtime source inventory.'}
         foreach($entry in $actual) {
             $name=[IO.Path]::GetFileName($entry)
-            if($name -ceq 'Assets'){continue}
+            if($name -cin @('Assets','tools')) {
+                HoldRuntime $entry $true
+                $children=@([IO.Directory]::EnumerateFileSystemEntries($entry))
+                if($children.Count -ne 1 -or ($name+'/'+[IO.Path]::GetFileName($children[0])) -cnotin [SyncSharkProtectedRuntimeTransaction]::Members){throw 'Unexpected runtime source directory contents.'}
+                continue
+            }
             if($name -cnotin [SyncSharkProtectedRuntimeTransaction]::Members){throw 'Unexpected runtime source directory or member.'}
             HoldRuntime $entry $false
         }

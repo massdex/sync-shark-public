@@ -10,6 +10,11 @@ public sealed record RootBinding(
     DirectoryIdentity Local,
     DropboxRootIdentity Dropbox)
 {
+    /// <summary>Whether saved configuration replaces the namespace to which deletion eligibility belongs.</summary>
+    public static bool HistoryIdentityChanged(PairConfig before, PairConfig after) =>
+        before.LocalRoot != after.LocalRoot || before.DropboxRoot != after.DropboxRoot ||
+        before.ConnectionId != after.ConnectionId || before.Roots != after.Roots;
+
     /// <summary>The Local journal domain for this pair: the volume serial as the adapters report it. A method, so the
     /// persisted binding keeps exactly its constructor members.</summary>
     internal string LocalVolumeKey() => Local.VolumeSerialNumber.ToString(CultureInfo.InvariantCulture);

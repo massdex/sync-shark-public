@@ -21,7 +21,7 @@ $prefix='# SyncSharkUpdateContract: '
 if(-not $header.StartsWith($prefix,[StringComparison]::Ordinal) -or $header.Length -gt 16384){throw 'The signed runtime contract is missing.'}
 $contract=$header.Substring($prefix.Length)|ConvertFrom-Json
 if($contract.version -cne $Version -or $contract.protectedRuntimeRoot -cne $runtime -or $contract.product -cne 'Massdex.SyncShark'){throw 'The signed contract identifies another runtime.'}
-$expectedMembers=@('Assets/SyncShark-64.png','Microsoft.Data.Sqlite.dll','Microsoft.Windows.SDK.NET.dll','SQLitePCLRaw.batteries_v2.dll','SQLitePCLRaw.core.dll','SQLitePCLRaw.provider.e_sqlite3.dll','SyncShark.Core.dll','SyncShark.Explorer.dll','SyncShark.deps.json','SyncShark.dll','SyncShark.exe','SyncShark.msix','SyncShark.runtimeconfig.json','SyncSharkDiscovery.exe','WinRT.Runtime.dll','e_sqlite3.dll')
+$expectedMembers=@('Assets/SyncShark-64.png','Microsoft.Data.Sqlite.dll','Microsoft.Windows.SDK.NET.dll','SQLitePCLRaw.batteries_v2.dll','SQLitePCLRaw.core.dll','SQLitePCLRaw.provider.e_sqlite3.dll','SyncShark.Core.dll','SyncShark.Engine.dll','tools/SyncShark.Uninstall.ps1','SyncShark.Explorer.dll','SyncShark.deps.json','SyncShark.dll','SyncShark.exe','SyncShark.msix','SyncShark.runtimeconfig.json','SyncSharkDiscovery.exe','WinRT.Runtime.dll','e_sqlite3.dll')
 $members=@{}
 foreach($member in $contract.runtimeMembers){
  if($member.path -cnotin $expectedMembers -or $members.ContainsKey($member.path)){throw 'The signed contract has a foreign or duplicate member.'}

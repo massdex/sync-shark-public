@@ -10,6 +10,7 @@ internal static class SyncHostChecks
 
     public static async Task RunAsync()
     {
+        await Run_RunLogFollowsTheTestProductRoot();
         await Pairs_MapToSyncPair();
         await StorageProjectionAndRemovalGuard();
         await SelectPair_Remembered_UnknownRefused();
@@ -210,6 +211,39 @@ internal static class SyncHostChecks
         Require(item.Result.Uploaded == 1 && item.Result.Downloaded == 1, "transfer totals count one each way");
         Require(!batch.Stopped && item.FailureType is null && item.Result.Outcome == RunOutcomes.Partial,
             "a completed partial attempt retains issues without becoming a batch failure");
+    }
+
+    // BUG #139: every run log the host opens must follow the test-aware product root. The production
+    // pointer is redirected to a scratch folder whose logs path is a file, so the failing direction
+    // cannot create anything anywhere — in particular not under the live data root.
+    private static async Task Run_RunLogFollowsTheTestProductRoot()
+    {
+        var testRoot = Path.GetFullPath(SyncSharkRuntimePaths.ProductRoot);
+        Require(SyncSharkRuntimePaths.HasTestProductRoot, "the harness owns a test product root");
+        var scratch = Path.Combine(Path.GetTempPath(), "sync-shark-bug139-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(scratch, "v2"));
+        File.WriteAllText(Path.Combine(scratch, "v2", "logs"), string.Empty);
+        File.WriteAllLines(SyncDataLocation.PointerPath, [scratch]);
+        var productionRoot = Path.GetFullPath(SyncDataLocation.ProductRoot);
+        Require(string.Equals(productionRoot, scratch, StringComparison.OrdinalIgnoreCase),
+            "the production pointer is redirected before this process reads it");
+        var expected = RunLog.LogsDirectory(testRoot);
+        Require(PathRules.IsPathInside(testRoot, expected), "the test-aware root keeps its logs under the test root");
+        Require(!PathRules.IsPathInside(testRoot, RunLog.LogsDirectory(productionRoot)),
+            "the redirected production pointer's logs are outside the test root, so the two roots are distinguishable");
+
+        var store = new InMemoryStateStore();
+        store.SavePair(PairDefOf("p1", "Alpha"));
+        var observed = new ObservedExecutor(new ScriptedExecutor());
+        string? opened = null;
+        var run = new ScriptedRun(observed, new Plan("p1", 1, [], []), Report("p1", RunOutcomes.Complete))
+        {
+            RefuseFor = _ => { opened = RunLog.Current?.Path; return null; }
+        };
+        await Host(store, run, observed).RunPairsAsync([PairOf("p1", "Alpha")], "manual");
+        Require(opened is not null, "the pair's run log was opened");
+        Require(PathRules.IsPathInside(expected, opened!),
+            "the pair's run log opens under the test product root, not the production pointer");
     }
 
     private static async Task Run_RefusedPair_IsItemFailure_NextPairRuns()

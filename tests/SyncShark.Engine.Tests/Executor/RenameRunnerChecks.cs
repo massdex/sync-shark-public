@@ -32,6 +32,8 @@ public static class RenameRunnerChecks
         await UpgradeRenameAsync();
         await HoldingSnapshotAsync();
         await MappedHeldFootprintAsync();
+        await HeldRenameEndpointsAsync(false);
+        await HeldRenameEndpointsAsync(true);
         await UnreadableAsync();
         await SavedUnreadableAsync();
         Measured();
@@ -715,6 +717,39 @@ public static class RenameRunnerChecks
             "F10: a held admitted rename retains its mapped destination footprint too");
     }
 
+    private static async Task HeldRenameEndpointsAsync(bool folder)
+    {
+        foreach (var side in new[] { Side.Local, Side.Dropbox })
+        {
+            using var f = new Fixture(folder, mappedParent: true);
+            var localParent = await f.Local.EnsureFolderAsync("Mapped_Parent", default);
+            var remoteParent = await f.Dropbox.EnsureFolderAsync("Mapped:Parent", default);
+            f.Store.Commit(f.Pair.PairId, StateChange.Empty with
+            { Record = [SyncedEntries.From(localParent, remoteParent)] });
+            var moved = await f.MoveAsync(side, side == Side.Local ? "Mapped_Parent/New" : "Mapped:Parent/New");
+            var jobs = SyncJobs.Create(f.Context, new SyncPorts(new RecoveryBoundary(),
+                RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0));
+            var rows = jobs.Items.Rows;
+            rows.HoldRenamePaths([(Side.Local, f.Saved.LocalPath)]);
+            Check.Require((await jobs.Items.RenameAsync([moved], moved.Moved, default)).Kind == RenameKind.Hold,
+                "the renamed item is held before effects");
+            foreach (var key in new[] { PathNames.Key(f.Saved.LocalPath),
+                PathNames.DropboxKey(f.Saved.DropboxPath), PathNames.Key("Mapped_Parent/New"),
+                PathNames.DropboxKey("Mapped:Parent/New") })
+            {
+                Check.Require(rows.Covers(key), "a held rename protects every saved, moved and mapped endpoint");
+                if (folder)
+                    Check.Require(rows.Covers(key + "/Child/Leaf"),
+                        "a held folder rename protects descendants at every endpoint");
+                Check.Require(!rows.Covers(key + "Sibling"), "segment siblings remain free");
+            }
+            foreach (var path in new[] { "a_b", "a_b/Sibling", "a_b/Other/Leaf",
+                "Mapped_Parent", "Mapped_Parent/Sibling", "Mapped_Parent/Other/Leaf" })
+                Check.Require(!rows.Covers(PathNames.Key(path)),
+                    "holding an item does not hold its parent or unrelated rows beneath that parent");
+        }
+    }
+
     private static async Task MappedParentAsync(Side side)
     {
         using var f = new Fixture();
@@ -836,6 +871,7 @@ public static class RenameRunnerChecks
             var reads = 0;
             var context = f.Context with
             {
+                ScanId = ScanFixture.Token(f.Store, f.Pair.PairId),
                 Local = new ProxySide(f.Local) { OnRead = _ => reads++ },
                 Dropbox = new ProxySide(f.Dropbox) { OnRead = _ => reads++ }
             };
@@ -1532,6 +1568,8 @@ public static class RenameRunnerChecks
         public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) =>
             inner.RequireScopes(pairId, generation, scopes);
 
+        public void Revalidate() => inner.Revalidate();
+
         public ValueTask ReleaseAdmissionAsync() => inner.ReleaseAdmissionAsync();
 
         public ValueTask DisposeAsync()
@@ -1600,7 +1638,7 @@ public static class RenameRunnerChecks
         public readonly RefusingItemAttempts ItemAttempts = new();
         public readonly List<RunEvent> Events = [];
         public readonly PairConfig Pair;
-        public readonly ExecutorContext Context;
+        public ExecutorContext Context { get; private set; }
         public readonly Entry LocalOld;
         public readonly Entry DropboxOld;
         public readonly SyncedEntry Saved;
@@ -1689,7 +1727,7 @@ public static class RenameRunnerChecks
         public async Task ScanAsync()
         {
             var generation = Store.ReadPairExecution(Pair.PairId)!.Value.Generation;
-            Store.BeginScan(Pair.PairId, generation, false);
+            Context = Context with { ScanId = Store.BeginScan(Pair.PairId, generation, false) };
             foreach (var side in new[] { Side.Local, Side.Dropbox })
             {
                 var sink = Store.OpenScan(Pair.PairId, side, ScanTestSettings.BatchRows);

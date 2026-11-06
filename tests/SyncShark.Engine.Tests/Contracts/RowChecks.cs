@@ -19,6 +19,7 @@ public static class RowChecks
         EntryOn();
         PathOn();
         OwnedPaths();
+        OwnedKeys();
         OneSide();
         FolderFact();
         ContextFacts();
@@ -44,6 +45,26 @@ public static class RowChecks
                 paths.Dropbox == (remote?.Path ?? target ?? saved?.DropboxPath ?? destination ?? row.Key),
                 "Row owns both endpoint fallbacks, preserving null versus empty.");
         }
+    }
+
+    private static void OwnedKeys()
+    {
+        foreach (var local in new Entry?[] { null, MakeEntry("Local") })
+        foreach (var remote in new Entry?[] { null, MakeEntry("Remote") })
+        foreach (var saved in new SyncedEntry?[] { null, Saved() })
+        {
+            var row = MakeRow(local, remote, saved, []);
+            var expected = new List<string> { row.Key };
+            if (local is not null) expected.Add(PathNames.KeyFor(Side.Local, local.Path));
+            if (remote is not null) expected.Add(PathNames.KeyFor(Side.Dropbox, remote.Path));
+            if (saved is not null) expected.AddRange([saved.LocalKey, saved.DropboxKey]);
+            Check.Require(Row.Keys(row).SequenceEqual(expected),
+                "Row.Keys retains comparison, observed and saved keys in their original order.");
+        }
+        var entry = MakeEntry("Same");
+        var duplicate = MakeRow(entry, entry, null, []) with { Key = PathNames.Key(entry.Path) };
+        Check.Require(Row.Keys(duplicate).SequenceEqual(Enumerable.Repeat(duplicate.Key, 3)),
+            "Row.Keys preserves duplicate keys rather than changing its callers' enumeration.");
     }
 
     private static void EntryOn()

@@ -786,7 +786,7 @@ public static class LiveContextChecks
             var volume = pair.Roots!.LocalVolumeKey();
             var position = session.Store.ReadJournal(volume)!;
             session.Store.AcquireJournalPage(volume, position, position,
-                [(pair.PairId, generation, source.Epoch, source.Revision, false, false)],
+                [(pair.PairId, generation, source.Epoch, source.Revision, false)],
                 [(pair.PairId, new ChangeNotice(Side.Local, ChangeKind.Changed, folder.Path, null,
                     folder.Id, folder, false, false))]);
             SyncWork(session);
@@ -957,7 +957,7 @@ public static class LiveContextChecks
         var remote = rig.Inner.ReadSource(id, Side.Dropbox)!.Value;
         var position = new JournalPosition(Volume, 0);
         Check.Require(rig.Inner.AcquireJournalPage(VolumeKey, null, position,
-            [(id, Generation, local.Epoch, local.Revision, false, false)], []) is not null,
+            [(id, Generation, local.Epoch, local.Revision, false)], []) is not null,
             "the live fixture installs the Local journal position");
         rig.Inner.AdvanceSource(id, Side.Dropbox, Generation, remote.Epoch, remote.Revision, null, null,
             remote.Epoch, remote.Revision, null, Cursor, null);
@@ -969,7 +969,7 @@ public static class LiveContextChecks
         rig.Inner.FinishRepair(id, CompletedSummary(), Generation, token, startLocal, startRemote);
         var next = position with { NextUsn = 1 };
         var through = rig.Inner.AcquireJournalPage(VolumeKey, position, next,
-            [(id, Generation, local.Epoch, local.Revision, false, false)],
+            [(id, Generation, local.Epoch, local.Revision, false)],
             [(id, new ChangeNotice(Side.Local, ChangeKind.Changed, ChildPath, null, LocalId, null, true, false))]);
         Check.Require(through is not null, "the live fixture commits one Local change");
         var committed = through!.Value;

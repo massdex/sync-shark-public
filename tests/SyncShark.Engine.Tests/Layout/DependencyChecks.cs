@@ -1136,19 +1136,19 @@ public static class DependencyChecks
     private static class InScanFixture
     {
         public static bool Use(Massdex.SyncShark.Engine.IStateStore store) =>
-            store.InScan("pair", Massdex.SyncShark.Engine.Side.Local, "key");
+            store.InScan("pair", Guid.Empty, Massdex.SyncShark.Engine.Side.Local, "key");
     }
 
     private static class ConditionalInScanFixture
     {
         public static bool? Use(Massdex.SyncShark.Engine.IStateStore? store) =>
-            store?.InScan("pair", Massdex.SyncShark.Engine.Side.Local, "key");
+            store?.InScan("pair", Guid.Empty, Massdex.SyncShark.Engine.Side.Local, "key");
     }
 
     private static class ConcreteInScanFixture
     {
         public static bool Use(Massdex.SyncShark.Engine.Storage.StateStore store) =>
-            store.InScan("pair", Massdex.SyncShark.Engine.Side.Local, "key");
+            store.InScan("pair", Guid.Empty, Massdex.SyncShark.Engine.Side.Local, "key");
     }
 
     private static class FolderDeleteFailureFixture

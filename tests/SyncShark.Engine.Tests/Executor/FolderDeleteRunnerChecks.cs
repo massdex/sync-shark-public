@@ -813,7 +813,7 @@ public static class FolderDeleteRunnerChecks
         try { _ = store.Plan!.DeleteWhole; }
         catch (ObjectDisposedException) { disposed = true; }
         Check.Require(disposed &&
-            !Directory.EnumerateFiles(folder, "*" + StateSchema.PlanFileSuffix).Any(),
+            !Directory.EnumerateFiles(folder, "*" + StateSchema.PlanFileSuffix + "*" + StateSchema.DatabaseExtension).Any(),
             "Preparation disposes the real scratch plan on a cancelled freeze.");
         Check.Require(!f.Store.ActiveFolderRemovals(f.Pair.PairId, default).Any() &&
             f.Events.Count == 0 && f.Dropbox.SubmitCalls == 0,
@@ -2109,6 +2109,8 @@ public static class FolderDeleteRunnerChecks
             public void Require(string pairId, long generation, IReadOnlyList<string> requiredLockKeys) { }
 
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) { }
+
+            public void Revalidate() { }
 
             public ValueTask ReleaseAdmissionAsync() => default;
 

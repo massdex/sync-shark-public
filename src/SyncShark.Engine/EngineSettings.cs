@@ -11,6 +11,9 @@ public sealed record EngineSettings(string ConflictLabelFormat, string ConflictL
     RecycleFallback WhenRecycleBinUnavailable, int LogRetentionDays, FirstRunPolicy DefaultFirstRunPolicy,
     int InitialLimiterLevel, string DefaultIgnoreRules, int LogBufferCharacters, int StoreBatchRows)
 {
+    // The accepted atomic-publish policy doubles each successive wait.
+    private const int AtomicReplaceDelayMultiplier = 2;
+
     /// <summary>The label rule built from the configured conflict-label formats.</summary>
     public LabelRule ConflictLabel => new(ConflictLabelFormat, ConflictLabelTimeFormat, TimeSpan.Zero,
         ConflictLabelLocalName, ConflictLabelDropboxName);
@@ -35,4 +38,29 @@ public sealed record EngineSettings(string ConflictLabelFormat, string ConflictL
     /// inputs. Derived here once; never stored or recomputed by a caller.</summary>
     public TimeSpan FolderDeletePollInterval =>
         TimeSpan.FromSeconds(Math.Max(BatchPollIntervalSeconds, FolderDeleteMinimumPollSeconds));
+
+    /// <summary>Attempts at publishing one completed file by atomic replace (#135).</summary>
+    public int AtomicReplaceAttempts { get; init; }
+
+    /// <summary>The wait before the second publish attempt, in milliseconds; each later wait doubles. The short
+    /// exponential backoff is the industry-standard wait for an antivirus or indexer hold, which clears in well
+    /// under a second; the last failure still reaches the caller's existing failure and notice path.</summary>
+    public int AtomicReplaceInitialDelayMilliseconds { get; init; }
+
+    /// <summary>The publish retry schedule derived from the two settings: one wait between each pair of attempts,
+    /// doubling from the configured first delay. Derived here once; never stored or recomputed by a caller.</summary>
+    public AtomicReplacePolicy AtomicReplace
+    {
+        get
+        {
+            var delays = new TimeSpan[Math.Max(0, AtomicReplaceAttempts - 1)];
+            var milliseconds = (long)AtomicReplaceInitialDelayMilliseconds;
+            for (var index = 0; index < delays.Length; index++)
+            {
+                delays[index] = TimeSpan.FromMilliseconds(milliseconds);
+                milliseconds *= AtomicReplaceDelayMultiplier;
+            }
+            return new AtomicReplacePolicy(delays);
+        }
+    }
 }

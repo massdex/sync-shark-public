@@ -41,8 +41,26 @@ public sealed class Syncer
     }
 
     internal Task<ScanOutcome> SyncScannedAsync(Guid scanToken, ListedSkips listed,
-        IReadOnlySet<long>? retryIssues, CancellationToken ct) =>
-        new ScanPass(_context, _items, _folders, _firstRunFolders, _exclusions, _ancestors, _ports).RunAsync(scanToken, listed, retryIssues, ct);
+        IReadOnlySet<long>? retryIssues, CancellationToken ct, WorkSelection? selection = null) =>
+        new Syncer(_context with { ScanId = scanToken }, _ports).RunScanAsync(scanToken, listed, retryIssues, ct, selection);
+
+    private Task<ScanOutcome> RunScanAsync(Guid scanToken, ListedSkips listed,
+        IReadOnlySet<long>? retryIssues, CancellationToken ct, WorkSelection? selection) =>
+        selection is null
+            ? new ScanPass(_context, _items, _folders, _firstRunFolders, _exclusions, _ancestors, _ports).RunAsync(scanToken, listed, retryIssues, ct)
+            : SyncBatchAsync(scanToken, selection, listed, retryIssues, ct);
+
+    private async Task<ScanOutcome> SyncBatchAsync(Guid token, WorkSelection selection, ListedSkips listed,
+        IReadOnlySet<long>? retryIssues, CancellationToken ct)
+    {
+        _ancestors.RunSelection(selection);
+        try
+        {
+            return await new ScanPass(_context, _items, _folders, _firstRunFolders, _exclusions, _ancestors, _ports)
+                .RunAsync(token, listed, retryIssues, ct, selection).ConfigureAwait(false);
+        }
+        finally { _ancestors.RunSelection(null); }
+    }
 
     internal async Task SyncWorkAsync(CancellationToken ct)
     {
@@ -64,12 +82,12 @@ public sealed class Syncer
                         _context.Events(RunEvent.Failed(error, path: selection.Key));
                         throw error;
                     }
-                    pass ??= new SelectionPass(_context, _items, _ancestors, _ports.Live, _executor);
+                    pass ??= new SelectionPass(_context, _items, _ancestors, _ports.Live, _executor, _ports.RunBatchAsync);
                     await SyncSelectionAsync(pass, selection, ct).ConfigureAwait(false);
                 }
             }
             finally { retired = _context.Store.EndWorkPass(pairId); }
-            // Only a net decrease can justify another pass; re-registering a failure is not progress.
+            // Retirement or a newly released endpoint justifies another pass; re-registering failure does not.
         } while (retired);
         await _folders.ContinueReleasedFollowUpsAsync(ct).ConfigureAwait(false);
         _context.Events(RunEvent.Stage(TextKey.StageRows, ended: true, count: pass?.Completed ?? 0));
@@ -145,7 +163,7 @@ public sealed class Syncer
     internal async Task<ResolutionOutcome> ResolveAsync(Issue issue, ResolutionChoice choice, string? newName,
         IReadOnlyList<SyncIgnoreRule>? keepRules, CancellationToken ct)
     {
-        var runner = new ResolutionRunner(_context, _executor, _keepBoth, _items, _ports.Selected);
+        var runner = new ResolutionRunner(_context, _executor, _keepBoth, _items, _ports.Selected, _ports.RunBatchAsync);
         var outcome = await runner.ResolveAsync(issue, choice, newName, keepRules, ct);
         return new ResolutionOutcome(outcome, runner.Resolved);
     }

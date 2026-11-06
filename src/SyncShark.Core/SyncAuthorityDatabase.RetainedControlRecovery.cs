@@ -329,7 +329,7 @@ public sealed partial class SyncAuthorityDatabase
         PilotDirectoryLease selectedRoot, CancellationToken cancellationToken = default,
         long? expectedUnpublishedRevision = null)
     {
-        // an EXPLICIT supplied expectation is preserved and enforced with no bypass - the
+        // Item 2: an EXPLICIT supplied expectation is preserved and enforced with no bypass - the
         // caller's revision is used with MustBeUnpublished = true. Only an OMITTED expectation derives the current
         // mode and revision, and even then the transaction still always checks them.
         if (expectedUnpublishedRevision is { } suppliedRevision)
@@ -346,7 +346,7 @@ public sealed partial class SyncAuthorityDatabase
     }
 
     /// <summary>
-    /// the exact current mode, identity and revision the recovery binds INSIDE its retention
+    /// Item 2: the exact current mode, identity and revision the recovery binds INSIDE its retention
     /// transaction. There is no null bypass: an initial publication requires the pair to be UNPUBLISHED at that
     /// revision and a published repair requires it to be PUBLISHED at that revision.
     /// </summary>
@@ -469,7 +469,7 @@ public sealed partial class SyncAuthorityDatabase
                     "The exact selected root changed before the retained-control metadata was committed; the " +
                     "recovery refuses without effect.");
 
-            // the current published-vs-unpublished mode and the expected current pair revision are
+            // The current published-vs-unpublished mode and the expected current pair revision are
             // bound INSIDE this existing transaction, so a change between the caller's read and this commit
             // refuses with no recovered row written. The pair must still be an UNPUBLISHED candidate at exactly
             // the expected revision.

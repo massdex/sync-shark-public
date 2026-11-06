@@ -7,6 +7,7 @@ public partial class App
     private async void MoveDataAndRestart(string destination, string parentId)
     {
         string message;
+        SyncDataLocation.MoveResult? observed = null;
         try
         {
             if (!int.TryParse(parentId, out var id) || id == Environment.ProcessId)
@@ -18,15 +19,13 @@ public partial class App
                 await parent.WaitForExitAsync(timeout.Token);
             }
             catch (ArgumentException) { /* The originating process already exited. */ }
-            SyncDataLocation.MoveResult result;
             using (var owner = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile))
-                result = await Task.Run(() => SyncDataLocation.MoveAsync(owner.StateAuthority, destination));
-            message = SyncDataLocation.CleanupOldCopy(result);
+                observed = await Task.Run(() => SyncDataLocation.MoveAsync(owner.StateAuthority, destination));
+            message = SyncDataLocation.CleanupOldCopy(observed);
         }
         catch (Exception error)
         {
-            message = "Data location was not changed. " + error.Message;
-            message += " Sync Shark will reopen its existing data.";
+            message = SyncDataLocation.DescribeMoveFailure(observed, error);
         }
         AppDialogWindow.Inform(null, "Data location", message, "Sync Shark will now restart.");
         try

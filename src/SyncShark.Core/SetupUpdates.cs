@@ -19,10 +19,10 @@ public static class SetupUpdates
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
         if (root.GetProperty("draft").GetBoolean() || root.GetProperty("prerelease").GetBoolean())
-            throw new InvalidDataException("Only stable published releases are accepted.");
+            throw new InvalidDataException(SetupMessages.Text("release.stable"));
         var tag = root.GetProperty("tag_name").GetString() ?? "";
         if (!Regex.IsMatch(tag, @"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$") || !Version.TryParse(tag[1..], out _))
-            throw new InvalidDataException("The release tag must be vX.Y.Z.");
+            throw new InvalidDataException(SetupMessages.Text("release.tag"));
         var name = $"SyncShark-Setup-{tag}.exe";
         var expected = $"https://github.com/{Repository}/releases/download/{tag}/{name}";
         SetupRelease? result = null;
@@ -30,16 +30,16 @@ public static class SetupUpdates
         foreach (var asset in root.GetProperty("assets").EnumerateArray())
         {
             var assetName = asset.GetProperty("name").GetString() ?? "";
-            if (!names.Add(assetName)) throw new InvalidDataException("Duplicate release asset.");
+            if (!names.Add(assetName)) throw new InvalidDataException(SetupMessages.Text("release.duplicate"));
             if (assetName != name) continue;
             var digest = asset.TryGetProperty("digest", out var node) ? node.GetString() ?? "" : "";
             var bytes = asset.GetProperty("size").GetInt64();
             if (!Regex.IsMatch(digest, "^sha256:[0-9a-fA-F]{64}$") || bytes <= 0 ||
                 asset.GetProperty("browser_download_url").GetString() != expected)
-                throw new InvalidDataException("The setup asset needs its exact URL, size and GitHub SHA256 digest.");
+                throw new InvalidDataException(SetupMessages.Text("release.asset"));
             result = new SetupRelease(tag[1..], new Uri(expected), bytes, digest[7..]);
         }
-        return result ?? throw new InvalidDataException("Exactly one versioned Sync Shark setup is required.");
+        return result ?? throw new InvalidDataException(SetupMessages.Text("release.missing"));
     }
 
     public static async Task<SetupRelease> CheckAsync(CancellationToken cancellationToken)
@@ -51,25 +51,38 @@ public static class SetupUpdates
         return Parse(Encoding.UTF8.GetString(buffer.ToArray()));
     }
 
-    public static async Task<string> ApplyAsync(SetupRelease release, CancellationToken cancellationToken)
+    public static async Task<string> ApplyAsync(SetupRelease release, CancellationToken cancellationToken, TextWriter? diagnostics = null)
     {
+        diagnostics ??= Console.Error;
         var directory = Path.Combine(Path.GetTempPath(), "SyncShark-Update-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, $"SyncShark-Setup-v{release.Version}.exe");
-        using var client = Client();
-        await using (var source = await client.GetStreamAsync(release.Download, cancellationToken))
-        await using (var destination = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            if (await SyncPublicUpdates.CopyBoundedAsync(source, destination, release.Bytes, cancellationToken) != release.Bytes)
-                throw new InvalidDataException("The setup download is incomplete.");
-        // Keep a deny-write/delete handle through signature verification and launch.
-        await using var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var digest = Convert.ToHexString(await SHA256.HashDataAsync(held, cancellationToken));
-        if (!digest.Equals(release.Sha256, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidDataException("The setup SHA256 differs from GitHub.");
-        await VerifySignatureAsync(path, cancellationToken);
-        using var setup = Process.Start(new ProcessStartInfo(path, "--wait-pid " + Environment.ProcessId) { UseShellExecute = false })
-            ?? throw new IOException("Setup could not start.");
-        return path;
+        try
+        {
+            using var client = Client();
+            await using (var source = await client.GetStreamAsync(release.Download, cancellationToken))
+            await using (var destination = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                if (await SyncPublicUpdates.CopyBoundedAsync(source, destination, release.Bytes, cancellationToken) != release.Bytes)
+                    throw new InvalidDataException(SetupMessages.Text("download.incomplete"));
+            // Keep a deny-write/delete handle through signature verification and launch.
+            using (var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                var digest = Convert.ToHexString(await SHA256.HashDataAsync(held, cancellationToken));
+                if (!digest.Equals(release.Sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException(SetupMessages.Text("download.digest"));
+                await VerifySignatureAsync(path, cancellationToken);
+                var setup = Process.Start(new ProcessStartInfo(path, "--wait-pid " + Environment.ProcessId) { UseShellExecute = false })
+                    ?? throw new IOException(SetupMessages.Text("install.start"));
+                SetupDownloadCleanup.Start(directory, setup.Id, diagnostics);
+                setup.Dispose();
+            }
+            return path;
+        }
+        catch
+        {
+            SetupDownloadCleanup.Delete(directory, diagnostics);
+            throw;
+        }
     }
 
     private static HttpClient Client()
@@ -92,7 +105,7 @@ public static class SetupUpdates
             start.ArgumentList.Add(argument);
         start.Environment["SYNCSHARK_SETUP"] = path;
         start.Environment["PSModulePath"] = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32/WindowsPowerShell/v1.0/Modules");
-        using var process = Process.Start(start) ?? throw new IOException("Cannot start signature verification.");
+        using var process = Process.Start(start) ?? throw new IOException(SetupMessages.Text("signature.start"));
         var output = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var error = process.StandardError.ReadToEndAsync(cancellationToken);
         await process.WaitForExitAsync(cancellationToken);
@@ -103,28 +116,28 @@ public static class SetupUpdates
         using var identity = JsonDocument.Parse(identityStream);
         var package = identity.RootElement.GetProperty("roles").GetProperty("package");
         var status = signature.GetProperty("Status").GetString();
-        if (status is not ("Valid" or "UnknownError")) throw new InvalidDataException("Authenticode integrity failed.");
+        if (status is not ("Valid" or "UnknownError")) throw new InvalidDataException(SetupMessages.Text("signature.integrity"));
         using var signer = new X509Certificate2(Convert.FromBase64String(signature.GetProperty("Signer").GetString()!));
         using var timestamp = new X509Certificate2(Convert.FromBase64String(signature.GetProperty("Timestamp").GetString()!));
         using var rsa = signer.GetRSAPublicKey();
         if (rsa is null || signer.Subject != package.GetProperty("subject").GetString() || signer.Issuer != signer.Subject ||
             !package.GetProperty("thumbprints").EnumerateArray().Any(item => string.Equals(item.GetString(), signer.Thumbprint, StringComparison.OrdinalIgnoreCase)) ||
             !package.GetProperty("spki").EnumerateArray().Any(item => string.Equals(item.GetString(), Convert.ToHexString(SHA256.HashData(rsa.ExportSubjectPublicKeyInfo())), StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidDataException("The embedded signer differs from Sync Shark's pinned package identity.");
+            throw new InvalidDataException(SetupMessages.Text("signature.identity"));
         using var chain = new X509Chain();
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
         var trusted = chain.Build(signer);
         var statuses = chain.ChainStatus.Select(item => item.Status).Where(item => item != X509ChainStatusFlags.NoError).Distinct().ToArray();
         var onlyUntrustedRoot = statuses.Length == 1 && statuses[0] == X509ChainStatusFlags.UntrustedRoot;
         if ((!trusted && !onlyUntrustedRoot) || (status == "UnknownError" && !onlyUntrustedRoot))
-            throw new InvalidDataException("Signer validation failed beyond the registered UntrustedRoot exception.");
+            throw new InvalidDataException(SetupMessages.Text("signature.validation"));
         const string timestampEku = "1.3.6.1.5.5.7.3.8";
         if (!timestamp.Extensions.OfType<X509EnhancedKeyUsageExtension>().SelectMany(extension => extension.EnhancedKeyUsages.Cast<Oid>()).Any(oid => oid.Value == timestampEku))
-            throw new InvalidDataException("The timestamp certificate is not authorized for timestamp signing.");
+            throw new InvalidDataException(SetupMessages.Text("signature.timestampEku"));
         using var timestampChain = new X509Chain();
         timestampChain.ChainPolicy.RevocationMode = X509RevocationMode.Online;
         timestampChain.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
         if (!timestampChain.Build(timestamp) || timestampChain.ChainStatus.Any(item => item.Status != X509ChainStatusFlags.NoError))
-            throw new InvalidDataException("The timestamp chain did not validate.");
+            throw new InvalidDataException(SetupMessages.Text("signature.timestampChain"));
     }
 }

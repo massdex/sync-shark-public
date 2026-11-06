@@ -25,7 +25,7 @@ public sealed record SyncOutcome(ActionKind Kind, NoneReason? None, EffectKind? 
     /// gates admit the row.</summary>
     internal bool? OwesWork(Row row, IStateStore store, string pairId) =>
         Deferred || None is NoneReason.RemovedWithFolder ? null :
-        !Succeeded() && None is not NoneReason.OutOfScope &&
+        !Succeeded() && (None is not NoneReason.OutOfScope || !row.Context.OutOfScope) &&
         (!row.Context.Skipped || store.UnreadableTouches(pairId, row.Key, true));
 
     /// <summary>True when this handled failure of a local folder replaced by a file must hold the row's dependent

@@ -13,7 +13,7 @@ namespace Massdex.SyncShark.Engine.Edge;
 /// already-held authority, and never attaches recursively, opens a second product lock or falls back to a direct
 /// runtime. Each connection has its own pipe writers and runs on one command path, so the two output streams are
 /// never written concurrently. This transport holds no request history and has no uncertainty exception path of
-/// its own.</summary>
+/// its own. A request still unread when the host stops accepting is closed without a frame, like a malformed one.</summary>
 public sealed class EngineHostServer
 {
     private readonly Func<string[], TextWriter, TextWriter, CancellationToken, Task<int>> _execute;
@@ -28,8 +28,9 @@ public sealed class EngineHostServer
         _subscribe = subscribe;
     }
 
-    /// <summary>Serves exactly one command on one connected trusted pipe and disposes the connection.</summary>
-    public async Task ServeAsync(PipeStream pipe, CancellationToken ct)
+    /// <summary>Serves one trusted connection. Intake bounds only the unread request; an accepted command,
+    /// its output, its Exit and a status subscription are never cancelled by it.</summary>
+    public async Task ServeAsync(PipeStream pipe, CancellationToken intake)
     {
         ArgumentNullException.ThrowIfNull(pipe);
         using (pipe)
@@ -39,15 +40,16 @@ public sealed class EngineHostServer
             try
             {
                 // A clean end of stream before any header is an observation attach, not a command.
-                var frame = await EngineHostFrame.ReadAsync(pipe, ct).ConfigureAwait(false);
+                var frame = await EngineHostFrame.ReadAsync(pipe, intake).ConfigureAwait(false);
                 if (frame is { Kind: EngineHostFrameKind.SubscribeStatus } && _subscribe is not null)
                 {
-                    await ServeStatusAsync(pipe, ct).ConfigureAwait(false);
+                    await ServeStatusAsync(pipe, CancellationToken.None).ConfigureAwait(false);
                     return;
                 }
                 if (frame is null || frame.Value.Kind != EngineHostFrameKind.Arguments) return;
                 arguments = frame.Value.DecodeArguments();
             }
+            catch (OperationCanceledException) when (intake.IsCancellationRequested) { return; }
             catch (Exception error) when (error is InvalidDataException or JsonException)
             {
                 return;
@@ -55,12 +57,12 @@ public sealed class EngineHostServer
             try
             {
                 await EngineHostFrame.WriteAsync(pipe,
-                    new EngineHostFrame(EngineHostFrameKind.Accepted, ReadOnlyMemory<byte>.Empty), ct)
+                    new EngineHostFrame(EngineHostFrameKind.Accepted, ReadOnlyMemory<byte>.Empty), CancellationToken.None)
                     .ConfigureAwait(false);
                 using var stdout = new EnginePipeWriter(pipe, EngineHostFrameKind.StandardOutput);
                 using var stderr = new EnginePipeWriter(pipe, EngineHostFrameKind.StandardError);
-                var exitCode = await _execute(arguments, stdout, stderr, ct).ConfigureAwait(false);
-                await EngineHostFrame.WriteAsync(pipe, EngineHostFrame.CreateExit(exitCode), ct)
+                var exitCode = await _execute(arguments, stdout, stderr, CancellationToken.None).ConfigureAwait(false);
+                await EngineHostFrame.WriteAsync(pipe, EngineHostFrame.CreateExit(exitCode), CancellationToken.None)
                     .ConfigureAwait(false);
             }
             catch (IOException)

@@ -145,7 +145,8 @@ public static class HumanLogChecks
             text.Contains("Peak memory: Not recorded", StringComparison.Ordinal),
             "facts this run does not record are labelled, never invented");
         Check.Require(text.Contains("ATTENTION SUMMARY", StringComparison.Ordinal) &&
-            text.Contains("changed while it was being synced", StringComparison.Ordinal) &&
+            text.Contains("its observed state changed or could not be confirmed as current", StringComparison.Ordinal) &&
+            Text.Get(TextKey.FailChanged).Contains("Sync will retry at the next sync opportunity.", StringComparison.Ordinal) &&
             text.Contains("Inspect notices: engine issues --pair Pair A", StringComparison.Ordinal),
             "the attention summary groups by the recorded cause and points at the durable notice view");
         Check.Require(text.Contains("Notice emissions:", StringComparison.Ordinal), "notice emissions");

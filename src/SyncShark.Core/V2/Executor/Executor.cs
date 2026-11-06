@@ -189,7 +189,7 @@ public sealed partial class Executor : IExecutor
                         .ConfigureAwait(false);
                 if (!committedByRunner)
                     await StoreAsync(() => _store.CommitResult(pairId, gen, intent, result), token).ConfigureAwait(false);
-                // Astra review of 4c00da0: a delete job that stays unresolved leaves its intent Uncertain forever,
+                // review of 4c00da0: a delete job that stays unresolved leaves its intent Uncertain forever,
                 // which blocks the whole pair's run (SyncRun) with no user-visible signal. Past the escalation window
                 // raise a stored notice naming the path and job; the effect stays Uncertain, never replayed. Once the
                 // intent resolves (Done, Failed or Skipped) that notice is closed explicitly: a completed delete drops

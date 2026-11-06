@@ -2,7 +2,7 @@ namespace Massdex.SyncShark.Engine.Run;
 
 /// <summary>The one product-state-lifetime owner of the disposable whole-pair scan of an initial real
 /// Repair (LIVE 3.2). The host composition creates one instance and injects it into every pair session as
-/// PairSession.Scans; only that Repair enters it, and a configuration change drains its waiters outside any
+/// PairSession.Scans; whole Repair excludes other whole Repairs, while scoped grants remain independent, and a configuration change drains its waiters outside any
 /// resource lock. It is scan ownership, not a Monitor mutex, root approval or permission to skip a listing.</summary>
 internal sealed class ScanOwnership
 {
@@ -30,13 +30,23 @@ internal sealed class ScanOwnership
                     throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
                 }
             }
-            return new ScanReservation(this, acquired);
+            return new ScanReservation(this, acquired, exclusive: true);
         }
         catch
         {
             Release([.. acquired]);
             throw;
         }
+    }
+
+    /// <summary>Grants isolated scoped scratch without waiting for a whole Repair or another scope.</summary>
+    internal ScanReservation GrantScoped(string pairId, Func<bool> acceptGrant, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(acceptGrant);
+        ct.ThrowIfCancellationRequested();
+        if (!acceptGrant()) throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
+        ct.ThrowIfCancellationRequested();
+        return new ScanReservation(this, [pairId], exclusive: false);
     }
 
     /// <summary>Frees the acquired slots and wakes waiters to retry; owns no decision about whether a scan may run.</summary>

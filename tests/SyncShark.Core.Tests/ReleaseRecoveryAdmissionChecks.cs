@@ -6,7 +6,7 @@ internal static class ReleaseRecoveryAdmissionChecks
     private const string Revision = "1234567890abcdef1234567890abcdef12345678";
     private const string Version = "0.3.55";
     private static readonly string[] InstallSteps = ["stage-package", "publish-runtime", "backup-state",
-        "create-next-link", "retain-predecessor", "publish-successor", "register-explorer-package", "verify-complete"];
+        "create-next-link", "retain-predecessor", "publish-successor", "register-explorer-package", "register-application", "verify-complete"];
 
     internal static void Run(string root)
     {
@@ -61,7 +61,10 @@ internal static class ReleaseRecoveryAdmissionChecks
         Check(Admit, "Contradictory product root is refused", true);
         Write(install, revision: new string('f', 40));
         Check(Admit, "Contradictory source revision is refused", true);
-        Write(install, completed: InstallSteps[..7]);
+        var missingRegistration = InstallSteps.Where(step => step != "register-application").ToArray();
+        Write(install, allowed: missingRegistration, completed: missingRegistration);
+        Check(Admit, "An eight-step complete install missing application registration is refused", true);
+        Write(install, completed: InstallSteps[..^1]);
         Check(Admit, "A falsely complete install missing its final phase is refused", true);
         Write(install, allowed: ["verify-complete"], completed: ["verify-complete"]);
         Check(Admit, "A fabricated shortened complete phase list is refused", true);

@@ -67,8 +67,8 @@ internal static class AutoSyncStartupChecks
             AutoSyncProcess.SupervisorArguments == "--core v2 --autosync-supervisor",
             "the private child and compatibility argument spellings stay exact");
         Require(AutoSyncProcess.StartupCommand(executable) ==
-            $"{Quoted(Path.GetFullPath(executable))} {AutoSyncProcess.EngineSupervisorArguments}",
-            "startup registers the exact canonical Engine supervisor command");
+            $"{Quoted(Path.GetFullPath(executable))} --cli engine host start --yes",
+            "startup registers the confirmed Engine host CLI command, never the classic window");
         Require(AutoSyncProcess.IsProductStartupCommand(Quoted(executable) + " " + AutoSyncProcess.EngineSupervisorArguments) &&
             AutoSyncProcess.IsProductStartupCommand(Quoted(executable) + " " + AutoSyncProcess.SupervisorArguments),
             "read-only recognition accepts the exact canonical and old supervisor commands");

@@ -18,7 +18,7 @@ internal static class SourceFixture
         if (store.ReadJournal(domain) is not null) return;
         var source = store.ReadSource(pair.PairId, Side.Local)!.Value;
         var member = (pair.PairId, store.ReadPairExecution(pair.PairId)!.Value.Generation, source.Epoch,
-            source.Revision, false, false);
+            source.Revision, false);
         Check.Require(store.AcquireJournalPage(domain, null, new JournalPosition(1, 1), [member], []) is not null,
             "the fixture journal position is acquired");
     }

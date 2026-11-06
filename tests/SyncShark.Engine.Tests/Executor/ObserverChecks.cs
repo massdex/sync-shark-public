@@ -21,8 +21,12 @@ public static class ObserverChecks
 
     private static async Task RunAsync()
     {
+        await FreshDropboxObservationAsync();
+        await FreshLocalObservationAsync();
         await UnboundObservationAsync();
         await SavedBindingAsync();
+        await CounterpartOwnershipAsync();
+        await ReturningOriginalAsync();
         await CurrentKindAsync();
         await AbsenceAsync();
         await UnicodeKeysAsync();
@@ -38,6 +42,55 @@ public static class ObserverChecks
         await IndependentUnderscoreAsync();
         await RenamedToValidAsync();
         await ZeroSiblingAsync();
+    }
+
+    private static async Task FreshDropboxObservationAsync()
+    {
+        foreach (var mode in new[] { "present", "absent", "skip", "mismatch" })
+        {
+            using var store = new InMemoryStateStore();
+            var context = Context(store);
+            var path = mode == "skip" ? "name:" : "item";
+            var current = FileAt(path);
+            Seed(Side.Dropbox, context, current);
+            var dropbox = new CountingSide(context.Dropbox);
+            var local = new CountingSide(context.Local);
+            context = context with { Local = local, Dropbox = dropbox };
+            var observer = new Observer(context, new Parents(context));
+            var supplied = mode == "absent" ? null : mode == "skip" ? Skipped(path) : current with { Size = 9 };
+            var row = await observer.ObserveDropboxAsync(Side.Dropbox, path,
+                (PathNames.DropboxKey(path), null, null), default,
+                (mode == "mismatch" ? "other" : path, supplied));
+            Check.Require(row.Dropbox == (mode == "mismatch" ? current : supplied) &&
+                row.Context.Skipped == (mode == "skip"), "121 supplied Dropbox observation preserves its result: " + mode);
+            Check.Require(local.Reads == 0 && dropbox.Reads == (mode == "mismatch" ? 1 : 0),
+                "121 only an exact primary path avoids Dropbox metadata: " + mode);
+        }
+    }
+
+    private static async Task FreshLocalObservationAsync()
+    {
+        foreach (var mode in new[] { "present", "absent", "invalid", "mismatch", "case", "dropbox", "unsupplied" })
+        {
+            using var store = new InMemoryStateStore();
+            var context = Context(store);
+            var path = mode == "invalid" ? "CON" : "item";
+            var current = FileAt(path);
+            Seed(Side.Local, context, current);
+            var local = new CountingSide(context.Local);
+            context = context with { Local = local };
+            var observer = new Observer(context, new Parents(context));
+            var supplied = mode == "absent" ? null : current with { Size = 9 };
+            (string Path, Entry? Entry)? fresh = mode == "unsupplied" ? null :
+                (mode == "mismatch" ? "other" : mode == "case" ? "ITEM" : path, supplied);
+            var observed = await observer.ObserveLocalAsync(mode == "dropbox" ? Side.Dropbox : Side.Local,
+                path, default, fresh);
+            var reused = mode is "present" or "absent";
+            Check.Require(observed.Local == (mode == "invalid" ? null : reused ? supplied : current),
+                "106 supplied Local observation respects absence, transferability, exact path and origin: " + mode);
+            Check.Require(local.Reads == (reused || mode == "invalid" ? 0 : 1),
+                "106 only a matching transferable Local observation removes a read: " + mode);
+        }
     }
 
     private static async Task UnboundObservationAsync()
@@ -104,6 +157,60 @@ public static class ObserverChecks
                 Check.Require(row.PathOn(side) == path,
                     "An absent observed entry keeps its own path as the destination");
             }
+        }
+    }
+
+    private static async Task CounterpartOwnershipAsync()
+    {
+        foreach (var side in Enum.GetValues<Side>())
+        foreach (var bound in new[] { false, true })
+        foreach (var replaced in new[] { false, true })
+        {
+            using var store = new InMemoryStateStore();
+            var context = Context(store);
+            var other = PathNames.Other(side);
+            var counterpart = FileAt("item");
+            var partner = FileAt("saved-copy");
+            SyncedEntry? saved = bound
+                ? side == Side.Local ? Save(context, partner, counterpart) : Save(context, counterpart, partner)
+                : null;
+            Seed(other, context, replaced ? counterpart with { Id = "replacement" } : counterpart);
+            var row = await Observe(context, side, "item");
+            var suppressed = bound && !replaced;
+            Check.Require(row.Synced is null && row.EntryOn(side) is null &&
+                (row.EntryOn(other) is null) == suppressed,
+                "Only the matching identity owned by another requested-side key is excluded");
+            var action = Decide.For(row, FirstRunPolicy.NewestWins, ComparisonTime, localContentDirty: false);
+            Check.Require(suppressed
+                ? action.Kind == ActionKind.None && action.None == NoneReason.InSync
+                : action.Kind == (other == Side.Local ? ActionKind.Upload : ActionKind.Download),
+                "An owned counterpart retires as in-sync; unbound or reused paths still transfer");
+            if (saved is not null)
+                Check.Require(store.SyncedByKey(context.Pair.PairId, other, saved.KeyOn(other)) == saved,
+                    "Excluding a counterpart leaves its actual binding unchanged");
+        }
+    }
+
+    private static async Task ReturningOriginalAsync()
+    {
+        foreach (var side in Enum.GetValues<Side>())
+        foreach (var present in new[] { false, true })
+        foreach (var relocated in new[] { false, true })
+        {
+            using var store = new InMemoryStateStore();
+            var context = Context(store);
+            var near = FileAt("Original") with { Id = "near" };
+            var partner = FileAt("Partner") with { Id = "partner" };
+            var returned = FileAt("Original") with { Id = relocated ? partner.Id : "returned" };
+            var saved = side == Side.Local ? Save(context, partner, near) : Save(context, near, partner);
+            Seed(PathNames.Other(side), context, near);
+            if (present) Seed(side, context, returned);
+            var row = await Observe(context, side, "Original");
+            Check.Require(row.EntryOn(side) == (present ? returned : null), "The requested entry is never invented.");
+            Check.Require(present && !relocated
+                    ? row.EntryOn(PathNames.Other(side)) == near && row.Synced == saved
+                    : row.EntryOn(PathNames.Other(side)) is null && row.Synced is null,
+                "Only a present returning original retains the crossed counterpart; absent requests and moves keep #112 behavior.");
         }
     }
 

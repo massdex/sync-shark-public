@@ -6,6 +6,7 @@ using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Planner;
 using Massdex.SyncShark.Engine.Storage;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
+using ListingChecks = Massdex.SyncShark.Engine.Tests.Dropbox.DropboxListingChecks;
 
 namespace Massdex.SyncShark.Engine.Tests.Executor;
 
@@ -45,12 +46,15 @@ public static class ResolutionRunnerChecks
         foreach (var side in new[] { Side.Local, Side.Dropbox })
         foreach (var failCopy in new[] { false, true })
             await FolderOverFolderAsync(side, failCopy);
+        await FolderRetryAsync();
         await InvalidAsync(false);
         await InvalidAsync(true);
         await StaleBeforeBadChoiceAsync();
         await LockAndCancellationAsync();
         await SelectedAdmissionAsync(false);
         await SelectedAdmissionAsync(true);
+        foreach (var failure in new[] { "none", "F1", "F2", "cancel", "gone" })
+            await ListingOccurrencesAsync(failure);
         foreach (var side in new[] { Side.Local, Side.Dropbox })
         foreach (var incoming in new[] { true, false })
         foreach (var fail in new[] { false, true })
@@ -98,6 +102,95 @@ public static class ResolutionRunnerChecks
         foreach (var failure in new[] { (Root: 0, Throws: false), (Root: 1, Throws: false),
                      (Root: 2, Throws: false), (Root: 1, Throws: true), (Root: 2, Throws: true) })
             await MoveFollowUpsAsync(side, folder, sameSide, failure.Root, failure.Throws);
+    }
+
+    private static async Task FolderRetryAsync()
+    {
+        foreach (var history in new[] { "complete", "owed", "match" })
+        foreach (var failed in new[] { false, true })
+        {
+            var original = Context();
+            using var store = original.Store;
+            var pair = original.Pair.PairId;
+            var source = original.Dropbox;
+            var target = original.Local;
+            var parent = await source.EnsureFolderAsync("Parent", default);
+            await source.EnsureFolderAsync("Parent/F1", default);
+            await source.EnsureFolderAsync("Parent/F2", default);
+            await PutAsync(source, "Parent/F2/Child", "child");
+            await target.EnsureFolderAsync("Parent", default);
+            var retained = await PutAsync(target, "Parent/LocalChild", "retained");
+            var retainedHash = await target.ContentHashAsync(retained, default);
+            store.Commit(pair, StateChange.Empty with
+            {
+                Raise = [(IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, retained.Path,
+                    new IssueSubject([new IssueItem(Side.Local, retained.Path, retained.Id)], null,
+                        FirstRunDeletion: IssueSubject.FirstRunDeletionKind.Item))]
+            });
+            var blocked = failed;
+            var context = original with
+            {
+                Store = new RepairedStore(store),
+                ReadDeletionEvidenceAsync = (path, _, _) => Task.FromResult<DeletionEvidence>(
+                    new DeletionEvidence.DeletedFile(path, "domain", "deleted-id", "revision",
+                        DateTimeOffset.UtcNow.AddDays(-1), null, retainedHash, null)),
+                Local = new ProxySide(target)
+                {
+                    EnsureFault = path => blocked && path == "Parent/F2"
+                        ? new ItemFailedException(path, TextKey.FailChanged, null) : null
+                }
+            };
+            if (history != "owed")
+            {
+                var token = store.BeginScan(pair, 0, true);
+                var sink = store.OpenScan(pair, Side.Dropbox, ScanTestSettings.BatchRows);
+                if (history == "match") await sink.AddAsync(new Listed(retained.Path, null), default);
+                await sink.CompleteAsync();
+                store.SaveDeletedHistory(pair, token, "history");
+                await store.EndScanAsync(pair, token, context.Settings.StoragePageSize);
+            }
+            store.Commit(pair, StateChange.Empty with
+            {
+                Raise = [(IssueKind.Failure, TextKey.FailChanged, "Parent",
+                    new IssueSubject([new IssueItem(Side.Dropbox, "Parent", parent.Id)], null))]
+            });
+            var issue = store.Issues(pair).Single(value => value.Path == "Parent");
+            var boundary = new TestSelectedBoundary(context);
+            var ports = new SyncPorts(PassthroughRecoveryBoundary.Instance, RefusingExecutionBoundary.Instance, boundary, 0);
+            ports = ports with
+            {
+                RunBatchAsync = (selection, side, scope, retries, settles, ct) =>
+                    SyncJobs.RunBatchAsync(context, ports, selection, scope, ct, side, retries, settles)
+            };
+            var syncer = new Syncer(context, ports);
+            await syncer.ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
+            Check.Require(history == "owed"
+                ? store.Issues(pair).Any(value => value.Path == retained.Path && value.Kind == IssueKind.Failure) &&
+                    await source.ReadOneAsync(retained.Path, default) is null
+                : history == "match" ? await target.ReadOneAsync(retained.Path, default) is null
+                    : await source.ReadOneAsync(retained.Path, default) is not null,
+                "actual Retry batch distinguishes history=" + history + " failed=" + failed + " issues=" + string.Join(",", store.Issues(pair).Select(i => i.Path + ":" + i.Cause)));
+            if (failed)
+            {
+                Check.Require(await target.ReadOneAsync("Parent/F2/Child", default) is null &&
+                    store.SyncedByKey(pair, Side.Dropbox, PathNames.DropboxKey("Parent/F2/Child")) is null,
+                    "a failed F2 leaves its child uncopied and unacknowledged");
+                var failure = store.Issues(pair).Single(value => value.Kind == IssueKind.Failure && value.Path == "Parent/F2");
+                blocked = false;
+                await syncer.ResolveAsync(failure, ResolutionChoice.Retry, null, null, default);
+            }
+            Check.Require(await target.ReadOneAsync("Parent/F2/Child", default) is not null &&
+                store.SyncedByKey(pair, Side.Dropbox, PathNames.DropboxKey("Parent/F2/Child")) is not null &&
+                !store.Issues(pair).Any(value => value.Kind == IssueKind.Failure && value.Path != retained.Path),
+                "Retry after F2 succeeds copies and records its previously gated child and clears failure");
+            Check.Require(store.SyncedByKey(pair, Side.Dropbox, PathNames.DropboxKey("Parent/F1")) is not null,
+                "an independent successful sibling is retained");
+        }
+    }
+
+    private sealed class RepairedStore(IStateStore inner) : ForwardingStateStore(inner)
+    {
+        public override bool FirstRepairDone(string pairId) => true;
     }
 
     private static async Task TieAsync(TextKey cause, ResolutionChoice choice)
@@ -973,6 +1066,96 @@ public static class ResolutionRunnerChecks
             "The admitted root effect and closure complete inside that single selected phase.");
     }
 
+    private static async Task ListingOccurrencesAsync(string failure)
+    {
+        var context = Context();
+        using var store = context.Store;
+        using var cancellation = new CancellationTokenSource();
+        var source = (FakeSide)context.Dropbox;
+        var folder = await source.EnsureFolderAsync("folder", default);
+        await source.EnsureFolderAsync("folder/X", default);
+        await source.EnsureFolderAsync("folder/X/a", default);
+        var child = await PutAsync(source, "folder/X/a/b", "child");
+        var occupant = await PutAsync(context.Local, "folder", "occupant");
+        var issue = Raise(context, IssueKind.Tie, TextKey.TieKindBoth, occupant, folder, null);
+        var root = context.Pair.DropboxRoot;
+        object[] input = failure == "gone"
+            ? [ListingChecks.Folder(root, "folder/X/a", "F1"), ListingChecks.Deleted(root, "folder/X/a"),
+                ListingChecks.File(root, child.Path, id: "C"), ListingChecks.Folder(root, "folder/X", "X")]
+            : [ListingChecks.File(root, child.Path, id: "C"), ListingChecks.Folder(root, "folder/X/a", "F1"),
+                ListingChecks.Folder(root, "folder/X/a", "F2"), ListingChecks.Folder(root, "folder/X", "X")];
+        using var fixture = new ListingChecks.Fixture(context.Pair,
+            _ => ListingChecks.Page(true, "next", input[..^1]),
+            _ => ListingChecks.Page(false, "end", input[^1]));
+        Listed? current = null;
+        var firstRead = false;
+        var calls = new List<string>();
+        var probe = new ProxySide(source)
+        {
+            ReadFault = path =>
+            {
+                if (!firstRead || current is not { Entry: { } entry } || current.Path != path) return null;
+                firstRead = false;
+                var occurrence = entry.Id;
+                calls.Add(occurrence);
+                return occurrence == failure ? new ItemFailedException(path, TextKey.ReadDropboxFailed, null) : null;
+            }
+        };
+        context = context with { Dropbox = new RecordingSide(probe, () => false, [], Listing) };
+        SyncOutcome? outcome = null;
+        var cancelled = false;
+        try { outcome = await Runner(context).ResolveAsync(issue, ResolutionChoice.UseDropbox, null, null, cancellation.Token); }
+        catch (OperationCanceledException) { cancelled = true; }
+        string[] expected = failure switch
+        {
+            "F1" or "cancel" => ["X", "F1"],
+            "F2" => ["X", "F1", "F2"],
+            "gone" => ["X", "C"],
+            _ => ["X", "F1", "F2", "C"]
+        };
+        Check.Require(calls.SequenceEqual(expected) && cancelled == (failure == "cancel") && !Open(context, issue),
+            "Real listing callbacks are occurrence-ordered: a failed folder gates later occurrences/children, not its closed root tie.");
+        var failures = store.Issues(context.Pair.PairId).Where(item => item.Kind == IssueKind.Failure).ToArray();
+        var failed = failure is "F1" or "F2";
+        Check.Require(failed ? outcome?.Raised == IssueKind.Failure && failures.Length == 1 &&
+            failures[0].Path == "folder/X/a" : failures.Length == 0,
+            "A failed folder retains one visible failure rather than acknowledging its subtree.");
+        Check.Require((await context.Local.ReadOneAsync(child.Path, default) is not null) == (failure is "none" or "gone") &&
+            (store.SyncedByKey(context.Pair.PairId, Side.Dropbox, PathNames.Key(child.Path)) is not null) == (failure is "none" or "gone"),
+            "The gated or cancelled child remains uncopied and unsynced; successful callbacks settle it.");
+        if (failure == "F2")
+        {
+            // Retry uses the current provider subtree, not the failed listing occurrence stream.
+            var retryContext = context with { Dropbox = source, Store = new RepairedStore(store) };
+            var ports = new SyncPorts(PassthroughRecoveryBoundary.Instance, RefusingExecutionBoundary.Instance,
+                new TestSelectedBoundary(retryContext), 0);
+            ports = ports with
+            {
+                RunBatchAsync = (selection, side, scope, retries, settles, ct) =>
+                    SyncJobs.RunBatchAsync(retryContext, ports, selection, scope, ct, side, retries, settles)
+            };
+            await new Syncer(retryContext, ports).ResolveAsync(failures.Single(), ResolutionChoice.Retry,
+                null, null, default);
+            Check.Require(await context.Local.ReadOneAsync(child.Path, default) is not null &&
+                store.SyncedByKey(context.Pair.PairId, Side.Dropbox, PathNames.Key(child.Path)) is not null &&
+                !store.Issues(context.Pair.PairId).Any(item => item.Kind == IssueKind.Failure),
+                "actual Retry after the second same-path folder occurrence copies and records the gated child and clears failure");
+        }
+
+        async IAsyncEnumerable<Listed> Listing(string under, ListOptions options,
+            [EnumeratorCancellation] CancellationToken ct)
+        {
+            await foreach (var listed in fixture.Listing.ReadAll(under, options, ListingChecks.BeginListing(), ct))
+            {
+                current = listed;
+                firstRead = listed.Entry is not null;
+                yield return listed;
+                if (failure == "cancel" && listed.Entry?.Id == "F1") cancellation.Cancel();
+            }
+            current = null;
+        }
+    }
+
     private static async Task FolderFailuresAsync(Side side, IssueKind kind, string failure)
     {
         var context = Context();
@@ -1380,6 +1563,8 @@ public static class ResolutionRunnerChecks
         public void RequireScopes(string pairId, long requiredGeneration, IReadOnlyList<PathLockScope> scopes) =>
             Require(pairId, requiredGeneration, scopes.Select(scope => scope.Key).ToArray());
 
+        public void Revalidate() { }
+
         public ValueTask ReleaseAdmissionAsync() => throw new NotSupportedException(nameof(ReleaseAdmissionAsync));
 
         public ValueTask DisposeAsync() => default;
@@ -1416,13 +1601,15 @@ public static class ResolutionRunnerChecks
         {
             public void Require(string pairId, long generation, IReadOnlyList<string> requiredLockKeys) { }
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) { }
+            public void Revalidate() { }
             public ValueTask ReleaseAdmissionAsync() => default;
             public ValueTask DisposeAsync() => default;
         }
     }
 
     /// <summary>Records every (side, path) read once the gate opens, so real follow-up visits replace the old fake syncPath.</summary>
-    private sealed class RecordingSide(ISide inner, Func<bool> recording, List<(Side Side, string Path)> visits) : ISide
+    private sealed class RecordingSide(ISide inner, Func<bool> recording, List<(Side Side, string Path)> visits,
+        Func<string, ListOptions, CancellationToken, IAsyncEnumerable<Listed>>? listing = null) : ISide
     {
         public Side Side => inner.Side;
         public List<(string From, string To)> Moves { get; } = [];
@@ -1436,7 +1623,8 @@ public static class ResolutionRunnerChecks
             [EnumeratorCancellation] CancellationToken ct)
         {
             Visit(under);
-            await foreach (var listed in inner.ReadAllAsync(under, options, ct)) yield return listed;
+            await foreach (var listed in listing?.Invoke(under, options, ct) ?? inner.ReadAllAsync(under, options, ct))
+                yield return listed;
         }
 
         public Task<Entry?> ReadOneAsync(string path, CancellationToken ct)

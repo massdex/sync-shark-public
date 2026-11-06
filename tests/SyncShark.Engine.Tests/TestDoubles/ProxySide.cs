@@ -15,6 +15,7 @@ internal sealed class ProxySide(ISide inner) : ISide
     public Func<string, Task?>? BlockEnsure { get; init; }
     public Func<string, CancellationToken, Task>? BlockPublish { get; init; }
     public Action<Entry>? AfterPublish { get; init; }
+    public Action<Entry?, RemovalSelection?>? OnPublish { get; init; }
     public Func<string, Exception?>? EnsureFault { get; init; }
     public bool Finished { get; private set; }
     public bool LateMarkers { get; init; }
@@ -76,6 +77,7 @@ internal sealed class ProxySide(ISide inner) : ISide
         CancellationToken ct)
     {
         if (BlockPublish is { } block) await block(staged.Path, ct);
+        OnPublish?.Invoke(expected, selection);
         var published = await inner.PublishAsync(staged, expected, selection, ct);
         if (published.Outcome == RemovalOutcome.Published && published.Final is { } entry) AfterPublish?.Invoke(entry);
         return published;

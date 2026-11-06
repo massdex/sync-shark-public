@@ -102,6 +102,15 @@ public static class ScenarioChecks
         ("42-nested-new-tree-one-repair", BodyNestedNewTree, []),
         ("43-own-folder-echo-settles", BodyOwnFolderEchoSettles, []),
         ("44-own-folder-target-before-fresh-read", BodyTargetBeforeFreshReadRefuses, []),
+        ("45-pause-during-prerequisite", scenario => BodyPauseDuringPrerequisite(scenario, admissionFirst: false), []),
+        ("45b-pause-admission-fence", scenario => BodyPauseDuringPrerequisite(scenario, admissionFirst: true), []),
+        ("45c-pause-genuine-failure", scenario => BodyPauseDuringPrerequisite(scenario, admissionFirst: true,
+            new IOException("synthetic prerequisite failure")), []),
+        ("45d-pause-unrelated-stale", scenario => BodyPauseDuringPrerequisite(scenario, admissionFirst: true,
+            new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged)), []),
+        ("45e-explicit-prerequisite-cancel", BodyExplicitPrerequisiteCancellation, []),
+        ("45f-pause-before-prerequisite-dispatch", scenario => BodyPauseDuringPrerequisite(scenario,
+            admissionFirst: true, acquisition: true), []),
         // shortcut: native drive changes and policy choices need a configurable session, add cases when the fixture exposes it.
         // shortcut: NoSpace needs a typed provider refusal, add suppression coverage when the account port exposes it.
         // shortcut: denied-folder snapshots fail before Repair, add ACL coverage when snapshots tolerate unreadable entries.
@@ -1711,6 +1720,148 @@ public static class ScenarioChecks
         scenario.RequireQuiet();
     }
 
+    // BUG-132: only Pause stops the Monitor-admitted attempt; the next checkpoint proves its catch has finished.
+    private static void BodyPauseDuringPrerequisite(Scenario scenario, bool admissionFirst, Exception? failure = null,
+        bool acquisition = false)
+    {
+        scenario.LocalFile("pause/note.txt", "pause fixture");
+        using var inFlight = new ManualResetEventSlim();
+        using var released = new ManualResetEventSlim();
+        using var diagnosed = new ManualResetEventSlim();
+        using var nextCheckpoint = new ManualResetEventSlim();
+        using var nextReleased = new ManualResetEventSlim();
+        using var cancellationDelivered = new ManualResetEventSlim();
+        var checkpoints = 0;
+        var drain = new DeferredSynchronizationContext();
+        Task? paused = null;
+        Task? cancellationWitness = null;
+        scenario.BeforeRepairCheckpoint = () =>
+        {
+            if (Interlocked.Increment(ref checkpoints) == 1 && !acquisition)
+            {
+                inFlight.Set();
+                released.Wait(Scenario.Cancellation);
+                if (failure is not null) throw failure;
+            }
+            else
+            {
+                nextCheckpoint.Set();
+                nextReleased.Wait(Scenario.Cancellation);
+            }
+        };
+        scenario.Progress = message =>
+        {
+            // This heading is emitted inside Acquisition, outside the host lock and before source-base work.
+            if (acquisition && message.Contains(Text.Get(TextKey.StageSourceBase), StringComparison.OrdinalIgnoreCase) &&
+                !inFlight.IsSet)
+            {
+                inFlight.Set();
+                released.Wait(Scenario.Cancellation);
+            }
+            if (message.Contains(Text.Get(TextKey.HumanStopped), StringComparison.Ordinal) ||
+                message.Contains(Text.Get(TextKey.HumanError), StringComparison.Ordinal)) diagnosed.Set();
+        };
+        try
+        {
+            scenario.Start();
+            scenario.Require(inFlight.Wait(TimeSpan.FromMinutes(1)),
+                "Monitor's prerequisite reached its held acquisition or Repair checkpoint");
+            var retryBefore = scenario.Store.ReadPrerequisiteRetry(scenario.Pair.PairId);
+            if (!admissionFirst)
+                cancellationWitness = scenario.Host.DispatchAsync(scenario.Pair.PairId, async (_, _, _, token) =>
+                {
+                    try { await Task.Delay(Timeout.InfiniteTimeSpan, token); }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { cancellationDelivered.Set(); }
+                    return true;
+                }, Scenario.Cancellation);
+            var previous = SynchronizationContext.Current;
+            SynchronizationContext.SetSynchronizationContext(drain);
+            try { paused = scenario.Host.PauseAsync(scenario.Pair.PairId, Scenario.Cancellation); }
+            finally { SynchronizationContext.SetSynchronizationContext(previous); }
+            scenario.Require(scenario.Host.IsPaused(scenario.Pair.PairId), "Pause has closed dispatch admission");
+            if (acquisition)
+            {
+                drain.Release();
+                paused.GetAwaiter().GetResult();
+                var refused = false;
+                try
+                {
+                    scenario.Host.DispatchAsync(scenario.Pair.PairId, (_, _, _, _) => Task.FromResult(true),
+                        Scenario.Cancellation).GetAwaiter().GetResult();
+                }
+                catch (LiveAdmissionStaleException) { refused = true; }
+                scenario.Require(refused, "ordinary Dispatch remains stale even with a paused prerequisite pending");
+            }
+            if (!admissionFirst)
+            {
+                drain.Release();
+                // Drain cancels the held Repair before this later dispatch; its linked cancellation has completed.
+                scenario.Require(cancellationDelivered.Wait(TimeSpan.FromMinutes(1)), "Pause delivered cancellation");
+            }
+            released.Set();
+            scenario.Require(diagnosed.Wait(TimeSpan.FromMinutes(1)), "the old attempt recorded its diagnosis");
+            drain.Release();
+            paused.GetAwaiter().GetResult();
+            scenario.Host.ResumeAsync(scenario.Pair.PairId, Scenario.Cancellation).GetAwaiter().GetResult();
+            scenario.Require(nextCheckpoint.Wait(TimeSpan.FromMinutes(1)),
+                "the next Monitor prerequisite reached its checkpoint after the old Monitor catch completed");
+            var lines = Directory.EnumerateFiles(scenario.Logs, "*", SearchOption.AllDirectories)
+                .SelectMany(LogFields).ToArray();
+            scenario.Require(lines.Count(fields => fields.Length == RunLog.RecordFieldCount &&
+                    fields[RunLog.FieldOutcome] == nameof(TextKey.RequiredRepairRetry)) == (failure is null ? 0 : 1),
+                "Pause suppresses only its own stop, not a genuine failure or unrelated stale refusal");
+            if (failure is null)
+                scenario.Require(lines.Count(fields => fields.Length == RunLog.RecordFieldCount &&
+                        fields[RunLog.FieldKind] == nameof(RunEventKind.Stage) &&
+                        fields[RunLog.FieldWhat] == nameof(TextKey.StageCheckpoint) &&
+                        fields[RunLog.FieldOutcome].Length == 0) == (admissionFirst && !acquisition ? 1 : 0),
+                    "the old Repair reached its checkpoint fence only in the dispatch-admission-first ordering");
+            scenario.Require(scenario.Store.ReadPrerequisiteRetry(scenario.Pair.PairId) == retryBefore,
+                "Pause and resume leave prerequisite retry accounting unchanged");
+        }
+        finally
+        {
+            released.Set();
+            nextReleased.Set();
+            drain.Release();
+            paused?.GetAwaiter().GetResult();
+            cancellationWitness?.GetAwaiter().GetResult();
+            scenario.BeforeRepairCheckpoint = null;
+            scenario.Progress = null;
+            scenario.Host.PauseAsync(scenario.Pair.PairId, Scenario.Cancellation).GetAwaiter().GetResult();
+        }
+    }
+
+    private static void BodyExplicitPrerequisiteCancellation(Scenario scenario)
+    {
+        scenario.LocalFile("pause/note.txt", "pause fixture");
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(Scenario.Cancellation);
+        var stoppedDiagnoses = 0;
+        scenario.Progress = message =>
+        {
+            if (message.Contains(Text.Get(TextKey.HumanStopped), StringComparison.Ordinal))
+                Interlocked.Increment(ref stoppedDiagnoses);
+        };
+        scenario.BeforeRepairCheckpoint = caller.Cancel;
+        Exception? stopped = null;
+        try { scenario.Host.Operations.RepairAsync(scenario.Pair.PairId, caller.Token).GetAwaiter().GetResult(); }
+        catch (OperationCanceledException error) { stopped = error; }
+        finally { scenario.BeforeRepairCheckpoint = null; scenario.Progress = null; }
+        scenario.Require(stopped is PrerequisiteStoppedException cancellation &&
+                cancellation.InnerException is OperationCanceledException original &&
+                cancellation.CancellationToken == original.CancellationToken && cancellation.CancellationToken.IsCancellationRequested,
+            "explicit prerequisite Repair retains its classified stop and underlying cancellation token");
+        scenario.Require(stoppedDiagnoses == 1, "explicit prerequisite Repair emits exactly one stopped diagnosis");
+        var lines = Directory.EnumerateFiles(scenario.Root, "*" + ResourceNames.LogExtension, SearchOption.AllDirectories)
+            .SelectMany(LogFields).ToArray();
+        scenario.Require(lines.Count(fields => fields.Length == RunLog.RecordFieldCount &&
+                fields[RunLog.FieldKind] == nameof(RunEventKind.Failed) &&
+                fields[RunLog.FieldWhat] == nameof(OperationCanceledException)) == 1,
+            "the explicit Repair's canonical log also contains exactly one stopped diagnosis");
+        scenario.Require(scenario.Store.ReadPrerequisiteRetry(scenario.Pair.PairId) is null,
+            "explicit cancellation records no prerequisite retry");
+    }
+
     /// <summary>The actual live-account construction seam, asserted over the in-memory wire and fake credentials.</summary>
     private static void LiveCompositionSeamChecks()
     {
@@ -2031,7 +2182,7 @@ public static class ScenarioChecks
         using var rig = new ArrangementRig();
         var created = new Entry("/", true, 0, Scenario.T0, "id:created", "", "", null);
         var diagnostic = Scenario.RetainedRootDiagnostic(created);
-        Seam(diagnostic.Contains("path=/SyncShark Engine Test", StringComparison.Ordinal), true,
+        Seam(diagnostic.Contains("path=/Apps/Sync Shark/Testing/engine-scenarios", StringComparison.Ordinal), true,
             "the retained-root diagnostic names the full provider root path");
         Seam(diagnostic.Contains("id=id:created", StringComparison.Ordinal), true,
             "the retained-root diagnostic names the actual creation receipt id");

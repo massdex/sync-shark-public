@@ -45,7 +45,7 @@ internal static class LocalDeltaChecks
         return delta;
     }
 
-    // Astra re-review 1: a stored folder the refresh finds replaced by a file loses its stored subtree.
+    // re-review 1: a stored folder the refresh finds replaced by a file loses its stored subtree.
     private static async Task FolderReplacedByFile_DeletesStoredSubtreeAsync()
     {
         var root = LocalChecks.FreshRoot("folder-to-file");
@@ -63,7 +63,7 @@ internal static class LocalDeltaChecks
             "only the new file stays live at sub/F; sub/F/a.txt is gone");
     }
 
-    // Astra re-review 2: a gone folder holding a stored row this refresh may not decide on (outside the selection)
+    // re-review 2: a gone folder holding a stored row this refresh may not decide on (outside the selection)
     // is kept, so Storage's cascading folder delete never removes that row; its other children are deleted.
     private static async Task GoneFolder_KeepsUndecidableChildAsync()
     {
@@ -81,7 +81,7 @@ internal static class LocalDeltaChecks
             "the excluded stored row survives");
     }
 
-    // Astra re-review 4: a removed deep tree whose every level was requested is one Delete, not one per folder.
+    // re-review 4: a removed deep tree whose every level was requested is one Delete, not one per folder.
     private static async Task DeepChain_OneDeleteAsync()
     {
         const int Depth = 40;

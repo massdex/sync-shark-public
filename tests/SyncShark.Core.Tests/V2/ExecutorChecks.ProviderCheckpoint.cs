@@ -47,7 +47,7 @@ internal static partial class ExecutorChecks
         await MkDirOccupiedPathWaitsForGraceAsync();
     }
 
-    // Astra re-check of 0320328: a file at the path is not a definitive refusal of an unknown create. The effect is
+    // re-check of 0320328: a file at the path is not a definitive refusal of an unknown create. The effect is
     // retained inside its grace and only resolves superseded after it, so an occupied path is never replanned early.
     private static async Task MkDirOccupiedPathWaitsForGraceAsync()
     {
@@ -83,7 +83,7 @@ internal static partial class ExecutorChecks
         }
     }
 
-    // Astra review of 04c4d75: a proven folder-create job must still read the folder's own state back. CommitDone
+    // review of 04c4d75: a proven folder-create job must still read the folder's own state back. CommitDone
     // needs a new target state for a Done MkDir, so a null-state Done would fail every reconciliation.
     private static async Task MkDirJobCompletesWithFolderStateAsync()
     {
@@ -195,7 +195,7 @@ internal static partial class ExecutorChecks
             "a stuck create job stays Uncertain and names its path and job: " + notice.Detail);
     }
 
-    // Astra review of 4c00da0: a delete job that stays unresolved leaves its intent Uncertain forever. Past the
+    // review of 4c00da0: a delete job that stays unresolved leaves its intent Uncertain forever. Past the
     // escalation window reconcile raises one stored notice naming the path and job id; the effect stays Uncertain and
     // is never replayed or released.
     private static async Task DeleteJobEscalatesWhenStuckAsync()

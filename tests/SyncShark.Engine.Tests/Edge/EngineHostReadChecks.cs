@@ -58,6 +58,19 @@ public static class EngineHostReadChecks
     private static async Task RunAsync(string root)
     {
         OwnsOnlyTheFourReads();
+        foreach (var name in new string?[] { null, string.Empty, PairName })
+        {
+            var expected = string.IsNullOrEmpty(name) ? Text.Get(TextKey.StatusStillQuiet)
+                : Text.Get(TextKey.StatusStillWorking, (TextArg.Name, name));
+            Check.Require(IssuePresentation.WorkingStatus(name) == expected &&
+                IssuePresentation.RenderHostStatus(AutoStatus.Running, name, null) == expected,
+                "working status uses the name-free sentence only when no name is supplied");
+        }
+        Check.Require(IssuePresentation.RenderHostStatus(AutoStatus.Waiting, PairName, null) ==
+            Text.Get(TextKey.StatusStillWaiting, (TextArg.Reason, PairName)),
+            "waiting status retains its reason");
+        Check.Require(IssuePresentation.RenderHostStatus(AutoStatus.Running, null, PairName) == PairName,
+            "an explicit host message still takes precedence");
         using var instance = PilotInstanceLock.Acquire(Path.Combine(root, "state", "instance.lock"));
         var store = new InMemoryStateStore();
         var counters = new StoreCounters(store);
@@ -103,6 +116,13 @@ public static class EngineHostReadChecks
                 Choices(item).Contains("Retry")),
             "a Failure row carries its Retry choice and dismissed rows never page");
 
+        var notice = store.Issues(PairId).Single(issue => issue.Id == infoId);
+        var infoRow = all.GetProperty("items").EnumerateArray().Single(item =>
+            item.GetProperty("relativePath").GetString() == InfoPath);
+        Check.Require(infoRow.GetProperty("recommendation").GetString() ==
+            IssuePresentation.Render(notice, new(RetryPresentationState.Unavailable)) &&
+            Choices(infoRow).SequenceEqual(["Dismiss", "Ignore"]), "Host conflicts use the shared enriched notice renderer.");
+
         var account = await ReadAsync(runtime,
             ["--cli", "conflicts", "list", "--account", "connection-b", "--limit", "10", "--json"]);
         Check.Require(account.GetProperty("returned").GetInt32() == 1 &&
@@ -132,6 +152,20 @@ public static class EngineHostReadChecks
             "counts=" + counters.MemberCalls.GetValueOrDefault("OpenIssuePage") +
             " snapshots=" + counters.MemberCalls.GetValueOrDefault("OpenIssueSnapshot") +
             " retries=" + string.Join("|", retries.RetryReads.Select(ids => string.Join(",", ids))));
+
+        var visibility = await host.Operations.ResolveAsync(PairId, tieId, ResolutionChoice.Ignore,
+            null, null, false, null, CancellationToken.None);
+        Check.Require(!visibility.Resolved && store.IssueById(PairId, tieId)!.Ignored,
+            "Ignore completes without claiming closure");
+        var hidden = await ReadAsync(runtime,
+            ["--cli", "conflicts", "list", "--pair", PairId, "--ignored", "--json"]);
+        Check.Require(hidden.GetProperty("totalOpen").GetInt32() == 1 &&
+            Choices(hidden.GetProperty("items")[0]).Contains("Unignore"), "IPC ignored view offers Restore");
+        var restored = await host.Operations.ResolveAsync(PairId, tieId, ResolutionChoice.Unignore,
+            null, null, false, null, CancellationToken.None);
+        var result = new Massdex.SyncShark.Engine.Edge.Results.ResolveResult(tieId, ResolutionChoice.Unignore, restored.Resolved, restored.Outcome);
+        Check.Require(result.ExitCode == 0 && !result.Done && result.RenderHuman().Contains("restored", StringComparison.Ordinal),
+            "visibility success is not reported as failed or as closing the notice");
 
         // Counted work: a full attention listing reads every problem notice with its one count in one snapshot,
         // collects the distinct pair ids, and projects each notice's retry exactly once per page of rows.
@@ -189,7 +223,13 @@ public static class EngineHostReadChecks
         store.SavePair(new PairConfig("pair-b", "Pair B", "C:/PairB", "/PairB", "connection-b", [], [],
             FirstRunPolicy.NewestWins, true, null));
         Raise(store, PairId, IssueKind.Tie, TextKey.TieEqualTimes, ItemPath);
-        Raise(store, PairId, IssueKind.Info, TextKey.InfoKeptBoth, InfoPath);
+        store.Commit(PairId, StateChange.Empty with
+        {
+            Raise = [(IssueKind.Info, TextKey.InfoKeptBoth, InfoPath, new IssueSubject([
+                new(Side.Local, InfoPath, "local"), new(Side.Dropbox, InfoPath, "remote"),
+                new(Side.Dropbox, "Documents/LocalCopy.txt", "upload"),
+                new(Side.Local, "Documents/RemoteCopy.txt", "download")], null))]
+        });
         Raise(store, PairId, IssueKind.Failure, TextKey.FailDropboxNameRejected, FailPath);
         Raise(store, PairId, IssueKind.Tie, TextKey.TieEqualTimes, GonePath);
         Raise(store, "pair-b", IssueKind.Info, TextKey.InfoKeptBoth, InfoBPath);

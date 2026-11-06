@@ -279,7 +279,7 @@ internal static class CloudPairAuthoringChecks
     private static async Task TwoSidedRegistrationRefusalsAsync()
     {
         await using var fixture = await Fixture.CreateAsync("o-two-sided", "o2");
-        // the candidate DEFINITION must carry the exact endpoints the registration supplies, so the
+        // The candidate DEFINITION must carry the exact endpoints the registration supplies, so the
         // unconditional binding is genuinely satisfied. Left is cand-left and right is third (both path-descriptive
         // Dropbox roles the fixture registers). The pair row and its immutable policy are registered with the exact
         // configuration the binding matcher derives from the definition.
@@ -341,7 +341,7 @@ internal static class CloudPairAuthoringChecks
                 right with { FolderId = fixture.Folder("cand-left-other") }, definition, exact),
             "a two-sided registration whose own right side is not its candidate right endpoint",
             "not exactly bound to BOTH of this registration's own logical cloud root identities");
-        // the exact logical-left/logical-right argument assignment. A swapped pair of tags with MATCHING
+        // The exact logical-left/logical-right argument assignment. A swapped pair of tags with MATCHING
         // identities reaches this entry point's own shape rule, not an account or namespace mismatch.
         await ExpectRefusalAsync<InvalidDataException>(() => fixture.Db.RegisterTwoSidedCandidateCloudRootsAsync(
                 definition.Id, definition.PolicyRevision, InstallationId, 1,
@@ -349,7 +349,7 @@ internal static class CloudPairAuthoringChecks
                 right with { CompatibilitySide = SyncAuthorityCloudSides.LogicalLeft }, definition, exact),
             "a two-sided registration with swapped logical-side argument tags",
             "logical-left identity as its left argument");
-        // the NEW carried-candidate binding, exercised with VALID registration arguments and a VALID
+        // The NEW carried-candidate binding, exercised with VALID registration arguments and a VALID
         // retained row, so each refusal reaches the binding diagnostic rather than an earlier row query.
         await ExpectRefusalAsync<InvalidDataException>(() => fixture.Db.RegisterTwoSidedCandidateCloudRootsAsync(
                 definition.Id, definition.PolicyRevision, InstallationId, 1, left, right,
@@ -366,7 +366,7 @@ internal static class CloudPairAuthoringChecks
                 definition with { RecoveryRetentionDays = 99 }, exact),
             "a two-sided registration carrying a changed immutable candidate policy",
             "not exactly bound to BOTH of this registration's own logical cloud root identities");
-        // each own side needs exactly one complete provider hierarchy bound to its own exact identity.
+        // Each own side needs exactly one complete provider hierarchy bound to its own exact identity.
         await ExpectRefusalAsync<InvalidDataException>(() => fixture.Db.RegisterTwoSidedCandidateCloudRootsAsync(
                 definition.Id, definition.PolicyRevision, InstallationId, 1, left, right, definition,
                 Array.Empty<SyncAuthorityCloudHierarchySnapshot>()),
@@ -378,7 +378,7 @@ internal static class CloudPairAuthoringChecks
         Assert(await ScalarAsync(fixture.DatabasePath, "SELECT count(*) FROM history_event WHERE " +
                    "event_kind='opaque_hierarchy_retained';") == "0",
             "the unbound and missing-evidence refusals retained no observation");
-        // exact SUCCESS: a genuinely bound registration with one complete chain per own side commits.
+        // Exact SUCCESS: a genuinely bound registration with one complete chain per own side commits.
         await using (var ok = await Fixture.CreateAsync("o-two-sided-success", "ok"))
         {
             var okDefinition = ok.Draft("cand-left", "third", "BIND1 two-sided success");

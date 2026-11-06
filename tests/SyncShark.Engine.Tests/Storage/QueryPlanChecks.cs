@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using Massdex.SyncShark.Engine;
 using Massdex.SyncShark.Engine.Storage;
+using Massdex.SyncShark.Engine.Tests.TestDoubles;
 using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.Engine.Tests.Storage;
@@ -49,6 +50,51 @@ public static class QueryPlanChecks
 
         using var connection = OpenSchema();
         CheckPlans(connection);
+        DescendantProbeCost();
+    }
+
+    // A light counted comparison of the #129 probe against the delete it can skip (section 3.7). Limits: CostProbe
+    // runs its own raw connection; VM steps come from a 32-bit stmt_status counter; ProbePrepares is the probe's own
+    // preparation count, not a production prepare count; and pair occurrences are source counts. It measures one
+    // statement, not end-to-end ingestion.
+    private static void DescendantProbeCost()
+    {
+        var path = Path.Combine(Path.GetTempPath(),
+            "probe-cost-" + Guid.NewGuid().ToString("N") + StateSchema.DatabaseExtension);
+        try
+        {
+            using var probe = new CostProbe(path);
+            probe.CreateSchema();
+            probe.Execute(StateSchema.UpsertPair, (StateSchema.ParamPair, "cost"), (StateSchema.ParamDef, "{}"));
+            probe.AttachScan(":memory:");
+            var key = PathNames.Key("cost/a");
+            var emptyProbe = probe.ExecuteFirst(StateSchema.ScanHasDescendants, (StateSchema.ParamPair, "cost"),
+                (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamSide, (int)Side.Local), (StateSchema.ParamTargetKey, key));
+            var emptyDelete = probe.Execute(StateSchema.ScanDeleteDescendants, (StateSchema.ParamPair, "cost"),
+                (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamSide, (int)Side.Local), (StateSchema.ParamTargetKey, key));
+            Check.Require(emptyProbe.VmSteps > 0 && emptyProbe.VmSteps <= emptyDelete.VmSteps &&
+                emptyDelete.ChangedRows == 0,
+                "an empty descendant probe costs no more VM steps than the delete it skips");
+
+            var childKey = PathNames.Key("cost/a/child");
+            probe.Execute(StateSchema.ScanUpsert, (StateSchema.ParamPair, "cost"),
+                (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamSide, (int)Side.Local), (StateSchema.ParamJoinKey, childKey),
+                (StateSchema.ParamOwnKey, childKey), (StateSchema.ParamPath, "cost/a/child"),
+                (StateSchema.ParamIsFolder, false), (StateSchema.ParamSize, 1L), (StateSchema.ParamMtime, 0L),
+                (StateSchema.ParamId, "id-child"), (StateSchema.ParamRev, ""), (StateSchema.ParamHash, ""),
+                (StateSchema.ParamSkip, null));
+            var foundProbe = probe.ExecuteFirst(StateSchema.ScanHasDescendants, (StateSchema.ParamPair, "cost"),
+                (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamSide, (int)Side.Local), (StateSchema.ParamTargetKey, key));
+            var foundDelete = probe.Execute(StateSchema.ScanDeleteDescendants, (StateSchema.ParamPair, "cost"),
+                (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamSide, (int)Side.Local), (StateSchema.ParamTargetKey, key));
+            Check.Require(foundProbe.VmSteps > 0 && foundDelete.ChangedRows == 1 &&
+                foundProbe.VmSteps + foundDelete.VmSteps <= 2 * foundDelete.VmSteps,
+                "a found probe plus delete costs at most twice the direct delete's VM steps");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     private static SqliteConnection OpenSchema()
@@ -57,8 +103,8 @@ public static class QueryPlanChecks
         StateStore.OpenConnection(connection);
         using (var create = connection.CreateCommand())
         {
-            create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.PublishVersion +
-                "ATTACH DATABASE ':memory:' AS scan_state;" + StateSchema.ScanPragmas + StateSchema.CreateScan;
+            create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.PublishVersion +
+                "ATTACH DATABASE ':memory:' AS scan_state;" + StateSchema.EmptyScanPragmas + StateSchema.CreateScan + StateSchema.CreateSkipTouched + StateSchema.CreateScanIssues;
             create.ExecuteNonQuery();
             // Production semantics: an issue DELETE also plans its child SET NULL program, checked below.
             create.CommandText = "PRAGMA foreign_keys=ON;";
@@ -92,6 +138,14 @@ public static class QueryPlanChecks
 
     private static void CheckPlans(SqliteConnection connection)
     {
+        foreach (var sql in new[] { StateSchema.DeleteScanBatch, StateSchema.DeleteTouchBatch,
+                     StateSchema.DeleteScanIssueBatch, StateSchema.ScanIssueUnchanged })
+        {
+            var partition = Plan(connection, sql);
+            Check.Require(partition.Any(line => line.Contains("scan_id=?", StringComparison.Ordinal)) &&
+                partition.Where(IsTableAccess).All(line => !line.StartsWith("SCAN ", StringComparison.Ordinal)),
+                "partition cleanup and evidence fences use token-indexed lookups: " + string.Join("; ", partition));
+        }
         CheckDurableStatement(connection, StateSchema.DeleteSyncedBothSubtrees);
         Check.Require(Plan(connection, StateSchema.DeleteSyncedBothSubtrees).Any(line =>
             line.Contains("<expr>>? AND <expr><?", StringComparison.Ordinal)),
@@ -103,6 +157,8 @@ public static class QueryPlanChecks
         CheckDurableStatement(connection, StateSchema.WorkIssue);
         CheckDurableStatement(connection, StateSchema.AnyLocalEvidence);
         CheckDurableStatement(connection, StateSchema.SelectIssueFact);
+        CheckDurableStatement(connection, StateSchema.SelectIssues);
+        CheckDurableStatement(connection, StateSchema.SelectIssuesByKinds);
         CheckDurableStatement(connection, StateSchema.SelectIssueFacts, keepPair: true);
 
         foreach (var (sql, key) in new[]
@@ -114,6 +170,7 @@ public static class QueryPlanChecks
             (StateSchema.DeleteSyncedSubtreeDropbox, "dropbox_key"),
             (StateSchema.ScanDeleteSelf, "<expr>"),
             (StateSchema.ScanDeleteDescendants, "<expr>"),
+            (StateSchema.ScanHasDescendants, "<expr>"),
         })
         {
             var plan = Plan(connection, sql);
@@ -121,7 +178,8 @@ public static class QueryPlanChecks
                 key == "dropbox_key" && line.Contains("dropbox_key_delta>? AND dropbox_key_delta<?", StringComparison.Ordinal)),
                 "descendants use a bounded BINARY index range: " + string.Join("; ", plan));
             foreach (var line in plan.Where(IsTableAccess))
-                Check.Require(IsLookup(line, key) || IsLookup(line, "<expr>") || IsLookup(line, "dropbox_key_delta") || line.Contains("rowid=?"),
+                Check.Require(IsLookup(line, key) || IsLookup(line, "<expr>") || IsLookup(line, "dropbox_key_delta") || line.Contains("rowid=?") ||
+                    line.StartsWith("SCAN json_each VIRTUAL TABLE", StringComparison.Ordinal),
                     "subtree access uses its natural or override range: " + line);
         }
 
@@ -174,6 +232,13 @@ public static class QueryPlanChecks
                 "single rename lookups use identity indexes: " + string.Join("; ", plan));
         }
 
+        var scoped = Plan(connection, StateSchema.NextScopedScanKey);
+        foreach (var line in scoped.Where(line => line.StartsWith("SEARCH scan ") || line.StartsWith("SEARCH synced_entry ")))
+            Check.Require(line.Contains("pair_id=?") &&
+                (line.Contains("<expr>>? AND <expr><?") || line.Contains("key_delta>? AND key_delta<?")),
+                "batch next-key discovery bounds every source to the subtree: " + line);
+        Check.Require(!scoped.Any(line => line.StartsWith("SCAN scan ") || line.StartsWith("SCAN synced_entry ")),
+            "batch next-key discovery cannot scan the whole pair");
         var next = Plan(connection, StateSchema.NextScanKey);
         foreach (var line in next.Where(line => line.StartsWith("SEARCH scan ") || line.StartsWith("SEARCH synced_entry ")))
             Check.Require(line.Contains("pair_id=?") &&
@@ -228,7 +293,8 @@ public static class QueryPlanChecks
         foreach (var (sql, exact) in new[] { (StateSchema.HasDeletedNames, false), (StateSchema.DeletedNameExact, true) })
         {
             var plan = Plan(connection, sql);
-            var access = plan.Single(line => line.StartsWith("SEARCH scan_state.deleted_name ", StringComparison.Ordinal));
+            var access = plan.Single(line => line.StartsWith("SEARCH scan_state.deleted_name ", StringComparison.Ordinal) ||
+                line.StartsWith("SEARCH n ", StringComparison.Ordinal));
             Check.Require(access.Contains("pair_id=?", StringComparison.Ordinal),
                 "deleted-name membership seeks the pair prefix: " + access);
             if (exact)
@@ -360,7 +426,7 @@ public static class QueryPlanChecks
             using (var setup = StateStore.Connect(durable, SqliteOpenMode.ReadWriteCreate))
             using (var create = setup.CreateCommand())
             {
-                create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.PublishVersion;
+                create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.PublishVersion;
                 create.ExecuteNonQuery();
             }
 

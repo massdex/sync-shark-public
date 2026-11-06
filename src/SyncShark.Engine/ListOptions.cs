@@ -15,7 +15,8 @@ public sealed record ListOptions(bool Recursive, bool IncludeOutOfScope,
     /// <summary>Reports provider phase boundaries to the owning run without per-entry log traffic.</summary>
     public Action<RunEvent>? Events { get; init; }
 
-    /// <summary>The inventory's own cursor for a finite continuation, never a source-feed cursor.</summary>
+    /// <summary>The inventory's own cursor for a finite continuation, never a source-feed cursor;
+    /// entries are yielded in provider order with their displayed spelling.</summary>
     public string? Cursor { get; init; }
 
     /// <summary>Receives the terminal cursor only after all deferred spelling entries have been yielded.</summary>

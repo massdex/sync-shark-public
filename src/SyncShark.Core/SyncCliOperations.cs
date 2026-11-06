@@ -1568,9 +1568,17 @@ public abstract partial class SyncCliOperationsBase : ISyncCliOperations
                 throw new SyncCliBusyException("Exit the running application before moving data from the CLI, or use its Data location setting. Finish or resolve pending work first.");
             var previous = await LoadSettingsAsync(cancellationToken);
             var moved = await SyncDataLocation.MoveAsync(StateAuthority, location.GetString()!, cancellationToken);
-            if (moved.RestartRequired) await DisposeAsync();
-            return previous with { DataLocation = moved.DataLocation, RestartRequired = moved.RestartRequired,
-                EffectsApplied = true, EffectsNote = SyncDataLocation.CleanupOldCopy(moved) };
+            var response = previous with { DataLocation = moved.DataLocation, RestartRequired = moved.RestartRequired,
+                EffectsApplied = true, EffectsNote = moved.Message };
+            try
+            {
+                if (moved.RestartRequired) await DisposeAsync();
+                return response with { EffectsNote = SyncDataLocation.CleanupOldCopy(moved) };
+            }
+            catch (Exception error)
+            {
+                return response with { EffectsNote = SyncDataLocation.DescribeMoveFailure(moved, error) };
+            }
         }
         await BeforeSaveSettingsAsync(cancellationToken);
         try

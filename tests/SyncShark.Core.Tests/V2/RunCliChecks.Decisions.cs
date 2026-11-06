@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.V2;
 /// <summary>
 /// Decision 64's CLI surface: decisions list / decisions resolve. A first-sync tie leaves a needs-decision notice
 /// open; the list shows both sides' freshly observed state and a version token that pins the exact notice, and the
-/// resolve applies the chosen side and closes that notice only on evidence (Astra round 2).
+/// resolve applies the chosen side and closes that notice only on evidence (round 2).
 /// </summary>
 internal static partial class RunCliChecks
 {
@@ -141,7 +141,7 @@ internal static partial class RunCliChecks
         Console.WriteLine("PASS Cli_DecisionsResolve_CaseVariantClosesExactNotice");
     }
 
-    // A folder decision is shown in the list (marked folder) but cannot be resolved yet (owner choice, Astra round 3).
+    // A folder decision is shown in the list (marked folder) but cannot be resolved yet (owner choice, round 3).
     private static async Task Cli_DecisionsResolve_FolderRefusedAsync()
     {
         var fx = Build();

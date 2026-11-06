@@ -591,7 +591,7 @@ public static class ExclusionRunnerChecks
         Check.Require(File.ReadAllBytes(database).SequenceEqual(before),
             "Read-only preview leaves durable bytes unchanged. Remaining files: " + names);
         // SQLite's WAL/SHM sidecars belong to the durable database, not the disposable plan.
-        Check.Require(!files.Any(path => path.EndsWith(StateSchema.PlanFileSuffix, StringComparison.Ordinal)),
+        Check.Require(!Directory.EnumerateFiles(folder, Path.GetFileName(database) + StateSchema.PlanFileSuffix + "*" + StateSchema.DatabaseExtension).Any(),
             "Read-only preview removes its disposable plan. Remaining files: " + names);
     }
 
@@ -1103,7 +1103,7 @@ public static class ExclusionRunnerChecks
         var position = store.ReadJournal(domain) ?? throw new InvalidOperationException("The fixture journal exists.");
         var source = store.ReadSource(pair.PairId, Side.Local)!.Value;
         var member = (pair.PairId, store.ReadPairExecution(pair.PairId)!.Value.Generation, source.Epoch,
-            source.Revision, false, false);
+            source.Revision, false);
         var notice = new ChangeNotice(Side.Local, ChangeKind.Changed, local.Path, null, local.Id, null, true, false);
         Check.Require(store.AcquireJournalPage(domain, position, position, [member],
             [(pair.PairId, notice)]) is not null, "The dirty child's acquired evidence is journaled.");
@@ -1284,6 +1284,13 @@ public static class ExclusionRunnerChecks
         Check.Require(store.Issues(context.Pair.PairId).Single().Cause == TextKey.InfoKeptBoth &&
             store.SyncedByKey(context.Pair.PairId, side, Key(side, exclusion.Path)) is null,
             "Keep-both reports Info and leaves no links to removed copies.");
+        var notice = store.Issues(context.Pair.PairId).Single();
+        var rendered = Massdex.SyncShark.Engine.Edge.IssuePresentation.Render(notice,
+            new(RetryPresentationState.Unavailable));
+        var excludedLocation = (side == Side.Local ? "this PC" : "Dropbox") + " \"" + path + "\"";
+        Check.Require(!rendered.Contains(excludedLocation, StringComparison.Ordinal) &&
+            !rendered.Contains("counterpart", StringComparison.Ordinal) && !rendered.Contains("Linked", StringComparison.Ordinal),
+            "Exclusion keep-both never names an excluded-side location or claims cross-side links.");
         RequireForgotten(context, [exclusion.Path, path, .. events.Where(e => Massdex.SyncShark.Engine.Run.RunLog.Present(e).What == EffectKind.KeptBoth.ToString()).Select(e => e.Path)]);
     }
 
@@ -2010,6 +2017,7 @@ public static class ExclusionRunnerChecks
         {
             public void Require(string pairId, long generation, IReadOnlyList<string> requiredLockKeys) { }
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) { }
+            public void Revalidate() { }
             public ValueTask ReleaseAdmissionAsync() => default;
             public ValueTask DisposeAsync() => default;
         }

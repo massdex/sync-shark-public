@@ -23,17 +23,17 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
     public IReadOnlyList<StatusInfo> Status(string? pairId) => Read<IReadOnlyList<StatusInfo>>(store =>
         pairId is null ? store.Pairs().Select(pair => Describe(store, pair)).ToArray() :
         [Describe(store, RequirePair(store, pairId))], []);
-    public IReadOnlyList<Issue> Issues(string pairId, IssueKind? kind) => Read<IReadOnlyList<Issue>>(store =>
+    public IReadOnlyList<Issue> Issues(string pairId, IssueKind? kind, bool ignored = false) => Read<IReadOnlyList<Issue>>(store =>
     {
         RequirePair(store, pairId);
-        return store.Issues(pairId, kind is null ? null : [kind.Value]).Where(issue => !issue.Dismissed).ToArray();
+        return store.OpenIssuePage(pairId, null, null, kind is null ? null : [kind.Value], int.MaxValue, 0, ignored).Page.Select(row => row.Issue).ToArray();
     }, []);
 
     /// <summary>One bounded page of open issues and its total, read through the storage owner.</summary>
     public (IReadOnlyList<(string PairId, Issue Issue)> Page, int Total) OpenIssuePage(string? pairId, string? account,
-        string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset) =>
+        string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset, bool ignored = false) =>
         Read<(IReadOnlyList<(string PairId, Issue Issue)> Page, int Total)>(
-            store => store.OpenIssuePage(pairId, account, search, kinds, limit, offset), ([], 0));
+            store => store.OpenIssuePage(pairId, account, search, kinds, limit, offset, ignored), ([], 0));
 
     /// <summary>Every open issue of the requested kinds and its total from one read-only snapshot.</summary>
     public (IReadOnlyList<(string PairId, Issue Issue)> Rows, int Total) OpenIssueSnapshot(
@@ -142,22 +142,28 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
             }, ct), false, ct);
 
     public Task<PairConfig> BindRootsAsync(string pairId, CancellationToken ct) =>
-        WithPairHostAsync(pairId, async (host, pair) =>
-        {
-            var issue = host.Store.Issues(pairId, [IssueKind.RootIdentity]).SingleOrDefault();
-            return await host.ChangeGenerationAsync(pair,
-                async (transition, store, current, token) =>
+        WithPairHostAsync(pairId, (host, pair) => BindRootsAsync(host, pair,
+            host.Store.Issues(pairId, [IssueKind.RootIdentity]).SingleOrDefault(), ct), false, ct);
+
+    private static Task<PairConfig> BindRootsAsync(EngineHost host, PairConfig pair, Issue? issue,
+        CancellationToken ct) => host.ChangeGenerationAsync(pair,
+            async (transition, store, current, token) =>
+            {
+                var expected = Required(current, pair.PairId);
+                var observed = await PairSession.ReadConfigurationRootsAsync(store, expected.Pair, host.Settings,
+                    host.Http, host.Authority, host, transition, expected.Generation, token).ConfigureAwait(false);
+                PairSafety.ValidateConfigurationRoots(store, expected.Pair, expected.Generation, observed, true);
+                token.ThrowIfCancellationRequested();
+                if (expected.Pair.Roots == observed)
                 {
-                    var expected = Required(current, pairId);
-                    var observed = await PairSession.ReadConfigurationRootsAsync(store, expected.Pair, host.Settings,
-                        host.Http, host.Authority, host, transition, expected.Generation, token).ConfigureAwait(false);
-                    PairSafety.ValidateConfigurationRoots(store, expected.Pair, expected.Generation, observed, true);
-                    token.ThrowIfCancellationRequested();
-                    var next = expected.Pair with { Roots = observed };
-                    store.SavePairDecision(expected.Pair, expected.Generation, next, issue, false, null);
-                    return next;
-                }, ct).ConfigureAwait(false);
-        }, false, ct);
+                    store.ReconcileRootIdentity(pair.PairId, expected.Generation, expected.Pair.Roots, issue,
+                        StateChange.Empty with { Close = [(string.Empty, new[] { IssueKind.RootIdentity })] });
+                    return expected.Pair;
+                }
+                var next = expected.Pair with { Roots = observed };
+                store.SavePairDecision(expected.Pair, expected.Generation, next, issue, false, null);
+                return next;
+            }, ct);
 
     public async Task<RepairSummary> RepairAsync(string pairId, CancellationToken ct, bool perFileDetail = false)
     {
@@ -233,7 +239,18 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
         {
             var issue = all ? null : host.Store.IssueById(pairId, issueId!.Value) ?? throw StaleIssue(issueId!.Value);
             if (issue is not null && !Resolutions.Allows(issue.Kind, issue.Cause, choice)) throw BadChoice(issueId, choice);
+            if (choice is ResolutionChoice.Ignore or ResolutionChoice.Unignore)
+            {
+                if (!host.Store.SetIssueIgnored(pairId, issue!.Id, choice == ResolutionChoice.Ignore))
+                    throw StaleIssue(issue.Id);
+                return new ResolveSummary(SyncOutcome.InSync, false, null);
+            }
             if (choice == ResolutionChoice.KeepFolderAlways && keepRules!.Count == 0) throw BadChoice(issueId, choice);
+            if (choice == ResolutionChoice.BindRoots)
+            {
+                await BindRootsAsync(host, pair, issue, ct).ConfigureAwait(false);
+                return new ResolveSummary(SyncOutcome.InSync, host.Store.IssueById(pairId, issue!.Id) is null, null);
+            }
             if (choice is ResolutionChoice.FirstSync or ResolutionChoice.SyncNormally)
             {
                 await host.ChangeGenerationAsync(pair,
@@ -428,7 +445,9 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
         string? rules) => Resolutions.RequestValid(hasIssue, all, choice, hasName, hasFirstRun, rules);
 
     public static IReadOnlyList<ResolutionChoice> ResolutionChoices(Issue issue) => Enum.GetValues<ResolutionChoice>()
-        .Where(choice => Resolutions.Allows(issue.Kind, issue.Cause, choice)).ToArray();
+        .Where(choice => Resolutions.Allows(issue.Kind, issue.Cause, choice) &&
+            (choice != ResolutionChoice.Ignore || !issue.Ignored) &&
+            (choice != ResolutionChoice.Unignore || issue.Ignored)).ToArray();
 
     public Task<(AutoStatus? Status, string? Detail)> HostStatusAsync(CancellationToken ct)
     { ct.ThrowIfCancellationRequested(); return Task.FromResult(_host?.Status() ?? (null, null)); }
@@ -447,11 +466,14 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
     {
         var json = SettingsParser.WithOverride(SettingsFile.Read(productRoot), name, value);
         var settings = SettingsParser.List(EngineHost.DefaultsJson(), json);
-        if (_host is not null) SettingsFile.Write(productRoot, json);
+        // The policy of the validated replacement document, never of the old one: an invalid saved value is
+        // correctable (#135).
+        var policy = SettingsParser.Parse(EngineHost.DefaultsJson(), json).AtomicReplace;
+        if (_host is not null) SettingsFile.Write(productRoot, json, policy);
         else
         {
             using var instanceLock = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
-            SettingsFile.Write(productRoot, json);
+            SettingsFile.Write(productRoot, json, policy);
         }
         return settings;
     }
@@ -485,7 +507,7 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
         if (monitor is not null)
         {
             monitor.Observe(() => startupLog?.ReportProgress(
-                Text.Get(TextKey.StatusStillWorking, (TextArg.Name, string.Empty))) == true);
+                Text.Get(TextKey.StatusStillQuiet)) == true);
             monitor.Start(quietOnly: true);
         }
         startupLog?.Event(RunEvent.Stage(TextKey.StageInstanceLock));
@@ -527,7 +549,7 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
         catch (InvalidDataException error) { throw new EngineRequestException(TextKey.IgnoreRulesInvalid, (TextArg.Message, error.Message)); }
     }
     private static StatusInfo Describe(IStateStore store, PairConfig pair) => new(pair, store.LastRepair(pair.PairId),
-        store.IssueCounts(pair.PairId), store.Pending(pair.PairId) is not NoPending, store.FirstRepairDone(pair.PairId));
+        store.IssueCounts(pair.PairId, ignored: false), store.Pending(pair.PairId) is not NoPending, store.FirstRepairDone(pair.PairId));
     private string DatabasePath => StateStore.DatabasePath(productRoot);
     private RunLog OpenLog(string pairId, int bufferCharacters, bool perFileDetail = false) => RunLog.Open(
         Path.Combine(productRoot, ResourceNames.EngineFolder, ResourceNames.LogsFolder), pairId,

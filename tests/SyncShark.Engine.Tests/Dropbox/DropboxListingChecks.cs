@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Massdex.SyncShark.Engine.Dropbox;
+using Massdex.SyncShark.Engine.Storage;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
 using Massdex.SyncShark.V2;
 
@@ -17,7 +18,7 @@ public static class DropboxListingChecks
     private static readonly TimeSpan ClockStep = TimeSpan.FromMilliseconds(100);
 
     // One ordinary request-attempt context per listing read, as the pair session composes it.
-    private static ListingReadContext BeginListing() => new(
+    internal static ListingReadContext BeginListing() => new(
         () => new RequestAttempt(new object(), AttemptOwner.Request),
         (_, _) => Task.FromResult(false), static () => ValueTask.CompletedTask);
 
@@ -28,12 +29,16 @@ public static class DropboxListingChecks
         AllocationProbe();
         await OrderedPagesAsync();
         await RetainedCursorAsync();
+        await ContinuationStreamsAsync();
         await CursorFallbackAsync();
         await RequestedRootAsync();
         await KindChangesAsync();
         await ScopeAsync();
         await PrefixIgnoresAsync();
         await StaleAncestorsAsync();
+        await WaitingOrderAsync();
+        await TombstoneBacklogAsync();
+        await RetainedEligibilityAsync();
         await RepeatedListingRenameAsync();
         await MetadataAsync();
         await ReservedNamesAsync();
@@ -170,6 +175,46 @@ public static class DropboxListingChecks
             Cursor = "saved", CursorAcquired = value => terminal = value
         });
         Check.Require(terminal == "empty-terminal", "An empty terminal continuation advances the history boundary.");
+    }
+
+    private static async Task ContinuationStreamsAsync()
+    {
+        foreach (var cursor in new string?[] { "saved", null })
+        {
+            var observed = new List<Listed>();
+            var events = new List<RunEvent>();
+            string? terminal = null;
+            using var fixture = new Fixture(Pair(),
+                _ => Page(true, "next", File("/Parent", "docs/a.txt"), Deleted("/Parent", "lost/old")),
+                _ =>
+                {
+                    Check.Require(observed.Count == (cursor is null ? 1 : 2),
+                        "A continuation streams all entries; a fresh listing waits only for live parent spelling.");
+                    return Page(false, "terminal", Folder("/Parent", "Docs"), Folder("/Parent", "Lost"));
+                });
+            var options = new ListOptions(true, false, true)
+            {
+                Cursor = cursor,
+                Events = events.Add,
+                CursorAcquired = value =>
+                {
+                    Check.Require(observed.Count == 4 && events.Last().StageKey == TextKey.StageDropboxFlush &&
+                        events.Last().Ended, "The terminal cursor follows all entries and the flush boundary.");
+                    terminal = value;
+                }
+            };
+            await foreach (var item in fixture.Listing.ReadAll("", options, BeginListing(), CancellationToken.None))
+                observed.Add(item);
+            var expected = cursor is null
+                ? new[] { ("deleted", "lost/old"), ("folder", "Docs"), ("file", "Docs/a.txt"), ("folder", "Lost") }
+                : new[] { ("file", "docs/a.txt"), ("deleted", "lost/old"), ("folder", "Docs"), ("folder", "Lost") };
+            Check.Require(observed.Select(item => (item.Entry is null ? "deleted" :
+                    item.Entry.IsFolder ? "folder" : "file", item.Path)).SequenceEqual(expected) &&
+                terminal == "terminal", "Continuation preserves provider order and displayed spelling; full listing corrects ancestors.");
+            Check.Require(events.Where(item => item.StageKey == TextKey.StageDropboxFlush)
+                .Select(item => (item.Ended, item.Count)).SequenceEqual(new (bool, long?)[] { (false, 0), (true, 0) }),
+                "Continuation has no deferred entries and retains both empty flush boundaries.");
+        }
     }
 
     private static async Task CursorFallbackAsync()
@@ -424,6 +469,159 @@ public static class DropboxListingChecks
             "Respelled takes the requested true parent and the reply's own name.");
         Check.Require(DropboxListing.Respelled(reply with { Path = "item" }, "Item").Path == "item",
             "A root-level requested path contributes no parent, so the reply's own name stands alone.");
+    }
+
+    private static async Task WaitingOrderAsync()
+    {
+        var cases = new (object[] Input, string[] Output)[]
+        {
+            ([File("/Parent", "X/a/b"), Deleted("/Parent", "X/a"), Folder("/Parent", "X"), Folder("/Parent", "X/a")],
+                ["X/a:deleted", "X:folder", "X/a:folder"]),
+            ([File("/Parent", "X/a"), Deleted("/Parent", "X/a"), Folder("/Parent", "X")],
+                ["X/a:deleted", "X:folder"]),
+            ([File("/Parent", "X/a/b"), File("/Parent", "X/a"), Folder("/Parent", "X")],
+                ["X:folder", "X/a:file"]),
+            ([Folder("/Parent", "X/a"), File("/Parent", "X/a"), File("/Parent", "X/a/b"), Folder("/Parent", "X")],
+                ["X:folder", "X/a:folder", "X/a:file", "X/a/b:file"]),
+            ([File("/Parent", "X/a/b"), Folder("/Parent", "X/a"), Folder("/Parent", "X/a"), Folder("/Parent", "X")],
+                ["X:folder", "X/a:folder", "X/a:folder", "X/a/b:file"]),
+            ([File("/Parent", "X/a/b"), File("/Parent", "X/a"), File("/Parent", "Y/a"), File("/Parent", "X/c")],
+                ["X/a:file", "Y/a:file", "X/c:file"]),
+            ([File("/Parent", "X/a/b"), Folder("/Parent", "X/a"), File("/Parent", "Y/a")],
+                ["X/a:folder", "Y/a:file", "X/a/b:file"]),
+            ([Folder("/Parent", "x/A"), Deleted("/Parent", "X/a"), File("/Parent", "x/a/new"), Folder("/Parent", "X")],
+                ["X/a:deleted", "X:folder", "X/A/new:file"]),
+            ([File("/Parent", "X/a/old"), Deleted("/Parent", "X"), File("/Parent", "X/a/new"),
+                Folder("/Parent", "X/a"), Folder("/Parent", "X")],
+                ["X:deleted", "X:folder", "X/a:folder", "X/a/new:file"])
+        };
+        var directory = Directory.CreateTempSubdirectory(nameof(WaitingOrderAsync)).FullName;
+        try
+        {
+            using var store = StateStore.Open(Path.Combine(directory, "scan.db"));
+            var pair = SourceFixture.Bound(Pair());
+            store.SavePair(pair);
+            SourceFixture.AcquireJournal(store, pair);
+            foreach (var test in cases)
+            {
+                using var fixture = new Fixture(pair, _ => Page(true, "next", test.Input[..^1]),
+                    _ => Page(false, "end", test.Input[^1]));
+                var listed = await CollectAsync(fixture.Listing, "", new ListOptions(true, false, true));
+                Check.Require(listed.Select(item => item.Path + (item.Entry is null ? ":deleted" :
+                    item.Entry.IsFolder ? ":folder" : ":file")).SequenceEqual(test.Output),
+                    "Waiting conflicts release whole buckets FIFO, omit gone entries and flush by depth/arrival.");
+                store.BeginScan(pair.PairId, store.ReadPairExecution(pair.PairId)!.Value.Generation, false);
+                var sink = store.OpenScan(pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows);
+                foreach (var item in listed) await sink.AddAsync(item, default);
+                await sink.CompleteAsync();
+                var rows = Snapshot();
+                using var reference = new Fixture(pair, _ => Page(false, "end", test.Input));
+                var providerOrder = await CollectAsync(reference.Listing, "", new ListOptions(true, false, true) { Cursor = "saved" });
+                store.BeginScan(pair.PairId, store.ReadPairExecution(pair.PairId)!.Value.Generation, false);
+                sink = store.OpenScan(pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows);
+                foreach (var item in providerOrder) await sink.AddAsync(item, default);
+                await sink.CompleteAsync();
+                Check.Require(rows.SequenceEqual(Snapshot()),
+                    "The real scan consumer has the same final live entries as provider order, apart from corrected path casing.");
+
+                Entry[] Snapshot() => store.ScanRows(pair.PairId, _ => RowContext.Neutral)
+                    .Where(row => row.Dropbox is not null)
+                    .Select(row => row.Dropbox! with { Path = PathNames.Key(row.Dropbox!.Path) })
+                    .OrderBy(entry => entry.Path, StringComparer.Ordinal).ToArray();
+            }
+            foreach (var input in new object[][]
+            {
+                [File("/Parent", "X/a/b"), File("/Parent", "X/a"), Folder("/Parent", "X")],
+                [Folder("/Parent", "X"), Folder("/Parent", "X/a"), File("/Parent", "X/a/b"), File("/Parent", "X/a")]
+            })
+            {
+                using var listing = new Fixture(pair, _ => Page(false, "end", input));
+                var root = new Entry("", true, 0, default, "root", "", "", null);
+                using var plan = store.OpenFolderPlan(pair.PairId,
+                    Row.ForOneSide(Side.Dropbox, "", root, null, [], null, RowContext.Neutral), Side.Dropbox);
+                await plan.CaptureAsync(listing.Listing.ReadAll("", new ListOptions(true, false), BeginListing(), default), default);
+                Check.Require(plan.Entries(default).Select(entry => entry.Path).Order().SequenceEqual(new[] { "X", "X/a" }),
+                    "StoredFolderPlan contains neither a waiting nor an already-emitted child erased by an ancestor file.");
+            }
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    private static async Task TombstoneBacklogAsync()
+    {
+        const int tombstones = 1000;
+        var observed = new List<Listed>();
+        var events = new List<RunEvent>();
+        using var fixture = new Fixture(Pair(),
+            _ => Page(true, "next", new object[] { File("/Parent", "X/a/b") }
+                .Concat(Enumerable.Range(0, tombstones).Select(_ => (object)Deleted("/Parent", "X/a"))).ToArray()),
+            _ =>
+            {
+                Check.Require(observed.Count == tombstones && observed.All(item => item.Entry is null),
+                    "Every tombstone streams before the next page; the only waiting live payload is gone.");
+                return Page(false, "end");
+            });
+        await foreach (var item in fixture.Listing.ReadAll("", new ListOptions(true, false, true)
+            { Events = events.Add }, BeginListing(), default)) observed.Add(item);
+        Check.Require(observed.Count == tombstones && events.Last().StageKey == TextKey.StageDropboxFlush &&
+            events.Last().Ended && events.Last().Count == 0,
+            "Flush counts yielded leftovers, not the one discarded waiting payload.");
+    }
+
+    private static async Task RetainedEligibilityAsync()
+    {
+        var directory = Directory.CreateTempSubdirectory(nameof(RetainedEligibilityAsync)).FullName;
+        var path = Path.Combine(directory, "history.db");
+        var pair = SourceFixture.Bound(Pair());
+        try
+        {
+            using (var store = StateStore.Open(path))
+            {
+                store.SavePair(pair);
+                SourceFixture.AcquireJournal(store, pair);
+                var token = store.BeginScan(pair.PairId, store.ReadPairExecution(pair.PairId)!.Value.Generation, true);
+                var sink = store.OpenScan(pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows);
+                await sink.AddAsync(new Listed("X/a/b", null), default);
+                await sink.CompleteAsync();
+                store.SaveDeletedHistory(pair.PairId, token, "saved");
+                token = store.BeginScan(pair.PairId, store.ReadPairExecution(pair.PairId)!.Value.Generation, true);
+                Check.Require(store.RestoreDeletedHistory(pair.PairId, token) == "saved", "Saved eligibility is restored.");
+                using var fixture = new Fixture(pair, _ => Page(false, "end", File("/Parent", "X/a/b"),
+                    Deleted("/Parent", "X/a"), Folder("/Parent", "X"), Folder("/Parent", "X/a")));
+                sink = store.OpenScan(pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows);
+                await foreach (var item in fixture.Listing.ReadAll("", new ListOptions(true, false, true), BeginListing(), default))
+                    await sink.AddAsync(item, default);
+                await sink.CompleteAsync();
+                store.SaveDeletedHistory(pair.PairId, token, "complete");
+            }
+            using (var store = StateStore.Open(path))
+            {
+                var token = store.BeginScan(pair.PairId, store.ReadPairExecution(pair.PairId)!.Value.Generation, true);
+                Check.Require(store.RestoreDeletedHistory(pair.PairId, token) == "complete" &&
+                    store.DeletedNameExact(pair.PairId, PathNames.Key("X/a/b")) &&
+                    !store.DeletedNameExact(pair.PairId, PathNames.Key("X/a")) &&
+                    !store.DeletedNameExact(pair.PairId, PathNames.Key("Y/a/b")),
+                    "An omitted gone live entry retains saved eligibility across reopen; live parents and nonmatches do not.");
+                store.Commit(pair.PairId, StateChange.Empty with
+                { ForgetSelf = [(Side.Local, PathNames.Key("X/a/b"))] });
+                Check.Require(!store.DeletedNameExact(pair.PairId, PathNames.Key("X/a/b")) &&
+                    !store.SavedDeletedNameExact(pair.PairId, PathNames.Key("X/a/b")) &&
+                    store.DeletedNameSpent(pair.PairId, PathNames.Key("X/a/b")),
+                    "spending overrides the retained eligibility through both scan and permanent-history consumers");
+                store.SaveDeletedHistory(pair.PairId, token, "complete-empty");
+            }
+            using (var store = StateStore.Open(path))
+            {
+                var token = store.BeginScan(pair.PairId, store.ReadPairExecution(pair.PairId)!.Value.Generation, true);
+                Check.Require(store.RestoreDeletedHistory(pair.PairId, token) == "complete-empty" && !store.HasDeletedNames(pair.PairId),
+                    "A completed empty dataset is not missing history.");
+                Check.Require(!store.DeletedHistoryOwed(pair.PairId) &&
+                    store.DeletedNameSpent(pair.PairId, PathNames.Key("X/a/b")) &&
+                    !store.SavedDeletedNameExact(pair.PairId, PathNames.Key("X/a/b")),
+                    "Complete-empty and its spent override both survive the next operation");
+            }
+        }
+        finally { Directory.Delete(directory, true); }
     }
 
     private static async Task RepeatedListingRenameAsync()
@@ -1061,14 +1259,14 @@ public static class DropboxListingChecks
     private static PairConfig Pair(string root = "/Parent") => new("pair", "Pair A", @"C:\Local", root,
         "connection", Array.Empty<string>(), Array.Empty<Exclusion>(), FirstRunPolicy.NewestWins, true, null);
 
-    private static Dictionary<string, object> Folder(string root, string path, string? id = null) => new()
+    internal static Dictionary<string, object> Folder(string root, string path, string? id = null) => new()
     {
         [DropboxProtocol.Tag] = DropboxProtocol.TagFolder,
         [DropboxProtocol.PathDisplay] = root.TrimEnd('/') + (path.Length == 0 ? "" : "/" + path),
         [DropboxProtocol.Id] = id ?? "id:" + path
     };
 
-    private static Dictionary<string, object> File(string root, string path, string revision = "rev",
+    internal static Dictionary<string, object> File(string root, string path, string revision = "rev",
         bool downloadable = true, string? id = null)
     {
         var metadata = Folder(root, path, id);
@@ -1081,13 +1279,13 @@ public static class DropboxListingChecks
         return metadata;
     }
 
-    private static Dictionary<string, object> Deleted(string root, string path) => new()
+    internal static Dictionary<string, object> Deleted(string root, string path) => new()
     {
         [DropboxProtocol.Tag] = DropboxProtocol.TagDeleted,
         [DropboxProtocol.PathDisplay] = root.TrimEnd('/') + "/" + path
     };
 
-    private static HttpResponseMessage Page(bool more, string cursor, params object[] entries) =>
+    internal static HttpResponseMessage Page(bool more, string cursor, params object[] entries) =>
         Json(new { entries, cursor, has_more = more });
 
     // A body that fails mid-read, unlike a transport failure, spends an unpublished attempt spool the retry replaces.
@@ -1113,7 +1311,7 @@ public static class DropboxListingChecks
     private static HttpResponseMessage Json(object data, HttpStatusCode status = HttpStatusCode.OK) =>
         new(status) { Content = new StringContent(JsonSerializer.Serialize(data), Encoding.UTF8, "application/json") };
 
-    private sealed class Fixture : IDisposable
+    internal sealed class Fixture : IDisposable
     {
         // Zero delays keep the retry path immediate here; the adopted schedule's numbers are its owner's checks.
         private static readonly FailureRetryOwner.BackoffSettings NoDelay = new(0, 1, 0, 0);
@@ -1163,7 +1361,7 @@ public static class DropboxListingChecks
     }
 
     // The hand-driven double, with monotonic stamps on the same clock so provider floors expire when the driver advances.
-    private sealed class ListingClock : TimeProvider
+    internal sealed class ListingClock : TimeProvider
     {
         private readonly FakeTimeProvider _inner = new();
         public bool HasArmedTimer => _inner.HasArmedTimer;
@@ -1202,7 +1400,7 @@ public static class DropboxListingChecks
         public Task<string> GetAccessTokenAsync(CancellationToken cancellationToken = default) => Task.FromResult("test-token");
     }
 
-    private sealed class Handler(IEnumerable<Func<CancellationToken, HttpResponseMessage>> replies, TimeProvider time)
+    internal sealed class Handler(IEnumerable<Func<CancellationToken, HttpResponseMessage>> replies, TimeProvider time)
         : HttpMessageHandler
     {
         private readonly Queue<Func<CancellationToken, HttpResponseMessage>> _replies = new(replies);

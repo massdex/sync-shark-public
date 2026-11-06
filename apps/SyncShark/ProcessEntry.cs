@@ -11,7 +11,6 @@ internal static class ProcessEntry
     private const string LocalPrefix = @"Local\";
     private const string SupervisorMutexSuffix = ".supervisor";
     // Private whole-process switches; after the core switch is stripped each one is a singleton argument.
-    private const string InitializeStoreSwitch = "--initialize-store";
     private const string EngineHostSwitch = "--engine-host";
     private const string EngineSupervisorSwitch = "--engine-supervisor";
     private const string AutoSyncSupervisorSwitch = "--autosync-supervisor";
@@ -31,26 +30,6 @@ internal static class ProcessEntry
         WindowsPlaceholderCompatibility.Expose();
         if (CliEntry.IsCliInvocation(args)) return CliEntry.Execute(args);
         var selected = CoreSwitch.Select(args, Environment.GetEnvironmentVariable(CoreSwitch.EnvironmentVariable));
-        if (selected.Args.FirstOrDefault() is "--setup-validate-data" or "--setup-startup-command" or InitializeStoreSwitch)
-        {
-            if (selected.Error is not null || !selected.UseV2 || selected.Args.Length != 2)
-                return (int)SyncCliExitCode.Usage;
-            try
-            {
-                if (selected.Args[0] == InitializeStoreSwitch)
-                {
-                    DataLocationSetup.Initialize(selected.Args[1]);
-                    return 0;
-                }
-                var result = selected.Args[0] == "--setup-validate-data"
-                    ? SyncDataLocation.ValidateDirectory(selected.Args[1])
-                    : AutoSyncProcess.StartupCommand(selected.Args[1]);
-                using var output = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
-                output.WriteLine(result);
-                return 0;
-            }
-            catch (Exception) { return (int)SyncCliExitCode.Failed; }
-        }
         if (selected.Error is null && !selected.UseV2)
         {
             try { Console.Error.WriteLine(CoreSwitch.LegacyNotice); } catch (IOException) { }
@@ -84,7 +63,7 @@ internal static class ProcessEntry
     }
 
     private static bool IsPrivateSwitch(string[] args) => args.Any(arg =>
-        arg is InitializeStoreSwitch or EngineHostSwitch or EngineSupervisorSwitch or AutoSyncSupervisorSwitch or LegacySupervisorSwitch);
+        arg is EngineHostSwitch or EngineSupervisorSwitch or AutoSyncSupervisorSwitch or LegacySupervisorSwitch);
 
     private static bool BackgroundEngineStartup()
     {

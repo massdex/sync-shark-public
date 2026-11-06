@@ -1,11 +1,11 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using Massdex.SyncShark;
 using Microsoft.Data.Sqlite;
 
-// monitor-failure correction (Claude H5 + H6): real pump, cursor and journal success and
+// Monitor-failure correction: real pump, cursor and journal success and
 // rejection proofs for the two existing authority monitors over the real isolated SQLite monitor
 // journal. The native FileSystemWatcher and the in-process provider fixture only supply input; every
 // durable decision is made by the production monitor against monitor_cursor/monitor_event/dirty_item.

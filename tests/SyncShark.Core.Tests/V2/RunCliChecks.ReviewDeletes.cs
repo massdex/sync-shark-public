@@ -178,7 +178,7 @@ internal static partial class RunCliChecks
         Console.WriteLine("PASS Cli_ReviewDeletes_ChangedSurvivorWins");
     }
 
-    // finding 2 (Astra re-review): a prepare-matched path never enters the deletion-history probe or
+    // finding 2 (re-review): a prepare-matched path never enters the deletion-history probe or
     // held lane. With a deferred-evidence cache MISS, the unchanged local survivor of a post-prepare Dropbox deletion
     // must still be planned as ordinary propagation (Recovery-first), not held.
     private static async Task Cli_ReviewDeletes_PrepareMatchedHeldLaneMissPropagatesAsync()
@@ -255,7 +255,7 @@ internal static partial class RunCliChecks
         Console.WriteLine("PASS Cli_ReviewDeletes_PrepareMatchedHeldLaneMissChangedSurvivor");
     }
 
-    // finding 4 (Astra re-review): the prepare-matched states come from the FINAL planning rows after
+    // finding 4 (re-review): the prepare-matched states come from the FINAL planning rows after
     // the hash pass. A size-differing pair hashed during prepare must not look "changed" at apply because the prepare
     // recorded a pre-hash stamp.
     private static async Task Cli_ReviewDeletes_PrepareMatchedHashPassNoCopyBackAsync()

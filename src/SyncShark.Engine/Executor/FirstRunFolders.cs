@@ -5,6 +5,65 @@ namespace Massdex.SyncShark.Engine.Executor;
 /// <summary>Settles original first-run folders after their children and current readable contents permit it.</summary>
 internal sealed class FirstRunFolders(ExecutorContext _context, Parents _parents, ActionExecutor _executor, ItemSync _items)
 {
+    internal async Task FinalizeFoldersAsync(List<(Row Folder, int Depth)> folders,
+        PrefixSet pendingExclusions, HashSet<string> unresolved, TaskSet tasks,
+        Action<Row, SyncOutcome> completed, Func<int> rowCapacity, Action<string, bool> progress,
+        CancellationToken ct, CancellationToken callerToken)
+    {
+        if (folders.Count == 0) return;
+        var queued = new HashSet<string>(folders.SelectMany(folder => Row.Keys(folder.Folder)), PathNames.Comparer);
+        var unfinished = new HashSet<string>(PathNames.Comparer);
+        void Seed(string key)
+        {
+            if (queued.Contains(key)) return;
+            foreach (var ancestor in PathNames.Ancestors(key)) unfinished.Add(ancestor);
+        }
+        foreach (var key in unresolved) Seed(key);
+        foreach (var key in pendingExclusions.Keys) Seed(key);
+        foreach (var issue in _context.Store.OpenIssuesUnder(_context.Pair.PairId,
+            PathNames.Key(_context.BatchScope ?? string.Empty), IssueClosure.AfterHeldInSync))
+        {
+            if (issue.Subject.Items.Count == 0) Seed(PathNames.Key(issue.Path));
+            else foreach (var item in issue.Subject.Items)
+            {
+                var local = item.Side == Side.Local ? item.Path : null;
+                var remote = item.Side == Side.Dropbox ? item.Path : null;
+                if (!_context.Scope.Excludes(local, remote, false) ||
+                    !_context.Scope.Excludes(local, remote, true)) Seed(PathNames.KeyFor(item.Side, item.Path));
+            }
+        }
+        foreach (var level in folders.GroupBy(folder => folder.Depth).OrderByDescending(level => level.Key))
+        {
+            var failed = new HashSet<string>(PathNames.Comparer);
+            async Task Finalize(Row folder, bool blocked)
+            {
+                progress(folder.Key, false);
+                SyncOutcome outcome;
+                try { outcome = await FinalizeFirstRunFolderAsync(folder, blocked, ct, completed); }
+                catch (Exception error) when (ActionExecutor.IsItemError(error))
+                {
+                    outcome = await _executor.FailAsync(folder, null, error, ct);
+                    completed(folder, outcome);
+                }
+                progress(folder.Key, true);
+                if (outcome.Succeeded()) return;
+                lock (failed)
+                    foreach (var key in Row.Keys(folder)) failed.Add(key);
+            }
+            foreach (var (folder, _) in level)
+            {
+                var blocked = Row.Keys(folder).Any(key => unfinished.Contains(key) || pendingExclusions.Overlaps(key));
+                tasks.Add(Finalize(folder, blocked));
+                await tasks.WaitForCapacityAsync(rowCapacity, callerToken,
+                    _context.Admission.WorkCapacity);
+            }
+            await tasks.WhenAllAsync();
+            ct.ThrowIfCancellationRequested();
+            foreach (var key in failed)
+                foreach (var ancestor in PathNames.Ancestors(key)) unfinished.Add(ancestor);
+        }
+    }
+
     internal async Task<SyncOutcome> FinalizeFirstRunFolderAsync(Row folder, bool unfinishedChildren, CancellationToken ct, Action<Row, SyncOutcome>? completed)
     {
         if (folder.Local is not { IsFolder: true }) throw new ArgumentException(nameof(folder));
@@ -35,7 +94,7 @@ internal sealed class FirstRunFolders(ExecutorContext _context, Parents _parents
                     break;
                 }
                 SyncAction action;
-                if (row.Synced is not null || row.Dropbox is not null)
+                if (row.Synced is not null || row.Dropbox is not null || !row.Context.DeletionEligible)
                     action = await _items.PrepareAsync(row, ct);
                 else
                 {
@@ -88,6 +147,7 @@ internal sealed class FirstRunFolders(ExecutorContext _context, Parents _parents
                         }
                     }
                 }
+                action = _items.AdmitInBatch(action);
                 if (action.Kind is ActionKind.None or ActionKind.Notice)
                 {
                     outcome = await _executor.ExecuteAsync(action, null, ct, firstRunFolder: action.IsInSync() ? folder : null);

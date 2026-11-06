@@ -235,6 +235,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             {
                 execution.RequireScopes(_context.Pair.PairId, selection.PairGeneration, LockKeys.ForScopes(_context.Pair, footprint));
                 var observed = await _items.ReobserveAsync(action.Row, new Observer(_context, _parents), token);
+                // A live selection applies only its admitted evidence; a later acquisition waits for its own record.
+                execution.Revalidate();
                 RequireAncestorsClear(observed);
                 if (!PlannedReplacementJustified(observed, action.Row, Side.Dropbox)) throw new ChangedUnderneathException(Row.Path(observed));
                 return await BuildAndFreezeAsync(observed, Side.Dropbox, NoRestoredItems, true, token, RemovalRoute.PlannedReplacement, null, null);
@@ -272,6 +274,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                 try
                 {
                     observed = await _items.ReobserveAsync(folder, new Observer(_context, _parents), token);
+                    // A live selection applies only its admitted evidence; a later acquisition waits for its own record.
+                    execution.Revalidate();
                     if (!FolderDeletes.PlanJustified(observed.EntryOn(deletingFrom), observed.EntryOn(PathNames.Other(deletingFrom)),
                         false))
                     {

@@ -41,13 +41,14 @@ public static class AutoSyncProcess
     public const string LegacySupervisorArguments = "--core v2 --legacy-autosync-supervisor";
     public const string EngineHostArguments = "--core v2 --engine-host";
     public const string EngineSupervisorArguments = "--core v2 --engine-supervisor";
+    public const string EngineStartupArguments = "--cli engine host start --yes";
     internal const string LegacyArguments = "--background";
 
     public static string StartupCommand(string executable)
     {
         if (!IsStartupExecutable(executable))
             throw new ArgumentException(EdgeMessages.Text("startup-executable-invalid"), nameof(executable));
-        return $"\"{Path.GetFullPath(executable)}\" {EngineSupervisorArguments}";
+        return $"\"{Path.GetFullPath(executable)}\" {EngineStartupArguments}";
     }
 
     /// <summary>Selects the stable installed copy when it is the same bound build, unless explicitly overridden.</summary>
@@ -104,7 +105,8 @@ public static class AutoSyncProcess
 
     /// <summary>Ownership follows the product command, never its deployment directory.</summary>
     public static bool IsProductStartupCommand(string? command) =>
-        IsStartupCommand(command, SupervisorArguments) || IsStartupCommand(command, EngineSupervisorArguments);
+        IsStartupCommand(command, SupervisorArguments) || IsStartupCommand(command, EngineSupervisorArguments) ||
+        IsStartupCommand(command, EngineStartupArguments);
 
     /// <summary>Recognizes only the owned GUI startup or its canonical replacement for this executable.</summary>
     public static bool IsEngineStartupInvocation(string executable)
@@ -112,7 +114,8 @@ public static class AutoSyncProcess
         if (!OperatingSystem.IsWindows() || !IsStartupExecutable(executable)) return false;
         using var key = OpenStartupKey(writable: false);
         return TargetsExecutable(key?.GetValue(LegacyValueName) as string, LegacyArguments, executable) ||
-            TargetsExecutable(key?.GetValue(ValueName) as string, EngineSupervisorArguments, executable);
+            TargetsExecutable(key?.GetValue(ValueName) as string, EngineSupervisorArguments, executable) ||
+            TargetsExecutable(key?.GetValue(ValueName) as string, EngineStartupArguments, executable);
     }
 
     private static bool TargetsExecutable(string? command, string arguments, string executable) =>
@@ -214,7 +217,7 @@ public static class AutoSyncProcess
             var current = (value as string ?? legacy as string)!;
             var registered = current[1..current.IndexOf('"', 1)];
             var exists = File.Exists(registered);
-            if (IsStartupCommand(value as string, EngineSupervisorArguments) && exists)
+            if (IsStartupCommand(value as string, EngineStartupArguments) && exists)
             {
                 RemoveLegacyStartup(key);
                 return;

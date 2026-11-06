@@ -73,7 +73,7 @@ internal static class PilotReleaseRecovery
                 var allowed = journal.GetProperty("allowed_steps").EnumerateArray().Select(step => step.GetString()).ToArray();
                 var completed = journal.GetProperty("completed").EnumerateArray().Select(step => step.GetString()).ToArray();
                 string[] required = ["stage-package", "publish-runtime", "backup-state", "create-next-link",
-                    "retain-predecessor", "publish-successor", "register-explorer-package", "verify-complete"];
+                    "retain-predecessor", "publish-successor", "register-explorer-package", "register-application", "verify-complete"];
                 if (status != "complete" || journal.GetProperty("pending").ValueKind != JsonValueKind.Null ||
                     !allowed.SequenceEqual(required, StringComparer.Ordinal) ||
                     !allowed.SequenceEqual(completed, StringComparer.Ordinal))

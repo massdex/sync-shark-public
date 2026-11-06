@@ -497,8 +497,9 @@ internal static partial class Program
     // remains separate and is still executed by the full UI batch.
     private static int RunOriginalManualLogUiChecks(string root, string databasePath, bool inspect)
     {
-        const string originalCommand = "command-f00d000000000000000000000000001b";
-        const string originalPair = "f00d0000000000000000000000000027";
+        // The captured interruption's own run and pair identities come from the operator's environment.
+        var originalCommand = RetainedCloneIdentities.Read("SYNCSHARK_OPERATION_LOG_RUN");
+        var originalPair = RetainedCloneIdentities.Read("SYNCSHARK_OPERATION_LOG_PAIR");
         var expectedRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "TestData", "Projects", "sync-shark", "build", "home-activity-tray", "ui-integration",

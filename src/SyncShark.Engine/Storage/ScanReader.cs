@@ -7,12 +7,20 @@ namespace Massdex.SyncShark.Engine.Storage;
 public static class ScanReader
 {
     /// <summary>One Row per consecutive (synced, k) group; context is called once per Row, in result order.</summary>
-    public static IEnumerable<Row> Rows(SqliteConnection read, string pairId, Func<Row, RowContext> context)
+    public static IEnumerable<Row> Rows(SqliteConnection read, string pairId, Func<Row, RowContext> context, string? scope = null, byte[]? scanId = null)
     {
-        using var next = Command(read, StateSchema.NextScanKey, pairId);
-        var after = next.Parameters.AddWithValue(StateSchema.ParamAfter, "");
+        using var next = Command(read, scope is null ? StateSchema.NextScanKey : StateSchema.NextScopedScanKey, pairId, scanId);
+        var scopeKey = scope is null ? null : PathNames.Key(scope);
+        var bounds = PathNames.DescendantBounds(scopeKey ?? string.Empty);
+        if (scopeKey is not null)
+        {
+            next.Parameters.AddWithValue(StateSchema.ParamScope, scopeKey);
+            next.Parameters.AddWithValue(StateSchema.ParamScopeLow, bounds.Low);
+            next.Parameters.AddWithValue(StateSchema.ParamScopeHigh, bounds.High);
+        }
+        var after = next.Parameters.AddWithValue(StateSchema.ParamAfter, scopeKey ?? "");
         var first = next.Parameters.AddWithValue(StateSchema.ParamFirst, true);
-        using var command = Command(read, StateSchema.ScanRows, pairId);
+        using var command = Command(read, StateSchema.ScanRows, pairId, scanId);
         var target = command.Parameters.AddWithValue(StateSchema.ParamTargetKey, "");
         var page = new List<Group>();
         while (true)
@@ -52,10 +60,10 @@ public static class ScanReader
     }
 
     /// <summary>Ordered by path depth, then path. Both sides compare the whole path exactly.</summary>
-    public static IReadOnlyList<RenameCandidate> Renames(SqliteConnection read, string pairId)
+    public static IReadOnlyList<RenameCandidate> Renames(SqliteConnection read, string pairId, byte[]? scanId = null)
     {
         var candidates = new List<RenameCandidate>();
-        using var command = Command(read, StateSchema.ScanRenames, pairId);
+        using var command = Command(read, StateSchema.ScanRenames, pairId, scanId);
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
@@ -69,10 +77,11 @@ public static class ScanReader
     }
 
     /// <summary>Reads this side's entry by its own canonical key, not its mapped join key.</summary>
-    public static Entry? EntryByKey(SqliteConnection read, string pairId, Side side, string key)
+    public static Entry? EntryByKey(SqliteConnection read, string pairId, Side side, string key, byte[]? scanId = null)
     {
         using var command = StorageCommand.Create(read, null, StateSchema.SelectScanEntry,
             StateSchema.ParamPair, pairId);
+        command.Parameters.AddWithValue(StateSchema.ParamScan, scanId ?? Guid.Empty.ToByteArray());
         command.Parameters.AddWithValue(StateSchema.ParamSide, (int)side);
         command.Parameters.AddWithValue(StateSchema.ParamTargetKey, key);
         using var reader = command.ExecuteReader();
@@ -95,8 +104,9 @@ public static class ScanReader
         return (long)command.ExecuteScalar()! != 0;
     }
 
-    private static SqliteCommand Command(SqliteConnection connection, string sql, string pairId) =>
-        StorageCommand.Create(connection, null, sql, (StateSchema.ParamPair, pairId));
+    private static SqliteCommand Command(SqliteConnection connection, string sql, string pairId, byte[]? scanId) =>
+        StorageCommand.Create(connection, null, sql, (StateSchema.ParamPair, pairId),
+            (StateSchema.ParamScan, scanId ?? Guid.Empty.ToByteArray()));
 
     private static void Add(SqliteDataReader reader, Group group)
     {

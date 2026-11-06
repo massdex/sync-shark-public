@@ -1,0 +1,12 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--setup-update-checks",
+    "--v2-autosync-checks",
+    "--cli-checks"
+  ],
+  "ui": []
+}

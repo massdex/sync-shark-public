@@ -20,7 +20,7 @@ internal static class ExactItemDispatchChecks
         await ConfirmedAbsenceAsync();
         await RefusalsNeverAbsenceAsync();
         await SharedFallbackAndAmbiguityAsync();
-        Console.WriteLine("PASS exact item dispatch (SSHARK595): " + _passed + " assertions");
+        Console.WriteLine("PASS exact item dispatch: " + _passed + " assertions");
     }
 
     private static void Require(bool condition, string message)

@@ -38,8 +38,7 @@ internal sealed class ItemSync
     /// <summary>One execution's run-local facts; a session runs one scan, or its selections in sequence.</summary>
     internal RowContexts ScanContexts(bool firstRun, IReadOnlySet<long>? retries,
         IReadOnlyDictionary<string, IssueSubject>? proofs, Func<string, bool>? deletedName) =>
-        _rows is null ? _rows = new RowContexts(_context, firstRun, true, retries, proofs, deletedName)
-            : _rows.ForScan(firstRun, retries, proofs, deletedName);
+        Rows.ForScan(firstRun, retries, proofs, deletedName);
 
     internal async ValueTask<(SyncAction Action, SyncOutcome? Completed)> PrepareRowAsync(
         Row row, CancellationToken ct,
@@ -65,10 +64,10 @@ internal sealed class ItemSync
 
     internal async Task<SyncOutcome> DispatchPreparedAsync(SyncAction prepared, CancellationToken ct, Action? releaseOrdinaryCapacity = null,
         Action<Row, SyncOutcome>? completed = null,
-        Guid? attemptId = null, ItemRetryCandidate? expectedAttempt = null)
+        Guid? attemptId = null, ItemRetryCandidate? expectedAttempt = null, WorkSelection? selection = null)
     {
         if (RequiresFolderReplacement(prepared))
-            return await ReplaceDropboxFolderRegisteredAsync(prepared, ct, attemptId, expectedAttempt, completed, null, null);
+            return await ReplaceDropboxFolderRegisteredAsync(prepared, ct, attemptId, expectedAttempt, completed, selection, null);
         await using var work = await _context.Admission.EnterWorkAsync(prepared.Kind == ActionKind.Upload, ct);
         if (prepared.Kind != ActionKind.Upload)
         {
@@ -159,6 +158,7 @@ internal sealed class ItemSync
         WorkSelection? selection, Action<Row, Issue>? retainUnfinished)
     {
         var row = action.Row;
+        if (OutsideBatchScope(action, null)) throw new ChangedUnderneathException(Row.Path(row));
         var result = selection is null ? await Folders.RemovePlannedReplacementAsync(row, ct) :
             await Folders.RemoveLiveReplacementAsync(action, selection, ct);
         var (fresh, failed) = await AfterReplacementRemovalAsync(result, row, null, ct, selection, attemptId, expectedAttempt, retainUnfinished);
@@ -218,7 +218,7 @@ internal sealed class ItemSync
 
     internal async Task<SyncOutcome> RunRowAttemptAsync(Row row, CancellationToken ct, Action? releaseOrdinaryCapacity = null,
         Action<Row, SyncOutcome>? completed = null,
-        PrefixSet? itemRetries = null)
+        PrefixSet? itemRetries = null, WorkSelection? selection = null)
     {
         // One dirty answer per row, shared by the route pre-check and Prepare; rows settled before content
         // (out of scope or skipped) read none, as Prepare never did.
@@ -235,7 +235,7 @@ internal sealed class ItemSync
                 // A deferral is never executed from the listing: the admitted path re-observes it first.
                 var deferred = await PrepareAsync(row, ct);
                 return await DispatchPreparedAsync(deferred, ct, releaseOrdinaryCapacity,
-                    completed);
+                    completed, selection: selection);
             }
             var prepared = await PrepareRowAsync(row, ct, completed, evidence: evidence);
             if (prepared.Completed is { } done) return done;
@@ -248,7 +248,7 @@ internal sealed class ItemSync
                 {
                     var prepared = await PrepareRowAsync(row, token, completed, attempt, expected, evidence);
                     return prepared.Completed ?? await DispatchPreparedAsync(prepared.Action, token,
-                        releaseOrdinaryCapacity, completed, attempt, expected);
+                        releaseOrdinaryCapacity, completed, attempt, expected, selection);
                 }
                 catch (Exception error) when (ActionExecutor.IsItemError(error))
                 {
@@ -266,7 +266,7 @@ internal sealed class ItemSync
 
     /// <summary>Observes a standalone path without treating it as completed inventory.</summary>
     internal async Task<SyncOutcome> SyncPathAsync(Side side, string sidePath, CancellationToken ct,
-        IReadOnlySet<long>? retryIssues = null)
+        IReadOnlySet<long>? retryIssues = null, Action<Row, SyncOutcome>? completed = null)
     {
         await using var work = await _context.Admission.EnterWorkAsync(false, ct);
         await using var permit = await _context.EnterOperationAsync(ct);
@@ -274,7 +274,7 @@ internal sealed class ItemSync
         if (retryIssues is not null)
             _rows = new RowContexts(_context, !_context.Store.FirstRepairDone(_context.Pair.PairId),
                 false, retryIssues, null, null);
-        try { return await SyncFollowUpAsync(side, sidePath, ct); }
+        try { return await SyncFollowUpAsync(side, sidePath, ct, completed: completed); }
         finally { if (retryIssues is not null) _rows = previous; }
     }
 
@@ -369,6 +369,8 @@ internal sealed class ItemSync
                     var fresh = await ReobserveAsync(row, observer, ct);
                     unchanged = fresh.Local == row.Local && fresh.Dropbox == row.Dropbox && fresh.Synced == row.Synced;
                     row = fresh;
+                    // A live selection applies only its admitted evidence; a later acquisition waits for its own record.
+                    if (execution is not null && selection is not null) execution.Revalidate();
                     action = null;
                 }
                 action ??= await PrepareAsync(row, ct);
@@ -413,6 +415,9 @@ internal sealed class ItemSync
                     Finish(action, failed, completed);
                     return failed;
                 }
+                // A live row that changed again waits for its own change record rather than looping inside the lease.
+                if (reobserve && selection is not null)
+                    throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.RelevantEvidenceChanged);
                 reobserve = true;
             }
             catch (Exception error) when (ActionExecutor.IsItemError(error))
@@ -436,6 +441,8 @@ internal sealed class ItemSync
         ArgumentNullException.ThrowIfNull(heldKeys);
         if (!ReferenceEquals(requiredKeys, heldKeys) && requiredKeys.Any(key => !heldKeys.Contains(key, PathLocks.KeyComparer)))
             return (null, true);
+        if (OutsideBatchScope(action, labels))
+            return await RefusedAsync(action, ct, committedIssue, firstRunFolder, attemptId, expectedAttempt, selection);
         var news = await _ancestors.BeforeExecutionAsync(action, _parents, ct);
         if (news == AncestorNews.Changed)
             return await RefusedAsync(action, ct, committedIssue, firstRunFolder, attemptId, expectedAttempt, selection);
@@ -453,8 +460,6 @@ internal sealed class ItemSync
         }
         if (!fresh.Fresh)
         {
-            if (selection is not null)
-                throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.RelevantEvidenceChanged);
             return (null, true);
         }
         if (labels is not null && !await _keepBoth.AreUsableAsync(action.Row, labels, ct)) return (null, false);
@@ -462,6 +467,13 @@ internal sealed class ItemSync
             observedTarget: fresh.ObservedTarget, committedIssue: committedIssue, firstRunFolder: firstRunFolder,
             attemptId: attemptId, expectedAttempt: expectedAttempt, selection: selection), false);
     }
+
+    private bool OutsideBatchScope(SyncAction action, KeepBothLabels? labels) =>
+        _context.BatchScope is { } scope && LockKeys.ForLiveAction(action, _context.Pair, labels)
+            .Any(item => (item.Side == Side.Local
+                ? PathNames.RelativeUnderLocalRoot(_context.Pair.LocalRoot, item.NativePath)
+                : PathNames.RelativeUnderDropboxRoot(_context.Pair.DropboxRoot, item.NativePath)) is not { } relative ||
+                !PathNames.IsSelfOrUnder(relative, scope));
 
     // A private method, not a local function: a local would capture action and ct in a heap closure on every call.
     private async ValueTask<(SyncOutcome? Outcome, bool Reobserve)> RefusedAsync(SyncAction action, CancellationToken ct,
@@ -481,14 +493,15 @@ internal sealed class ItemSync
     internal async ValueTask<SyncAction> PrepareAsync(Row row, CancellationToken ct, DirtyProof? evidence = null)
     {
         ct.ThrowIfCancellationRequested();
-        if (Decide.WithoutContent(row) is { } settled) return settled;
+        row = Rows.RefreshDeletionEligibility(row);
+        if (Decide.WithoutContent(row) is { } settled) return AdmitInBatch(settled);
         if (row.Synced is null && row.Local is { } local && row.Dropbox is null)
             row = row with { Context = row.Context with { Destination = _parents.Destination(Side.Dropbox, local.Path) } };
         else if (row.Synced is null && row.Dropbox is { } remote && row.Local is null)
             row = row with { Context = row.Context with { Destination = _parents.Destination(Side.Local, remote.Path) } };
         if (evidence is null && LocalEvidence.AppliesTo(row)) evidence = ReadDirty(row);
         if (evidence?.Dirty == true) row = row with { LocalHash = null };
-        var action = Decide.For(row, _context.Pair.FirstRun, _context.Time.GetUtcNow(), evidence?.Dirty == true);
+        var action = AdmitInBatch(Decide.For(row, _context.Pair.FirstRun, _context.Time.GetUtcNow(), evidence?.Dirty == true));
         if (action.Kind == ActionKind.NeedDeletionEvidence)
         {
             row = row with { Deletion = await _context.ReadDeletionEvidenceAsync(action.Target!, row.IsFolder(), ct) };
@@ -508,18 +521,31 @@ internal sealed class ItemSync
             _proofs.Add(row, new DirtyProof(hashed.Proof.Dirty, hashed.Proof.Boundary, hashed.Proof.Version));
             action = Decide.For(row, _context.Pair.FirstRun, _context.Time.GetUtcNow(), evidence?.Dirty == true);
         }
-        return action;
+        return AdmitInBatch(action);
     }
+
+    internal SyncAction AdmitInBatch(SyncAction action) => _context.BatchScope is null ? action :
+        Decide.AdmitInBatch(action, action.Row.Synced is null && BoundById(action.Row),
+            _context.BatchUnlisted, _context.BatchSettlesFirstRun);
+
+    private bool BoundById(Row row) =>
+        row.Local is { } local && _context.Store.SyncedById(_context.Pair.PairId, Side.Local, local.Id) is not null ||
+        row.Dropbox is { } remote && _context.Store.SyncedById(_context.Pair.PairId, Side.Dropbox, remote.Id) is not null ||
+        row.Extra.Any(entry => _context.Store.SyncedById(_context.Pair.PairId, Side.Dropbox, entry.Id) is not null);
 
     private async ValueTask<(bool Fresh, (Side Side, string Path, Entry? Entry)? ObservedTarget)> IsFreshAsync(
         Row row, SyncAction action, CancellationToken ct)
     {
+        if (row.Context.DeletionEligible && !Rows.RefreshDeletionEligibility(row).Context.DeletionEligible)
+            return (false, null);
         var paths = Row.Paths(row, action.Target);
         var storeOnly = action.Kind == ActionKind.Record;
         var local = storeOnly ? row.Local : await _context.Local.ReadOneAsync(paths.Local, ct);
         var dropbox = storeOnly ? row.Dropbox : await _context.Dropbox.ReadOneAsync(paths.Dropbox, ct);
         var localBinding = _context.Store.SyncedByKey(_context.Pair.PairId, Side.Local, PathNames.KeyFor(Side.Local, paths.Local));
         var dropboxBinding = _context.Store.SyncedByKey(_context.Pair.PairId, Side.Dropbox, PathNames.KeyFor(Side.Dropbox, paths.Dropbox));
+        // A binding of this new row's identity committed since preparation is a move-in: reobserve, the seam leaves it.
+        if (_context.BatchScope is not null && row.Synced is null && BoundById(row)) return (false, null);
         if (_proofs.TryGetValue(row, out var proof) && !LocalEvidence.SameFile(
             (proof.Dirty, proof.Boundary, proof.Version), _context.Evidence.Read(row.Local!, row.Synced))) return (false, null);
         var existingFolder = false;
@@ -532,7 +558,12 @@ internal sealed class ItemSync
             if (row.EntryOn(written) is null && target is not null && source == row.EntryOn(PathNames.Other(written)))
             {
                 existingFolder = target.IsFolder && action.Kind is ActionKind.EnsureDropboxFolder or ActionKind.EnsureLocalFolder;
-                if (!existingFolder) throw new PathOccupiedException(target.Path);
+                if (!existingFolder)
+                {
+                    if (Decide.CrossedFar(local, dropbox, written == Side.Local ? localBinding : dropboxBinding)
+                        == PathNames.Other(written)) return (false, null);
+                    throw new PathOccupiedException(target.Path);
+                }
             }
         }
         // A one-sided unlinked move writes only its own side; the opposite side is not a freshness precondition.
@@ -544,7 +575,10 @@ internal sealed class ItemSync
                 ? (row.Local is null || local == row.Local) && (row.Dropbox is null || dropbox == row.Dropbox)
                 : (local == row.Local || existingFolder && row.Local is null) &&
                   (dropbox == row.Dropbox || existingFolder && row.Dropbox is null) &&
-                  localBinding == row.Synced && dropboxBinding == row.Synced;
+                  (Decide.CrossedFar(row.Local, row.Dropbox, row.Synced) is { } far
+                      ? far == Side.Local ? localBinding is null && dropboxBinding == row.Synced
+                          : localBinding == row.Synced && dropboxBinding is null
+                      : localBinding == row.Synced && dropboxBinding == row.Synced);
         if (!fresh || action.Kind is not (ActionKind.Upload or ActionKind.Download or ActionKind.EnsureDropboxFolder or
             ActionKind.EnsureLocalFolder or ActionKind.ReplaceKind)) return (fresh, null);
         var side = action.WrittenSide();
@@ -554,14 +588,15 @@ internal sealed class ItemSync
     internal async Task<Row> ReobserveAsync(Row row, Observer observer, CancellationToken ct)
     {
         var paths = Row.Paths(row);
-        var side = row.Local is not null || row.Dropbox is null ? Side.Local : Side.Dropbox;
+        var side = Decide.CrossedFar(row.Local, row.Dropbox, row.Synced) ??
+            (row.Local is not null || row.Dropbox is null ? Side.Local : Side.Dropbox);
         var fresh = await observer.ObserveAsync(side, side == Side.Local ? paths.Local : paths.Dropbox, ct);
         fresh = fresh with { Context = row.Context with
         {
             Destination = fresh.Context.Destination,
             Skipped = row.Context.Skipped || fresh.Context.Skipped
         } };
-        if (row.Synced is null)
+        if (row.Synced is null && Decide.CrossedFar(fresh.Local, fresh.Dropbox, fresh.Synced) is null)
         {
             var local = row.Local is null ? null : fresh.Local;
             var dropbox = row.Dropbox is null ? null : fresh.Dropbox;
@@ -570,7 +605,7 @@ internal sealed class ItemSync
             if (Decide.IsFreeIncoming(local, dropbox, localBinding, dropboxBinding))
                 fresh = fresh with { Local = local, Dropbox = dropbox, Synced = null };
         }
-        return IssuePolicy.ReobserveFirstRun(row, fresh);
+        return Rows.RefreshDeletionEligibility(IssuePolicy.ReobserveFirstRun(row, fresh));
     }
 
     // A content answer exists only for a saved same-kind file; a kind change decides before content is read.

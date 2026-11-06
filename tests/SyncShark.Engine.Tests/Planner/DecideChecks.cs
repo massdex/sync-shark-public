@@ -22,10 +22,12 @@ public static class DecideChecks
 
     public static void Run()
     {
+        BatchAdmission();
         Steps();
         HeldFailures();
         NoRecordTable();
         WithRecordTable();
+        ReturningOriginals();
         FolderDeleteDirtyChild();
         NeedLocalHash();
         OldAppPatternOne();
@@ -38,6 +40,77 @@ public static class DecideChecks
         UnreliableTime();
         FirstRunDeletion();
         RetainedFolderDecisions();
+    }
+
+    private static void ReturningOriginals()
+    {
+        foreach (var far in new[] { Side.Local, Side.Dropbox })
+        foreach (var (nearHash, farHash, expected) in new[]
+        {
+            (ContentA, ContentB, far == Side.Local ? ActionKind.Upload : ActionKind.Download),
+            (ContentA, ContentA, ActionKind.Record),
+            (ContentB, ContentA, far == Side.Local ? ActionKind.Download : ActionKind.Upload),
+            (ContentB, ContentB, ActionKind.Record),
+            (ContentB, "different", ActionKind.KeepBoth)
+        })
+        {
+            var local = new Entry("Original", false, 4, Before, "near-local", "", far == Side.Local ? farHash : nearHash, null);
+            var remote = local with { Id = "near-remote", ContentHash = far == Side.Dropbox ? farHash : nearHash };
+            var saved = new SyncedEntry(PathNames.Key("Original"), "Original", PathNames.DropboxKey("Original"),
+                "Original", false, local.Id, 4, Before.UtcTicks, remote.Id, ContentA);
+            saved = far == Side.Local
+                ? saved with { LocalKey = PathNames.Key("Partner"), LocalPath = "Partner", LocalId = "old-local" }
+                : saved with { DropboxKey = PathNames.DropboxKey("Partner"), DropboxPath = "Partner", DropboxId = "old-remote" };
+            var row = MakeRow(local, remote, saved, localHash: local.ContentHash);
+            Check.Require(Decide.CrossedFar(local, remote, saved) == far, "Returning original has one crossed near endpoint.");
+            var action = Decide.For(row, Newest, ComparedAt, localContentDirty: local.ContentHash != ContentA);
+            Check.Require(action.Kind == expected && ReferenceEquals(action.Row, row) &&
+                action.InfoAfter == (expected == ActionKind.KeepBoth ? TextKey.InfoKeptBoth : (TextKey?)null),
+                "All returning-original content cases reuse Table B and preserve the actual binding and notice policy.");
+            Check.Require(Decide.CrossedFar(null, remote, saved) is null &&
+                Decide.CrossedFar(local, null, saved) is null &&
+                Decide.CrossedFar(local with { IsFolder = true }, remote, saved) is null &&
+                Decide.CrossedFar(local, remote with { Skip = "skip" }, saved) is null &&
+                Decide.CrossedFar(local, remote with { Path = "Unrelated" }, saved) is null &&
+                Decide.CrossedFar(local, remote, saved with { IsFolder = true }) is null &&
+                Decide.CrossedFar(local with { Id = saved.LocalId }, remote with { Id = saved.DropboxId }, saved) is null,
+                "Missing, skipped, unrelated, folder and same-identity relocation inputs do not qualify.");
+        }
+    }
+
+    private static void BatchAdmission()
+    {
+        var local = File("Parent/Child");
+        var remote = File("Parent/Child", id: "remote");
+        var saved = SavedFile("Parent/Child");
+        foreach (var kind in Enum.GetValues<ActionKind>())
+        {
+            var ordinary = MakeRow(local, remote, saved);
+            var action = new SyncAction(kind, ordinary);
+            var forbidden = kind is ActionKind.ReplaceKind or ActionKind.MoveLocal or ActionKind.MoveDropbox or
+                ActionKind.MoveUnlinked or ActionKind.DeleteLocal or ActionKind.DeleteDropbox or ActionKind.ForgetOnly;
+            var admitted = Decide.AdmitInBatch(action, false, null, true);
+            Check.Require(forbidden ? admitted.None == NoneReason.OutOfScope : admitted == action,
+                "batch gates every destructive action kind, retaining ordinary actions");
+            foreach (var missing in new[] { MakeRow(local, null, saved), MakeRow(null, remote, saved) })
+                Check.Require(Decide.AdmitInBatch(action with { Row = missing }, false, null, true).None == NoneReason.OutOfScope,
+                    "saved missing-side rows cannot enter any batch action or folder plan");
+        }
+        var first = MakeRow(local, null, context: Ctx(firstRun: true, completeInventory: true, deletionEligible: true));
+        var deletion = new SyncAction(ActionKind.DeleteLocal, first);
+        Check.Require(Decide.AdmitInBatch(deletion, false, null, true) == deletion &&
+            Decide.AdmitInBatch(deletion, false, null, false).None == NoneReason.OutOfScope &&
+            Decide.AdmitInBatch(deletion with { Row = first with { Context = first.Context with { CompleteInventory = false } } },
+                false, null, true).None == NoneReason.OutOfScope,
+            "only Retry with complete first-run evidence admits checked Local deletion");
+        var create = new SyncAction(ActionKind.Upload, MakeRow(local, null));
+        Check.Require(Decide.AdmitInBatch(create, true, null, true).None == NoneReason.OutOfScope &&
+            Decide.AdmitInBatch(create, false, Side.Dropbox, true).None == NoneReason.OutOfScope,
+            "bound-elsewhere and incomplete missing-side rows stay unfinished");
+        var preserve = new SyncAction(ActionKind.DeferFolder, MakeRow(Folder("Parent"), null,
+            context: Ctx(firstRun: true) with { FirstRunDeletion = IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice }));
+        Check.Require(Decide.AdmitInBatch(preserve, false, null, false) == preserve,
+            "legitimate preserved-folder deferral permits children");
     }
 
     // Measured per-site evidence for the per-item predicates and tables this change introduced or rewired.

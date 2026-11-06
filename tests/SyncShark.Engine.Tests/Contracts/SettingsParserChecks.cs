@@ -18,7 +18,8 @@ public static class SettingsParserChecks
           "LogBufferCharacters": 262144, "InitialBackoffSeconds": 1, "BackoffMultiplier": 1.6,
           "BackoffJitter": 0.2, "MaximumBackoffSeconds": 120,
           "BatchPollIntervalSeconds": 0.1, "FolderDeleteMinimumPollSeconds": 1, "StoragePageSize": 100,
-          "StoreBatchRows": 20000 }
+          "StoreBatchRows": 20000, "AtomicReplaceAttempts": 5,
+          "AtomicReplaceInitialDelayMilliseconds": 50 }
         """;
 
     public static void Run()
@@ -32,8 +33,19 @@ public static class SettingsParserChecks
             BatchPollIntervalSeconds = 0.1,
             FolderDeleteMinimumPollSeconds = 1,
             StoragePageSize = storagePageSize,
+            AtomicReplaceAttempts = 5,
+            AtomicReplaceInitialDelayMilliseconds = 50,
         };
         Check.Require(SettingsParser.Parse(DefaultsJson, null) == expected, "the defaults alone");
+
+        // The publish retry schedules one wait between each pair of attempts, doubling from the first delay.
+        var atomicReplace = SettingsParser.Parse(DefaultsJson, null).AtomicReplace.Delays;
+        Check.Require(atomicReplace.SequenceEqual(new[]
+            {
+                TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(100),
+                TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(400)
+            }),
+            "the atomic-replace waits double from the configured first delay");
 
         var overridden = SettingsParser.Parse(DefaultsJson,
             """{ "LogRetentionDays": 30, "DefaultFirstRunPolicy": "DropboxWins" }""");
@@ -76,12 +88,12 @@ public static class SettingsParserChecks
         Check.Require(SettingsParser.Parse(duplicateDefaults, null).CaseRenameSuffix == "second-case",
             "a repeated default takes its last value");
         var duplicateRows = SettingsParser.List(duplicateDefaults, null);
-        Check.Require(duplicateRows.Count == 20 && duplicateRows[4].Value == "first-case"
+        Check.Require(duplicateRows.Count == 22 && duplicateRows[4].Value == "first-case"
             && duplicateRows[5].Value == "second-case"
             && !duplicateRows[4].Overridden && !duplicateRows[5].Overridden,
             "list keeps every duplicate default in order");
         var duplicateOverrideRows = SettingsParser.List(duplicateDefaults, """{ "CaseRenameSuffix": "mine" }""");
-        Check.Require(duplicateOverrideRows.Count == 20 && duplicateOverrideRows[4].Value == "mine"
+        Check.Require(duplicateOverrideRows.Count == 22 && duplicateOverrideRows[4].Value == "mine"
             && duplicateOverrideRows[5].Value == "mine"
             && duplicateOverrideRows[4].Overridden && duplicateOverrideRows[5].Overridden,
             "a user override applies to every duplicate default row");
@@ -215,6 +227,24 @@ public static class SettingsParserChecks
         RequiresDefaultsInvalid(DefaultsJson.Replace("\"StoreBatchRows\"", "\"StoreBatchRowsX\"", StringComparison.Ordinal),
             nameof(EngineSettings.StoreBatchRows), "a defaults file without the scan save batch");
 
+        // The atomic-replace retry stays a few bounded attempts with a short first wait, in the user file and
+        // when saved as an override; a negative first wait is refused like any other.
+        foreach (var attempts in new[] { "0", "11" })
+        {
+            var userJson = "{ \"AtomicReplaceAttempts\": " + attempts + " }";
+            RequiresInvalid(DefaultsJson, userJson, nameof(EngineSettings.AtomicReplaceAttempts), attempts,
+                "an atomic-replace attempt count outside the bound");
+            RequiresInvalidOverride(null, nameof(EngineSettings.AtomicReplaceAttempts), attempts,
+                "an atomic-replace attempt count outside the bound saved as an override");
+        }
+        RequiresInvalid(DefaultsJson, """{ "AtomicReplaceInitialDelayMilliseconds": -1 }""",
+            nameof(EngineSettings.AtomicReplaceInitialDelayMilliseconds), "-1",
+            "a negative atomic-replace first wait");
+        Check.Require(SettingsParser.Parse(DefaultsJson,
+                """{ "AtomicReplaceAttempts": 2, "AtomicReplaceInitialDelayMilliseconds": 10 }""").AtomicReplace
+            .Delays.SequenceEqual(new[] { TimeSpan.FromMilliseconds(10) }),
+            "an atomic-replace override drives the schedule");
+
         // Retry backoff: finite non-negative waits, jitter at most the whole, and the largest wait
         // max(initial, maximum) * (1 + jitter) inside TimeSpan's tick range.
         var zeroBackoff = SettingsParser.Parse(DefaultsJson,
@@ -293,7 +323,7 @@ public static class SettingsParserChecks
         using var embedded = CliCatalogResource.Load(typeof(SettingsParser).Assembly, ResourceNames.Settings);
         var embeddedJson = embedded.RootElement.GetRawText();
         SettingsParser.Parse(embeddedJson, null);
-        Check.Require(SettingsParser.List(embeddedJson, null).Count == 19, "the embedded defaults name every setting");
+        Check.Require(SettingsParser.List(embeddedJson, null).Count == 21, "the embedded defaults name every setting");
         Check.Require(SettingsParser.Parse(embeddedJson, null).StoragePageSize == storagePageSize,
             "the shipped page-size default loads");
         Check.Require(SettingsParser.Parse(embeddedJson, null).StoreBatchRows == 20_000,
@@ -341,11 +371,11 @@ public static class SettingsParserChecks
             "a bad override enum");
 
         var rows = SettingsParser.List(DefaultsJson, numberJson);
-        Check.Require(rows.Count == 19, "list names every setting once");
+        Check.Require(rows.Count == 21, "list names every setting once");
         RequireRow(rows, nameof(EngineSettings.LogRetentionDays), "7", true, "an overridden value");
         RequireRow(rows, nameof(EngineSettings.CaseRenameSuffix), "default-case", false, "a default value");
         RequireRow(rows, nameof(EngineSettings.WhenRecycleBinUnavailable), "Fail", false, "an enum default");
-        Check.Require(SettingsParser.List(DefaultsJson, null).Count == 19, "list works with no user settings");
+        Check.Require(SettingsParser.List(DefaultsJson, null).Count == 21, "list works with no user settings");
 
         try
         {

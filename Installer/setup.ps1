@@ -1,214 +1,291 @@
-[CmdletBinding()]
 param([string]$Payload, [switch]$FunctionsOnly)
 $ErrorActionPreference = 'Stop'
-Set-StrictMode -Version Latest
+if (-not ('SetupFileSystem' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'SetupFileSystem.cs') }
+if (-not ('Massdex.SyncShark.SetupMessages' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'SetupMessages.cs') }
+[Massdex.SyncShark.SetupMessages]::Load((Join-Path $PSScriptRoot 'setup-strings.xml'))
 
-# The transition is shared with fixture checks; after start, recovery is roll-forward only.
-function Invoke-SetupTransition($Stop, $Backup, $Copy, $Switch, $Start, $Health, $RestartOld, $StopNew) {
-    $starting = $false
+function Open-SetupDirectories([string]$Path, [switch]$Create) {
+    $held = [Collections.Generic.List[IDisposable]]::new()
+    $ancestors = [Collections.Generic.Stack[string]]::new()
+    for ($entry = [IO.DirectoryInfo]::new([IO.Path]::GetFullPath($Path)); $null -ne $entry; $entry = $entry.Parent) {
+        $ancestors.Push($entry.FullName)
+    }
     try {
-        & $Stop
-        & $Backup
-        & $Copy
-        & $Switch
-        $starting = $true
-        & $Start
-        & $Health
+        while ($ancestors.Count) {
+            $path = $ancestors.Pop()
+            if ($Create -and -not [SetupFileSystem]::Exists($path)) { [IO.Directory]::CreateDirectory($path) | Out-Null }
+            $held.Add([SetupFileSystem]::OpenDirectory($path))
+        }
+        $held.Reverse()
+        return ,$held
+    } catch { foreach ($item in $held) { $item.Dispose() }; throw }
+}
+
+function Get-SetupVersion([string]$Executable) {
+    $parents = Open-SetupDirectories ([IO.Path]::GetDirectoryName($Executable))
+    $file = $null
+    try {
+        $file = [SetupFileSystem]::OpenFile($Executable)
+        $value = [Diagnostics.FileVersionInfo]::GetVersionInfo($Executable).ProductVersion
+        if ($value -cnotmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(\+[a-fA-F0-9]{40})?$') {
+            throw ([Massdex.SyncShark.SetupMessages]::Text('version.invalid', [object[]]@($Executable)))
+        }
+        return [version]($value.Split('+')[0])
+    } finally {
+        if ($file) { $file.Dispose() }
+        foreach ($item in $parents) { $item.Dispose() }
+    }
+}
+
+function Assert-SetupUpgrade([version]$Candidate, [string]$PreviousTarget) {
+    if ($PreviousTarget -and $Candidate -le (Get-SetupVersion (Join-Path $PreviousTarget 'SyncShark.exe'))) {
+        throw ([Massdex.SyncShark.SetupMessages]::Text('version.upgrade', [object[]]@()))
+    }
+}
+
+function Get-SetupTree([string]$Root) {
+    $result = [Collections.Generic.List[object]]::new()
+    $pending = [Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($Root)
+    $directories = [Collections.Generic.List[IDisposable]]::new()
+    try {
+        while ($pending.Count) {
+            $directory = $pending.Dequeue()
+            $held = [SetupFileSystem]::OpenDirectory($directory)
+            $directories.Add($held)
+            $result.Add([pscustomobject]@{ Path = $directory.Substring($Root.Length); Directory = $true; Identity = $held.Identity; Hash = $null })
+            foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($directory)) {
+                if ([IO.File]::GetAttributes($entry) -band [IO.FileAttributes]::Directory) { $pending.Enqueue($entry); continue }
+                $file = [SetupFileSystem]::OpenFile($entry)
+                try { $result.Add([pscustomobject]@{ Path = $entry.Substring($Root.Length); Directory = $false; Identity = $file.Identity; Hash = $file.Hash() }) }
+                finally { $file.Dispose() }
+            }
+        }
+        return ,$result.ToArray()
+    } finally { foreach ($held in $directories) { $held.Dispose() } }
+}
+
+function Open-SetupTree([string]$Root, $Manifest, [switch]$RequireComplete, [switch]$ForRemoval) {
+    $held = [Collections.Generic.List[object]]::new()
+    try {
+        $known = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($entry in $Manifest) {
+            if (-not $known.Add($Root + $entry.Path)) { throw ([Massdex.SyncShark.SetupMessages]::Text('manifest.duplicate', [object[]]@())) }
+            if ($entry.Path -and ($entry.Path -notmatch '^\\' -or $entry.Path -match '(^|[\\/])\.\.([\\/]|$)')) { throw ([Massdex.SyncShark.SetupMessages]::Text('manifest.invalid', [object[]]@())) }
+            $path = $Root + $entry.Path
+            if (-not ([SetupFileSystem]::Exists($path))) {
+                if ($RequireComplete) { throw ([Massdex.SyncShark.SetupMessages]::Text('payload.missing', [object[]]@($path))) }
+                continue
+            }
+            $item = if ($entry.Directory) {
+                if ($ForRemoval) { [SetupFileSystem]::OpenMutableDirectory($path) } else { [SetupFileSystem]::OpenDirectory($path) }
+            } else {
+                if ($ForRemoval) { [SetupFileSystem]::OpenMutableFile($path) } else { [SetupFileSystem]::OpenFile($path) }
+            }
+            $held.Add($item)
+            if ($item.Identity -cne $entry.Identity -or (-not $entry.Directory -and $item.Hash() -cne $entry.Hash)) {
+                throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.changed', [object[]]@($path)))
+            }
+        }
+        # The held objects cannot be replaced or rewritten; newly added children are never deleted.
+        foreach ($entry in $Manifest) {
+            if (-not $entry.Directory -or -not ([SetupFileSystem]::Exists($Root + $entry.Path))) { continue }
+            foreach ($actual in [IO.Directory]::EnumerateFileSystemEntries($Root + $entry.Path)) {
+                if (-not $known.Contains($actual)) { throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.foreign', [object[]]@($actual))) }
+            }
+        }
+        return ,$held
+    } catch { foreach ($item in $held) { $item.Dispose() }; throw }
+}
+
+function Remove-SetupTree([string]$Root, $Manifest) {
+    $parents = Open-SetupDirectories ([IO.Path]::GetDirectoryName($Root))
+    $tree = $null
+    try {
+        $tree = Open-SetupTree $Root $Manifest -ForRemoval
+        foreach ($item in ($tree | Sort-Object { $_.Path.Length } -Descending)) { $item.Delete() }
+    } finally {
+        if ($tree) { foreach ($item in $tree) { $item.Dispose() } }
+        foreach ($item in $parents) { $item.Dispose() }
+    }
+}
+
+function Write-SetupFrame($Journal, $State) {
+    $json = ConvertTo-Json -InputObject $State -Depth 8 -Compress
+    $Journal.Append([Text.UTF8Encoding]::new($false).GetBytes($json + "`n"))
+}
+
+function Read-SetupFrame($Journal) {
+    $bytes = $Journal.Read()
+    $end = [Array]::LastIndexOf($bytes, [byte]10)
+    if ($end -lt 0) { throw ([Massdex.SyncShark.SetupMessages]::Text('journal.empty', [object[]]@())) }
+    # Decode only complete frames: an interrupted UTF-8 character belongs to the partial tail.
+    $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes, 0, $end)
+    $frames = $text.Split("`n")
+    return ($frames[-1] | ConvertFrom-Json)
+}
+
+function Restore-SetupTransaction([string]$Root, $Journal) {
+    $state = Read-SetupFrame $Journal
+    if ($state.Id -cnotmatch '^[0-9a-f]{32}$' -or $state.Version -cnotmatch '^\d+\.\d+\.\d+$') { throw ([Massdex.SyncShark.SetupMessages]::Text('journal.invalid', [object[]]@())) }
+    $stage = Join-Path $Root ('versions/.staging/' + $state.Id)
+    $destination = Join-Path $Root ('versions\' + $state.Version)
+    $activePath = Join-Path $Root 'active'
+    $nextPath = Join-Path $Root ('versions/.staging/' + $state.Id + '.active')
+    $rootHandle = [SetupFileSystem]::OpenDirectory($Root)
+    $versionsHandle = [SetupFileSystem]::OpenDirectory((Join-Path $Root 'versions'))
+    $active = $null; $next = $null; $tree = $null; $stagingHandle = $null
+    try {
+        if ($rootHandle.Identity -cne $state.RootIdentity -or $versionsHandle.Identity -cne $state.VersionsIdentity) { throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.roots', [object[]]@())) }
+        if ([SetupFileSystem]::Exists($activePath)) {
+            $active = [SetupFileSystem]::OpenJunction($activePath)
+            if ($active.Identity -cne $state.ActiveIdentity) { throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.active', [object[]]@())) }
+        }
+        $candidate = [Convert]::FromBase64String($state.Candidate)
+        if ($state.Committed) {
+            if ($null -eq $active -or -not [SetupFileSystem]::Equal($active.ReadJunction(), $candidate)) { throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.committed', [object[]]@())) }
+            $tree = Open-SetupTree $destination $state.Manifest -RequireComplete
+            $Journal.Delete()
+            return
+        }
+        if ($state.Previous) {
+            if ($null -eq $active) { throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.predecessor', [object[]]@())) }
+            $previous = [Convert]::FromBase64String($state.Previous)
+            if (-not [SetupFileSystem]::Equal($active.ReadJunction(), $previous)) { $active.Retarget($candidate, $previous) }
+        } elseif ($null -ne $active) {
+            if (-not [SetupFileSystem]::Equal($active.ReadJunction(), $candidate)) { throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.first', [object[]]@())) }
+            $active.Delete(); $active = $null
+        }
+        $stagingHandle = [SetupFileSystem]::OpenDirectory((Join-Path $Root 'versions\.staging'))
+        if ([SetupFileSystem]::Exists($nextPath)) {
+            $next = [SetupFileSystem]::OpenJunction($nextPath)
+            if ($next.Identity -cne $state.ActiveIdentity -or -not [SetupFileSystem]::Equal($next.ReadJunction(), $candidate)) { throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.staged', [object[]]@())) }
+            $next.Delete(); $next = $null
+        }
+        foreach ($path in @($destination, $stage)) {
+            if (-not ([SetupFileSystem]::Exists($path))) { continue }
+            Remove-SetupTree $path $state.Manifest
+        }
+        $Journal.Delete()
+    } finally {
+        if ($tree) { foreach ($item in $tree) { $item.Dispose() } }
+        if ($active) { $active.Dispose() }; if ($next) { $next.Dispose() }
+        if ($stagingHandle) { $stagingHandle.Dispose() }
+        $versionsHandle.Dispose(); $rootHandle.Dispose()
+    }
+}
+
+function Clear-SetupPreparation([string]$Root) {
+    $parent = Join-Path $Root 'versions\.staging'
+    [IO.Directory]::CreateDirectory($parent) | Out-Null
+    $guard = [SetupFileSystem]::OpenDirectory($parent)
+    try {
+        foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($parent)) {
+            $name = [IO.Path]::GetFileName($path)
+            if ($name -cmatch '^[0-9a-f]{32}\.active$') {
+                $junction = [SetupFileSystem]::OpenJunction($path)
+                try { $junction.Delete() } finally { $junction.Dispose() }
+            } elseif ($name -cmatch '^[0-9a-f]{32}\.journal$') {
+                $file = [SetupFileSystem]::OpenMutableFile($path)
+                try { $file.Delete() } finally { $file.Dispose() }
+            } elseif ($name -cmatch '^[0-9a-f]{32}$') {
+                $manifest = Get-SetupTree $path
+                Remove-SetupTree $path $manifest
+            } else { throw ([Massdex.SyncShark.SetupMessages]::Text('preparation.unknown', [object[]]@($path))) }
+            Write-Output ([Massdex.SyncShark.SetupMessages]::Text('preparation.removed', [object[]]@($path)))
+        }
+    } finally { $guard.Dispose() }
+}
+
+function Invoke-SetupInstall([string]$Archive, [string]$Root) {
+    $Root = [IO.Path]::GetFullPath($Root)
+    $parents = Open-SetupDirectories $Root -Create
+    $claim = $null; $journal = $null; $active = $null; $stageHandle = $null; $next = $null; $publishedTree = $null; $versions = $null
+    $stage = $null; $nextPath = $null; $manifest = $null
+    try {
+        [IO.Directory]::CreateDirectory((Join-Path $Root 'versions')) | Out-Null
+        $versions = Open-SetupDirectories (Join-Path $Root 'versions')
+        $claim = [SetupFileSystem]::OpenClaim((Join-Path $Root 'versions\setup.lock'))
+        $journalPath = Join-Path $Root 'versions\setup-transaction.jsonl'
+        if ([SetupFileSystem]::Exists($journalPath)) {
+            $journal = [SetupFileSystem]::OpenJournal($journalPath)
+            Restore-SetupTransaction $Root $journal
+            $journal.Dispose(); $journal = $null
+        }
+        Clear-SetupPreparation $Root
+        $versions.Add([SetupFileSystem]::OpenDirectory((Join-Path $Root 'versions\.staging')))
+        $id = [guid]::NewGuid().ToString('N')
+        $stage = Join-Path $Root ('versions/.staging/' + $id)
+        [IO.Directory]::CreateDirectory($stage) | Out-Null
+        $stageHandle = [SetupFileSystem]::OpenDirectory($stage)
+        Expand-Archive -LiteralPath $Archive -DestinationPath $stage
+        $manifest = Get-SetupTree $stage
+        $version = Get-SetupVersion (Join-Path $stage 'SyncShark.exe')
+        $destination = Join-Path $Root ('versions\' + $version)
+        if ([SetupFileSystem]::Exists($destination)) { throw ([Massdex.SyncShark.SetupMessages]::Text('version.occupied', [object[]]@())) }
+        $activePath = Join-Path $Root 'active'
+        $previous = $null
+        if ([SetupFileSystem]::Exists($activePath)) {
+            $active = [SetupFileSystem]::OpenJunction($activePath)
+            Assert-SetupUpgrade $version $active.JunctionTarget()
+            $previous = [Convert]::ToBase64String($active.ReadJunction())
+        }
+        $candidate = [SetupFileSystem]::JunctionData($destination)
+        $stageHandle.Dispose()
+        $stageHandle = [SetupFileSystem]::OpenMutableDirectory($stage)
+        if ($stageHandle.Identity -cne $manifest[0].Identity) { throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.changed', [object[]]@($stage))) }
+        if ($null -eq $active) {
+            $nextPath = Join-Path $Root ('versions/.staging/' + $id + '.active')
+            New-Item -ItemType Junction -Path $nextPath -Target $stage | Out-Null
+            $next = [SetupFileSystem]::OpenJunction($nextPath)
+            $next.Retarget($next.ReadJunction(), $candidate)
+        }
+        $state = [pscustomobject]@{
+            Id = $id; Version = $version.ToString(); RootIdentity = $parents[0].Identity
+            VersionsIdentity = $versions[0].Identity; Manifest = $manifest; Previous = $previous
+            Candidate = [Convert]::ToBase64String($candidate)
+            ActiveIdentity = $(if ($active) { $active.Identity } else { $next.Identity }); Committed = $false
+        }
+        $journalTemporary = Join-Path $Root ('versions/.staging/' + $id + '.journal')
+        $created = [IO.File]::Open($journalTemporary, 'CreateNew', 'ReadWrite', 'None')
+        $created.Dispose()
+        $journal = [SetupFileSystem]::OpenJournal($journalTemporary)
+        Write-SetupFrame $journal $state
+        $journal.Rename($journalPath)
+        $stageHandle.Rename($destination)
+        $stageHandle.Dispose(); $stageHandle = $null
+        $publishedTree = Open-SetupTree $destination $manifest -RequireComplete
+        if ($active) { $active.Retarget([Convert]::FromBase64String($previous), $candidate) }
+        else { $next.Rename($activePath) }
+        $state.Committed = $true
+        Write-SetupFrame $journal $state
+        $journal.Delete(); $journal = $null
+        Write-Output ([Massdex.SyncShark.SetupMessages]::Text('install.success', [object[]]@($version)))
     } catch {
         $failure = $_
-        if ($starting) { & $StopNew } else { & $RestartOld }
+        if ($publishedTree) { foreach ($item in $publishedTree) { $item.Dispose() }; $publishedTree = $null }
+        if ($active) { $active.Dispose(); $active = $null }; if ($next) { $next.Dispose(); $next = $null }
+        if ($stageHandle) { $stageHandle.Dispose(); $stageHandle = $null }
+        if ($journal) {
+            try { Restore-SetupTransaction $Root $journal }
+            catch { throw ([Massdex.SyncShark.SetupMessages]::Text('install.rollback', [object[]]@($failure, $_, $Root))) }
+        } elseif ($manifest -and $stage -and ([SetupFileSystem]::Exists($stage))) {
+            Remove-SetupTree $stage $manifest
+        }
         throw $failure
-    }
-}
-function Invoke-SetupCli([string]$Exe, [string[]]$Arguments) {
-    $output = & $Exe --cli @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "Sync Shark command failed ($LASTEXITCODE): $($Arguments -join ' ')" }
-    if ($Arguments -contains '--json') { return ($output -join "`n" | ConvertFrom-Json) }
-}
-function Get-SetupProcesses {
-    @(Get-CimInstance Win32_Process -Filter "Name='SyncShark.exe'")
-}
-function Stop-SetupHost([string]$Exe) {
-    $processes = @(Get-SetupProcesses)
-    if (-not $processes.Count) { return }
-    foreach ($item in $processes) {
-        if ($item.ExecutablePath -ine $Exe -or $item.CommandLine -notmatch ' --core v2 --engine-(host|supervisor)$') {
-            throw 'Another Sync Shark command or generation is running. Close it and retry; nothing was killed.'
-        }
-    }
-    $handles = @($processes | ForEach-Object {
-        try { [Diagnostics.Process]::GetProcessById($_.ProcessId) } catch [ArgumentException] { }
-    })
-    try {
-        Invoke-SetupCli $Exe @('engine','host','stop','--yes') | Out-Null
-        foreach ($process in $handles) { $process.WaitForExit() }
-    } finally { foreach ($process in $handles) { $process.Dispose() } }
-    if (@(Get-SetupProcesses).Count) { throw 'Graceful stop was not confirmed. Nothing was replaced; retry after the host and supervisor exit.' }
-}
-function Get-SetupPairs([string]$Exe) {
-    $reply = Invoke-SetupCli $Exe @('engine','pairs','list','--json')
-    if (-not $reply.ok) { throw 'Cannot snapshot the existing pairs.' }
-    (@($reply.data.pairs) | ForEach-Object { "$($_.id)|$($_.enabled)" } | Sort-Object -CaseSensitive) -join ';'
-}
-function Test-SetupHealthState([string]$State) {
-    $State -notin @('StatusDisabled','StatusUnavailable')
-}
-function Get-SetupStartupPrevious([string]$Startup) {
-    $registered = [regex]::Match($Startup, '^"([^"]+)" --core v2 --engine-supervisor$')
-    if (-not $registered.Success -or [IO.Path]::GetFileName($registered.Groups[1].Value) -ine 'SyncShark.exe' -or
-        -not (Test-Path -LiteralPath $registered.Groups[1].Value -PathType Leaf)) { throw 'The startup executable is unavailable or invalid.' }
-    $registered.Groups[1].Value
-}
-function Assert-SetupCapacity([long]$Bytes, [long]$Free) {
-    # Approved installation headroom: ten percent, with a 256 MiB floor.
-    $margin = [long][Math]::Ceiling([Math]::Max($Bytes * 0.1, 256MB))
-    if ($Free -lt ($Bytes + $margin)) { throw "Insufficient backup space: need $($Bytes + $margin) bytes, available $Free. Free space and retry." }
-}
-function Test-SyncSharkHealth([string]$Exe, [string]$Version, $Pairs, [datetime]$Since, [string]$DataRoot) {
-    $status = Invoke-SetupCli $Exe @('engine','host','status','--json')
-    if (-not $status.ok -or $status.error -or -not (Test-SetupHealthState $status.data.state)) { throw 'The new host is not healthy.' }
-    $hosts = @(Get-SetupProcesses | Where-Object { $_.ExecutablePath -ieq $Exe -and $_.CommandLine -match ' --core v2 --engine-host$' })
-    if ($hosts.Count -ne 1 -or [Diagnostics.FileVersionInfo]::GetVersionInfo($Exe).ProductVersion -cne $Version) { throw 'The expected new host identity was not confirmed.' }
-    if ($null -ne $Pairs -and (Get-SetupPairs $Exe) -cne $Pairs) { throw 'The pairs differ from the pre-upgrade snapshot.' }
-    foreach ($name in @('autosync.log','autosync.log.previous')) {
-        $path = Join-Path $DataRoot "v2/logs/autosync/$name"
-        if (-not (Test-Path -LiteralPath $path)) { continue }
-        $reader = [IO.StreamReader]::new([IO.File]::Open($path, 'Open', 'Read', 'ReadWrite, Delete'))
-        try {
-            while ($null -ne ($line = $reader.ReadLine())) {
-                if ($line -match '^(\S+) .*lifecycle failure' -and [datetime]::Parse($Matches[1]).ToUniversalTime() -ge $Since) { throw "New host lifecycle failure: $line" }
-            }
-        } finally { $reader.Dispose() }
-    }
-}
-function Backup-SetupStore([string]$DataRoot, [string]$BackupRoot) {
-    if (@(Get-SetupProcesses).Count) { throw 'A process appeared before backup; no store was copied.' }
-    $database = Join-Path $DataRoot 'engine/state.db'
-    if (-not (Test-Path -LiteralPath $database)) { return }
-    [IO.Directory]::CreateDirectory($BackupRoot) | Out-Null
-    $names = @('state.db','state.db-wal','state.db-shm')
-    $present = @($names | Where-Object { Test-Path -LiteralPath (Join-Path (Split-Path $database) $_) })
-    $bytes = 0L
-    foreach ($name in $present) { $bytes += (Get-Item -LiteralPath (Join-Path (Split-Path $database) $name)).Length }
-    $free = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($BackupRoot)).AvailableFreeSpace
-    Assert-SetupCapacity $bytes $free
-    foreach ($name in $present) {
-        $source = Join-Path (Split-Path $database) $name
-        $destination = Join-Path $BackupRoot $name
-        $before = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
-        Copy-Item -LiteralPath $source -Destination $destination
-        if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -cne $before -or (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne $before) { throw "Backup verification failed: $name. Preserve the incomplete backup." }
-    }
-    $after = @($names | Where-Object { Test-Path -LiteralPath (Join-Path (Split-Path $database) $_) })
-    if (@(Get-SetupProcesses).Count -or ($after -join ';') -cne ($present -join ';')) { throw 'The store changed during backup. Retry after stopping all writers.' }
-    Write-Host "Verified backup retained at $BackupRoot"
-}
-function Write-SetupLauncher([string]$Path, [string]$Exe) {
-    $temporary = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
-    [IO.File]::WriteAllText($temporary, "@echo off`r`n`"$Exe`" --cli %*`r`n")
-    if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
-    else { [IO.File]::Move($temporary, $Path) }
-}
-if ($FunctionsOnly) { return }
-try {
-    $root = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs/SyncShark'
-    [IO.Directory]::CreateDirectory($root) | Out-Null
-    # Exclusive setup handle, not a persistent transaction journal.
-    $gate = [IO.File]::Open((Join-Path $root 'setup.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
-    $staging = $null
-    try {
-        $staging = Join-Path $root ('staging-' + [guid]::NewGuid().ToString('N'))
-        Expand-Archive -LiteralPath $Payload -DestinationPath $staging
-        $candidate = Join-Path $staging 'SyncShark.exe'
-        function Get-ProductSetupValue([string]$Mode, [string]$Value) {
-            $result = & $candidate --core v2 $Mode $Value
-            if ($LASTEXITCODE -ne 0) { throw 'Product setup validation failed; no startup or data override was applied.' }
-            return ($result -join "`n").Trim()
-        }
-        $pointer = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'massdex/SyncShark/product-root.txt'
-        $initialize = $false
-        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Massdex\SyncShark')
-        try {
-            $data = $key.GetValue('DataLocation', $null, 'DoNotExpandEnvironmentNames')
-            if ($null -eq $data) {
-                $legacy = if (Test-Path -LiteralPath $pointer) { [IO.File]::ReadAllText($pointer).Trim() } else { '' }
-                $data = if ([IO.Path]::IsPathRooted($legacy) -and (Test-Path -LiteralPath (Join-Path $legacy 'engine/state.db') -PathType Leaf)) { $legacy } else { 'C:\SyncShark\Data' }
-                $initialize = -not ([IO.Path]::IsPathRooted($legacy) -and (Test-Path -LiteralPath (Join-Path $legacy 'engine/state.db') -PathType Leaf))
-                $data = Get-ProductSetupValue '--setup-validate-data' $data
-                if (-not $initialize) { $key.SetValue('DataLocation', $data, [Microsoft.Win32.RegistryValueKind]::String) }
-            }
-        } finally { $key.Dispose() }
-        $data = Get-ProductSetupValue '--setup-validate-data' $data
-        if (-not $initialize -and -not (Test-Path -LiteralPath (Join-Path $data 'engine/state.db') -PathType Leaf)) { throw 'The registered store is missing. Restore access to it; setup will not create a replacement.' }
-        $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($candidate).ProductVersion
-        if ($version -notmatch '^\d+\.\d+\.\d+(\+[0-9a-f]{40})?$') { throw 'Invalid application version in the embedded payload.' }
-        $destination = Join-Path $root "versions/$version"
-        if (Test-Path -LiteralPath $destination) { throw 'This version folder already exists. Preserve it and use the installed version or a newer setup.' }
-        $exe = Join-Path $destination 'SyncShark.exe'
-        $launcher = Join-Path $root 'SyncShark.cmd'
-        $previous = $null
-        if (Test-Path -LiteralPath $launcher) {
-            $match = [regex]::Match([IO.File]::ReadAllText($launcher), '(?m)^"([^"]+)" --cli %\*\r?$')
-            if (-not $match.Success) { throw 'The existing launcher was edited. Preserve it and resolve its target before installing.' }
-            $previous = $match.Groups[1].Value
-        }
-        $running = @(Get-SetupProcesses)
-        if ($running.Count) {
-            $paths = @($running | ForEach-Object ExecutablePath | Select-Object -Unique)
-            if ($paths.Count -ne 1 -or ($previous -and $previous -ine $paths[0])) { throw 'More than one active version was found. Close extra generations first.' }
-            $previous = $paths[0]
-        }
-        $runKey = 'HKCU:/Software/Microsoft/Windows/CurrentVersion/Run'
-        $startup = Get-ItemPropertyValue -LiteralPath $runKey -Name 'Sync Shark AutoSync' -ErrorAction SilentlyContinue
-        if (-not $previous -and $startup) {
-            $previous = Get-SetupStartupPrevious $startup
-        }
-        $wasRunning = $running.Count -gt 0
-        $pairs = if ($previous) { Get-SetupPairs $previous } else { $null }
-        $backup = Join-Path $root ('backups/' + [guid]::NewGuid().ToString('N'))
-        $since = [datetime]::UtcNow
-        $oldLauncher = if (Test-Path -LiteralPath $launcher) { [IO.File]::ReadAllText($launcher) } else { $null }
-        $runKey = 'HKCU:/Software/Microsoft/Windows/CurrentVersion/Run'
-        $startup = Get-ItemPropertyValue -LiteralPath $runKey -Name 'Sync Shark AutoSync' -ErrorAction SilentlyContinue
-        if ($startup -and $startup -cne (Get-ProductSetupValue '--setup-startup-command' $previous)) { throw 'The startup value is not the previous Engine supervisor. Preserve it and resolve it before setup.' }
-        $newStartup = if ($startup) { Get-ProductSetupValue '--setup-startup-command' $exe } else { $null }
-        Invoke-SetupTransition -Stop { if ($previous) { Stop-SetupHost $previous } } -Backup {
-            Backup-SetupStore $data $backup
-        } -Copy {
-            if ($initialize) {
-                & $candidate --core v2 --initialize-store $data
-                if ($LASTEXITCODE -ne 0) { throw 'First-install store initialization failed; retry setup after correcting the error.' }
-            }
-            [IO.Directory]::CreateDirectory((Split-Path $destination)) | Out-Null
-            [IO.Directory]::Move($staging, $destination)
-        } -Switch {
-            Write-SetupLauncher $launcher $exe
-            if ($startup) { Set-ItemProperty -LiteralPath $runKey -Name 'Sync Shark AutoSync' -Value $newStartup }
-        } -Start {
-            # Host start uses the product's supervisor/readiness handshake and performs its own migration.
-            Invoke-SetupCli $exe @('engine','host','start','--yes') | Out-Null
-        } -Health {
-            Test-SyncSharkHealth $exe $version $pairs $since $data
-        } -RestartOld {
-            if ($startup) { Set-ItemProperty -LiteralPath $runKey -Name 'Sync Shark AutoSync' -Value $startup }
-            if ($null -ne $oldLauncher) { [IO.File]::WriteAllText($launcher, $oldLauncher) }
-            if ($wasRunning -and -not @(Get-SetupProcesses).Count) { Invoke-SetupCli $previous @('engine','host','start','--yes') | Out-Null }
-        } -StopNew {
-            try { Stop-SetupHost $exe } finally {
-                Write-Error -ErrorAction Continue "Upgrade needs roll-forward recovery. Launcher remains $exe. Preserve data and backup $backup; do not restore automatically or run an older version. Correct the reported error, then run the new executable with --cli engine host start --yes and --cli engine host status --json, or install a fixed newer setup."
-            }
-        }
-        Write-Host "Installed $version. CLI launcher: $launcher. Start With Windows was not enabled by default."
-        Get-ChildItem -LiteralPath (Join-Path $root 'versions') -Directory | ForEach-Object { Write-Host "Retained version (removable when no launcher/process uses it): $($_.FullName)" }
     } finally {
-        if ($staging -and (Test-Path -LiteralPath $staging)) { Remove-Item -LiteralPath $staging -Recurse -Force }
-        $backupParent = Join-Path $root 'backups'
-        if (Test-Path -LiteralPath $backupParent) {
-            Get-ChildItem -LiteralPath $backupParent -Directory | ForEach-Object { Write-Host "Retained backup (removable after recovery is no longer needed): $($_.FullName)" }
+        if ($publishedTree) { foreach ($item in $publishedTree) { $item.Dispose() } }
+        if ($journal) { $journal.Dispose() }; if ($active) { $active.Dispose() }; if ($next) { $next.Dispose() }
+        if ($stageHandle) { $stageHandle.Dispose() }; if ($claim) { $claim.Dispose() }
+        if ($versions) { foreach ($item in $versions) { $item.Dispose() } }
+        foreach ($item in $parents) { $item.Dispose() }
+        if ($stage -and ([SetupFileSystem]::Exists($stage))) {
+            Write-Warning ([Massdex.SyncShark.SetupMessages]::Text('preparation.retained', [object[]]@($stage)))
         }
-        $gate.Dispose()
     }
-} catch {
-    Write-Error -ErrorAction Continue $_
-    exit 1
+}
+
+if (-not $FunctionsOnly) {
+    try { Invoke-SetupInstall $Payload (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Massdex\SyncShark') }
+    catch { [Console]::Error.WriteLine($_); exit 1 }
 }

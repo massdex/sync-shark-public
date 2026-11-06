@@ -18,7 +18,7 @@ internal sealed class ExclusionRunner(ExecutorContext context, Parents parents, 
         Entry? entry = null;
         try
         {
-            entry = await context.For(exclusion.Side).ReadOneAsync(exclusion.Path, ct);
+            entry = await ReadTargetAsync(exclusion, ct);
             if (entry is null) return true;
             var scope = context.Scope.Without(exclusion);
             var protection = context.Scope.ProtectionWithout(exclusion);
@@ -144,6 +144,10 @@ internal sealed class ExclusionRunner(ExecutorContext context, Parents parents, 
             return false;
         }
     }
+
+    /// <summary>Observes only the configured target; the caller owns admission and any effect locks.</summary>
+    internal Task<Entry?> ReadTargetAsync(Exclusion exclusion, CancellationToken ct) =>
+        context.For(exclusion.Side).ReadOneAsync(exclusion.Path, ct);
 
     /// <summary>Reports potential copies and removals without hashing or changing durable state.</summary>
     public async Task<ExcludePreview> PreviewAsync(Exclusion exclusion, CancellationToken ct)

@@ -65,17 +65,16 @@ try {
     Check ((Get-SyncSharkTreeIdentity (Join-Path $root 'state')) -eq $settings -and (Get-SyncSharkTreeIdentity (Join-Path $root 'vNext\state')) -eq $recovery) 'Undo leaves both settings and recovery unchanged'
     # SS-D20: a failure after pointer retirement stays durable, and a later
     # attempt is admitted only from its own freshly matched verified rollback.
-    # The injection is a real native read-share hold on the runtime directory, so
-    # the retirement rename is denied by the filesystem itself.
+    # A runtime member held without delete sharing prevents retirement of its containing tree.
     $failurePlan=Get-SyncSharkUninstallPlan "$version+$commit" $root
-    $runtimeHold=[IO.File]::Open($target,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $runtimeHold=[IO.File]::Open((Join-Path $target 'fixture.txt'),[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
     $originalFailure=$null
     try {
         try { Complete-SyncSharkUninstall $failurePlan } catch { $originalFailure=$_.Exception.Message }
         Check ($null -ne $originalFailure -and $originalFailure.Length -gt 0) 'A denied runtime retirement fails instead of reporting success'
     } finally { $runtimeHold.Dispose() }
     Check ((Get-SyncSharkTreeIdentity $target) -eq $failurePlan.tree) 'The failed attempt restores the exact installed runtime'
-    Check ((Get-SyncSharkJunctionTarget $active) -eq (Get-SyncSharkNormalizedPath $target)) 'The failed attempt restores the exact active pointer'
+    Check ((Get-SyncSharkJunctionTarget $active) -eq (Get-SyncSharkNormalizedPath $target)) ('The failed attempt restores the exact active pointer: '+$originalFailure)
     Check (-not (Test-Path -LiteralPath $failurePlan.retired) -and -not (Test-Path -LiteralPath $failurePlan.pointer)) 'No retired uninstall location is left behind'
     $rolled=Read-SyncSharkJournal $failurePlan.journal 'uninstall' $version $commit $root @('retain-active-pointer','retain-runtime','verify-uninstalled')
     Check ($rolled.status -ceq 'active') 'A rolled-back uninstall journal stays active, never fictitiously complete'
@@ -152,7 +151,8 @@ try {
         @($dualJournal.artifacts.rollback_failure.completed_phases) -contains 'retain-active-pointer' -and
         $dualJournal.artifacts.rollback_failure.journal_preimage_sha256 -match '^[0-9a-f]{64}$') 'The dual failure is recorded as an unverified artifact with both failures, the prior phases and the preimage hash'
     Reject { Get-SyncSharkUninstallPlan "$version+$commit" $dual.root } 'The unresolved dual failure grants no retry'
-    Check ((Test-Path -LiteralPath $dualPlan.retired) -and -not (Test-Path -LiteralPath $dualPlan.target)) 'The dual failure preserves both retained locations for recovery'
+    Check ((Test-Path -LiteralPath $dualPlan.retired) -and (Test-Path -LiteralPath $dualPlan.target) -and
+        (Get-SyncSharkTreeIdentity $dualPlan.target) -ceq $dualPlan.tree) 'The dual failure preserves the foreign retirement path and exact original runtime for recovery'
     # The same real dual failure with the failure-record write failing: all three
     # failures must surface and the preimage must stay unresolved.
     $script:journalWriteAttempts=0

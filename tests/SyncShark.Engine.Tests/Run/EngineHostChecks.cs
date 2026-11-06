@@ -49,6 +49,7 @@ public static class EngineHostChecks
             typeof(PairSession).GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                 .All(constructor => constructor.IsPrivate),
             "AutoSync opportunities and session construction remain private to their owners");
+        await QuietWorkingStatusHasNoEmptyNameAsync(root).ConfigureAwait(false);
         await HostStartupReadsSavedPreferencesBeforeReadyAsync(root).ConfigureAwait(false);
         await HostStartupWithoutPreferencesReturnsDefaultsWithoutSeedingAsync(root).ConfigureAwait(false);
         await HostPreferenceFailureKeepsReadyAndPreservesFailureAsync(root).ConfigureAwait(false);
@@ -56,6 +57,7 @@ public static class EngineHostChecks
         await PreferenceOperationsDoNoPairWorkAsync(root).ConfigureAwait(false);
         HostCompositionFailurePreventsReady(root);
         await DispatchRegistrationIsVisiblyRunningAndCancellableAsync(root).ConfigureAwait(false);
+        await BackgroundFailureLeavesSupervisionAsync(root).ConfigureAwait(false);
         await AcceptedStopSignalsSupervisionBeforeDrainAsync(root).ConfigureAwait(false);
         await RejectedStopDoesNotSignalSupervisionAsync(root).ConfigureAwait(false);
         await PageWaitFirstFailureRaisesOneNoticeWithoutPairAccountingAsync(root).ConfigureAwait(false);
@@ -68,10 +70,13 @@ public static class EngineHostChecks
         await FailedRepairRecordsOnePrerequisiteFailureAsync(root).ConfigureAwait(false);
         await ImportedLegacyPausedPairNotDispatchedUntilEnabledAsync(root).ConfigureAwait(false);
         await ItemAttemptAuthorityAsync(root).ConfigureAwait(false);
+        await ReservationWorkAsync(root).ConfigureAwait(false);
         await SelectedOpportunityAuthorityAsync(root).ConfigureAwait(false);
         await RequestAttemptIsNotRetriedAsync(root).ConfigureAwait(false);
         await TransferRetryRequiresProofAsync(root).ConfigureAwait(false);
         await PauseAdmissionRoutingAsync(root).ConfigureAwait(false);
+        await PausedPrerequisiteLogsAnAdmissionErrorAsync(root).ConfigureAwait(false);
+        StoppedPrerequisiteLogKeepsDistinctFailures(root);
         await ExternalClientOwnershipAsync(root).ConfigureAwait(false);
         await ExternalClientFailureAsync(root).ConfigureAwait(false);
         await StartupReceiptsAsync(root, fail: false, jobs: false, opportunity: false).ConfigureAwait(false);
@@ -259,6 +264,36 @@ public static class EngineHostChecks
         var again = await host.AcquireAsync(PairId, (registration, pair, generation, token) => Task.FromResult(true),
             CancellationToken.None).ConfigureAwait(false);
         Check.Require(again, "the host remains usable after a client operation is cancelled");
+    }
+
+    private static async Task BackgroundFailureLeavesSupervisionAsync(string root)
+    {
+        using var instance = Lock(root, "background-failure");
+        var host = Compose(instance.StateAuthority, new InMemoryStateStore());
+        var signalled = false;
+        host.BindStopSupervision(() => signalled = true);
+        using var acceptStop = CancellationTokenSource.CreateLinkedTokenSource(host.Stopping);
+        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = acceptStop.Token.Register(() => stopped.TrySetResult());
+        await using var status = host.SubscribeStatusAsync(CancellationToken.None).GetAsyncEnumerator();
+        Check.Require(await status.MoveNextAsync(), "A status subscriber receives the initial host status.");
+        var failure = new IOException("background-fixture");
+        host.BackgroundFailed(failure);
+        Check.Require(await status.MoveNextAsync() && status.Current.Status == AutoStatus.Held,
+            "A background failure publishes Held before ending status subscriptions.");
+        Check.Require(!await status.MoveNextAsync(),
+            "A failed host ends its status stream before disposal so open clients cannot prevent exit.");
+        await using var lateStatus = host.SubscribeStatusAsync(CancellationToken.None).GetAsyncEnumerator();
+        Check.Require(!await lateStatus.MoveNextAsync(),
+            "A subscriber arriving after background failure ends immediately without waiting for disposal.");
+        await stopped.Task;
+        Check.Require(acceptStop.IsCancellationRequested && !signalled,
+            "A background failure ends host acceptance without stopping its supervisor.");
+        AggregateException? reported = null;
+        try { await host.DisposeAsync(); }
+        catch (AggregateException error) { reported = error; }
+        Check.Require(reported?.InnerExceptions.Contains(failure) == true && !signalled,
+            "Host disposal reports the original failure for a failed exit and preserves supervision.");
     }
 
     // RC05-V5-F122: an accepted explicit stop signals supervision before it drains admitted work.
@@ -529,6 +564,45 @@ public static class EngineHostChecks
     // LOCAL-IN-USE C3/D1: item retry authority belongs to the host's exact registration, not the Store. A real
     // opportunity (never a clock tick) registers one attempt per subject and generation; a repeated report or
     // completion returns the one recorded result instead of writing twice, and a conflicting one is refused.
+    private static async Task ReservationWorkAsync(string root)
+    {
+        // Doubling consumed subjects exposes the old triangular scan; singleton hashing needs no enumeration.
+        foreach (var count in new[] { 128, 256 })
+        {
+            using var instance = Lock(root, "reservation-work-" + count);
+            const string PairId = "reservation-work";
+            var store = new InMemoryStateStore();
+            store.SavePair(Paired(PairId));
+            await using var host = Compose(instance.StateAuthority, store);
+            var visits = 0;
+            var reservationVisits = 0;
+            var hashes = new HashSet<int>();
+            await host.DispatchAsync(PairId, async (registration, pair, generation, token) =>
+            {
+                var source = store.ReadSource(PairId, Side.Local) ?? throw new InvalidOperationException();
+                for (var index = 0; hashes.Count < count; index++)
+                {
+                    var path = "item-" + index;
+                    var item = new IssueItem(Side.Local, path, path);
+                    if (!hashes.Add(item.GetHashCode())) continue;
+                    var subject = new IssueSubject(new Storage.StateStoreChecks.ObservedList<IssueItem>(
+                        [item], () => visits++), null);
+                    var before = visits;
+                    await host.ExecuteItemAttemptAsync(registration, registration, null, subject, (id, ct) =>
+                    {
+                        reservationVisits += visits - before;
+                        host.ReportItemFailure(registration, id, source.Epoch, path, subject,
+                            TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null);
+                        return Task.FromResult(true);
+                    }, token);
+                }
+                return true;
+            }, CancellationToken.None);
+            Check.Require(reservationVisits == 0,
+                "distinct singleton reservations never enumerate previously consumed subjects");
+        }
+    }
+
     private static async Task ItemAttemptAuthorityAsync(string root)
     {
         using var instance = Lock(root, "item-attempt");
@@ -543,7 +617,7 @@ public static class EngineHostChecks
             {
                 Check.Require(!host.IsRegisteredItemAttempt(Guid.NewGuid(), PairId, generation, subject, null),
                     "no attempt is registered before an actual opportunity selects one");
-                return await host.ExecuteItemAttemptAsync(registration, registration, null, subject,
+                var first = await host.ExecuteItemAttemptAsync(registration, registration, null, subject,
                     (attemptId, ct) =>
                     {
                         Check.Require(host.IsRegisteredItemAttempt(attemptId, PairId, generation, subject, null),
@@ -575,6 +649,22 @@ public static class EngineHostChecks
                         Check.Require(conflicted, "a conflicting duplicate report is refused");
                         return Task.FromResult(true);
                     }, token).ConfigureAwait(false);
+                var refused = false;
+                try
+                {
+                    await host.ExecuteItemAttemptAsync(registration, registration, null,
+                        new IssueSubject([subject.Items[0], subject.Items[0]], Side.Dropbox),
+                        (_, _) => Task.FromResult(true), token);
+                }
+                catch (LiveAdmissionStaleException error)
+                {
+                    refused = error.Reason == LiveAdmissionStaleReason.SelectionChanged;
+                }
+                Check.Require(refused, "consumed item set refuses repetition regardless of Incoming or duplicates");
+                var other = new IssueSubject([new IssueItem(Side.Local, "other.txt", "other")], null);
+                Check.Require(await host.ExecuteItemAttemptAsync(registration, registration, null, other,
+                    (_, _) => Task.FromResult(true), token), "another item set remains admissible");
+                return first;
             }, CancellationToken.None).ConfigureAwait(false);
         Check.Require(admitted && reported is not null, "the first report is recorded once through the host");
 
@@ -697,6 +787,66 @@ public static class EngineHostChecks
             Check.Require(!unproved, "an unproved Transfer attempt is not retried");
         }
         finally { await host.DisposeAsync(); }
+    }
+
+    private static void StoppedPrerequisiteLogKeepsDistinctFailures(string root)
+    {
+        var messages = new List<string>();
+        using var log = RunLog.Open(Path.Combine(root, "stopped-diagnoses"), "pair", "run",
+            messages.Add, Settings.LogBufferCharacters);
+        var cancellation = new OperationCanceledException();
+        var cleanup = new IOException("synthetic cleanup failure");
+        log.Failed(cancellation);
+        log.Failed(new PrerequisiteStoppedException(cancellation));
+        log.Failed(cleanup);
+        log.Failed(new OperationCanceledException());
+        log.Dispose();
+        var lines = File.ReadAllLines(log.Path).Select(line => line.Split(RunLog.FieldSeparator)).ToArray();
+        Check.Require(lines.Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Failed)) == 3 &&
+            messages.Count(message => message.Contains(Text.Get(TextKey.HumanStopped), StringComparison.Ordinal)) == 2,
+            "a stop wrapper keeps its diagnosis identity without hiding distinct cancellation or cleanup failures");
+        Check.Require(lines.Any(fields => fields[RunLog.FieldWhat] == nameof(IOException)),
+            "a genuinely distinct cleanup failure remains visible");
+    }
+
+    // BUG-132: the prerequisite admission read happens before the attempt's owned log exists. A genuine failure
+    // there is still diagnosed through a log the host opens for it, even while the pair is paused.
+    private static async Task PausedPrerequisiteLogsAnAdmissionErrorAsync(string root)
+    {
+        using var instance = Lock(root, "paused-admission-error");
+        const string PairId = "paused-admission-error-pair";
+        var inner = new InMemoryStateStore();
+        inner.SavePair(Pair(PairId));
+        var store = new FailingPairReadStore(inner);
+        var folder = Path.Combine(root, "paused-admission-error", "logs");
+        var written = new List<string>();
+        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { }, instance.StateAuthority,
+            Settings, Http, TimeProvider.System, pairId =>
+            {
+                var log = RunLog.Open(folder, pairId, ResourceNames.NewId(), _ => { },
+                    Settings.LogBufferCharacters);
+                written.Add(log.Path);
+                return log;
+            }, _ => store, EngineHost.Mode.Direct);
+        try
+        {
+            await host.PauseAsync(PairId, CancellationToken.None).ConfigureAwait(false);
+            store.Error = new IOException("synthetic admission read failure");
+            var thrown = false;
+            try { await host.RunPrerequisiteAsync(PairId, CancellationToken.None).ConfigureAwait(false); }
+            catch (IOException) { thrown = true; }
+            Check.Require(thrown, "the admission read failure reaches the caller");
+            var lines = written.SelectMany(File.ReadAllLines)
+                .Select(line => line.Split(RunLog.FieldSeparator)).ToArray();
+            Check.Require(lines.Any(fields => fields.Length > 2 && fields[1] == nameof(RunEventKind.Failed) &&
+                    fields[2] == nameof(IOException)),
+                "a paused prerequisite logs its genuine admission error");
+        }
+        finally
+        {
+            store.Error = null;
+            await host.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     // V13/RC05-V5-F122: an explicit pause stops only Dispatch admission; the source acquisition lifetime and the
@@ -1241,6 +1391,13 @@ public static class EngineHostChecks
         }
     }
 
+    private sealed class FailingPairReadStore(IStateStore inner) : ForwardingStateStore(inner)
+    {
+        internal Exception? Error;
+        public override (PairConfig Pair, long Generation)? ReadPairExecution(string pairId) =>
+            Error is { } error ? throw error : base.ReadPairExecution(pairId);
+    }
+
     private sealed class ReceiptReadStore(IStateStore inner, bool fail) : ForwardingStateStore(inner)
     {
         internal int Passes;
@@ -1316,6 +1473,46 @@ public static class EngineHostChecks
             new RootBinding(@"C:\EngineHostFixture", "/EngineHostFixture", "connection-a",
                 new DirectoryIdentity(1, 2, null),
                 new DropboxRootIdentity("account-a", "ns-root", "ns-home", "folder-a")));
+
+    private static async Task QuietWorkingStatusHasNoEmptyNameAsync(string root)
+    {
+        using var instance = Lock(root, "quiet-working");
+        var store = new InMemoryStateStore();
+        store.SavePair(Pair("quiet-pair"));
+        var clock = new FakeTimeProvider();
+        var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
+        var published = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot,
+            message => published.TrySetResult(message), instance.StateAuthority, Settings, Http, clock,
+            _ => null, _ => store, EngineHost.Mode.Persistent, startupMonitor: monitor);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var running = host.DispatchAsync("quiet-pair", async (registration, pair, generation, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token).ConfigureAwait(false);
+            return true;
+        }, CancellationToken.None);
+        try
+        {
+            await entered.Task.ConfigureAwait(false);
+            monitor.Start(quietOnly: true);
+            using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            while (!clock.HasArmedTimer)
+            {
+                bound.Token.ThrowIfCancellationRequested();
+                await Task.Yield();
+            }
+            clock.Advance(clock.NextDueIn!.Value);
+            Check.Require(await published.Task.WaitAsync(bound.Token).ConfigureAwait(false) ==
+                Text.Get(TextKey.StatusStillQuiet), "a quiet working host publishes the name-free sentence");
+        }
+        finally
+        {
+            release.TrySetResult();
+            await running.ConfigureAwait(false);
+        }
+    }
 
     private static EngineHost Compose(PilotStateAuthority authority, IStateStore store) =>
         EngineHost.Compose(authority.ProductRoot, _ => { }, authority, Settings, Http, TimeProvider.System,

@@ -55,6 +55,7 @@ public static class LiteralsChecks
         DefaultArithmeticFixtures();
         ZeroFixtures();
         GrammarFixtures();
+        MigrationMessageChecks();
 
         var root = FindRepoRoot();
         var offences = new List<string>();
@@ -66,6 +67,171 @@ public static class LiteralsChecks
         }
         Check.Require(offences.Count == 0, "literals: " + string.Join("; ", offences));
     }
+
+    private static void MigrationMessageChecks()
+    {
+        var root = FindRepoRoot();
+        using var catalog = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "src/SyncShark.Core/V2/Adapters/edge-messages.json")));
+        var templates = catalog.RootElement.GetProperty("messages");
+        foreach (var expression in new[] { "MoveText(\"data-move-noop\")", "MoveText(\"data-move-precommit-failed\", (\"reason\", error.Message))", "MoveText(\"data-move-cleanup-incomplete\", (\"location\", result.DataLocation))" })
+            Check.Require(!HasInlineText(SyntaxFactory.ParseExpression(expression), templates), "migration stable catalog expression passes: " + expression);
+        foreach (var expression in new[] { "\"Failed.\"", "\"Data move failed.\"", "\"No-op\"", "\"Committed\"", "$\"Failed {p}\"", "MoveText(\"data-move-noop\") + \" appended\"", "MoveText(\"data-move-noop\") + suffix" })
+            Check.Require(HasInlineText(SyntaxFactory.ParseExpression(expression), templates), "migration inline or appended text fails: " + expression);
+        // Inline text cannot reach a return site through a local variable or a same-file helper.
+        foreach (var (source, what) in new[]
+        {
+            ("""static partial class C { static string M() { var text = "Failed."; return text; } }""", "local variable"),
+            ("""static partial class C { static string M() { string text; text = "Failed."; return text; } }""", "assigned local variable"),
+            ("""static partial class C { static string M() => Helper(); static string Helper() => "Failed."; }""", "helper"),
+        })
+            Check.Require(ReturnCarriesInlineText(source, templates), "migration inline text through a " + what + " fails: " + source);
+        foreach (var (source, what) in new[]
+        {
+            ("""static partial class C { static string M() { var text = MoveText("data-move-noop"); return text; } }""", "local"),
+            ("""static partial class C { static string M() => Helper(); static string Helper() => MoveText("data-move-noop"); }""", "helper"),
+            // A repeated call in one expression is not recursion and must pass.
+            ("""static partial class C { static string M() => Pick(Helper(), Helper()); static string Pick(string first, string second) => first; static string Helper() => MoveText("data-move-noop"); }""", "repeated helper"),
+            ("""static partial class C { static string M() { var text = MoveText("data-move-noop"); return Pick(text, text); } static string Pick(string first, string second) => first; }""", "repeated local"),
+        })
+            Check.Require(!ReturnCarriesInlineText(source, templates), "migration resolved catalog call through a " + what + " passes: " + source);
+        var migrationTree = CSharpSyntaxTree.ParseText(File.ReadAllText(Path.Combine(root, "src/SyncShark.Core/SyncDataLocation.cs")));
+        var migration = migrationTree.GetRoot();
+        var migrationModel = MessageModel(migrationTree);
+        foreach (var method in migration.DescendantNodes().OfType<MethodDeclarationSyntax>()
+            .Where(method => method.Identifier.ValueText is "MoveAsync" or "CleanupOldCopy"))
+        foreach (var statement in method.DescendantNodes().OfType<ReturnStatementSyntax>())
+        {
+            var expression = statement.Expression!;
+            if (method.Identifier.ValueText == "MoveAsync")
+                expression = ((BaseObjectCreationExpressionSyntax)expression).ArgumentList!.Arguments[2].Expression;
+            Check.Require(!HasInlineText(expression, templates, migrationModel), "migration outcome assembly: " + method.Identifier.ValueText);
+        }
+        var recovery = CSharpSyntaxTree.ParseText(File.ReadAllText(Path.Combine(root, "src/SyncShark.Core/SyncDataLocation.Recovery.cs"))).GetRoot();
+        var formatter = recovery.DescendantNodes().OfType<MethodDeclarationSyntax>().Single(method => method.Identifier.ValueText == "MoveText");
+        var expected = SyntaxFactory.ParseExpression("CliCatalogResource.Fill(V2.MessageCatalog.Default.Message(key), values)");
+        Check.Require(SyntaxFactory.AreEquivalent(formatter.ExpressionBody!.Expression, expected), "migration formatter uses the existing catalog and one-pass filler");
+        Check.Require(!SyntaxFactory.AreEquivalent(SyntaxFactory.ParseExpression("CliCatalogResource.Fill(V2.MessageCatalog.Default.Message(key), values) + suffix"), expected),
+            "migration formatter append-after-lookup fails");
+        var checks = new[] {
+            ("src/SyncShark.Core/SyncDataLocation.cs", "DescribeMoveFailure", false),
+            ("apps/SyncShark/App.DataLocation.cs", "MoveDataAndRestart", true),
+            ("src/SyncShark.Core/SyncCliOperations.cs", "", true)
+        };
+        foreach (var (path, member, catchesOnly) in checks)
+        {
+            var fileTree = CSharpSyntaxTree.ParseText(File.ReadAllText(Path.Combine(root, path)));
+            var syntax = fileTree.GetRoot();
+            IEnumerable<SyntaxNode> nodes = syntax.DescendantNodes().OfType<MethodDeclarationSyntax>()
+                .Where(method => method.Identifier.ValueText == member);
+            if (path.EndsWith("SyncCliOperations.cs", StringComparison.Ordinal))
+                nodes = syntax.DescendantNodes().OfType<CatchClauseSyntax>().Where(clause =>
+                    clause.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(invocation =>
+                        invocation.Expression.ToString() == "SyncDataLocation.DescribeMoveFailure"));
+            else if (catchesOnly) nodes = nodes.SelectMany(node => node.DescendantNodes().OfType<CatchClauseSyntax>())
+                .Where(clause => clause.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(invocation =>
+                    invocation.Expression.ToString() == "SyncDataLocation.DescribeMoveFailure"));
+            var selected = nodes.ToArray();
+            Check.Require(selected.Length == 1 && !HasInlineText(selected[0], templates, MessageModel(fileTree)), "migration message boundary: " + path);
+        }
+    }
+
+    // True when the node carries text that is not an existing migration catalog message reached through a catalog
+    // call, including text a local variable or a same-file helper carries into it.
+    private static bool HasInlineText(SyntaxNode node, System.Text.Json.JsonElement templates, SemanticModel? model = null,
+        HashSet<ISymbol>? visited = null)
+    {
+        foreach (var part in node.DescendantNodesAndSelf())
+        {
+            if (part is InterpolatedStringExpressionSyntax) return true;
+            if (part is BinaryExpressionSyntax binary && binary.IsKind(SyntaxKind.AddExpression)) return true;
+            if (part is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.StringLiteralExpression))
+            {
+                var invocation = literal.Ancestors().OfType<InvocationExpressionSyntax>().FirstOrDefault();
+                if (invocation?.Expression.ToString() != "MoveText") return true;
+                var arguments = invocation.ArgumentList.Arguments;
+                if (arguments[0].Expression.Span == literal.Span)
+                {
+                    if (!literal.Token.ValueText.StartsWith("data-move-", StringComparison.Ordinal) ||
+                        !templates.TryGetProperty(literal.Token.ValueText, out _)) return true;
+                }
+                else if (literal.Parent is not ArgumentSyntax { Parent: TupleExpressionSyntax tuple } ||
+                    tuple.Arguments[0].Expression.Span != literal.Span || tuple.Parent is not ArgumentSyntax { Parent: ArgumentListSyntax list } ||
+                    list.Parent?.Span != invocation.Span) return true;
+                continue;
+            }
+            if (model is null || part is not IdentifierNameSyntax identifier) continue;
+            var symbol = model.GetSymbolInfo(identifier).Symbol;
+            // Only a string value can carry user text into a return site; other locals and calls cannot.
+            var carriesText = symbol switch
+            {
+                ILocalSymbol local => local.Type.SpecialType == SpecialType.System_String,
+                IMethodSymbol method => method.ReturnType.SpecialType == SpecialType.System_String,
+                _ => false,
+            };
+            if (!carriesText) continue;
+            visited ??= new(SymbolEqualityComparer.Default);
+            if (!visited.Add(symbol!)) continue;
+            try
+            {
+                // The stack entry lasts only while this expression is being resolved, so a repeated call is not recursion.
+                if (CarriedText(symbol!, model).Any(carried => HasInlineText(carried, templates, model, visited))) return true;
+            }
+            finally { visited.Remove(symbol!); }
+        }
+        return false;
+    }
+
+    // The expressions whose text an identifier can carry: a local's initializer and later assignments, or a helper's
+    // returned expressions.
+    private static IEnumerable<SyntaxNode> CarriedText(ISymbol symbol, SemanticModel model)
+    {
+        foreach (var reference in symbol.DeclaringSyntaxReferences)
+        {
+            // Only this model's tree can be resolved; a fixture stub in another tree carries no user text.
+            if (reference.SyntaxTree != model.SyntaxTree) continue;
+            var declaration = reference.GetSyntax();
+            if (declaration is VariableDeclaratorSyntax { Initializer.Value: { } initial }) yield return initial;
+            if (declaration is not (MethodDeclarationSyntax or LocalFunctionStatementSyntax)) continue;
+            foreach (var expression in declaration.DescendantNodes().OfType<ReturnStatementSyntax>().Select(statement => (SyntaxNode)statement.Expression!)
+                         .Concat(declaration.DescendantNodes().OfType<ArrowExpressionClauseSyntax>()))
+                yield return expression;
+        }
+        if (symbol is not ILocalSymbol local) yield break;
+        var references = local.DeclaringSyntaxReferences;
+        if (references.Length != 1 || references[0].GetSyntax() is not VariableDeclaratorSyntax declarator) yield break;
+        foreach (var assignment in declarator.Ancestors().OfType<MethodDeclarationSyntax>().SelectMany(method =>
+                     method.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+                 .Where(assignment => assignment.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+                     assignment.Left is IdentifierNameSyntax left &&
+                     SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(left).Symbol, symbol) &&
+                     assignment.SpanStart > declarator.SpanStart))
+            yield return assignment.Right;
+    }
+
+    private static bool ReturnCarriesInlineText(string source, System.Text.Json.JsonElement templates)
+    {
+        var tree = CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.Latest));
+        var method = tree.GetRoot().DescendantNodes().OfType<MethodDeclarationSyntax>()
+            .Single(candidate => candidate.Identifier.ValueText == "M");
+        var model = FixtureModel(tree);
+        return method.DescendantNodes().OfType<ReturnStatementSyntax>().Select(statement => (SyntaxNode)statement.Expression!)
+            .Concat(method.DescendantNodes().OfType<ArrowExpressionClauseSyntax>())
+            .Any(node => HasInlineText(node, templates, model));
+    }
+
+    // The fixtures call the real catalog call by name, so they compile against this resolvable stub declaring it.
+    private const string MoveTextStub = "static partial class C { internal static string MoveText(string key) => key; }";
+
+    private static SemanticModel FixtureModel(SyntaxTree tree) =>
+        CSharpCompilation.Create("MigrationFixtures",
+            [tree, CSharpSyntaxTree.ParseText(MoveTextStub, new CSharpParseOptions(LanguageVersion.Latest))],
+            [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)],
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)).GetSemanticModel(tree);
+
+    private static SemanticModel MessageModel(SyntaxTree tree) =>
+        CSharpCompilation.Create("MigrationMessages", [tree], [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)],
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)).GetSemanticModel(tree);
+
 
     private static void OwnerFixtures()
     {
@@ -110,7 +276,10 @@ public static class LiteralsChecks
         foreach (var (owner, members) in new[]
         {
             ("EngineHost", "private const int SingleHolder = 1; private const int LatestStatusCapacity = 1;"),
-            ("Monitor", "private const int QuietSeconds = 30;")
+            ("Monitor", "private const int QuietSeconds = 30;"),
+            ("EngineSettings", "private const int AtomicReplaceDelayMultiplier = 2;"),
+            ("SettingsParser", "private const int MaximumAtomicReplaceAttempts = 10; private const int MaximumAtomicReplaceInitialDelayMilliseconds = 60_000;"),
+            ("DropboxListing", "private const int SpellingQueued = 1; private const int SpellingReleased = -1;")
         })
         {
             var source = "class " + owner + " { " + members + " }";
@@ -300,6 +469,9 @@ public static class LiteralsChecks
     /// in (design section 10).</summary>
     private static readonly Dictionary<string, string> OwnerFiles = new(StringComparer.Ordinal)
     {
+        ["EngineSettings"] = "src/SyncShark.Engine/EngineSettings.cs",
+        ["SettingsParser"] = "src/SyncShark.Engine/SettingsParser.cs",
+        ["DropboxListing"] = "src/SyncShark.Engine/Dropbox/DropboxListing.cs",
         ["StateSchema"] = "src/SyncShark.Engine/Storage/StateSchema.cs",
         ["DropboxProtocol"] = "src/SyncShark.Engine/Dropbox/DropboxProtocol.cs",
         ["DropboxEntries"] = DropboxEntriesFile,
@@ -325,6 +497,10 @@ public static class LiteralsChecks
     // Narrow exemptions follow each member's owner; other constants there remain offences.
     private static readonly Dictionary<string, IReadOnlySet<string>> MemberOwners = new(StringComparer.Ordinal)
     {
+        ["EngineSettings"] = new HashSet<string>(StringComparer.Ordinal) { "AtomicReplaceDelayMultiplier" },
+        ["SettingsParser"] = new HashSet<string>(StringComparer.Ordinal)
+            { "MaximumAtomicReplaceAttempts", "MaximumAtomicReplaceInitialDelayMilliseconds" },
+        ["DropboxListing"] = new HashSet<string>(StringComparer.Ordinal) { "SpellingQueued", "SpellingReleased" },
         ["EngineHost"] = new HashSet<string>(StringComparer.Ordinal)
             { "SingleHolder", "LatestStatusCapacity" },
         ["Monitor"] = new HashSet<string>(StringComparer.Ordinal) { "QuietSeconds" },

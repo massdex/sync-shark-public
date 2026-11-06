@@ -52,7 +52,7 @@ internal static class SyncSharkUpdaterContractChecks
         using(var sha=System.Security.Cryptography.SHA256.Create())manifestHash=SyncSharkUpdaterFiles.Hex(sha.ComputeHash(originalManifest));
         string original="{\"manifestBase64\":\""+Convert.ToBase64String(originalManifest)+"\",\"manifestSha256\":\""+manifestHash+"\",\"treeSha256\":\""+Hash+"\"}";
         var originalPair=SyncSharkOriginalDiscovery.ReadPair(SyncSharkUpdaterData.Read(original,16384),Sid);
-        Check(originalPair.Members.Length==16 && originalPair.Version=="0.3.49+"+Revision && originalPair.Manifest.SequenceEqual(originalManifest),"Original restoration preserves exact manifest bytes and derives one fixed retained runtime.");
+        Check(originalPair.Members.Length==18 && originalPair.Version=="0.3.49+"+Revision && originalPair.Manifest.SequenceEqual(originalManifest),"Original restoration preserves exact manifest bytes and derives one fixed retained runtime.");
         foreach(string bad in new[]{original.Replace(manifestHash,Other),original.Replace("{","{\"path\":\"C:\\\\other\","),
             original.Replace("{","{\"treeSha256\":\""+Hash+"\","),original.Replace("\"treeSha256\":\""+Hash+"\"","\"treeSha256\":null"),original+"{}"})
             Reject(()=>SyncSharkOriginalDiscovery.ReadPair(SyncSharkUpdaterData.Read(bad,16384),Sid),"Malformed original-pair restoration data");
@@ -64,7 +64,7 @@ internal static class SyncSharkUpdaterContractChecks
             Pending()+"{}",Pending().Replace("0.3.49","../0.3.49"),new string(' ',1025)})
             Reject(()=>SyncSharkUpdaterData.ReadPendingPlan(bad),"malformed pending plan: "+bad);
         var contract=SyncSharkUpdaterData.ReadSignedHeader(Header(),plan);
-        Check(contract.Members.Length==16 && contract.PreviousTree==Hash && contract.UserSid==Sid && contract.UpdaterWorker.Sha256==Other &&
+        Check(contract.Members.Length==18 && contract.PreviousTree==Hash && contract.UserSid==Sid && contract.UpdaterWorker.Sha256==Other &&
             contract.UpdaterWorker.Bytes==1000,"Signed data preserves runtime and fixed updater authority bindings separately.");
         foreach(string bad in new[]{Header().Replace("\"product\":","\"product\":\"other\",\"product\":"),
             Header().Replace("\"product\":","\"run\":\"calc.exe\",\"product\":"),
@@ -76,14 +76,18 @@ internal static class SyncSharkUpdaterContractChecks
             Header().Replace("versions\\\\0.3.49","versions\\\\0.3.50"),Header().Replace("0.3.49","0.3.50"),
             Header().Replace("\"schemaVersion\":1","\"schemaVersion\":2"),Header()+"{}",Header()+new string(' ',16384)})
             Reject(()=>SyncSharkUpdaterData.ReadSignedHeader(bad,plan),"malformed signed header");
-        string steps="[\"stage-package\",\"publish-runtime\",\"backup-state\",\"create-next-link\",\"retain-predecessor\",\"publish-successor\",\"register-explorer-package\",\"verify-complete\"]";
+        string steps="[\"stage-package\",\"publish-runtime\",\"backup-state\",\"create-next-link\",\"retain-predecessor\",\"publish-successor\",\"register-explorer-package\",\"register-application\",\"verify-complete\"]";
         string journal="{\"schema\":1,\"operation\":\"install\",\"version\":\"0.3.49\",\"commit\":\""+Revision+
             "\",\"product_root\":\"test-root\",\"status\":\"active\",\"pending\":\"publish-runtime\",\"completed\":[\"stage-package\"],\"allowed_steps\":"+steps+",\"artifacts\":{\"state_predecessor_sha256\":null}}";
         Check(SyncSharkUpdaterData.PublicationStepPending(journal,contract,"test-root"),"The real installer publication phase is accepted.");
         foreach(string bad in new[]{journal.Replace("test-root","foreign-root"),journal.Replace("\"install\"","\"rollback\""),
             journal.Replace("\"pending\":\"publish-runtime\"","\"pending\":null"),journal.Replace("\"completed\":[\"stage-package\"]","\"completed\":[]"),
             journal.Replace("\"completed\":[\"stage-package\"]","\"completed\":[\"publish-runtime\",\"stage-package\"]"),
-            journal.Replace("\"status\":\"active\"","\"status\":\"complete\"")})
+            journal.Replace("\"status\":\"active\"","\"status\":\"complete\""),
+            journal.Replace("\"register-application\",",""),
+            journal.Replace("\"register-application\"","\"register-explorer-package\""),
+            journal.Replace("\"register-application\",\"verify-complete\"","\"verify-complete\",\"register-application\""),
+            journal.Replace("\"verify-complete\"","\"verify-complete\",\"unexpected-step\"")})
             Reject(()=>SyncSharkUpdaterData.PublicationStepPending(bad,contract,"test-root"),"foreign/incompatible journal");
         string complete=journal.Replace("\"status\":\"active\"","\"status\":\"complete\"").Replace("\"pending\":\"publish-runtime\"","\"pending\":null")
             .Replace("\"completed\":[\"stage-package\"]","\"completed\":"+steps).Replace("\"state_predecessor_sha256\":null","\"state_predecessor_sha256\":\""+Hash+"\"");
@@ -102,9 +106,36 @@ internal static class SyncSharkUpdaterContractChecks
             uninstall.Replace("\"operation\":\"uninstall\"","\"operation\":\"install\""),uninstall.Replace("{\"schema\":1","{\"schema\":1,\"schema\":1")})
             Reject(()=>SyncSharkUpdaterData.UninstallRestoration(bad,contract,"test-root",Hash),"foreign or previously completed uninstall restoration");
     }
+    private static void PredecessorInventoryChecks()
+    {
+        string root=Path.Combine(Path.GetTempPath(),"sync-shark-predecessor-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            foreach(string name in SyncSharkProtectedRuntimeTransaction.Members)
+            {
+                if(name=="SyncShark.Engine.dll" || name.StartsWith("tools/",StringComparison.Ordinal))continue;
+                string path=Path.Combine(root,name);Directory.CreateDirectory(Path.GetDirectoryName(path));File.WriteAllText(path,"fixture");
+            }
+            string legacy;
+            using(var files=new SyncSharkUpdaterFiles(IntPtr.Zero))legacy=files.TreeIdentity(root,false);
+            Check(legacy.Length==64,"Pre-engine predecessor is inspected using its actual bounded inventory.");
+            File.WriteAllText(Path.Combine(root,"SyncShark.Engine.dll"),"engine");
+            using(var files=new SyncSharkUpdaterFiles(IntPtr.Zero))
+                Check(files.TreeIdentity(root,false)!=legacy,"Adding Engine changes the bound predecessor hash.");
+            Directory.CreateDirectory(Path.Combine(root,"tools"));
+            File.WriteAllText(Path.Combine(root,"tools","SyncShark.Uninstall.ps1"),"uninstall");
+            using(var files=new SyncSharkUpdaterFiles(IntPtr.Zero))
+                Check(files.TreeIdentity(root,false)!=legacy,"Current predecessor includes the packaged uninstall launcher.");
+            File.WriteAllText(Path.Combine(root,"foreign.dll"),"foreign");
+            using(var files=new SyncSharkUpdaterFiles(IntPtr.Zero))
+                Reject(()=>files.TreeIdentity(root,false),"Foreign predecessor members remain rejected");
+        }
+        finally {Directory.Delete(root,true);}
+    }
     internal static int Run()
     {
-        checks=0;DataChecks();var contract=Contract();var observation=Observation();
+        checks=0;DataChecks();PredecessorInventoryChecks();var contract=Contract();var observation=Observation();
         Reject(()=>SyncSharkUpdaterSetup.Prepare("UNBOUND"),"initial setup without exact frozen identity");
         var manifest=SyncSharkUpdaterManifest.Discovery(contract);
         var reordered=new SyncSharkUpdaterContract(contract.Version,contract.SourceRevision,contract.PreviousVersion,contract.PreviousTree,

@@ -166,11 +166,12 @@ if ($Step -eq 'Stage') {
     $members=@('e_sqlite3.dll','Microsoft.Data.Sqlite.dll','Microsoft.Windows.SDK.NET.dll',
         'SQLitePCLRaw.batteries_v2.dll','SQLitePCLRaw.core.dll','SQLitePCLRaw.provider.e_sqlite3.dll',
         'SyncShark.Core.dll','SyncShark.Engine.dll','SyncShark.deps.json','SyncShark.dll','SyncShark.exe',
-        'SyncShark.runtimeconfig.json','WinRT.Runtime.dll','SyncShark.Explorer.dll','SyncSharkDiscovery.exe','Assets/SyncShark-64.png')
+        'SyncShark.runtimeconfig.json','WinRT.Runtime.dll','SyncShark.Explorer.dll','SyncSharkDiscovery.exe','Assets/SyncShark-64.png','tools/SyncShark.Uninstall.ps1')
     $inputs=@{}
     foreach ($name in $members) {
         $path=Join-Path $publish $name
         if($name -ceq 'Assets/SyncShark-64.png'){$path=Join-Path $repo 'apps\SyncShark\Assets\SyncShark-64.png'}
+        if($name -ceq 'tools/SyncShark.Uninstall.ps1'){$path=Join-Path $repo $name}
         if ($name -eq 'e_sqlite3.dll' -and !(Test-Path -LiteralPath $path)) {
             $path=Join-Path $publish 'runtimes\win-x64\native\e_sqlite3.dll'
         }

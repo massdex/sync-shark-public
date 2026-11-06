@@ -40,6 +40,8 @@ public static class ChangeTableChecks
     public static void Run()
     {
         WithStore(PageRollback);
+        WithStore(store => ReturningRelease(store));
+        using (var memory = new InMemoryStateStore()) ReturningRelease(memory);
         WithStore(OrderedAndFinite);
         SeparateWorkProbeCounts();
         WithStore(JournalRollbackAndGap);
@@ -95,6 +97,105 @@ public static class ChangeTableChecks
         });
         WithStore(ResidualSafetyCase);
         WithStore(IsolatedResidualSafetyCases);
+    }
+
+    // Integration calls with Repair held open after the concurrent live-selection lane lands.
+    internal static void ReturningRelease(IStateStore store, bool keepRepairObligated = false)
+    {
+        var pair = Pair(PairId);
+        store.SavePair(pair);
+        var generation = store.ReadPairExecution(PairId)!.Value.Generation;
+        foreach (var side in new[] { Side.Local, Side.Dropbox })
+        {
+            if (keepRepairObligated) continue;
+            var source = store.ReadSource(PairId, side)!.Value;
+            store.AdvanceSource(PairId, side, generation, source.Epoch, source.Revision,
+                source.Provenance, source.Cursor, source.Epoch, source.Revision, source.Provenance, source.Cursor, null);
+        }
+        Check.Require(store.Obligated(PairId) == keepRepairObligated,
+            "Advancing a source to a null obligation clears it equally in SQLite and the fake.");
+        var a = new SyncedEntry(PathNames.Key("Original"), "Original", PathNames.DropboxKey("RemotePartner"),
+            "RemotePartner", false, "local-original", 1, 0, "remote-partner", "hash");
+        var b = a with { LocalKey = PathNames.Key("LocalPartner"), LocalPath = "LocalPartner",
+            DropboxKey = PathNames.DropboxKey("Original"), DropboxPath = "Original",
+            LocalId = "local-partner", DropboxId = "remote-original" };
+        store.Commit(PairId, StateChange.Empty with { Record = [a, b] });
+        var after = a with { DropboxKey = b.DropboxKey, DropboxPath = b.DropboxPath, DropboxId = b.DropboxId };
+        var start = store.ReadWorkWatermark();
+        try
+        {
+            store.Commit(PairId, StateChange.Empty with { ForgetSelf = [(Side.Local, a.LocalKey)],
+                Record = [after], FirstRunAcknowledged = [new IssueItem(Side.Dropbox, "Original", null!)] });
+            throw new InvalidOperationException("Invalid acknowledgement must roll back.");
+        }
+        catch (ArgumentException) { }
+        Check.Require(store.ReadWorkWatermark() == start && store.SyncedByKey(PairId, Side.Local, a.LocalKey) == a,
+            "A refused change publishes neither replacement nor release work.");
+        store.Commit(PairId, StateChange.Empty with { ForgetSelf = [(Side.Local, a.LocalKey)], Record = [after] });
+        Check.Require(store.ReadWorkWatermark() == start + 2 && store.SyncedByKey(PairId, Side.Local, after.LocalKey) == after,
+            "Both exact RETURNING result sets register one released endpoint, including ForgetSelf deduplication.");
+        var scope = new PathScope(pair, [pair]);
+        var first = store.SelectWork(PairId, generation, scope)!;
+        Check.Require(first is not null, "A committed released endpoint is selectable in ordinary acquired work.");
+        var observed = new List<PendingChange>();
+        for (var selection = first; selection is not null; selection = store.SelectWork(PairId, generation, scope))
+            observed.AddRange(store.ReadWork(selection));
+        Check.Require(observed.Count == 2 && observed.All(work => work.Before is null && work.Notice.Kind == ChangeKind.Changed) &&
+            observed.Any(work => work.Notice.Side == Side.Local && work.Notice.Path == b.LocalPath && work.Notice.Id == b.LocalId) &&
+            observed.Any(work => work.Notice.Side == Side.Dropbox && work.Notice.Path == a.DropboxPath && work.Notice.Id == a.DropboxId),
+            "Release work carries each endpoint's own identity, path and side with no inherited baseline.");
+        // No selected work is retired: only a new release can request another pass here.
+        var c = a with { LocalKey = PathNames.Key("Second"), LocalPath = "Second", LocalId = "second-local",
+            DropboxKey = PathNames.DropboxKey("SecondPartner"), DropboxPath = "SecondPartner", DropboxId = "second-remote" };
+        store.Commit(PairId, StateChange.Empty with { Record = [c] });
+        var next = c with { DropboxKey = c.LocalKey, DropboxPath = c.LocalPath, DropboxId = "returned" };
+        store.Commit(PairId, StateChange.Empty with { Record = [next] });
+        Check.Require(store.SelectWork(PairId, generation, scope) is null && store.EndWorkPass(PairId),
+            "A release beyond the captured watermark requests a fresh pass with zero net retirements.");
+        var watermark = store.ReadWorkWatermark();
+        store.Commit(PairId, StateChange.Empty with { Record = [next] });
+        Check.Require(store.ReadWorkWatermark() == watermark, "Re-recording an ordinary binding creates no release loop.");
+    }
+
+    public static void RepairOverlap()
+    {
+        foreach (var residualBeforeScan in new[] { false, true })
+            WithStore((store, database) =>
+            {
+                var provenance = Install(store);
+                CompletePrerequisite(database);
+                Acquire(store, provenance, NextCursor, [Notice(Side.Dropbox, File, Identity)]);
+                var selection = store.SelectWork(PairId, provenance.PairGeneration,
+                    new PathScope(store.Pair(PairId)!, store.Pairs()))!;
+                Check.Require(selection is not null, "S-G1 selects live work before Repair completion");
+                store.BeginSelection(selection!);
+                var subject = new IssueSubject([new IssueItem(Side.Dropbox, OtherFile, OtherIdentity)], null);
+                store.Commit(PairId, StateChange.Empty with
+                    { Raise = [(IssueKind.Failure, TextKey.FailChanged, OtherFile, subject)] });
+                var issue = store.Issues(PairId).Single();
+                void Residual() => store.AttachIssueWork(selection!, issue,
+                    [(Notice(Side.Dropbox, OtherFile, OtherIdentity), false, null)]);
+                if (residualBeforeScan) Residual();
+                var token = store.BeginScan(PairId, Guid.NewGuid(), provenance.PairGeneration, false);
+                if (!residualBeforeScan) Residual();
+                var local = store.ReadSource(PairId, Side.Local)!.Value;
+                var through = store.ReadWorkWatermark();
+                store.AcquireJournalPage("0", null, new JournalPosition(0, 0),
+                    [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)], []);
+                store.FinishRepair(PairId, CompactStorageChecks.Summary(), provenance.PairGeneration, token,
+                    new LocalCatchUp(PairId, provenance.PairGeneration, local.Epoch,
+                        new NtfsUsnCheckpoint(0, 0, 0, 0), through),
+                    new DropboxCatchUp(PairId, provenance.PairGeneration, provenance.SourceEpoch, NextCursor, through));
+                Check.Require(store.ReadWork(selection!).Any(),
+                    "S-G1 Repair retirement preserves the active finite selection");
+                store.CompleteWork(selection!, null);
+                var residual = PendingWork.ByIdentity(store, Side.Dropbox, Domain, OtherIdentity).Single();
+                Check.Require(store.ReadWork(residual).Single().Notice.Path == OtherFile,
+                    "S-G1 residual survives on either side of the captured scan watermark");
+                store.EndSelection(selection!);
+                store.EndWorkPass(PairId);
+                store.EndScanAsync(PairId, token, 1).GetAwaiter().GetResult();
+            });
     }
 
     private static void WithStore(Action<StateStore> check) => WithStore((store, _) => check(store));
@@ -258,8 +359,8 @@ public static class ChangeTableChecks
         var next = new JournalPosition(0, 0);
         var members = new[]
         {
-            (PairId, generation, local.Epoch, local.Revision, false, false),
-            (OtherPair, otherGeneration, other.Epoch, other.Revision, false, false),
+            (PairId, generation, local.Epoch, local.Revision, false),
+            (OtherPair, otherGeneration, other.Epoch, other.Revision, false),
         };
         var before = store.ReadWorkWatermark();
         Throws<IOException>(() => store.AcquireJournalPage(Volume, null, next, members,
@@ -267,25 +368,30 @@ public static class ChangeTableChecks
         Check.Require(store.ReadJournal(Volume) is null && store.ReadWorkWatermark() == before, AtomicPage);
         Check.Require(store.AcquireJournalPage(Volume, next, next, members, []) is null, AtomicPage);
         Check.Require(store.AcquireJournalPage(Volume, null, next, members, []) == before, AtomicPage);
-        Check.Require(store.AcquireJournalPage(Volume, next, next,
-            [(PairId, generation, local.Epoch, local.Revision, true, false)], []) == before, GapResponsibility);
-        var gap = store.ReadSource(PairId, Side.Local)!.Value;
-        Check.Require(gap.Obligation == SourceObligation.LocalSkippedCoverage &&
-            gap.Revision == local.Revision + 1 && store.ReadLocalGap(PairId, gap.Epoch) == gap.Revision,
-            GapResponsibility);
-        store.AcquireJournalPage(Volume, next, next,
-            [(PairId, generation, gap.Epoch, gap.Revision, true, false)], []);
-        Check.Require(store.ReadSource(PairId, Side.Local) == gap, GapResponsibility);
-        store.AcquireJournalPage(Volume, next, next,
-            [(PairId, generation, gap.Epoch, gap.Revision, true, true)], []);
-        var requested = store.ReadSource(PairId, Side.Local)!.Value;
-        Check.Require(requested.Obligation == SourceObligation.LocalSkippedCoverage &&
-            requested.Revision == gap.Revision + 1 && store.ReadWorkWatermark() == before,
-            GapResponsibility);
         var evidence = store.ReadLocalDirty(PairId, generation, local.Epoch, Volume, Identity,
             PathNames.Key(File), null);
         Check.Require(!evidence.Dirty && evidence.EvidenceVersion == 0 && evidence.SourceBoundary == next,
             DirtyEvidence);
+        Check.Require(store.AcquireJournalPage(Volume, next, next, members,
+            [(PairId, Notice(Side.Local, OtherFile, OtherIdentity))]) == before + 1, GapResponsibility);
+        var pair = store.Pair(PairId)!;
+        // A configuration change hiding retained Local work creates skipped coverage.
+        store.SavePairDecision(pair, generation, pair with { Name = "renamed" }, null, false, null);
+        generation = store.ReadPairExecution(PairId)!.Value.Generation;
+        var watermark = store.ReadWorkWatermark();
+        var gap = store.ReadSource(PairId, Side.Local)!.Value;
+        Check.Require(gap.Obligation == SourceObligation.LocalSkippedCoverage && gap.Epoch == local.Epoch + 1 &&
+            gap.Revision == local.Revision + 1 && store.ReadLocalGap(PairId, gap.Epoch) == gap.Revision,
+            GapResponsibility);
+        store.AcquireJournalPage(Volume, next, next,
+            [(PairId, generation, gap.Epoch, gap.Revision, false)], []);
+        Check.Require(store.ReadSource(PairId, Side.Local) == gap, GapResponsibility);
+        store.AcquireJournalPage(Volume, next, next,
+            [(PairId, generation, gap.Epoch, gap.Revision, true)], []);
+        var requested = store.ReadSource(PairId, Side.Local)!.Value;
+        Check.Require(requested.Obligation == SourceObligation.LocalSkippedCoverage &&
+            requested.Revision == gap.Revision + 1 && store.ReadWorkWatermark() == watermark,
+            GapResponsibility);
     }
 
     // F04: one source owner answers a lost interval from first_repair_done, and an existing obligation is preserved.
@@ -347,7 +453,7 @@ public static class ChangeTableChecks
     {
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         store.AcquireJournalPage(volume, expected, new JournalPosition(0, 0),
-            [(PairId, generation, local.Epoch, local.Revision, false, lostInterval)], []);
+            [(PairId, generation, local.Epoch, local.Revision, lostInterval)], []);
     }
 
     private static void MarkFirstRepairDone(string database)
@@ -387,12 +493,12 @@ public static class ChangeTableChecks
             Read(store, epoch: source.Epoch + 1) == (false, null, 0L), "cached entry never accepts stale arguments");
         var position = new JournalPosition(1, 1);
         store.AcquireJournalPage(Volume, null, position,
-            [(PairId, generation, source.Epoch, source.Revision, false, false)], []);
+            [(PairId, generation, source.Epoch, source.Revision, false)], []);
         Check.Require(Count(() => Read(store)) == 1, "position insert reads only the position");
         Compare("position insert");
         var next = new JournalPosition(1, 2);
         store.AcquireJournalPage(Volume, position, next,
-            [(PairId, generation, source.Epoch, source.Revision, false, false)], []);
+            [(PairId, generation, source.Epoch, source.Revision, false)], []);
         Check.Require(Count(() => Read(store)) == 1, "position update does not re-probe evidence");
         position = next;
         Compare("position advance");
@@ -404,7 +510,7 @@ public static class ChangeTableChecks
         try
         {
             store.AcquireJournalPage(Volume, position, next,
-                [(PairId, generation, source.Epoch, source.Revision, false, false)], FailingPage());
+                [(PairId, generation, source.Epoch, source.Revision, false)], FailingPage());
             throw new Exception("the page must fail");
         }
         catch (InvalidOperationException error) when (error.Message == ExpectedFailure) { }
@@ -412,7 +518,7 @@ public static class ChangeTableChecks
         Compare("rollback clean answer");
         Check.Require(!Read(observer).Dirty, "read-only reader starts clean");
         var work = store.AcquireJournalPage(Volume, position, next,
-            [(PairId, generation, source.Epoch, source.Revision, false, false)],
+            [(PairId, generation, source.Epoch, source.Revision, false)],
             [(PairId, Notice(Side.Local, File, Identity, dirty: true))])!.Value;
         Check.Require(Read(store).Dirty && Read(observer).Dirty, "next scan row and immediate reader see committed arrival");
         Compare("arrival during scan");
@@ -446,12 +552,12 @@ public static class ChangeTableChecks
         var generation = store.ReadPairExecution(PairId)!.Value.Generation;
         var position = new JournalPosition(0, 0);
         var first = store.AcquireJournalPage(Volume, null, position,
-            [(PairId, generation, local.Epoch, local.Revision, false, false)],
+            [(PairId, generation, local.Epoch, local.Revision, false)],
             [(PairId, Notice(Side.Local, File, Identity))])!.Value;
         var selected = new WorkSelection(PairId, generation, local.Epoch, Side.Local, Volume,
             Identity, PathNames.Key(File), first, first);
         var dirty = store.AcquireJournalPage(Volume, position, position,
-            [(PairId, generation, local.Epoch, local.Revision, false, false)],
+            [(PairId, generation, local.Epoch, local.Revision, false)],
             [(PairId, Notice(Side.Local, File, Identity, dirty: true))])!.Value;
         var evidence = store.ReadLocalDirty(PairId, generation, local.Epoch, Volume, Identity,
             PathNames.Key(File), null);
@@ -519,7 +625,7 @@ public static class ChangeTableChecks
         var volume = store.Pair(PairId)!.Roots!.Local.VolumeSerialNumber.ToString(
             System.Globalization.CultureInfo.InvariantCulture);
         var work = store.AcquireJournalPage(volume, null, new JournalPosition(0, 0),
-            [(PairId, generation, local.Epoch, local.Revision, false, false)],
+            [(PairId, generation, local.Epoch, local.Revision, false)],
             [(PairId, Notice(Side.Local, File, Identity, dirty: true))])!.Value;
         return (generation, volume, work);
     }
@@ -740,7 +846,7 @@ public static class ChangeTableChecks
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
         store.AcquireJournalPage(volume, null, new JournalPosition(0, 0),
-            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false, false)], []);
+            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)], []);
         var localCoverage = new LocalCatchUp(PairId, provenance.PairGeneration, local.Epoch,
             new NtfsUsnCheckpoint(0, 0, 0, 0), through);
         var remoteCoverage = new DropboxCatchUp(PairId, provenance.PairGeneration, provenance.SourceEpoch,
@@ -1112,7 +1218,7 @@ public static class ChangeTableChecks
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
         store.AcquireJournalPage(volume, null, new JournalPosition(0, 0),
-            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false, false)], []);
+            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)], []);
         var coverage = store.CaptureLiveCoverage(rename,
             new LocalCatchUp(PairId, provenance.PairGeneration, local.Epoch,
                 new NtfsUsnCheckpoint(0, 0, 0, 0), through),
@@ -1251,7 +1357,7 @@ public static class ChangeTableChecks
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
         store.AcquireJournalPage(volume, null, new JournalPosition(0, 0),
-            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false, false)], []);
+            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)], []);
         var coverage = store.CaptureLiveCoverage(selection,
             new LocalCatchUp(PairId, provenance.PairGeneration, local.Epoch, new NtfsUsnCheckpoint(0, 0, 0, 0), through),
             new DropboxCatchUp(PairId, provenance.PairGeneration, provenance.SourceEpoch, NextCursor, through));
@@ -1278,7 +1384,7 @@ public static class ChangeTableChecks
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
         store.AcquireJournalPage(volume, null, new JournalPosition(0, 0),
-            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false, false)], []);
+            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)], []);
         var coverage = store.CaptureLiveCoverage(selection,
             new LocalCatchUp(PairId, provenance.PairGeneration, local.Epoch, new NtfsUsnCheckpoint(0, 0, 0, 0), through),
             new DropboxCatchUp(PairId, provenance.PairGeneration, provenance.SourceEpoch, NextCursor, through));
@@ -1308,7 +1414,7 @@ public static class ChangeTableChecks
             PathNames.DropboxKey(File), File, true, Identity, 0, 0, OtherIdentity, string.Empty)] });
         var moved = new Entry(Renamed, true, 0, DateTimeOffset.UnixEpoch, Identity, string.Empty, string.Empty, null);
         store.AcquireJournalPage(volume, null, new JournalPosition(0, 1),
-            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false, false)],
+            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)],
             [(PairId, Notice(Side.Local, Renamed, Identity, kind: ChangeKind.Renamed, oldPath: File) with { Observed = moved }),
              (PairId, Notice(Side.Local, File + "/Child", OtherIdentity, dirty: true))]);
         if (mapped)
@@ -1376,7 +1482,7 @@ public static class ChangeTableChecks
         }
         var child = Notice(restating, saved.PathOn(restating) + "/Child", "child-identity", dirty: restating == Side.Local);
         store.AcquireJournalPage(pair.Roots!.LocalVolumeKey(), null, new JournalPosition(0, 1),
-            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false, false)],
+            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)],
             restating == Side.Local ? [(PairId, RootNotice(Side.Local)), (PairId, child)] : [(PairId, RootNotice(Side.Local))]);
         Acquire(store, provenance, NextCursor,
             restating == Side.Dropbox ? [RootNotice(Side.Dropbox), child] : [RootNotice(Side.Dropbox)]);
@@ -1398,7 +1504,7 @@ public static class ChangeTableChecks
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
         store.AcquireJournalPage(volume, null, new JournalPosition(0, 0),
-            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false, false)], []);
+            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)], []);
         foreach (var (id, identity) in new[] { (through - 1, Identity), (through, OtherIdentity) })
         {
             var selection = Selection(provenance, id, through, identity);
@@ -1430,7 +1536,7 @@ public static class ChangeTableChecks
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
         store.AcquireJournalPage(volume, null, new JournalPosition(0, 0),
-            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false, false)], []);
+            [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)], []);
         var coverage = store.CaptureLiveCoverage(selection,
             new LocalCatchUp(PairId, provenance.PairGeneration, local.Epoch, new NtfsUsnCheckpoint(0, 0, 0, 0), through),
             new DropboxCatchUp(PairId, provenance.PairGeneration, provenance.SourceEpoch, NextCursor, through));
@@ -1515,7 +1621,7 @@ public static class ChangeTableChecks
         var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var generation = provenance.PairGeneration;
         var first = store.AcquireJournalPage(volume, null, new JournalPosition(0, 1),
-            [(PairId, generation, local.Epoch, local.Revision, false, false)],
+            [(PairId, generation, local.Epoch, local.Revision, false)],
             acquired ? [(PairId, Notice(Side.Local, File, Identity))] : [])!.Value;
         var initial = acquired ? store.SelectWork(PairId, generation, new PathScope(store.Pair(PairId)!, store.Pairs())) : null;
         var subject = new IssueSubject([new IssueItem(Side.Local, File, Identity)], null);
@@ -1525,7 +1631,7 @@ public static class ChangeTableChecks
         Check.Require(store.SelectWork(PairId, generation, new PathScope(store.Pair(PairId)!, store.Pairs())) is null,
             "an existing in-use episode has no restart-only opportunity");
         var through = store.AcquireJournalPage(volume, new JournalPosition(0, 1), new JournalPosition(0, 2),
-            [(PairId, generation, local.Epoch, local.Revision, false, false)],
+            [(PairId, generation, local.Epoch, local.Revision, false)],
             [(PairId, Notice(Side.Local, File, Identity, dirty: dirty))])!.Value;
         var next = store.SelectWork(PairId, generation, new PathScope(store.Pair(PairId)!, store.Pairs())) ?? throw new InvalidOperationException(ExpectedFailure);
         Check.Require(next.AnchorWorkId == through && next.AnchorWorkId > episode.Token.WorkId,
@@ -1550,7 +1656,7 @@ public static class ChangeTableChecks
             "persistent in-use failure waits visibly, without another attempt on an unrelated wake");
         if (!dirty) return;
         var repeatedId = store.AcquireJournalPage(volume, new JournalPosition(0, 2), new JournalPosition(0, 3),
-            [(PairId, generation, local.Epoch, local.Revision, false, false)],
+            [(PairId, generation, local.Epoch, local.Revision, false)],
             [(PairId, Notice(Side.Local, File, Identity, dirty: true))])!.Value;
         var repeated = store.SelectWork(PairId, generation, new PathScope(store.Pair(PairId)!, store.Pairs())) ?? throw new InvalidOperationException(ExpectedFailure);
         store.BeginSelection(repeated);
@@ -1582,7 +1688,7 @@ public static class ChangeTableChecks
         var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var generation = provenance.PairGeneration;
         store.AcquireJournalPage(volume, null, new JournalPosition(0, 1),
-            [(PairId, generation, local.Epoch, local.Revision, false, false)],
+            [(PairId, generation, local.Epoch, local.Revision, false)],
             acquired ? [(PairId, Notice(Side.Local, File, Identity)),
                 (PairId, Notice(Side.Local, File, Identity, dirty: true))] :
                 [(PairId, Notice(Side.Local, File, Identity, dirty: true))]);
@@ -1734,7 +1840,7 @@ public static class ChangeTableChecks
             var local = store.ReadSource(PairId, Side.Local)!.Value;
             var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var through = store.AcquireJournalPage(volume, null, new JournalPosition(0, 0),
-                [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false, false)],
+                [(PairId, provenance.PairGeneration, local.Epoch, local.Revision, false)],
                 [(PairId, Notice(Side.Local, Renamed, Identity, dirty: true, kind: ChangeKind.Renamed, oldPath: File))])!.Value;
             var selection = new WorkSelection(PairId, provenance.PairGeneration, local.Epoch, Side.Local,
                 volume, Identity, PathNames.Key(Renamed), through, through);

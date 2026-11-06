@@ -32,7 +32,8 @@ function Get-SyncSharkVerifiedUninstallRollback([object]$Prior,[string]$Version,
     if($Prior.artifacts.PSObject.Properties['history']){$priorHistory=@($Prior.artifacts.history)}
     [pscustomobject]@{ verified_utc=$record.verified_utc; failure_class=$record.failure_class;
         failure_reason=$record.failure_reason; version=$record.version; commit=$record.commit; tree=$record.tree;
-        journal_preimage_sha256=$record.journal_preimage_sha256; history=@($priorHistory) }
+        journal_preimage_sha256=$record.journal_preimage_sha256; pending_phase=$record.pending_phase;
+        completed_phases=@($record.completed_phases); history=@($priorHistory | Where-Object { $null -ne $_ }) }
 }
 
 function Get-SyncSharkUninstallHistory([object]$Plan) {
@@ -41,7 +42,8 @@ function Get-SyncSharkUninstallHistory([object]$Plan) {
     $history=@()
     if($null -ne $Plan.previous_receipt -and $Plan.previous_receipt.PSObject.Properties['kind'] -and
         $Plan.previous_receipt.kind -ceq 'verified-rollback') {
-        $history=@($Plan.previous_receipt.record.history)+@($Plan.previous_receipt.record)
+        $history=@($Plan.previous_receipt.record.history | Where-Object { $null -ne $_ })+
+            @($Plan.previous_receipt.record | Select-Object -Property * -ExcludeProperty history)
     }
     $history
 }
@@ -139,10 +141,12 @@ function Complete-SyncSharkUninstall {
         } { Assert-SyncSharkJunction $Plan.pointer $Plan.target; if (Test-Path -LiteralPath $active) { throw 'The active application pointer remains.' } }
         Invoke-SyncSharkJournalStep $journal $Plan.journal 'retain-runtime' '' {
             if ((Get-SyncSharkTreeIdentity $Plan.target) -cne $Plan.tree) { throw 'Runtime identity changed before retirement.' }
-            if($Plan.testMode){Move-Item -LiteralPath $Plan.target -Destination $Plan.retired}
+            if($Plan.testMode){[IO.Directory]::Move($Plan.target,$Plan.retired)}
             else {Invoke-SyncSharkProtectedRuntime (Join-Path $root ('versions\'+$Plan.version)) RuntimeRemove}
         } { if ((Get-SyncSharkTreeIdentity $Plan.retired) -cne $Plan.tree) { throw 'Retained runtime identity mismatch.' } }
+        if (-not $Plan.testMode) { Invoke-SyncSharkAppRegistration $Plan.version Remove }
         Invoke-SyncSharkJournalStep $journal $Plan.journal 'verify-uninstalled' '' {} {
+            if (-not $Plan.testMode) { Invoke-SyncSharkAppRegistration $Plan.version VerifyAbsent }
             if (Test-Path -LiteralPath $active) { throw 'The active installation still exists.' }
             if (Test-Path -LiteralPath $Plan.target) { throw 'The installed version still exists.' }
             if ((Get-SyncSharkTreeIdentity $Plan.retired) -cne $Plan.tree) { throw 'Uninstall rollback identity mismatch.' }
@@ -175,7 +179,11 @@ function Complete-SyncSharkUninstall {
         foreach ($path in @($Plan.retired, $Plan.pointer)) {
             if (Test-Path -LiteralPath $path) { throw 'A retired uninstall location remains.' }
         }
-        if (-not $Plan.testMode) { Assert-SyncSharkProtectedRuntime $Plan.target }
+        if (-not $Plan.testMode) {
+            Assert-SyncSharkProtectedRuntime $Plan.target
+            Invoke-SyncSharkAppRegistration $Plan.version Register
+            Invoke-SyncSharkAppRegistration $Plan.version Verify
+        }
         }
         catch {
             # Preserve both failures. The exact journal still passes its own
@@ -282,6 +290,10 @@ function Restore-SyncSharkUninstalledRuntime {
         Move-Item -LiteralPath $Plan.pointer -Destination $active
     }
     Assert-SyncSharkJunction $active $Plan.target
+    if (-not $Plan.testMode) {
+        Invoke-SyncSharkAppRegistration $Plan.version Register
+        Invoke-SyncSharkAppRegistration $Plan.version Verify
+    }
     $journal.artifacts | Add-Member -NotePropertyName restored_utc -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString('O')) -Force
     Write-SyncSharkJournal $Plan.journal $journal
 }
@@ -307,4 +319,10 @@ function Invoke-SyncSharkUninstall {
         Restore-SyncSharkUninstalledRuntime $plan
         Start-Process -FilePath (Join-Path $plan.root 'active\SyncShark.exe') -WindowStyle Hidden
     }
+}
+
+# ARP starts the installed app's safe uninstall action, never bypassing its exit/checkpoint.
+if ($MyInvocation.InvocationName -ne '.' -and $MyInvocation.MyCommand.Name -eq 'SyncShark.Uninstall.ps1') {
+    & (Join-Path (Split-Path -Parent $PSScriptRoot) 'SyncShark.exe') --cli app uninstall --yes
+    exit $LASTEXITCODE
 }

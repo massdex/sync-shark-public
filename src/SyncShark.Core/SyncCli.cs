@@ -363,7 +363,7 @@ public static class SyncCli
                         throw new SyncCliUsageException("setup apply requires --update matching the latest stable version.");
                     if (Version.Parse(release.Version) <= Version.Parse(VersionData().Version.Split('+')[0]))
                         throw new SyncCliUsageException("The selected setup must be newer than this application.");
-                    installer = await SetupUpdates.ApplyAsync(release, commandCancellation);
+                    installer = await SetupUpdates.ApplyAsync(release, commandCancellation, standardError);
                 }
                 return WriteSuccess(standardOutput, invocation, new { release.Version, installer },
                     installer is null ? $"Latest stable setup: {release.Version}" : $"Setup started: {installer}");

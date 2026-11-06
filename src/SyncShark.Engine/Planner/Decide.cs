@@ -5,6 +5,21 @@ namespace Massdex.SyncShark.Engine.Planner;
 /// <summary>Section 6.2 decision tables; folder-delete classification receives in-scope, listed rows.</summary>
 public static class Decide
 {
+    /// <summary>Leaves destructive or unproved subtree transitions to their owning work; Retry alone may settle first-run history.</summary>
+    public static SyncAction AdmitInBatch(SyncAction action, bool boundElsewhere, Side? unlisted, bool settlesFirstRun)
+    {
+        var row = action.Row;
+        var firstRun = IssuePolicy.InFirstRunScope(row, row.Context.FirstRun, row.Context.FirstRunDeletion);
+        var preserved = row.Context.FirstRunDeletion == IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice;
+        var left = row.Synced is not null && (row.Local is null || row.Dropbox is null) ||
+            row.Synced is null && (boundElsewhere || unlisted is { } side && row.EntryOn(side) is null) ||
+            action.Kind is ActionKind.ReplaceKind or ActionKind.MoveLocal or ActionKind.MoveDropbox or ActionKind.MoveUnlinked or
+                ActionKind.DeleteDropbox or ActionKind.ForgetOnly ||
+            action.Kind == ActionKind.DeleteLocal && !(settlesFirstRun && firstRun && row.Context.CompleteInventory) ||
+            firstRun && !preserved && (!settlesFirstRun || !row.Context.CompleteInventory);
+        return left ? None(row, NoneReason.OutOfScope) : action;
+    }
+
     /// <summary>Consumes the settled child barrier for a retained preservation without replaying history.</summary>
     public static SyncAction ResumePreservedFolder(Row row, FirstRunPolicy policy, DateTimeOffset comparedAt)
     {
@@ -116,6 +131,13 @@ public static class Decide
     private static SyncAction WithRecord(Row row, bool localContentDirty)
     {
         var synced = row.Synced!;
+        if (CrossedFar(row.Local, row.Dropbox, synced) is { } far)
+        {
+            var view = far == Side.Local
+                ? synced with { LocalKey = PathNames.Key(row.Local!.Path), LocalPath = row.Local.Path }
+                : synced with { DropboxKey = PathNames.DropboxKey(row.Dropbox!.Path), DropboxPath = row.Dropbox.Path };
+            return WithRecord(row with { Synced = view }, localContentDirty) with { Row = row };
+        }
         var (localState, needHash) = LocalState(row, synced, localContentDirty);
         if (needHash) return NeedHash(row);
         return (localState, DropboxState(row, synced)) switch
@@ -228,6 +250,19 @@ public static class Decide
         (local is not null && dropbox is null && local.Id != localBinding?.LocalId ||
          dropbox is not null && local is null && dropbox.Id != dropboxBinding?.DropboxId);
 
+    /// <summary>The returning original opposite a live crossed-file endpoint; same-identity moves remain renames.</summary>
+    public static Side? CrossedFar(Entry? local, Entry? dropbox, SyncedEntry? binding)
+    {
+        if (local is not { IsFolder: false, Skip: null } || dropbox is not { IsFolder: false, Skip: null } ||
+            binding is not { IsFolder: false } || binding.LocalKey == binding.DropboxKey ||
+            !PathNames.Same(local.Path, PathNames.LocalSpelling(dropbox.Path))) return null;
+        if (PathNames.Same(local.Path, binding.LocalKey) && local.Id == binding.LocalId &&
+            dropbox.Id != binding.DropboxId) return Side.Dropbox;
+        if (PathNames.Same(dropbox.Path, binding.DropboxKey) && dropbox.Id == binding.DropboxId &&
+            local.Id != binding.LocalId) return Side.Local;
+        return null;
+    }
+
     /// <summary>Null means different content; otherwise record equality or request the missing hash.</summary>
     private static SyncAction? Compare(Row row) =>
         row.LocalHash is null ? NeedHash(row)
@@ -245,7 +280,7 @@ public static class Decide
     private static SyncAction Notice(Row row, IssueKind kind, TextKey cause) =>
         new(ActionKind.Notice, row, NoticeKind: kind, Cause: cause);
 
-    private static SyncAction None(Row row, NoneReason reason) => new(ActionKind.None, row, reason);
+    internal static SyncAction None(Row row, NoneReason reason) => new(ActionKind.None, row, reason);
 
     /// <summary>An action held by the caller's current conflict or unfinished work.</summary>
     internal static SyncAction Held(Row row) => None(row, NoneReason.Held);

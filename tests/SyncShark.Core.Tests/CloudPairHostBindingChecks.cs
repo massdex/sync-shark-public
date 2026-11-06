@@ -3521,7 +3521,7 @@ internal static class CloudPairHostBindingChecks
         var before = await rig.AuthoritySnapshotAsync();
         var definition = await rig.PairDefinitionAsync(pair.Id);
 
-        // the two-sided registration is atomic, so the right side being refused rolls BOTH own rows
+        // The two-sided registration is atomic, so the right side being refused rolls BOTH own rows
         // back rather than leaving the left side's row behind.
         rig.Wire.SetDriveMissing(right.FolderId, true);
         var refusal = await rig.RefusalAsync(rig.Request(pair));
@@ -3546,7 +3546,7 @@ internal static class CloudPairHostBindingChecks
         Assert(before.SequenceEqual(after.Where(row => !added.Contains(row, StringComparer.Ordinal))),
             "every pre-existing legitimate authority row is unchanged by the refusal");
 
-        // the rolled-back refusal leaves NO row, so the identical request is refused again, and only a
+        // The rolled-back refusal leaves NO row, so the identical request is refused again, and only a
         // genuine re-read of both providers through the real adapters lets the identical binding complete.
         var again = await rig.RefusalAsync(rig.Request(pair));
         Assert(again is not null, "the rolled-back refusal does not make the refused binding preparable");
@@ -3832,7 +3832,7 @@ internal static class CloudPairHostBindingChecks
         // (a) a foreign pair's retained root authority may never be this pair's staging member reference.
         var leftRootBefore = await rig.RootBindingAsync(pair.LeftRoot);
         var foreignRoot = await rig.RefusalAsync(rig.Request(pair, createStaging: true, leftRoot: other.LeftRoot));
-        // added the atomic two-sided registration's preimage refusal, which now refuses this foreign
+        // The atomic two-sided registration's preimage refusal now refuses this foreign
         // root id EARLIER and more precisely than the previous downstream authorities did. The case's intent -
         // a foreign pair's root authority is refused, never referenced - is unchanged and still required.
         Assert(foreignRoot is not null &&

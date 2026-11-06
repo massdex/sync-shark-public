@@ -91,32 +91,32 @@ internal sealed class HookStore(IStateStore inner) : ForwardingStateStore(inner)
         return base.HeldCovers(pairId, key, exceptIssues);
     }
 
-    public override IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId)
+    public override IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId, bool? ignored = null)
     {
         GateReads++;
-        return base.IssueCounts(pairId);
+        return base.IssueCounts(pairId, ignored);
     }
 
     public List<bool> DiscoveryStarts { get; } = [];
     public int ScanPasses { get; private set; }
-    public override Guid BeginScan(string pairId, long expectedGeneration, bool includeDeleted)
+    public override Guid BeginScan(string pairId, Guid scanId, long expectedGeneration, bool includeDeleted, string? scope = null)
     {
         DiscoveryStarts.Add(includeDeleted);
-        return base.BeginScan(pairId, expectedGeneration, includeDeleted);
+        return base.BeginScan(pairId, scanId, expectedGeneration, includeDeleted, scope);
     }
 
-    public override IScanSink OpenScan(string pairId, Side side, int batchRows)
+    public override IScanSink OpenScan(string pairId, Guid scanId, Side side, int batchRows)
     {
         BeforeOpenScan?.Invoke(side);
-        var sink = base.OpenScan(pairId, side, batchRows);
+        var sink = base.OpenScan(pairId, scanId, side, batchRows);
         return WrapSink is { } wrap ? wrap(side, sink) : sink;
     }
 
-    public override IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context)
+    public override IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context)
     {
         ScanPasses++;
         OnScanRows?.Invoke();
-        foreach (var row in base.ScanRows(pairId, context))
+        foreach (var row in base.ScanRows(pairId, scanId, context))
         {
             Rows++;
             OnRow?.Invoke(Rows);
@@ -125,9 +125,9 @@ internal sealed class HookStore(IStateStore inner) : ForwardingStateStore(inner)
     }
 
     public int DiscoveryExistenceReads { get; private set; }
-    public override bool HasDeletedNames(string pairId)
+    public override bool HasDeletedNames(string pairId, Guid scanId)
     {
         DiscoveryExistenceReads++;
-        return base.HasDeletedNames(pairId);
+        return base.HasDeletedNames(pairId, scanId);
     }
 }

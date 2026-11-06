@@ -165,7 +165,7 @@ public static class ParentsChecks
             {
                 var position = store.ReadJournal("1");
                 store.AcquireJournalPage("1", position, position!,
-                    [(pair.PairId, generation, current.Epoch, current.Revision, false, false)], [(pair.PairId, notice)]);
+                    [(pair.PairId, generation, current.Epoch, current.Revision, false)], [(pair.PairId, notice)]);
             }
             else store.AcquireDropboxPage(pair.PairId, generation, current.Epoch, current.Revision, provenance!,
                 current.Cursor, [notice], entry.Path);

@@ -10,26 +10,50 @@ public static class IssuePresentation
     /// current state. The cause never promises background activity; only the guidance names the real opportunities.</summary>
     public static string Render(Issue issue, IssueRetryView retry)
     {
+        if (issue.Cause == TextKey.InfoKeptBoth) return KeptBoth(issue);
         var cause = Text.Get(issue.Cause, (TextArg.Path, issue.Path), (TextArg.Message, ""));
         return IssuePolicy.IsLocalAccessRetryCause(issue.Cause)
             ? cause + Environment.NewLine + Text.Get(StateKey(retry.State))
             : cause;
     }
 
+    private static string KeptBoth(Issue issue)
+    {
+        var items = issue.Subject.Items;
+        var twoLegs = items is [_, _, { Side: Side.Dropbox }, { Side: Side.Local }];
+        var oneLeg = items is [_, _, _];
+        if ((!twoLegs && !oneLeg) ||
+            items is not [{ Side: Side.Local } local, { Side: Side.Dropbox } dropbox, var copy, ..])
+            return Text.Get(issue.Cause, (TextArg.Path, issue.Path));
+
+        var keptLocal = oneLeg && copy.Side == Side.Local;
+        var retained = keptLocal ? local : dropbox;
+        var path = oneLeg ? retained.Path : issue.Path;
+        var localVersion = twoLegs
+            ? Text.Get(TextKey.InfoKeptBothLocalVersion, (TextArg.Path, local.Path), (TextArg.Name, copy.Path))
+            : Text.Get(keptLocal ? TextKey.InfoKeptBothLocalOnly : TextKey.InfoKeptBothDropboxOnly,
+                (TextArg.Path, retained.Path), (TextArg.Name, copy.Path));
+        var dropboxVersion = twoLegs
+            ? Environment.NewLine + Text.Get(TextKey.InfoKeptBothDropboxVersion,
+                (TextArg.Path, dropbox.Path), (TextArg.Name, items[^1].Path)) : string.Empty;
+        return Text.Get(oneLeg ? TextKey.InfoKeptBothRetained : issue.Cause, (TextArg.Path, path)) + Environment.NewLine +
+            Text.Get(TextKey.InfoKeptBothLocations) + Environment.NewLine + localVersion + dropboxVersion;
+    }
+
     /// <summary>The choices one notice offers, with their data-owned labels; Run still validates every exact
-    /// choice. The ignored-folder-kept cause offers only its one-off and always choices.</summary>
+    /// choice. The ignored-folder-kept cause retains its special one-off and always labels.</summary>
     public static IReadOnlyList<SyncNoticeOption> Options(Issue issue)
     {
-        if (issue.Cause == TextKey.InfoIgnoredFolderKept)
-            return
-            [
-                new(ResolutionChoice.Dismiss.ToString(), EngineCliCatalog.Message(EngineMessageKey.KeepThisTimeLabel)),
-                new(ResolutionChoice.KeepFolderAlways.ToString(),
-                    EngineCliCatalog.Message(EngineMessageKey.KeepFolderAlwaysLabel))
-            ];
         return Run.EngineOperations.ResolutionChoices(issue).Select(choice =>
-            new SyncNoticeOption(choice.ToString(),
-                EngineCliCatalog.OptionValue(EngineOptionKey.Choice, choice.ToString()))).ToArray();
+            new SyncNoticeOption(choice.ToString(), choice switch
+            {
+                ResolutionChoice.BindRoots => Text.Get(TextKey.ResolutionBindRootsLabel),
+                ResolutionChoice.Unignore => Text.Get(TextKey.RestoreLabel),
+                ResolutionChoice.Dismiss when issue.Cause == TextKey.InfoIgnoredFolderKept =>
+                    EngineCliCatalog.Message(EngineMessageKey.KeepThisTimeLabel),
+                ResolutionChoice.KeepFolderAlways => EngineCliCatalog.Message(EngineMessageKey.KeepFolderAlwaysLabel),
+                _ => EngineCliCatalog.OptionValue(EngineOptionKey.Choice, choice.ToString())
+            })).ToArray();
     }
 
     /// <summary>The one extra value a choice requires from the user, or null when it needs none.</summary>
@@ -45,7 +69,10 @@ public static class IssuePresentation
     {
         if (!Run.EngineOperations.ResolutionChoices(issue).Contains(choice))
             throw new ArgumentException(null, nameof(choice));
-        return ResolutionConfirmation(choice);
+        var confirmation = ResolutionConfirmation(choice);
+        if (choice != ResolutionChoice.Ignore) return confirmation;
+        var consequence = IssuePolicy.IgnoreConsequence(issue.Kind, issue.Cause);
+        return consequence is null ? confirmation : confirmation + Environment.NewLine + Text.Get(consequence.Value);
     }
 
     public static string ResolutionConfirmation(ResolutionChoice choice)
@@ -55,6 +82,8 @@ public static class IssuePresentation
             ResolutionChoice.UseLocal or ResolutionChoice.KeepLocal => TextKey.ResolutionUseLocalConsequence,
             ResolutionChoice.UseDropbox or ResolutionChoice.KeepDropbox => TextKey.ResolutionUseDropboxConsequence,
             ResolutionChoice.KeepBoth => TextKey.ResolutionKeepBothConsequence,
+            ResolutionChoice.Ignore => TextKey.ResolutionIgnoreConsequence,
+            ResolutionChoice.Unignore => TextKey.ResolutionRestoreConsequence,
             ResolutionChoice.Dismiss => TextKey.ResolutionDismissConsequence,
             ResolutionChoice.RenameIncoming or ResolutionChoice.RenameLocal or ResolutionChoice.RenameDropbox => TextKey.ResolutionRenameConsequence,
             ResolutionChoice.ReplaceExisting => TextKey.ResolutionReplaceConsequence,
@@ -62,6 +91,7 @@ public static class IssuePresentation
             ResolutionChoice.FirstSync => TextKey.ResolutionFirstSyncConsequence,
             ResolutionChoice.SyncNormally => TextKey.ResolutionSyncNormallyConsequence,
             ResolutionChoice.KeepFolderAlways => TextKey.ResolutionKeepFolderConsequence,
+            ResolutionChoice.BindRoots => TextKey.ResolutionBindRootsConsequence,
             _ => throw new ArgumentOutOfRangeException(nameof(choice))
         };
         return Text.Get(key);
@@ -159,13 +189,17 @@ public static class IssuePresentation
         _ => TextKey.StatusUnavailable
     };
 
+    public static string WorkingStatus(string? name) => string.IsNullOrEmpty(name)
+        ? Text.Get(TextKey.StatusStillQuiet)
+        : Text.Get(TextKey.StatusStillWorking, (TextArg.Name, name));
+
     /// <summary>The one host-status sentence: an explicit message, else the key's template with its detail.</summary>
     public static string RenderHostStatus(AutoStatus? status, string? detail, string? message)
     {
         var key = HostStatusKey(status);
         return message ?? (key switch
         {
-            TextKey.StatusStillWorking => Text.Get(key, (TextArg.Name, detail ?? string.Empty)),
+            TextKey.StatusStillWorking => WorkingStatus(detail),
             TextKey.StatusStillWaiting => Text.Get(key, (TextArg.Reason, detail ?? string.Empty)),
             _ => Text.Get(key)
         });

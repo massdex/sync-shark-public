@@ -1,17 +1,20 @@
 namespace Massdex.SyncShark.Engine.Run;
 
-/// <summary>The exclusive resource that owns the one disposable whole-pair scan of an initial real Repair
-/// (LIVE 3.2). Only ScanOwnership constructs one; the operation that acquired it disposes it exactly once,
+/// <summary>One operation token and its exact pair grants; only whole-Repair grants are exclusive.
+/// Only ScanOwnership constructs one; the operation that acquired it disposes it exactly once,
 /// after every borrower has finished. It is resource ownership, not root approval or permission to skip a listing.</summary>
 internal sealed class ScanReservation : IAsyncDisposable
 {
     private readonly string[] _pairIds;
     private ScanOwnership? _owner;
+    private readonly bool _exclusive;
+    internal Guid ScanId { get; } = ResourceNames.NewScanToken();
 
     /// <summary>Binds the issuing ownership instance and the exact acquired pair IDs.</summary>
-    internal ScanReservation(ScanOwnership owner, IReadOnlyList<string> pairIds)
+    internal ScanReservation(ScanOwnership owner, IReadOnlyList<string> pairIds, bool exclusive)
     {
         _owner = owner;
+        _exclusive = exclusive;
         _pairIds = [.. pairIds];
     }
 
@@ -26,7 +29,8 @@ internal sealed class ScanReservation : IAsyncDisposable
     /// <summary>Releases the acquired slots once; any later release is a no-op.</summary>
     public ValueTask DisposeAsync()
     {
-        Interlocked.Exchange(ref _owner, null)?.Release(_pairIds);
+        var owner = Interlocked.Exchange(ref _owner, null);
+        if (_exclusive) owner?.Release(_pairIds);
         return ValueTask.CompletedTask;
     }
 }

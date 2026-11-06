@@ -8,7 +8,10 @@ public static class StateSchema
     public const string Pragmas = "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;";
 
     /// <summary>The schema version this build writes and accepts.</summary>
-    public const int Version = 7;
+    public const int Version = 10;
+    public const int SpentHistoryUpgradeVersion = 9;
+    public const int DeletedBlocksUpgradeVersion = 8;
+    public const int IssueVisibilityUpgradeVersion = 7;
     public const int DeletedHistoryUpgradeVersion = 6;
     public const int HashHexLength = 64;
     /// <summary>One row per statement keeps a cursor step from holding a reader across a yield.</summary>
@@ -41,7 +44,13 @@ public static class StateSchema
 
     public const string AttachScan = "ATTACH DATABASE $path AS scan_state;";
     public const string DetachScan = "DETACH DATABASE scan_state;";
-    public const string ScanPragmas = "PRAGMA scan_state.journal_mode=MEMORY; PRAGMA scan_state.synchronous=OFF;";
+    public const string EmptyScanPragmas = "PRAGMA scan_state.journal_mode=MEMORY; PRAGMA scan_state.synchronous=OFF;";
+    public const string ScanWal = "PRAGMA scan_state.journal_mode=WAL;";
+    public const string ScanPragmas = "PRAGMA scan_state.synchronous=OFF;";
+    public const string WalSuffix = "-wal";
+    public const string ShmSuffix = "-shm";
+    public const string WalMode = "wal";
+    public const string ParamScan = "$scan";
     /// <summary>In-memory database used by the read-only scan connection.</summary>
     public const string ReadRoot = "file::memory:";
     public const string AttachState = "ATTACH DATABASE $path AS durable_state;";
@@ -52,7 +61,7 @@ public static class StateSchema
     public const string EmptyScan = ":memory:";
     /// <summary>Read-only in-memory stand-in for a pair with no scan.</summary>
     public const string EmptyScanRead = "file::memory:?mode=memory";
-    public const string CreateScan = "CREATE TABLE IF NOT EXISTS scan_state.scan(pair_id INTEGER NOT NULL, side INTEGER NOT NULL,\r\n  own_key TEXT GENERATED ALWAYS AS (" + KeyOf + "path)) VIRTUAL, key_delta TEXT,\r\n  key TEXT GENERATED ALWAYS AS (coalesce(key_delta, own_key)) VIRTUAL, path TEXT NOT NULL, is_folder INTEGER NOT NULL, size INTEGER NOT NULL,\r\n  mtime INTEGER NOT NULL, id ANY NOT NULL, rev TEXT NOT NULL, hash ANY NOT NULL, skip TEXT) STRICT;\r\nCREATE UNIQUE INDEX IF NOT EXISTS scan_state.scan_own ON scan(pair_id, side, " + KeyOf + "path));\r\nCREATE INDEX IF NOT EXISTS scan_state.scan_key ON scan(pair_id, side, key_delta) WHERE side=1 AND key_delta IS NOT NULL;";
+    public const string CreateScan = "CREATE TABLE IF NOT EXISTS scan_state.scan(pair_id INTEGER NOT NULL, scan_id BLOB NOT NULL, side INTEGER NOT NULL,\r\n  own_key TEXT GENERATED ALWAYS AS (" + KeyOf + "path)) VIRTUAL, key_delta TEXT,\r\n  key TEXT GENERATED ALWAYS AS (coalesce(key_delta, own_key)) VIRTUAL, path TEXT NOT NULL, is_folder INTEGER NOT NULL, size INTEGER NOT NULL,\r\n  mtime INTEGER NOT NULL, id ANY NOT NULL, rev TEXT NOT NULL, hash ANY NOT NULL, skip TEXT) STRICT;\r\nCREATE UNIQUE INDEX IF NOT EXISTS scan_state.scan_own ON scan(pair_id, scan_id, side, " + KeyOf + "path));\r\nCREATE INDEX IF NOT EXISTS scan_state.scan_key ON scan(pair_id, scan_id, side, key_delta) WHERE side=1 AND key_delta IS NOT NULL;";
 
     // pair and account
     public const string CountSynced = "SELECT count(*) FROM synced_entry WHERE pair_id = " + PairRow + ";";
@@ -119,6 +128,10 @@ public static class StateSchema
         ON CONFLICT(connection_id) DO UPDATE SET limiter_level = excluded.limiter_level;
         """;
 
+    public const string ParamScope = "$scope";
+    public const string ParamScopeLow = "$scopeLow";
+    public const string ParamScopeHigh = "$scopeHigh";
+
     // synced_entry reads
     public const string SyncedColumns = KeyOf + "local_path), local_path, dropbox_key_delta, dropbox_path, is_folder, local_id, local_size, local_mtime,\r\ndropbox_id, dropbox_hash";
     public const string SelectSyncedByLocalKey = "SELECT " + SyncedColumns + " FROM synced_entry WHERE pair_id = " + PairRow + " AND " + KeyOf + "local_path) = $k;";
@@ -145,7 +158,7 @@ public static class StateSchema
     public const string RenameSyncedRow = "UPDATE synced_entry SET local_path = $newLocalPath, dropbox_key_delta = nullif($newDropboxKey, $newLocalKey),\r\n  dropbox_path_delta = nullif($newDropboxPath, $newLocalPath), local_id = $localId, dropbox_id = $dropboxId\r\nWHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND " + KeyOf + "local_path) = $oldLocalKey;";
     public const string RebaseDescendantsLocal = "UPDATE synced_entry SET dropbox_key_delta = nullif(dropbox_key, " + KeyOf + "$newPath || substr(local_path, length($oldPath) + 1))),\r\n  dropbox_path_delta = nullif(dropbox_path, $newPath || substr(local_path, length($oldPath) + 1)),\r\n  local_path = $newPath || substr(local_path, length($oldPath) + 1)\r\nWHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND " + KeyOf + "local_path) >= $oldKey || '/' AND " + KeyOf + "local_path) < $oldKey || '0';";
     public const string RebaseDescendantsDropbox = "UPDATE synced_entry SET dropbox_key_delta = nullif($newKey || substr(dropbox_key, length($oldKey) + 1), " + KeyOf + "local_path)),\r\n  dropbox_path_delta = nullif($newPath || substr(dropbox_path, length($oldPath) + 1), local_path)\r\nWHERE rowid IN (SELECT rowid FROM synced_entry INDEXED BY synced_dropbox_key WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND dropbox_key_delta >= $oldKey || '/' AND dropbox_key_delta < $oldKey || '0'\r\n    UNION ALL SELECT rowid FROM synced_entry INDEXED BY synced_local_key WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND " + KeyOf + "local_path) >= $oldKey || '/' AND " + KeyOf + "local_path) < $oldKey || '0' AND dropbox_key_delta IS NULL);";
-    public const string MoveScanSubtree = "UPDATE scan SET key_delta = nullif($newKey || substr(key, length($oldKey) + 1),\r\n    $newOwnKey || substr(" + KeyOf + "path), length($oldOwnKey) + 1)),\r\n  path = $newPath || substr(path, length($oldPath) + 1)\r\nWHERE rowid IN (SELECT rowid FROM scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = $side AND " + KeyOf + "path) = $oldOwnKey\r\n    UNION ALL SELECT rowid FROM scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = $side\r\n      AND " + KeyOf + "path) >= $oldOwnKey || '/' AND " + KeyOf + "path) < $oldOwnKey || '0');";
+    public const string MoveScanSubtree = "UPDATE scan SET key_delta = nullif($newKey || substr(key, length($oldKey) + 1),\r\n    $newOwnKey || substr(" + KeyOf + "path), length($oldOwnKey) + 1)),\r\n  path = $newPath || substr(path, length($oldPath) + 1)\r\nWHERE rowid IN (SELECT rowid FROM scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = $side AND " + KeyOf + "path) = $oldOwnKey\r\n    UNION ALL SELECT rowid FROM scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = $side\r\n      AND " + KeyOf + "path) >= $oldOwnKey || '/' AND " + KeyOf + "path) < $oldOwnKey || '0');";
     // Freeze old keys before either side moves, so overlapping mapped ranges cannot rebase a row twice.
     public const string RebaseDescendantsBoth = """
         WITH old_rows AS MATERIALIZED (
@@ -179,16 +192,30 @@ public static class StateSchema
           dropbox_path_delta = nullif(f.dropbox_path, f.local_path)
         FROM final_rows f WHERE synced_entry.rowid = f.id;
         """;
-    public const string DeleteSyncedLocalKey = "DELETE FROM synced_entry WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND " + KeyOf + "local_path) = $k;";
-    public const string DeleteSyncedDropboxKey = "DELETE FROM synced_entry WHERE " + SyncedDropboxSelf + ";";
-    public const string DeleteSyncedSubtreeLocal = DeleteSyncedLocalKey + "DELETE FROM synced_entry WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND " + KeyOf + "local_path) >= $k || '/' AND " + KeyOf + "local_path) < $k || '0';";
-    public const string DeleteSyncedSubtreeDropbox = DeleteSyncedDropboxKey +
-        "DELETE FROM synced_entry WHERE " + SyncedDropboxSubtree + ";";
-    public const string DeleteSyncedBothSubtrees = "DELETE FROM synced_entry WHERE rowid IN (" +
-        "SELECT rowid FROM synced_entry INDEXED BY synced_local_key WHERE pair_id = " + PairRow + " AND " + KeyOf + "local_path) = $localKey UNION ALL " +
-        "SELECT rowid FROM synced_entry INDEXED BY synced_local_key WHERE pair_id = " + PairRow + " AND " + KeyOf + "local_path) >= $localKey || '/' AND " + KeyOf + "local_path) < $localKey || '0')" +
-        " AND (dropbox_key = $dropboxKey OR (dropbox_key >= $dropboxKey || '/' AND dropbox_key < $dropboxKey || '0'));";
-    public const string DeleteSyncedEitherKey = "DELETE FROM synced_entry WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND " + KeyOf + "local_path) = $localKey;\r\nDELETE FROM synced_entry WHERE rowid IN (SELECT rowid FROM synced_entry INDEXED BY synced_dropbox_key WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND dropbox_key_delta = $dropboxKey\r\n    UNION ALL SELECT rowid FROM synced_entry INDEXED BY synced_local_key WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND " + KeyOf + "local_path) = $dropboxKey AND dropbox_key_delta IS NULL AND $dropboxKey <> $localKey);";
+    private const string SyncedLocalSelf = "pair_id=" + PairRow + " AND " + KeyOf + "local_path)=$k";
+    private const string SyncedLocalDescendants = "pair_id=" + PairRow + " AND " + KeyOf + "local_path)>=$k||'/' AND " + KeyOf + "local_path)<$k||'0'";
+    private const string SyncedBothSubtrees = "rowid IN (" +
+        "SELECT rowid FROM synced_entry INDEXED BY synced_local_key WHERE pair_id=" + PairRow + " AND " + KeyOf + "local_path)=$localKey UNION ALL " +
+        "SELECT rowid FROM synced_entry INDEXED BY synced_local_key WHERE pair_id=" + PairRow + " AND " + KeyOf + "local_path)>=$localKey||'/' AND " + KeyOf + "local_path)<$localKey||'0')" +
+        " AND (dropbox_key=$dropboxKey OR (dropbox_key>=$dropboxKey||'/' AND dropbox_key<$dropboxKey||'0'))";
+    private const string ReturningSynced = " RETURNING " + SyncedColumns + ";";
+    public const string DeleteSyncedLocalKey = "DELETE FROM synced_entry WHERE " + SyncedLocalSelf + ReturningSynced;
+    public const string DeleteSyncedDropboxKey = "DELETE FROM synced_entry WHERE " + SyncedDropboxSelf + ReturningSynced;
+    // Subtrees spend with INSERT SELECT, avoiding SQLite's in-memory RETURNING embargo for a whole tree.
+    private const string SpendSynced = "INSERT INTO discovery_deleted_delta(pair_id,path_key,spent) SELECT pair_id,historykey(local_path),1 FROM synced_entry WHERE ";
+    private const string SpendRetired = " AND ($retained='[]' OR " + KeyOf + "local_path) NOT IN (SELECT value FROM json_each($retained))) ON CONFLICT(pair_id,path_key) DO UPDATE SET spent=1 WHERE spent=0;";
+    public const string ParamRetained = "$retained";
+    public const string HistoryKeyFunction = "historykey";
+    public const string DeleteSyncedSubtreeLocal = SpendSynced + SyncedLocalSelf + SpendRetired +
+        SpendSynced + SyncedLocalDescendants + SpendRetired +
+        "DELETE FROM synced_entry WHERE " + SyncedLocalSelf + ";DELETE FROM synced_entry WHERE " + SyncedLocalDescendants + ";";
+    public const string DeleteSyncedSubtreeDropbox = SpendSynced + SyncedDropboxSelf + SpendRetired +
+        SpendSynced + SyncedDropboxSubtree + SpendRetired +
+        "DELETE FROM synced_entry WHERE " + SyncedDropboxSelf + ";DELETE FROM synced_entry WHERE " + SyncedDropboxSubtree + ";";
+    public const string DeleteSyncedBothSubtrees = SpendSynced + SyncedBothSubtrees + SpendRetired +
+        "DELETE FROM synced_entry WHERE " + SyncedBothSubtrees + ";";
+    public const string DeleteSyncedEitherKey = "DELETE FROM synced_entry WHERE pair_id=" + PairRow + " AND " + KeyOf + "local_path)=$localKey" + ReturningSynced +
+        "DELETE FROM synced_entry WHERE rowid IN (SELECT rowid FROM synced_entry INDEXED BY synced_dropbox_key WHERE pair_id=" + PairRow + " AND dropbox_key_delta=$dropboxKey UNION ALL SELECT rowid FROM synced_entry INDEXED BY synced_local_key WHERE pair_id=" + PairRow + " AND " + KeyOf + "local_path)=$dropboxKey AND dropbox_key_delta IS NULL AND $dropboxKey<>$localKey)" + ReturningSynced;
     public const string InsertSynced =
         "INSERT INTO synced_entry(pair_id, local_path, dropbox_key_delta, dropbox_path_delta, " +
         "is_folder, local_id, local_size, local_mtime, dropbox_id, dropbox_hash) " +
@@ -201,7 +228,7 @@ public static class StateSchema
     public const string ClashInDropboxSubtree = "SELECT EXISTS(\r\n  SELECT 1 FROM synced_entry a INDEXED BY synced_dropbox_key\r\n  CROSS JOIN synced_entry b INDEXED BY synced_local_key\r\n  WHERE a.pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND a.dropbox_key_delta >= $k || '/' AND a.dropbox_key_delta < $k || '0'\r\n    AND b.pair_id = a.pair_id AND " + KeyOf + "b.local_path) = +a.dropbox_key_delta AND b.dropbox_key_delta IS NULL\r\n  UNION ALL\r\n  SELECT 1 FROM synced_entry a INDEXED BY synced_local_key\r\n  CROSS JOIN synced_entry b INDEXED BY synced_dropbox_key\r\n  WHERE a.pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND " + KeyOf + "a.local_path) >= $k || '/' AND " + KeyOf + "a.local_path) < $k || '0'\r\n    AND a.dropbox_key_delta IS NULL AND b.pair_id = a.pair_id AND b.dropbox_key_delta = " + KeyOf + "a.local_path));";
 
     // issues (section 2.4)
-    public const string IssueColumns = "issue_id, kind, cause, path, subject_json, at_ticks, dismissed";
+    public const string IssueColumns = "issue_id, kind, cause, path, subject_json, at_ticks, dismissed, ignored";
     internal const string IssueFactsTouchedFunction = "issuefactstouched";
     private const string IssueFactKindSeparator = ",";
     private static readonly string IssueFactKinds = string.Join(IssueFactKindSeparator,
@@ -221,31 +248,31 @@ public static class StateSchema
     internal static readonly string SelectIssueFacts =
         string.Format(System.Globalization.CultureInfo.InvariantCulture, IssueFactsSelectTemplate, IssueFactKinds);
     internal const string SelectIssueFact = "SELECT " + IssueColumns + ",pair_id FROM issue WHERE issue_id=$id;";
-    internal const int IssueFactPair = IssueDismissed + 1;
+    internal const int IssueFactPair = IssueIgnored + 1;
 
     public const string SelectIssues = "SELECT " + IssueColumns + " FROM issue WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) ORDER BY issue_id;";
     public const string SelectIssuesByKinds = "SELECT " + IssueColumns + " FROM issue WHERE pair_id = " + PairRow +
         " AND kind IN (SELECT value FROM json_each($kinds)) ORDER BY issue_id;";
     // One bounded page of open issues (pair, account or all pairs, optional kinds and path search) and its
-    // separate count in the same read transaction. The pair id trails the issue columns, at IssueDismissed + 1.
+    // separate count in the same read transaction. The pair id trails the issue columns, at IssueIgnored + 1.
     // The path search calls the registered PathContainsFunction, which is backed by PathNames.Contains.
     public const string PathContainsFunction = "pathcontains";
     public const string SelectIssuePage = "SELECT " + IssueColumns +
-        ",p.pair_id FROM issue i JOIN pair p ON p.id = i.pair_id WHERE i.dismissed = 0" +
+        ",p.pair_id FROM issue i JOIN pair p ON p.id = i.pair_id WHERE i.dismissed = 0 AND i.ignored = $ignored" +
         " AND ($p IS NULL OR p.pair_id = $p)" +
         " AND ($account IS NULL OR json_extract(p.def_json,'$.ConnectionId') = $account)" +
         " AND ($kinds IS NULL OR i.kind IN (SELECT value FROM json_each($kinds)))" +
         " AND ($search IS NULL OR " + PathContainsFunction + "(i.path, $search))" +
         " ORDER BY i.issue_id LIMIT $limit OFFSET $offset;";
     public const string CountIssuePage = "SELECT count(*) FROM issue i JOIN pair p ON p.id = i.pair_id" +
-        " WHERE i.dismissed = 0 AND ($p IS NULL OR p.pair_id = $p)" +
+        " WHERE i.dismissed = 0 AND i.ignored = $ignored AND ($p IS NULL OR p.pair_id = $p)" +
         " AND ($account IS NULL OR json_extract(p.def_json,'$.ConnectionId') = $account)" +
         " AND ($kinds IS NULL OR i.kind IN (SELECT value FROM json_each($kinds)))" +
         " AND ($search IS NULL OR " + PathContainsFunction + "(i.path, $search));";
     // One keyset page of open issues after the last seen id. It carries no count, so a full listing counts once
-    // instead of once per page. The pair id trails the issue columns, at IssueDismissed + 1.
+    // instead of once per page. The pair id trails the issue columns, at IssueIgnored + 1.
     public const string SelectIssuePageAfter = "SELECT " + IssueColumns +
-        ",p.pair_id FROM issue i JOIN pair p ON p.id = i.pair_id WHERE i.dismissed = 0" +
+        ",p.pair_id FROM issue i JOIN pair p ON p.id = i.pair_id WHERE i.dismissed = 0 AND i.ignored = $ignored" +
         " AND ($kinds IS NULL OR i.kind IN (SELECT value FROM json_each($kinds)))" +
         " AND i.issue_id > $after ORDER BY i.issue_id LIMIT $limit;";
     public const string SelectClosureKeys = "SELECT path, kind FROM issue WHERE pair_id = " + PairRow +
@@ -258,13 +285,13 @@ public static class StateSchema
     public const string SelectHoldingSubjects = "SELECT kind, subject_json, cause, issue_id, path FROM issue WHERE pair_id = " +
         PairRow + " ORDER BY issue_id;";
     public const string SelectIssuePathsByKind = "SELECT path FROM issue WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND kind = $kind;";
-    public const string CountIssues = "SELECT kind, count(*) FROM issue WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND dismissed = 0 GROUP BY kind;";
+    public const string CountIssues = "SELECT kind, count(*) FROM issue WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND dismissed = 0 AND ($ignored IS NULL OR ignored=$ignored) GROUP BY kind;";
     public const string InsertIssue = """
         INSERT INTO issue(pair_id, kind, cause, path, subject_json, at_ticks, dismissed)
         VALUES((SELECT id FROM pair WHERE pair_id = $p), $kind, $cause, $path, $subject, $at, 0);
         """;
     public const string ReplaceIssue = """
-        UPDATE issue SET cause = $cause, subject_json = $subject, at_ticks = $at, dismissed = 0
+        UPDATE issue SET cause = $cause, subject_json = $subject, at_ticks = $at, dismissed = 0, ignored = 0
         WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND path = $path AND kind = $kind;
         """;
     public const string DeleteIssueByPathKind = "DELETE FROM issue WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND path = $path AND kind = $kind;";
@@ -274,11 +301,39 @@ public static class StateSchema
     /// <summary>The issue owner authorizes closure; zero affected rows authorizes no association cleanup or fallback.</summary>
     public const string CloseIssueExact = "DELETE FROM issue WHERE " + ExactIssueFence + ";";
     /// <summary>Replaces only the authorized snapshot and ends its old retry binding in the same transition.</summary>
-    public const string ReplaceIssueExact = "UPDATE issue SET cause=$cause,subject_json=$subject,at_ticks=$at,dismissed=0," +
+    public const string ReplaceIssueExact = "UPDATE issue SET cause=$cause,subject_json=$subject,at_ticks=$at,dismissed=0,ignored=0," +
         "item_retry_episode=NULL,item_retry_revision=NULL,item_retry_work_id=NULL WHERE " + ExactIssueFence + ";";
     /// <summary>Removes only captured associations detached by the successful guarded issue deletion.</summary>
     private const string ClosedMemberFence = "pair_id=$pair AND issue_id IS NULL AND member_id IN (SELECT value FROM json_each($ids))";
     public const string DeleteClosedIssueMembers = "DELETE FROM issue_member WHERE " + ClosedMemberFence + ";";
+    public const string SetIssueIgnored = "UPDATE issue SET ignored=$ignored WHERE pair_id=" + PairRow + " AND issue_id=$id;";
+    public const string ForeignKeysOff = "PRAGMA foreign_keys=OFF;";
+    public const string ForeignKeysOn = "PRAGMA foreign_keys=ON;";
+    public const string ReadForeignKeys = "PRAGMA foreign_keys;";
+    public const string RebuildIssues = """
+        CREATE TABLE issue_new(issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+         pair_id INTEGER NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+         kind INTEGER NOT NULL, cause TEXT NOT NULL, path TEXT NOT NULL, subject_json TEXT NOT NULL,
+         at_ticks INTEGER NOT NULL, dismissed INTEGER NOT NULL DEFAULT 0,
+         item_retry_episode TEXT,
+         item_retry_revision INTEGER CHECK(item_retry_revision IS NULL OR item_retry_revision>=0),
+         item_retry_work_id INTEGER REFERENCES change_work(work_id) ON DELETE NO ACTION
+          CHECK((item_retry_episode IS NULL AND item_retry_revision IS NULL AND item_retry_work_id IS NULL) OR
+                (item_retry_episode IS NOT NULL AND length(item_retry_episode)>0
+                 AND item_retry_revision IS NOT NULL AND item_retry_work_id IS NOT NULL
+                 AND kind=0 AND localaccessretrycause(cause)=1)),
+         ignored INTEGER NOT NULL DEFAULT 0 CHECK(ignored IN (0,1)),
+         UNIQUE(pair_id,path,kind)) STRICT;
+        INSERT INTO issue_new(issue_id,pair_id,kind,cause,path,subject_json,at_ticks,dismissed,
+         item_retry_episode,item_retry_revision,item_retry_work_id)
+         SELECT issue_id,pair_id,kind,cause,path,subject_json,at_ticks,dismissed,
+          item_retry_episode,item_retry_revision,item_retry_work_id FROM issue;
+        DROP TABLE issue;
+        ALTER TABLE issue_new RENAME TO issue;
+        DELETE FROM sqlite_sequence WHERE name='issue' AND seq=0;
+        CREATE UNIQUE INDEX issue_item_retry_work ON issue(item_retry_work_id) WHERE item_retry_work_id IS NOT NULL;
+        """;
+
     public const string DismissIssue = """
         DELETE FROM issue WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND issue_id = $id AND kind = $kind;
         UPDATE issue SET dismissed = 1 WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND issue_id = $id;
@@ -287,20 +342,25 @@ public static class StateSchema
     // scan (sections 3.3, 3.4)
     /// <summary>The scan row holding one effective key: its explicit Dropbox mapping, else its own inherited key.</summary>
     private const string ScanKeyUnion = "SELECT rowid FROM scan INDEXED BY scan_key WHERE pair_id = " + PairRow +
-        " AND side = 1 AND key_delta = $k UNION ALL SELECT rowid FROM scan INDEXED BY scan_own WHERE pair_id = " + PairRow +
-        " AND side = 1 AND " + KeyOf + "path) = $k AND key_delta IS NULL";
-    public const string ScanDeleteSelf = "DELETE FROM scan_state.scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = $side AND " + KeyOf + "path) = $k\r\nRETURNING EXISTS(SELECT 1 FROM scan_state.scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = $side\r\n  AND " + KeyOf + "path) >= $k || '/' AND " + KeyOf + "path) < $k || '0');";
-    public const string ScanDeleteDescendants = "DELETE FROM scan_state.scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = $side AND " + KeyOf + "path) >= $k || '/' AND " + KeyOf + "path) < $k || '0';";
-    public const string ScanUpsert = "INSERT INTO scan_state.scan(pair_id, side, key_delta, path, is_folder, size, mtime, id, rev, hash, skip)\r\nVALUES((SELECT id FROM pair WHERE pair_id = $p), $side, nullif($key, $ownKey), $path, $isFolder, $size, $mtime, $id, $rev, $hash, $skip)\r\nON CONFLICT(pair_id, side, " + KeyOf + "path)) DO UPDATE SET key_delta = excluded.key_delta, path = excluded.path,\r\n  is_folder = excluded.is_folder, size = excluded.size, mtime = excluded.mtime, id = excluded.id,\r\n  rev = excluded.rev, hash = excluded.hash, skip = excluded.skip\r\nWHERE scan.key_delta IS NOT excluded.key_delta OR scan.path IS NOT excluded.path\r\n  OR scan.is_folder IS NOT excluded.is_folder OR scan.size IS NOT excluded.size\r\n  OR scan.mtime IS NOT excluded.mtime OR scan.id IS NOT excluded.id\r\n  OR scan.rev IS NOT excluded.rev OR scan.hash IS NOT excluded.hash OR scan.skip IS NOT excluded.skip;";
-    public const string InScanLocal = "SELECT EXISTS(SELECT 1 FROM scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = 0 AND " + KeyOf + "path) = $k);";
+        " AND scan_id = $scan AND side = 1 AND key_delta = $k UNION ALL SELECT rowid FROM scan INDEXED BY scan_own WHERE pair_id = " + PairRow +
+        " AND scan_id = $scan AND side = 1 AND " + KeyOf + "path) = $k AND key_delta IS NULL";
+    // The one BINARY range holding every strict descendant of $k, shared by the scan delete and its existence probe.
+    private const string ScanDescendantRange = KeyOf + "path) >= $k || '/' AND " + KeyOf + "path) < $k || '0'";
+    public const string ScanDeleteSelf = "DELETE FROM scan_state.scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = $side AND " + KeyOf + "path) = $k\r\nRETURNING EXISTS(SELECT 1 FROM scan_state.scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = $side\r\n  AND " + ScanDescendantRange + ");";
+    public const string ScanDeleteDescendants = "DELETE FROM scan_state.scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = $side AND " + ScanDescendantRange + ";";
+    /// <summary>True when this scan already holds a descendant of $k, in an earlier committed batch or the current one (#129).</summary>
+    public const string ScanHasDescendants = "SELECT EXISTS(SELECT 1 FROM scan_state.scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = $side AND " + ScanDescendantRange + ");";
+    public const string ScanUpsert = "INSERT INTO scan_state.scan(pair_id, scan_id, side, key_delta, path, is_folder, size, mtime, id, rev, hash, skip)\r\nVALUES((SELECT id FROM pair WHERE pair_id = $p), $scan, $side, nullif($key, $ownKey), $path, $isFolder, $size, $mtime, $id, $rev, $hash, $skip)\r\nON CONFLICT(pair_id, scan_id, side, " + KeyOf + "path)) DO UPDATE SET key_delta = excluded.key_delta, path = excluded.path,\r\n  is_folder = excluded.is_folder, size = excluded.size, mtime = excluded.mtime, id = excluded.id,\r\n  rev = excluded.rev, hash = excluded.hash, skip = excluded.skip\r\nWHERE scan.key_delta IS NOT excluded.key_delta OR scan.path IS NOT excluded.path\r\n  OR scan.is_folder IS NOT excluded.is_folder OR scan.size IS NOT excluded.size\r\n  OR scan.mtime IS NOT excluded.mtime OR scan.id IS NOT excluded.id\r\n  OR scan.rev IS NOT excluded.rev OR scan.hash IS NOT excluded.hash OR scan.skip IS NOT excluded.skip;";
+    public const string InScanLocal = "SELECT EXISTS(SELECT 1 FROM scan WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = 0 AND " + KeyOf + "path) = $k);";
     public const string InScanDropbox = "SELECT EXISTS(" + ScanKeyUnion + ");";
 
     // One key is the natural page: both linked/free groups and every mapped candidate stay together.
-    public const string NextScanKey = "SELECT min(k) FROM (\r\n  SELECT k FROM (SELECT " + KeyOf + "local_path) AS k FROM synced_entry WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p)\r\n    AND " + KeyOf + "local_path) >= $after AND ($first OR " + KeyOf + "local_path) > $after) ORDER BY " + KeyOf + "local_path) LIMIT 1)\r\n  UNION ALL\r\n  SELECT k FROM (SELECT " + KeyOf + "path) AS k FROM scan INDEXED BY scan_own WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = 0\r\n    AND " + KeyOf + "path) >= $after AND ($first OR " + KeyOf + "path) > $after) ORDER BY " + KeyOf + "path) LIMIT 1)\r\n  UNION ALL\r\n  SELECT k FROM (SELECT key_delta AS k FROM scan INDEXED BY scan_key WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = 1\r\n    AND key_delta >= $after AND ($first OR key_delta > $after) ORDER BY key_delta LIMIT 1)\r\n  UNION ALL\r\n  SELECT k FROM (SELECT " + KeyOf + "path) AS k FROM scan INDEXED BY scan_own WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = 1\r\n    AND " + KeyOf + "path) >= $after AND ($first OR " + KeyOf + "path) > $after) ORDER BY " + KeyOf + "path) LIMIT 1));";
+    public const string NextScanKey = "SELECT min(k) FROM (\r\n  SELECT k FROM (SELECT " + KeyOf + "local_path) AS k FROM synced_entry WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p)\r\n    AND " + KeyOf + "local_path) >= $after AND ($first OR " + KeyOf + "local_path) > $after) ORDER BY " + KeyOf + "local_path) LIMIT 1)\r\n  UNION ALL\r\n  SELECT k FROM (SELECT " + KeyOf + "path) AS k FROM scan INDEXED BY scan_own WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = 0\r\n    AND " + KeyOf + "path) >= $after AND ($first OR " + KeyOf + "path) > $after) ORDER BY " + KeyOf + "path) LIMIT 1)\r\n  UNION ALL\r\n  SELECT k FROM (SELECT key_delta AS k FROM scan INDEXED BY scan_key WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = 1\r\n    AND key_delta >= $after AND ($first OR key_delta > $after) ORDER BY key_delta LIMIT 1)\r\n  UNION ALL\r\n  SELECT k FROM (SELECT " + KeyOf + "path) AS k FROM scan INDEXED BY scan_own WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = 1\r\n    AND " + KeyOf + "path) >= $after AND ($first OR " + KeyOf + "path) > $after) ORDER BY " + KeyOf + "path) LIMIT 1));";
+    public const string NextScopedScanKey = "SELECT min(k) FROM (\r\n  SELECT k FROM (SELECT " + KeyOf + "local_path) AS k FROM synced_entry WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p)\r\n    AND " + KeyOf + "local_path) >= $after AND ($first OR " + KeyOf + "local_path) > $after) AND " + KeyOf + "local_path) < $scopeHigh AND (" + KeyOf + "local_path) = $scope OR " + KeyOf + "local_path) >= $scopeLow) ORDER BY " + KeyOf + "local_path) LIMIT 1)\r\n  UNION ALL\r\n  SELECT k FROM (SELECT " + KeyOf + "path) AS k FROM scan INDEXED BY scan_own WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = 0\r\n    AND " + KeyOf + "path) >= $after AND ($first OR " + KeyOf + "path) > $after) AND " + KeyOf + "path) < $scopeHigh AND (" + KeyOf + "path) = $scope OR " + KeyOf + "path) >= $scopeLow) ORDER BY " + KeyOf + "path) LIMIT 1)\r\n  UNION ALL\r\n  SELECT k FROM (SELECT key_delta AS k FROM scan INDEXED BY scan_key WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = 1\r\n    AND key_delta >= $after AND ($first OR key_delta > $after) AND key_delta < $scopeHigh AND (key_delta = $scope OR key_delta >= $scopeLow) ORDER BY key_delta LIMIT 1)\r\n  UNION ALL\r\n  SELECT k FROM (SELECT " + KeyOf + "path) AS k FROM scan INDEXED BY scan_own WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = 1\r\n    AND " + KeyOf + "path) >= $after AND ($first OR " + KeyOf + "path) > $after) AND " + KeyOf + "path) < $scopeHigh AND (" + KeyOf + "path) = $scope OR " + KeyOf + "path) >= $scopeLow) ORDER BY " + KeyOf + "path) LIMIT 1));";
 
     // Unary + removes TEXT affinity on correlated keys so SQLite can seek the pathkey expression index.
     public const string ScanRows =
-        "WITH free_l AS NOT MATERIALIZED (SELECT x.* FROM scan x INDEXED BY scan_own WHERE x.pair_id = " + PairRow + " AND x.side = 0 AND " + KeyOf + "x.path) = $k AND " +
+        "WITH free_l AS NOT MATERIALIZED (SELECT x.* FROM scan x INDEXED BY scan_own WHERE x.pair_id = " + PairRow + " AND x.scan_id = $scan AND x.side = 0 AND " + KeyOf + "x.path) = $k AND " +
         "NOT EXISTS (SELECT 1 FROM synced_entry s WHERE s.pair_id = " + PairRow + " AND " + KeyOf + "s.local_path) = $k)), " +
         "free_d AS NOT MATERIALIZED (SELECT x.* FROM scan x WHERE x.rowid IN (" + ScanKeyUnion + ") AND " +
         "NOT EXISTS (SELECT 1 FROM synced_entry INDEXED BY synced_dropbox_key WHERE pair_id = " + PairRow + " AND dropbox_key_delta = $k " +
@@ -310,9 +370,9 @@ public static class StateSchema
         KeyOf + "l.path) AS l_own, l.path AS l_path, l.is_folder AS l_folder, l.size AS l_size, l.mtime AS l_mtime, l.id AS l_id, l.skip AS l_skip, " +
         KeyOf + "d.path) AS d_own, d.path AS d_path, d.is_folder AS d_folder, d.size AS d_size, d.mtime AS d_mtime, d.id AS d_id, d.rev AS d_rev, d.hash AS d_hash, d.skip AS d_skip " +
         "FROM synced_entry s " +
-        "LEFT JOIN scan l INDEXED BY scan_own ON l.pair_id = " + PairRow + " AND l.side = 0 AND " + KeyOf + "l.path) = $k " +
-        "LEFT JOIN scan d ON d.rowid IN (SELECT rowid FROM scan INDEXED BY scan_key WHERE pair_id = " + PairRow + " AND side = 1 AND key_delta = coalesce(s.dropbox_key_delta, $k) " +
-        "UNION ALL SELECT rowid FROM scan INDEXED BY scan_own WHERE pair_id = " + PairRow + " AND side = 1 AND " + KeyOf + "path) = +coalesce(s.dropbox_key_delta, $k) AND key_delta IS NULL) " +
+        "LEFT JOIN scan l INDEXED BY scan_own ON l.pair_id = " + PairRow + " AND l.scan_id = $scan AND l.side = 0 AND " + KeyOf + "l.path) = $k " +
+        "LEFT JOIN scan d ON d.rowid IN (SELECT rowid FROM scan INDEXED BY scan_key WHERE pair_id = " + PairRow + " AND scan_id = $scan AND side = 1 AND key_delta = coalesce(s.dropbox_key_delta, $k) " +
+        "UNION ALL SELECT rowid FROM scan INDEXED BY scan_own WHERE pair_id = " + PairRow + " AND scan_id = $scan AND side = 1 AND " + KeyOf + "path) = +coalesce(s.dropbox_key_delta, $k) AND key_delta IS NULL) " +
         "WHERE s.pair_id = " + PairRow + " AND " + KeyOf + "s.local_path) = $k " +
         "UNION ALL " +
         "SELECT 0, f.k, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, " +
@@ -323,7 +383,7 @@ public static class StateSchema
 
     /// <summary>One scan entry by its side's own key, with the leading ScanRenames columns.</summary>
     public const string SelectScanEntry = "SELECT side, path, is_folder, size, mtime, id, rev, hash, skip " +
-        "FROM scan INDEXED BY scan_own WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND side = $side AND " + KeyOf + "path) = $k;";
+        "FROM scan INDEXED BY scan_own WHERE pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND scan_id = $scan AND side = $side AND " + KeyOf + "path) = $k;";
 
     private const string ScanRenameColumns = "SELECT x.side, x.path, x.is_folder, x.size, x.mtime, x.id, x.rev, x.hash, x.skip, " +
         KeyOf + "s.local_path), s.local_path, s.dropbox_key_delta, s.dropbox_path, s.is_folder, s.local_id, s.local_size, s.local_mtime, " +
@@ -331,11 +391,11 @@ public static class StateSchema
     /// <summary>Rename candidates: a matched id whose whole path changed, compared exactly on both sides.</summary>
     public const string ScanRenames = ScanRenameColumns + """
         FROM scan x CROSS JOIN synced_entry s INDEXED BY synced_local_id
-        WHERE x.pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND x.side = 0 AND x.id <> ''
+        WHERE x.pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND x.scan_id = $scan AND x.side = 0 AND x.id <> ''
           AND s.pair_id = x.pair_id AND s.local_id = x.id AND x.path <> s.local_path
         """ + " UNION ALL " + ScanRenameColumns + """
         FROM scan x CROSS JOIN synced_entry s INDEXED BY synced_dropbox_id
-        WHERE x.pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND x.side = 1 AND x.id <> ''
+        WHERE x.pair_id = (SELECT id FROM pair WHERE pair_id = $p) AND x.scan_id = $scan AND x.side = 1 AND x.id <> ''
           AND s.pair_id = x.pair_id AND s.dropbox_id = x.id AND x.path <> s.dropbox_path;
         """;
 
@@ -349,14 +409,14 @@ public static class StateSchema
     private const string PlanFields = "policy_key TEXT NOT NULL,native_key TEXT NOT NULL,present INTEGER NOT NULL,entry_path TEXT,entry_folder INTEGER,entry_size INTEGER,entry_mtime INTEGER,entry_id ANY,entry_rev TEXT,entry_hash ANY,entry_skip TEXT,saved_local_key TEXT,saved_local_path TEXT,saved_dropbox_delta TEXT,saved_dropbox_path_delta TEXT,saved_dropbox_path TEXT GENERATED ALWAYS AS(coalesce(saved_dropbox_path_delta,saved_local_path)) VIRTUAL,saved_folder INTEGER,saved_local_id ANY,saved_size INTEGER,saved_mtime INTEGER,saved_dropbox_id TEXT,saved_hash ANY";
 
     private const string PlanPresentColumns = "coalesce(x.key_delta,pathkey(x.path)) AS policy_key,pathkey(x.path) AS native_key,1 AS present,x.path AS entry_path,x.is_folder AS entry_folder,x.size AS entry_size,x.mtime AS entry_mtime,x.id AS entry_id,x.rev AS entry_rev,x.hash AS entry_hash,x.skip AS entry_skip,pathkey(s.local_path) AS saved_local_key,s.local_path AS saved_local_path,s.dropbox_key_delta AS saved_dropbox_delta,s.dropbox_path AS saved_dropbox_path,s.is_folder AS saved_folder,s.local_id AS saved_local_id,s.local_size AS saved_size,s.local_mtime AS saved_mtime,s.dropbox_id AS saved_dropbox_id,s.dropbox_hash AS saved_hash";
-    private const string PlanPresentFrom = " FROM scan_state.scan x INDEXED BY scan_own LEFT JOIN durable_state.synced_entry s ON s.rowid IN (SELECT rowid FROM durable_state.synced_entry INDEXED BY synced_local_key WHERE pair_id=" + PlanPair + " AND pathkey(local_path)=+coalesce(x.key_delta,pathkey(x.path)) AND ($side=0 OR dropbox_key_delta IS NULL) UNION ALL SELECT rowid FROM durable_state.synced_entry INDEXED BY synced_dropbox_key WHERE $side=1 AND pair_id=" + PlanPair + " AND dropbox_key_delta=coalesce(x.key_delta,pathkey(x.path))) WHERE x.pair_id=" + PlanPair + " AND x.side=$side AND pathkey(x.path)<>$ownKey";
+    private const string PlanPresentFrom = " FROM scan_state.scan x INDEXED BY scan_own LEFT JOIN durable_state.synced_entry s ON s.rowid IN (SELECT rowid FROM durable_state.synced_entry INDEXED BY synced_local_key WHERE pair_id=" + PlanPair + " AND pathkey(local_path)=+coalesce(x.key_delta,pathkey(x.path)) AND ($side=0 OR dropbox_key_delta IS NULL) UNION ALL SELECT rowid FROM durable_state.synced_entry INDEXED BY synced_dropbox_key WHERE $side=1 AND pair_id=" + PlanPair + " AND dropbox_key_delta=coalesce(x.key_delta,pathkey(x.path))) WHERE x.scan_id=$scan AND x.pair_id=" + PlanPair + " AND x.side=$side AND pathkey(x.path)<>$ownKey";
     private const string PlanSavedColumns = "CASE WHEN $side=0 THEN pathkey(s.local_path) ELSE s.dropbox_key END AS policy_key,pathkey(CASE WHEN $side=0 THEN s.local_path ELSE s.dropbox_path END) AS native_key,0 AS present,NULL AS entry_path,NULL AS entry_folder,NULL AS entry_size,NULL AS entry_mtime,NULL AS entry_id,NULL AS entry_rev,NULL AS entry_hash,NULL AS entry_skip,pathkey(s.local_path) AS saved_local_key,s.local_path AS saved_local_path,s.dropbox_key_delta AS saved_dropbox_delta,s.dropbox_path AS saved_dropbox_path,s.is_folder AS saved_folder,s.local_id AS saved_local_id,s.local_size AS saved_size,s.local_mtime AS saved_mtime,s.dropbox_id AS saved_dropbox_id,s.dropbox_hash AS saved_hash";
-    private const string PlanNoScan = " AND NOT EXISTS(SELECT 1 FROM scan_state.scan x INDEXED BY scan_own WHERE x.pair_id=" + PlanPair + " AND x.side=$side AND pathkey(x.path)=+(CASE WHEN $side=0 THEN pathkey(s.local_path) ELSE coalesce(s.dropbox_key_delta,pathkey(s.local_path)) END) AND ($side=0 OR x.key_delta IS NULL) UNION ALL SELECT 1 FROM scan_state.scan x INDEXED BY scan_key WHERE $side=1 AND x.pair_id=" + PlanPair + " AND x.side=1 AND x.key_delta=coalesce(s.dropbox_key_delta,pathkey(s.local_path)))";
+    private const string PlanNoScan = " AND NOT EXISTS(SELECT 1 FROM scan_state.scan x INDEXED BY scan_own WHERE x.scan_id=$scan AND x.pair_id=" + PlanPair + " AND x.side=$side AND pathkey(x.path)=+(CASE WHEN $side=0 THEN pathkey(s.local_path) ELSE coalesce(s.dropbox_key_delta,pathkey(s.local_path)) END) AND ($side=0 OR x.key_delta IS NULL) UNION ALL SELECT 1 FROM scan_state.scan x INDEXED BY scan_key WHERE $side=1 AND x.scan_id=$scan AND x.pair_id=" + PlanPair + " AND x.side=1 AND x.key_delta=coalesce(s.dropbox_key_delta,pathkey(s.local_path)))";
     private const string PlanSavedInheritedFrom = " FROM durable_state.synced_entry s INDEXED BY synced_local_key WHERE s.pair_id=" + PlanPair + " AND ($side=0 OR s.dropbox_key_delta IS NULL) AND pathkey(s.local_path)>=$k||'/' AND pathkey(s.local_path)<$k||'0'" + PlanNoScan;
     private const string PlanSavedOverrideFrom = " FROM durable_state.synced_entry s INDEXED BY synced_dropbox_key WHERE $side=1 AND s.pair_id=" + PlanPair + " AND s.dropbox_key_delta>=$k||'/' AND s.dropbox_key_delta<$k||'0'" + PlanNoScan;
 
     // Inventory result: native cursor, followed by the 8 StateEncoding.ReadEntry fields.
-    public const string PlanEntries = "SELECT pathkey(path),path,is_folder,size,mtime,id,rev,hash,skip FROM scan_state.scan INDEXED BY scan_own WHERE pair_id=" + PlanPair + " AND side=$side AND pathkey(path)>$after ORDER BY pathkey(path) LIMIT 1;";
+    public const string PlanEntries = "SELECT pathkey(path),path,is_folder,size,mtime,id,rev,hash,skip FROM scan_state.scan INDEXED BY scan_own WHERE scan_id=$scan AND pair_id=" + PlanPair + " AND side=$side AND pathkey(path)>$after ORDER BY pathkey(path) LIMIT 1;";
     // Candidate result: the 21 PlanPayload columns, followed by its private pagination cursor.
     public const string PlanPresent = "SELECT " + PlanPresentColumns + ",pathkey(x.path) AS cursor" + PlanPresentFrom + " AND pathkey(x.path)>$after ORDER BY pathkey(x.path) LIMIT 1;";
     public const string PlanSaved = "WITH next_saved AS MATERIALIZED (SELECT " + PlanSavedColumns + ",pathkey(s.local_path) AS cursor,0 AS saved_override" + PlanSavedInheritedFrom + " AND $savedOverride=0 AND pathkey(s.local_path)>$after ORDER BY pathkey(s.local_path) LIMIT 1) SELECT * FROM next_saved UNION ALL SELECT * FROM (SELECT " + PlanSavedColumns + ",s.dropbox_key_delta AS cursor,1 AS saved_override" + PlanSavedOverrideFrom + " AND s.dropbox_key_delta>CASE WHEN $savedOverride THEN $after ELSE '' END ORDER BY s.dropbox_key_delta LIMIT CASE WHEN EXISTS(SELECT 1 FROM next_saved) THEN 0 ELSE 1 END);";
@@ -400,15 +460,63 @@ public static class StateSchema
           UPDATE pair SET deleted_history_cursor=NULL WHERE id=new.id;
         END;
         """;
-    public const string ReadDeletedHistoryCursor = "SELECT deleted_history_cursor FROM pair WHERE pair_id=$p;";
-    private const string DeletedHistoryPage = " WHERE pair_id=$pair AND path_key>=coalesce($after,'') AND ($after IS NULL OR path_key<>$after) ORDER BY path_key LIMIT $take;";
-    public const string RestoreDeletedHistory = "INSERT INTO scan_state.deleted_name SELECT pair_id,path_key FROM main.discovery_deleted_name WHERE pair_id=" + PairRow + ";";
-    public const string SaveDeletedHistory = "INSERT INTO main.discovery_deleted_name SELECT pair_id,path_key FROM scan_state.deleted_name" + DeletedHistoryPage;
-    public const string SavedDeletedHistoryKey = "SELECT max(path_key) FROM main.discovery_deleted_name WHERE pair_id=$pair;";
-    public const string ClearDeletedHistory = "UPDATE pair SET deleted_history_cursor=NULL WHERE pair_id=$p;";
-    public const string PublishDeletedHistory = "UPDATE pair SET deleted_history_cursor=$cursor WHERE pair_id=$p;";
-    public const string ReclaimDeletedHistory = "DELETE FROM main.discovery_deleted_name WHERE pair_id=$pair AND path_key IN (SELECT path_key FROM main.discovery_deleted_name WHERE pair_id=$pair ORDER BY path_key LIMIT $take) AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND deleted_history_cursor IS NULL);";
-    public const string ClearScanDropbox = "DELETE FROM scan_state.scan WHERE pair_id=" + PairRow + " AND side=1;";
+    public const string DeletedHistoryBlocks = """
+        ALTER TABLE pair ADD COLUMN deleted_history_owed INTEGER NOT NULL DEFAULT 1 CHECK(deleted_history_owed IN (0,1));
+        CREATE TABLE discovery_deleted_block(pair_id INTEGER NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+          last_key TEXT NOT NULL, name_count INTEGER NOT NULL CHECK(name_count BETWEEN 1 AND 5000),
+          names BLOB NOT NULL, PRIMARY KEY(pair_id,last_key)) STRICT;
+        CREATE TABLE discovery_deleted_delta(pair_id INTEGER NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+          path_key TEXT NOT NULL, PRIMARY KEY(pair_id,path_key)) STRICT, WITHOUT ROWID;
+        DROP TRIGGER invalidate_deleted_history;
+        CREATE TRIGGER invalidate_deleted_history AFTER UPDATE OF def_json,execution_generation ON pair
+        WHEN json_remove(new.def_json,'$.Drive')<>json_remove(old.def_json,'$.Drive') OR new.execution_generation<>old.execution_generation
+        BEGIN
+          UPDATE pair SET deleted_history_cursor=NULL,deleted_history_owed=1 WHERE id=new.id;
+          DELETE FROM discovery_deleted_delta WHERE pair_id=new.id;
+        END;
+        UPDATE source_state SET repair_reason=coalesce(repair_reason,'NormalRepair'),repair_revision=repair_revision+1;
+        """;
+    public const string SpentDeletedHistory = """
+        ALTER TABLE discovery_deleted_delta ADD COLUMN spent INTEGER NOT NULL DEFAULT 0 CHECK(spent IN (0,1));
+        DROP TRIGGER invalidate_deleted_history;
+        CREATE TRIGGER invalidate_deleted_history AFTER UPDATE OF def_json,execution_generation ON pair
+        WHEN json_remove(new.def_json,'$.Drive')<>json_remove(old.def_json,'$.Drive') OR new.execution_generation<>old.execution_generation
+        BEGIN
+          UPDATE pair SET deleted_history_cursor=NULL,deleted_history_owed=1 WHERE id=new.id;
+          DELETE FROM discovery_deleted_delta WHERE pair_id=new.id AND spent=0;
+        END;
+        """;
+    public const string ReplaceDeletedHistoryIdentity = "DELETE FROM discovery_deleted_delta WHERE pair_id=" + PairRow + ";DELETE FROM discovery_deleted_block WHERE pair_id=" + PairRow + ";" + ClearDeletedHistory;
+    private const string NotSpentDeletedKey = "NOT EXISTS(SELECT 1 FROM main.discovery_deleted_delta d WHERE d.pair_id=$pair AND d.path_key=$path AND d.spent=1)";
+    public const string SpentDeletedKey = "SELECT EXISTS(SELECT 1 FROM main.discovery_deleted_delta WHERE pair_id=" + PairRow + " AND path_key=$path AND spent=1);";
+    public const string SpendDeletedKey = "INSERT INTO discovery_deleted_delta(pair_id,path_key,spent) VALUES(" + PairRow + ",$path,1) ON CONFLICT(pair_id,path_key) DO UPDATE SET spent=1 WHERE spent=0;";
+    public const string DeletedKeyDelta = "SELECT spent FROM main.discovery_deleted_delta WHERE pair_id=$pair AND path_key=$path;";
+    public const string DeletedBlockTable = "discovery_deleted_block";
+    public const string DeletedBlockPayload = "names";
+    public const int DeletedBlockLast = 0;
+    public const int DeletedBlockCount = 1;
+    public const int DeletedBlockRow = 2;
+    public const int DeletedBlockPrevious = 3;
+    public const string DeletedKeyBlock = "SELECT last_key,name_count,rowid,(SELECT max(last_key) FROM main.discovery_deleted_block WHERE pair_id=$pair AND last_key<b.last_key) FROM main.discovery_deleted_block b WHERE pair_id=$pair AND last_key>=$path ORDER BY last_key LIMIT 1;";
+    public const string DropDeletedHistoryNames = "DROP TABLE discovery_deleted_name;";
+    public const string LegacyDeletedNames = "SELECT pair_id,path_key FROM discovery_deleted_name ORDER BY pair_id,path_key;";
+    public const string LegacyDeletedCount = "SELECT count(*) FROM discovery_deleted_name;";
+    public const string ReadDeletedHistoryCursor = "SELECT deleted_history_cursor FROM pair WHERE pair_id=$p AND deleted_history_owed=0;";
+    public const string ReadDeletedHistoryOwed = "SELECT deleted_history_owed FROM pair WHERE pair_id=$p;";
+    public const string SaveDeletedHistory = "SELECT path_key FROM scan_state.deleted_name WHERE pair_id=$pair AND path_key>coalesce($after,'') AND NOT EXISTS(SELECT 1 FROM main.discovery_deleted_delta d WHERE d.pair_id=$pair AND d.path_key=deleted_name.path_key AND d.spent=1) ORDER BY path_key LIMIT $take;";
+    public const string SaveDeletedBlock = "INSERT INTO main.discovery_deleted_block(pair_id,last_key,name_count,names) VALUES($pair,$path,$count,$names);";
+    public const string ReadDeletedBlock = "SELECT last_key,name_count,rowid FROM main.discovery_deleted_block WHERE pair_id=$pair AND last_key>coalesce($after,'') ORDER BY last_key LIMIT 1;";
+    public const string SavedDeletedHistoryKey = "SELECT max(last_key) FROM main.discovery_deleted_block WHERE pair_id=$pair;";
+    public const string ClearDeletedHistory = "UPDATE pair SET deleted_history_cursor=NULL,deleted_history_owed=1 WHERE pair_id=$p;";
+    public const string PublishDeletedHistory = "UPDATE pair SET deleted_history_cursor=$cursor,deleted_history_owed=0 WHERE pair_id=$p;";
+    public const string ReclaimDeletedHistory = "DELETE FROM main.discovery_deleted_block WHERE pair_id=$pair AND last_key IN (SELECT last_key FROM main.discovery_deleted_block WHERE pair_id=$pair ORDER BY last_key LIMIT $take) AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND deleted_history_cursor IS NULL);";
+    public const string DeletedHistoryCount = "SELECT count(*) FROM scan_state.deleted_name WHERE pair_id=$pair;";
+    public const string ParamNames = "$names";
+    public const string ParamCount = "$count";
+    public const string AppendDeletedHistory = "INSERT OR IGNORE INTO discovery_deleted_delta(pair_id,path_key) VALUES($pair,$path);";
+    public const string DeletedDeltaPage = "SELECT path_key FROM discovery_deleted_delta WHERE pair_id=$pair AND spent=0 AND path_key>coalesce($after,'') ORDER BY path_key LIMIT $take;";
+    public const string RetireFoldedDeletedNames = "DELETE FROM discovery_deleted_delta WHERE pair_id=$pair AND spent=0 AND path_key IN (SELECT path_key FROM scan_state.deleted_name WHERE pair_id=$pair);";
+    public const string ClearScanDropbox = "DELETE FROM scan_state.scan WHERE pair_id=" + PairRow + " AND scan_id=$scan AND side=1;";
     public const string ClearScanDeletedNames = "DELETE FROM scan_state.deleted_name WHERE pair_id=" + PairRow + ";";
     public const string DeletedNameLive = "DELETE FROM scan_state.deleted_name WHERE pair_id=$pair AND path_key=$path;";
 
@@ -575,7 +683,7 @@ public static class StateSchema
     public const string CreateObsoletePhaseIndex = "CREATE INDEX folder_item_phase ON folder_removal_item(pair_id,operation_id,phase,ordinal);";
     public const string DropObsoletePhaseIndex = "DROP INDEX folder_item_phase;";
     /// <summary>The last modifying statement of the upgrade or a fresh creation.</summary>
-    public const string PublishVersion = "PRAGMA user_version=7;";
+    public const string PublishVersion = "PRAGMA user_version=10;";
     public const string LocalAccessRetryCauseFunction = "localaccessretrycause";
 
     // Upgrade validation: the actual structure is compared before and after the additions.
@@ -597,8 +705,15 @@ public static class StateSchema
         " THEN " + KeyOf + "dropbox_path) ELSE dropbox_key END AS final_key FROM synced_entry) GROUP BY pair_id, final_key HAVING count(*) > 1);";
 
     // Disposable scan relations; deleted_name exists only for discovery-enabled scans.
-    public const string CreateSkipTouched = "CREATE TABLE scan_state.skip_touched(pair_id INTEGER NOT NULL,side INTEGER NOT NULL CHECK(side IN (0,1)),path_key TEXT NOT NULL,PRIMARY KEY(pair_id,side,path_key)) STRICT;";
-    public const string CreateDeletedName = "CREATE TABLE scan_state.deleted_name(pair_id INTEGER NOT NULL,path_key TEXT NOT NULL,PRIMARY KEY(pair_id,path_key)) STRICT;";
+    public const string CreateSkipTouched = "CREATE TABLE IF NOT EXISTS scan_state.skip_touched(pair_id INTEGER NOT NULL,scan_id BLOB NOT NULL,side INTEGER NOT NULL CHECK(side IN (0,1)),path_key TEXT NOT NULL,PRIMARY KEY(pair_id,scan_id,side,path_key)) STRICT;";
+    public const string DeleteScanBatch = "DELETE FROM scan_state.scan WHERE rowid IN (SELECT rowid FROM scan_state.scan INDEXED BY scan_own WHERE pair_id=$pair AND scan_id=$scan LIMIT $take);";
+    public const string DeleteTouchBatch = "DELETE FROM scan_state.skip_touched WHERE rowid IN (SELECT rowid FROM scan_state.skip_touched WHERE pair_id=$pair AND scan_id=$scan LIMIT $take);";
+    public const string ClearDeletedNames = "DELETE FROM scan_state.deleted_name WHERE pair_id=$pair;";
+    public const string CreateScanIssues = "CREATE TABLE IF NOT EXISTS scan_state.scan_issue(scan_id BLOB NOT NULL,issue_id INTEGER NOT NULL,path TEXT NOT NULL,kind INTEGER NOT NULL,cause TEXT NOT NULL,subject_json TEXT NOT NULL,at_ticks INTEGER NOT NULL,dismissed INTEGER NOT NULL,episode TEXT,revision INTEGER,work_id INTEGER,PRIMARY KEY(scan_id,issue_id)) STRICT;";
+    public const string CaptureScanIssues = "INSERT INTO scan_state.scan_issue SELECT $scan,issue_id,path,kind,cause,subject_json,at_ticks,dismissed,item_retry_episode,item_retry_revision,item_retry_work_id FROM issue WHERE pair_id=$pair;";
+    public const string ScanIssueUnchanged = "SELECT EXISTS(SELECT 1 FROM scan_state.scan_issue s JOIN issue i ON i.issue_id=s.issue_id WHERE s.scan_id=$scan AND s.issue_id=$issue AND i.pair_id=$pair AND i.path=s.path AND i.kind=s.kind AND i.cause=s.cause AND i.subject_json=s.subject_json AND i.at_ticks=s.at_ticks AND i.dismissed=s.dismissed AND i.item_retry_episode IS s.episode AND i.item_retry_revision IS s.revision AND i.item_retry_work_id IS s.work_id);";
+    public const string DeleteScanIssueBatch = "DELETE FROM scan_state.scan_issue WHERE rowid IN (SELECT rowid FROM scan_state.scan_issue WHERE scan_id=$scan LIMIT $take);";
+    public const string CreateDeletedName = "CREATE TABLE IF NOT EXISTS scan_state.deleted_name(pair_id INTEGER NOT NULL,path_key TEXT NOT NULL,PRIMARY KEY(pair_id,path_key)) STRICT;";
     // The plan's one classified relation; create exactly one of the two root index variants.
     public const string PlanCreateClassified = "CREATE TABLE scan_state.classified(id INTEGER PRIMARY KEY," + PlanFields + ",verdict TEXT NOT NULL CHECK(verdict IN ('Survives','Removed')),follow_up INTEGER NOT NULL CHECK(follow_up IN (0,1)),selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0,1)),UNIQUE(policy_key,native_key,present)) STRICT;CREATE INDEX scan_state.classified_order ON classified(-plandepth(policy_key),policy_key,native_key,present);CREATE INDEX scan_state.classified_survivor ON classified(policy_key,native_key,present) WHERE verdict='Survives';CREATE INDEX scan_state.classified_selected_order ON classified(-plandepth(policy_key),policy_key,native_key,present) WHERE selected=1;";
     // SQLite's CREATE INDEX grammar qualifies the index name, not its table name; all targets are in scan_state.
@@ -691,6 +806,18 @@ public static class StateSchema
     internal const int EchoSaved = 2;
     // shortcut: fixed reclaim/copy batch size, chosen by measurement; make it a setting only if lock-hold targets differ per machine
     internal const int DeletedHistoryBatchSize = 5000;
+    internal const int DeletedKeyUtf8BytesPerUnit = 3;
+    internal const int DeletedZlibMinimumBytes = 6;
+    internal const int DeletedChecksumBytes = 4;
+    internal const uint DeletedChecksumInitial = 1;
+    internal const uint DeletedChecksumMask = 65535;
+    internal const int DeletedChecksumShift = 16;
+    internal const uint DeletedChecksumModulus = 65521;
+    internal const int DeletedLengthMask = 127;
+    internal const int DeletedLengthShift = 7;
+    internal const int DeletedLengthContinuation = 128;
+    internal const int DeletedStreamEnd = -1;
+    internal const int LegacyDeletedKeyColumn = 1;
     private const string ClaimWorkColumn = "w.work_id";
     private const string ClaimWorkFrom = "FROM change_work w";
     private const string ClaimPeerFrom = "FROM change_work w INDEXED BY work_path";
@@ -733,11 +860,11 @@ public static class StateSchema
     public const string UnreadableBelow = "SELECT path_key FROM issue_member INDEXED BY issue_member_skip WHERE pair_id=" + PairRow + " AND side=$side AND work_id IS NULL AND path_key>$low AND path_key<$high AND skip_cause=$cause;";
     public const string MemberlessSkips = "SELECT i.issue_id,i.pair_id,i.path,i.cause,i.subject_json FROM issue i WHERE i.kind=$kind AND NOT EXISTS(SELECT 1 FROM issue_member m WHERE m.issue_id=i.issue_id);";
     public const string RemoveSkipMember = "DELETE FROM issue_member WHERE pair_id=$pair AND side=$side AND path_key=$path AND work_id IS NULL;";
-    public const string TouchSkip = "INSERT INTO scan_state.skip_touched(pair_id,side,path_key) VALUES($pair,$side,$path) ON CONFLICT DO NOTHING;";
-    public const string SkipTouched = "SELECT EXISTS(SELECT 1 FROM scan_state.skip_touched WHERE pair_id=$pair AND side=$side AND path_key=$path);";
-    public const string DeletedNameInsert = "INSERT INTO scan_state.deleted_name(pair_id,path_key) VALUES($pair,$path) ON CONFLICT DO NOTHING;";
-    public const string HasDeletedNames = "SELECT EXISTS(SELECT 1 FROM scan_state.deleted_name WHERE pair_id=$pair);";
-    public const string DeletedNameExact = "SELECT EXISTS(SELECT 1 FROM scan_state.deleted_name WHERE pair_id=$pair AND path_key=$path);";
+    public const string TouchSkip = "INSERT INTO scan_state.skip_touched(pair_id,scan_id,side,path_key) VALUES($pair,$scan,$side,$path) ON CONFLICT DO NOTHING;";
+    public const string SkipTouched = "SELECT EXISTS(SELECT 1 FROM scan_state.skip_touched WHERE pair_id=$pair AND scan_id=$scan AND side=$side AND path_key=$path);";
+    public const string DeletedNameInsert = "INSERT INTO scan_state.deleted_name(pair_id,path_key) SELECT $pair,$path WHERE " + NotSpentDeletedKey + " ON CONFLICT DO NOTHING;";
+    public const string HasDeletedNames = "SELECT EXISTS(SELECT 1 FROM scan_state.deleted_name n WHERE pair_id=$pair AND NOT EXISTS(SELECT 1 FROM main.discovery_deleted_delta d WHERE d.pair_id=$pair AND d.path_key=n.path_key AND d.spent=1) UNION ALL SELECT 1 FROM main.discovery_deleted_delta WHERE pair_id=$pair AND spent=0);";
+    public const string DeletedNameExact = "SELECT " + NotSpentDeletedKey + " AND EXISTS(SELECT 1 FROM scan_state.deleted_name WHERE pair_id=$pair AND path_key=$path UNION ALL SELECT 1 FROM main.discovery_deleted_delta WHERE pair_id=$pair AND path_key=$path AND spent=0);";
     public const string PendingRead = "SELECT pending_json FROM pair WHERE id=$pair;";
     public const string PendingArm = "UPDATE pair SET pending_json=$next WHERE id=$pair AND pending_json IS NULL;";
     public const string PendingAdvance = "UPDATE pair SET pending_json=$next WHERE id=$pair AND pending_json=$expected;";
@@ -857,7 +984,7 @@ public static class StateSchema
     public const string CloseSupersededRetryNotice = "DELETE FROM issue WHERE pair_id=$pair AND issue_id=$issue AND path='' AND kind=$kind AND cause=$retryCause AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND execution_generation=$generation AND " + BothSourceFences + " AND retry_attempts=$expectedAttempts AND retry_after_ticks=$expectedRetryAfter);";
     public const string ReadFolderDisposition = "SELECT generation,phase,active,retirement_disposition FROM folder_removal WHERE pair_id=$pair AND operation_id=$operation;";
     public const string RetireFolderDisposition ="UPDATE folder_removal AS f SET generation=$nextGeneration,phase=$nextPhase,active=0,retirement_disposition=$disposition,cause=$cause WHERE f.pair_id=$pair AND f.operation_id=$operation AND f.generation=$generation AND $nextGeneration=f.generation+1 AND f.retirement_disposition IS NULL AND $nextPhase IN ('Unknown','Retained') AND $disposition IN ('Acknowledged','NoEffect') AND NOT EXISTS(SELECT 1 FROM folder_removal_item i WHERE i.pair_id=f.pair_id AND i.operation_id=f.operation_id AND (" + FolderCustody + " OR ($disposition='NoEffect' AND i.effect_state NOT IN ('None','Ready','NoEffect'))));";
-    public const string ReclassifyItemRetry = "UPDATE issue SET cause=$nextCause,at_ticks=$at,dismissed=0 WHERE pair_id=$pair AND issue_id=$issue AND item_retry_episode=$episode AND item_retry_revision=$revision AND item_retry_work_id=$work AND subject_json=$subject AND cause=$expectedCause AND $nextCause<>$expectedCause AND localaccessretrycause(cause)=1 AND localaccessretrycause($nextCause)=1;";
+    public const string ReclassifyItemRetry = "UPDATE issue SET cause=$nextCause,at_ticks=$at,dismissed=0,ignored=0 WHERE pair_id=$pair AND issue_id=$issue AND item_retry_episode=$episode AND item_retry_revision=$revision AND item_retry_work_id=$work AND subject_json=$subject AND cause=$expectedCause AND $nextCause<>$expectedCause AND localaccessretrycause(cause)=1 AND localaccessretrycause($nextCause)=1;";
     public const string ClassifiedInsert = "INSERT INTO scan_state.classified(policy_key,native_key,present,entry_path,entry_folder,entry_size,entry_mtime,entry_id,entry_rev,entry_hash,entry_skip,saved_local_key,saved_local_path,saved_dropbox_delta,saved_dropbox_path_delta,saved_folder,saved_local_id,saved_size,saved_mtime,saved_dropbox_id,saved_hash,verdict,follow_up) VALUES($policy_key,$native_key,$present,$entry_path,$entry_folder,$entry_size,$entry_mtime,$entry_id,$entry_rev,$entry_hash,$entry_skip,$saved_local_key,$saved_local_path,$saved_dropbox_delta,$saved_dropbox_path_delta,$saved_folder,$saved_local_id,$saved_size,$saved_mtime,$saved_dropbox_id,$saved_hash,$verdict,$follow_up);";
     // Membership is EXACT at one root key; caller walks ancestors using PathNames.
     public const string ClassifiedLocalRootForLocal = "SELECT EXISTS(SELECT 1 FROM scan_state.classified WHERE coalesce(saved_local_key,policy_key)=$key AND selected=1);";
@@ -1078,6 +1205,8 @@ public static class StateSchema
     public const int IssueSubject = 4;
     public const int IssueAt = 5;
     public const int IssueDismissed = 6;
+    public const int IssueIgnored = 7;
+    public const string ParamIgnored = "$ignored";
 
     // Column ordinals: narrow issue reads.
     public const int HoldingKind = 0;

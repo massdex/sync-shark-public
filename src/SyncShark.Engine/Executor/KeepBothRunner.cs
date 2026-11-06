@@ -49,6 +49,11 @@ public sealed class KeepBothRunner(ExecutorContext context, Transfers transfers)
             }
         }
 
+        List<IssueItem> items = [new(Side.Local, local.Path, local.Id),
+            new(Side.Dropbox, dropbox.Path, dropbox.Id)];
+        if (copiedDropbox is not null) items.Add(new(Side.Dropbox, copiedDropbox.Path, copiedDropbox.Id));
+        if (copiedLocal is not null) items.Add(new(Side.Local, copiedLocal.Path, copiedLocal.Id));
+
         // shortcut: a crash can leave an extra copy + InfoKeptBoth; next run logs a NameClash that the in-sync linked row closes (no data lost); upgrade only if seen in practice
         return await RecordBindings.PrepareAsync(context, StateChange.Empty with
         {
@@ -59,8 +64,7 @@ public sealed class KeepBothRunner(ExecutorContext context, Transfers transfers)
             Close = [(local.Path, IssueClosure.AfterKeepBoth),
                 (dropbox.Path, IssueClosure.AfterKeepBoth)],
             Raise = [(IssueKind.Info, TextKey.InfoKeptBoth, local.Path,
-                new IssueSubject([new(Side.Local, local.Path, local.Id),
-                    new(Side.Dropbox, dropbox.Path, dropbox.Id)], null))]
+                new IssueSubject(items, null))]
         }, ct);
     }
 

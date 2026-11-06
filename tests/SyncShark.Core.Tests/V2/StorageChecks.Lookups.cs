@@ -110,7 +110,7 @@ internal static partial class StorageChecks
         Console.WriteLine("v2 storage unicode checks passed.");
     }
 
-    // , exactly: the stored key must agree with OrdinalIgnoreCase on every Unicode scalar (Astra
+    // , exactly: the stored key must agree with OrdinalIgnoreCase on every Unicode scalar (
     // found "ſ" vs "S", which upper-invariant merges and OrdinalIgnoreCase keeps apart).
     private static void PathKey_MatchesOrdinalIgnoreCase()
     {

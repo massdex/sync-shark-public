@@ -17,5 +17,7 @@
   "BatchPollIntervalSeconds": 0.1,
   "FolderDeleteMinimumPollSeconds": 1,
   "StoragePageSize": 100,
-  "StoreBatchRows": 20000
+  "StoreBatchRows": 20000,
+  "AtomicReplaceAttempts": 5,
+  "AtomicReplaceInitialDelayMilliseconds": 50
 }

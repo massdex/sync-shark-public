@@ -10,6 +10,8 @@ public sealed record ResolveResult(long Issue, ResolutionChoice Choice, bool Don
     public string RenderHuman()
     {
         var id = (TextArg.Id, Issue.ToString(CultureInfo.InvariantCulture));
+        if (Choice is ResolutionChoice.Ignore or ResolutionChoice.Unignore)
+            return Text.Get(Choice == ResolutionChoice.Ignore ? TextKey.ResultIssueIgnored : TextKey.ResultIssueRestored, id);
         if (!Done)
             return Text.Get(TextKey.ResultResolveFailed, id,
                 (TextArg.Reason, Outcome.Raised?.ToString() ?? Outcome.Kind.ToString()));
@@ -18,5 +20,5 @@ public sealed record ResolveResult(long Issue, ResolutionChoice Choice, bool Don
             : Text.Get(TextKey.ResultResolveDone, id, (TextArg.Choice, Choice.ToString()));
     }
 
-    public int ExitCode => (int)(Done ? SyncCliExitCode.Success : SyncCliExitCode.TransientUnavailable);
+    public int ExitCode => (int)(Done || Choice is ResolutionChoice.Ignore or ResolutionChoice.Unignore ? SyncCliExitCode.Success : SyncCliExitCode.TransientUnavailable);
 }

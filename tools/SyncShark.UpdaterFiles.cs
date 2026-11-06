@@ -63,18 +63,19 @@ internal sealed class SyncSharkUpdaterFiles : IDisposable
             SyncSharkUpdaterContract.Require(new FileInfo(path).Length==member.Bytes && Hash(path,protect)==member.Sha256,"Held runtime member changed.");
         }
     }
-    private void Shape(string directory,bool protect)
+    private void Shape(string directory,bool protect,string[] required=null)
     {
         Hold(directory,true,protect);
-        string[] actual=Directory.GetFileSystemEntries(directory),required=SyncSharkProtectedRuntimeTransaction.Members;
+        required=required??SyncSharkProtectedRuntimeTransaction.Members;
+        string[] actual=Directory.GetFileSystemEntries(directory);
         SyncSharkUpdaterContract.Require(actual.Length==required.Length,"Unexpected runtime root inventory.");
         foreach(string path in actual)
         {
             string name=Path.GetFileName(path);
-            if(name=="Assets")
+            if(name=="Assets" || name=="tools")
             {
                 Hold(path,true,protect);string[] assets=Directory.GetFileSystemEntries(path);
-                SyncSharkUpdaterContract.Require(assets.Length==1 && Path.GetFileName(assets[0])=="SyncShark-64.png","Unexpected runtime assets.");
+                SyncSharkUpdaterContract.Require(assets.Length==1 && required.Contains(name+"/"+Path.GetFileName(assets[0]),StringComparer.Ordinal),"Unexpected runtime assets.");
                 Hold(assets[0],false,protect);
             }
             else
@@ -92,11 +93,11 @@ internal sealed class SyncSharkUpdaterFiles : IDisposable
         foreach(string entry in entries)
         {
             string name=Path.GetFileName(entry);
-            if(name=="Assets")
+            if(name=="Assets" || name=="tools")
             {
                 Hold(entry,true,protect);string[] assets=Directory.GetFileSystemEntries(entry);
                 SyncSharkUpdaterContract.Require(assets.Length<=1,"Unexpected staging assets.");
-                foreach(string asset in assets)PartialMember(asset,"Assets/"+Path.GetFileName(asset),members,protect);
+                foreach(string asset in assets)PartialMember(asset,name+"/"+Path.GetFileName(asset),members,protect);
             }
             else PartialMember(entry,name,members,protect);
         }
@@ -139,18 +140,23 @@ internal sealed class SyncSharkUpdaterFiles : IDisposable
         [DataMember(Name="length",Order=1)] public long Length;
         [DataMember(Name="sha256",Order=2)] public string Sha256;
     }
+    internal static bool IsPredecessorAddition(string name)
+    {return name=="SyncShark.Engine.dll" || name=="tools/SyncShark.Uninstall.ps1";}
     internal string TreeIdentity(string directory,bool protect)
     {
-        Shape(directory,protect);
+        // Only explicit predecessor additions are optional; the signed predecessor tree hash still binds every byte.
+        string[] members=SyncSharkProtectedRuntimeTransaction.Members.Where(name=>
+            !IsPredecessorAddition(name) || File.Exists(Path.Combine(directory,name))).ToArray();
+        Shape(directory,protect,members);
         long total=0;
-        foreach(string name in SyncSharkProtectedRuntimeTransaction.Members)
+        foreach(string name in members)
         {
             long size=new FileInfo(Path.Combine(directory,name)).Length;
             SyncSharkUpdaterContract.Require(size>0 && size<=536870912,"Predecessor member exceeds its inspection bound.");
             total=checked(total+size);
         }
         SyncSharkUpdaterContract.Require(total<=1073741824,"Predecessor tree exceeds its inspection bound.");
-        var rows=SyncSharkProtectedRuntimeTransaction.Members.OrderBy(name=>Path.Combine(directory,name),StringComparer.InvariantCultureIgnoreCase)
+        var rows=members.OrderBy(name=>Path.Combine(directory,name),StringComparer.InvariantCultureIgnoreCase)
             .Select(name=>new TreeMember {Path=name,Length=new FileInfo(Path.Combine(directory,name)).Length,Sha256=Hash(Path.Combine(directory,name),protect)}).ToArray();
         using(var stream=new MemoryStream())
         using(var sha=SHA256.Create())

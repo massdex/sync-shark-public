@@ -39,6 +39,19 @@ public sealed record Row(string Key, Entry? Local, Entry? Dropbox, SyncedEntry? 
         (row.PathOn(Side.Local, target) ?? row.Context.Destination ?? row.Key,
          row.PathOn(Side.Dropbox, target) ?? row.Context.Destination ?? row.Key);
 
+    /// <summary>The comparison key followed by observed and saved side keys, retaining their order and duplicates.</summary>
+    public static IEnumerable<string> Keys(Row row)
+    {
+        yield return row.Key;
+        if (row.Local is { } local) yield return PathNames.KeyFor(Side.Local, local.Path);
+        if (row.Dropbox is { } remote) yield return PathNames.KeyFor(Side.Dropbox, remote.Path);
+        if (row.Synced is { } saved)
+        {
+            yield return saved.LocalKey;
+            yield return saved.DropboxKey;
+        }
+    }
+
     /// <summary>One row for a single-side observation; an invalid side populates neither entry.</summary>
     public static Row ForOneSide(Side side, string key, Entry? entry, SyncedEntry? synced,
         IReadOnlyList<Entry> extra, string? localHash, RowContext context) =>

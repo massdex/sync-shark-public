@@ -1,4 +1,5 @@
 using Massdex.SyncShark.Engine.Storage;
+using Massdex.SyncShark.Engine.Tests.TestDoubles;
 using Microsoft.Data.Sqlite;
 
 namespace Massdex.SyncShark.Engine.Tests.Storage;
@@ -18,7 +19,7 @@ public static class StateCommitterChecks
             StateStore.OpenConnection(connection);
             Exec(connection, StateSchema.Create);
             Exec(connection, StateSchema.SchemaAdditions);
-            Exec(connection, StateSchema.DeletedHistorySchema);
+            Exec(connection, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory);
             Exec(connection, StateSchema.AttachScan, (StateSchema.ParamPath, StateSchema.EmptyScan));
             Exec(connection, StateSchema.ScanPragmas);
             Exec(connection, StateSchema.CreateScan);
@@ -38,6 +39,7 @@ public static class StateCommitterChecks
             Records(connection);
             RetireStaleRecord(connection);
             RecordConflicts(connection);
+            ReleasedBindings(connection);
             EqualKeyReplacement(connection);
             PartialCounterpart(connection);
             AcknowledgesBeforeClose(connection);
@@ -73,9 +75,9 @@ public static class StateCommitterChecks
                     false, "live-local", 0, 0, "live-cloud", ""));
                 transaction.Commit();
             }
-            // One set-based statement regardless of descendants; query-plan checks separately prove indexed access.
-            Check.Require(StateSchema.DeleteSyncedBothSubtrees.Split(';', StringSplitOptions.RemoveEmptyEntries).Length == 1,
-                "Bilateral forgetting has one SQL statement for one or ten thousand children.");
+            // One set-based spend plus one delete, independent of descendant count.
+            Check.Require(StateSchema.DeleteSyncedBothSubtrees.Split(';', StringSplitOptions.RemoveEmptyEntries).Length == 2,
+                "Bilateral forgetting spends and deletes in two set-based statements at either size.");
             var statements = 0;
             SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, _) => statements++), null);
             try
@@ -323,7 +325,7 @@ public static class StateCommitterChecks
                 Exception? failure = null;
                 try
                 {
-                    StateCommitter.Commit(connection, transaction, pair, StateChange.Empty with
+                    StateCommitter.Commit(connection, transaction, new ChangeTable(connection, writable: false), pair, StateChange.Empty with
                     {
                         Renames =
                         [
@@ -331,7 +333,7 @@ public static class StateCommitterChecks
                                 Side.Dropbox, "Before.txt", "After.txt"),
                             new RenameApplied(root, after, Side.Dropbox, "Remote", after.DropboxPath),
                         ],
-                    }, At, narrowRecordUpdates: true, raised: null);
+                    }, At, narrowRecordUpdates: true, raised: null, scans: [Guid.Empty.ToByteArray()]);
                 }
                 catch (SqliteException error) { failure = error; }
                 catch (InvalidOperationException error) { failure = error; }
@@ -372,9 +374,9 @@ public static class StateCommitterChecks
             ArgumentException? failure = null;
             try
             {
-                StateCommitter.Commit(connection, transaction, pair,
+                StateCommitter.Commit(connection, transaction, new ChangeTable(connection, writable: false), pair,
                     change with { ForgetSelf = [(Side.Local, keep.LocalKey)] }, At,
-                    narrowRecordUpdates: true, raised: null);
+                    narrowRecordUpdates: true, raised: null, scans: [Guid.Empty.ToByteArray()]);
             }
             catch (ArgumentException error) { failure = error; }
             transaction.Rollback();
@@ -564,10 +566,10 @@ public static class StateCommitterChecks
         {
             try
             {
-                StateCommitter.Commit(connection, transaction, pair, StateChange.Empty with
+                StateCommitter.Commit(connection, transaction, new ChangeTable(connection, writable: false), pair, StateChange.Empty with
                 {
                     Record = [replacement with { LocalId = null! }],
-                }, At, narrowRecordUpdates: true, raised: null);
+                }, At, narrowRecordUpdates: true, raised: null, scans: [Guid.Empty.ToByteArray()]);
                 Check.Require(false, "a failed insert after both key deletions must fail");
             }
             catch (SqliteException)
@@ -582,6 +584,44 @@ public static class StateCommitterChecks
         var rows = Rows(connection, pair);
         Check.Require(rows.Count == 2 && rows.Contains(replacement) && rows.Contains(child),
             "replacement deletes both conflicting self rows, never their descendants");
+    }
+
+    private static void ReleasedBindings(SqliteConnection connection)
+    {
+        const string pair = "returning-original";
+        Pair(connection, pair);
+        var a = Saved("Original", "RemotePartner", "near");
+        var b = Saved("LocalPartner", "Original", "far");
+        Synced(connection, pair, a);
+        Synced(connection, pair, b);
+        var after = a with { DropboxKey = b.DropboxKey, DropboxPath = b.DropboxPath, DropboxId = b.DropboxId };
+        var change = StateChange.Empty with { ForgetSelf = [(Side.Dropbox, a.DropboxKey)], Record = [after] };
+        var watermark = Count(connection, StateSchema.WorkWatermark);
+        Exec(connection, "CREATE TEMP TRIGGER reject_release_notice BEFORE INSERT ON issue BEGIN SELECT RAISE(ABORT,'notice-failure'); END");
+        try
+        {
+            Reject<SqliteException>(() => Commit(connection, pair, change with
+            {
+                Raise = [(IssueKind.Info, TextKey.InfoKeptBoth, "Original", new IssueSubject([], null))]
+            }));
+        }
+        finally { Exec(connection, "DROP TRIGGER reject_release_notice"); }
+        RequireRows(connection, pair, a, b);
+        Check.Require(Count(connection, StateSchema.WorkWatermark) == watermark,
+            "A failure after release registration rolls back bindings and both acquired work rows.");
+        Commit(connection, pair, change);
+        RequireRows(connection, pair, after);
+        Check.Require(Count(connection, StateSchema.WorkWatermark) == watermark + 2,
+            "ForgetSelf plus both-key deletion consumes every RETURNING result once.");
+        Commit(connection, pair, change);
+        Check.Require(Count(connection, StateSchema.WorkWatermark) == watermark + 2,
+            "A replay cannot release endpoints whose crossed binding has already retired.");
+        var folder = Saved("Folder", "OtherFolder", "folder", true);
+        Synced(connection, pair, folder);
+        Commit(connection, pair, StateChange.Empty with { Record = [folder with
+            { DropboxKey = folder.LocalKey, DropboxPath = folder.LocalPath }] });
+        Check.Require(Count(connection, StateSchema.WorkWatermark) == watermark + 2,
+            "Folder bindings never create file-release work.");
     }
 
     private static void EqualKeyReplacement(SqliteConnection connection)
@@ -677,11 +717,11 @@ public static class StateCommitterChecks
             }
             using (var transaction = connection.BeginTransaction())
             {
-                StateCommitter.Commit(connection, transaction, pair, StateChange.Empty with
+                StateCommitter.Commit(connection, transaction, new ChangeTable(connection, writable: false), pair, StateChange.Empty with
                 {
                     FirstRunAcknowledged = [item], Close = [(OutcomePath, [IssueKind.Failure])],
                     Raise = [(IssueKind.Info, TextKey.InfoDropboxHistoryUnchecked, OutcomePath, subject)]
-                }, At, narrowRecordUpdates: true, raised: null);
+                }, At, narrowRecordUpdates: true, raised: null, scans: [Guid.Empty.ToByteArray()]);
                 transaction.Rollback();
             }
             Check.Require(IssueTable.List(connection, pair).Single().Subject.FirstRunDeletion == marker, OutcomeCheck);
@@ -720,7 +760,7 @@ public static class StateCommitterChecks
             var changes = Count(connection, "SELECT total_changes()");
             using (var transaction = connection.BeginTransaction())
             {
-                StateCommitter.Commit(connection, transaction, pair,
+                StateCommitter.Commit(connection, transaction, new ChangeTable(connection, writable: false), pair,
                     StateChange.Empty with { Record = [after] }, At, narrow, raised: null);
                 transaction.Commit();
             }
@@ -729,7 +769,7 @@ public static class StateCommitterChecks
             RequireRows(connection, pair, after);
             using (var transaction = connection.BeginTransaction())
             {
-                StateCommitter.Commit(connection, transaction, pair,
+                StateCommitter.Commit(connection, transaction, new ChangeTable(connection, writable: false), pair,
                     StateChange.Empty with { Record = [before] }, At, narrow, raised: null);
                 transaction.Rollback();
             }
@@ -1082,14 +1122,14 @@ public static class StateCommitterChecks
         {
             try
             {
-                StateCommitter.Commit(connection, transaction, pair, StateChange.Empty with
+                StateCommitter.Commit(connection, transaction, new ChangeTable(connection, writable: false), pair, StateChange.Empty with
                 {
                     Renames =
                     [
                         new RenameApplied(first, movedFirst, null, null, null),
                         new RenameApplied(second, movedSecond, null, null, null),
                     ],
-                }, At, narrowRecordUpdates: true, raised: null);
+                }, At, narrowRecordUpdates: true, raised: null, scans: [Guid.Empty.ToByteArray()]);
                 Check.Require(false, "atomicity: the conflicting second rename must fail");
             }
             catch (PathOccupiedException)
@@ -1103,8 +1143,16 @@ public static class StateCommitterChecks
             rows.Any(row => row.LocalPath == "b.txt"), "a failure mid-commit leaves no change");
     }
 
-    private static void Pair(SqliteConnection connection, string pairId) =>
-        Exec(connection, "INSERT INTO pair(pair_id, def_json) VALUES($p, '{}')", (StateSchema.ParamPair, pairId));
+    private static void Pair(SqliteConnection connection, string pairId)
+    {
+        var pair = SourceFixture.Bound(new PairConfig(pairId, "Pair A", @"C:\Synthetic", "/Synthetic",
+            "connection", [], [], FirstRunPolicy.NewestWins, true, null));
+        Exec(connection, StateSchema.UpsertPair, (StateSchema.ParamPair, pairId),
+            (StateSchema.ParamDef, System.Text.Json.JsonSerializer.Serialize(pair)));
+        using var transaction = connection.BeginTransaction();
+        new ChangeTable(connection, writable: false).SeedPairSources(transaction, pairId);
+        transaction.Commit();
+    }
 
     private static void Synced(SqliteConnection connection, string pairId, SyncedEntry entry) =>
         Exec(connection, StateSchema.InsertSynced,
@@ -1123,6 +1171,7 @@ public static class StateCommitterChecks
     private static void Scan(SqliteConnection connection, string pairId, Side side, string path,
         bool isFolder) =>
         Exec(connection, StateSchema.ScanUpsert,
+            (StateSchema.ParamScan, Guid.Empty.ToByteArray()),
             (StateSchema.ParamPair, pairId), (StateSchema.ParamSide, (int)side),
             (StateSchema.ParamJoinKey, Key(side, path)), (StateSchema.ParamOwnKey, PathNames.Key(path)),
             (StateSchema.ParamPath, path), (StateSchema.ParamIsFolder, isFolder), (StateSchema.ParamSize, 0L),
@@ -1135,8 +1184,8 @@ public static class StateCommitterChecks
     private static void Commit(SqliteConnection connection, string pairId, StateChange change)
     {
         using var transaction = connection.BeginTransaction();
-        StateCommitter.Commit(connection, transaction, pairId, change, At,
-            narrowRecordUpdates: true, raised: null);
+        StateCommitter.Commit(connection, transaction, new ChangeTable(connection, writable: false), pairId, change, At,
+            narrowRecordUpdates: true, raised: null, scans: [Guid.Empty.ToByteArray()]);
         transaction.Commit();
     }
 

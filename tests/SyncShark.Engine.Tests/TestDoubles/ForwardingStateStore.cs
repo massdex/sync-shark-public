@@ -7,6 +7,7 @@ namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 /// <summary>Passes every IStateStore member through to an inner store; checks add one hook by overriding.</summary>
 public class ForwardingStateStore(IStateStore inner) : IStateStore
 {
+    internal IStateStore FixtureInner => Inner;
     protected IStateStore Inner { get; } = inner;
 
     public virtual IReadOnlyList<PairConfig> Pairs() => Inner.Pairs();
@@ -43,14 +44,16 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
     public virtual SyncedEntry? SyncedById(string pairId, Side side, string id) => Inner.SyncedById(pairId, side, id);
     public virtual IReadOnlyList<SyncedEntry> SyncedBindingsById(string pairId, Side side, string id) =>
         Inner.SyncedBindingsById(pairId, side, id);
-    public virtual Entry? ScanEntry(string pairId, Side side, string key) => Inner.ScanEntry(pairId, side, key);
+    public virtual Entry? ScanEntry(string pairId, Guid scanId, Side side, string key) => Inner.ScanEntry(pairId, scanId, side, key);
     public virtual IReadOnlyList<Issue> Issues(string pairId, IReadOnlyList<IssueKind>? kinds = null) =>
         Inner.Issues(pairId, kinds);
     public virtual (IReadOnlyList<(string PairId, Issue Issue)> Page, int Total) OpenIssuePage(string? pairId,
-        string? account, string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset) =>
-        Inner.OpenIssuePage(pairId, account, search, kinds, limit, offset);
+        string? account, string? search, IReadOnlyList<IssueKind>? kinds, int limit, int offset, bool ignored = false) =>
+        Inner.OpenIssuePage(pairId, account, search, kinds, limit, offset, ignored);
     public virtual (IReadOnlyList<(string PairId, Issue Issue)> Rows, int Total) OpenIssueSnapshot(
         IReadOnlyList<IssueKind>? kinds, int pageSize) => Inner.OpenIssueSnapshot(kinds, pageSize);
+    public virtual IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null) =>
+        Inner.OpenIssuesUnder(pairId, scopeKey, kinds);
     public virtual void RecordPrerequisiteFailure(string pairId, long expectedGeneration, long localEpoch,
         long dropboxEpoch, long localRevision, long dropboxRevision, FailureRetryOwner.State? expected,
         FailureRetryOwner.State next, StateChange failureNotice) =>
@@ -78,7 +81,7 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
         Inner.SettleLegacyPending(pairId, rawToken, issueOnlyChange);
     public virtual JournalPosition? ReadJournal(string volumeKey) => Inner.ReadJournal(volumeKey);
     public virtual long? AcquireJournalPage(string volumeKey, JournalPosition? expected, JournalPosition next,
-        IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision, bool Suspended, bool LostInterval)> members,
+        IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision, bool LostInterval)> members,
         IEnumerable<(string PairId, ChangeNotice Notice)> notices) =>
         Inner.AcquireJournalPage(volumeKey, expected, next, members, notices);
     public virtual void RequireRepairAfterLoss(string pairId, long expectedGeneration) =>
@@ -210,8 +213,9 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
     public virtual void KeepFolderAlways(string pairId, long expectedGeneration, Issue expected,
         IReadOnlyList<Massdex.SyncShark.SyncIgnoreRule> keepRules) =>
         Inner.KeepFolderAlways(pairId, expectedGeneration, expected, keepRules);
-    public virtual bool HasDeletedNames(string pairId) => Inner.HasDeletedNames(pairId);
-    public virtual bool DeletedNameExact(string pairId, string key) => Inner.DeletedNameExact(pairId, key);
+    public virtual bool HasDeletedNames(string pairId, Guid scanId) => Inner.HasDeletedNames(pairId, scanId);
+    public virtual bool DeletedNameExact(string pairId, Guid scanId, string key) => Inner.DeletedNameExact(pairId, scanId, key);
+    public virtual bool DeletedNameSpent(string pairId, string key) => Inner.DeletedNameSpent(pairId, key);
     public virtual FolderPlan OpenFolderPlan(string pairId, Row folder, Side deletingFrom) =>
         Inner.OpenFolderPlan(pairId, folder, deletingFrom);
     public virtual bool UnreadableTouches(string pairId, string localKey, bool isFolder) =>
@@ -222,6 +226,8 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
         Inner.ReleaseUnreadable(pairId, expectedGeneration, localKey, acquiredId);
     public virtual bool ForgetTouchesUnreadable(string pairId, IReadOnlyList<(Side Side, string Key)> roots,
         CancellationToken ct) => Inner.ForgetTouchesUnreadable(pairId, roots, ct);
+    public virtual bool SetIssueIgnored(string pairId, long id, bool ignored) => Inner.SetIssueIgnored(pairId, id, ignored);
+
     public virtual Issue? IssueById(string pairId, long id) => Inner.IssueById(pairId, id);
     public virtual IssueKind? HeldKind(string pairId, Row row, IReadOnlySet<long>? exceptIssues) =>
         Inner.HeldKind(pairId, row, exceptIssues);
@@ -232,23 +238,29 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
     public virtual Issue? HoldingIssue(string pairId, Row row) => Inner.HoldingIssue(pairId, row);
     public virtual IReadOnlyDictionary<string, IssueSubject> RetainedFirstRun(string pairId) =>
         Inner.RetainedFirstRun(pairId);
-    public virtual IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId) => Inner.IssueCounts(pairId);
+    public virtual IReadOnlyDictionary<IssueKind, int> IssueCounts(string pairId, bool? ignored = null) => Inner.IssueCounts(pairId, ignored);
     public virtual long SyncedCount(string pairId) => Inner.SyncedCount(pairId);
     public virtual void ReplaceSkipped(string pairId, Guid scanToken,
         IEnumerable<(string Path, TextKey Cause, IssueSubject Subject)> skipped) =>
         Inner.ReplaceSkipped(pairId, scanToken, skipped);
     public virtual void DismissIssue(string pairId, long id) => Inner.DismissIssue(pairId, id);
-    public virtual Guid BeginScan(string pairId, long expectedGeneration, bool includeDeleted) =>
-        Inner.BeginScan(pairId, expectedGeneration, includeDeleted);
-    public virtual IScanSink OpenScan(string pairId, Side side, int batchRows) =>
-        Inner.OpenScan(pairId, side, batchRows);
+    public virtual Guid BeginScan(string pairId, Guid scanId, long expectedGeneration, bool includeDeleted, string? scope = null) =>
+        Inner.BeginScan(pairId, scanId, expectedGeneration, includeDeleted, scope);
+    public virtual IScanSink OpenScan(string pairId, Guid scanId, Side side, int batchRows) =>
+        Inner.OpenScan(pairId, scanId, side, batchRows);
+    public virtual bool SavedDeletedNameExact(string pairId, string key) => Inner.SavedDeletedNameExact(pairId, key);
+    public virtual bool DeletedHistoryOwed(string pairId) => Inner.DeletedHistoryOwed(pairId);
+    public virtual string? ContinueDeletedHistory(string pairId, Guid scanToken) => Inner.ContinueDeletedHistory(pairId, scanToken);
+
     public virtual string? RestoreDeletedHistory(string pairId, Guid scanToken) => Inner.RestoreDeletedHistory(pairId, scanToken);
     public virtual void ResetDeletedHistory(string pairId, Guid scanToken, bool discardNames) => Inner.ResetDeletedHistory(pairId, scanToken, discardNames);
     public virtual void SaveDeletedHistory(string pairId, Guid scanToken, string cursor) => Inner.SaveDeletedHistory(pairId, scanToken, cursor);
-    public virtual IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context) =>
-        Inner.ScanRows(pairId, context);
-    public virtual IReadOnlyList<RenameCandidate> ScanRenames(string pairId) => Inner.ScanRenames(pairId);
-    public virtual bool InScan(string pairId, Side side, string key) => Inner.InScan(pairId, side, key);
+    public virtual IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context) =>
+        Inner.ScanRows(pairId, scanId, context);
+    public virtual IReadOnlyList<RenameCandidate> ScanRenames(string pairId, Guid scanId) => Inner.ScanRenames(pairId, scanId);
+    public virtual bool InScan(string pairId, Guid scanId, Side side, string key) => Inner.InScan(pairId, scanId, side, key);
     public virtual ScanRecord ReadScan(string pairId, Guid scanToken) => Inner.ReadScan(pairId, scanToken);
+    public virtual Task EndScanAsync(string pairId, Guid scanId, int pageSize) => Inner.EndScanAsync(pairId, scanId, pageSize);
+    public virtual bool CloseScanIssue(string pairId, Guid scanId, Issue expected) => Inner.CloseScanIssue(pairId, scanId, expected);
     public virtual void Dispose() => Inner.Dispose();
 }

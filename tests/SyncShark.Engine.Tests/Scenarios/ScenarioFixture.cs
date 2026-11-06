@@ -25,7 +25,7 @@ internal sealed class Scenario : IDisposable
     };
     private const string RootNamespace = "root-namespace";
     private const int InitialLimiterLevel = 4;
-    private const string LiveDropboxRoot = "/SyncShark Engine Test";
+    private const string LiveDropboxRoot = "/Apps/Sync Shark/Testing/engine-scenarios";
     private const string LiveLocalFolderName = "SyncShark-EngineTest";
     private const string LiveLocalRootVariable = "SYNCSHARK_LIVE_LOCAL_ROOT";
     private const string LiveConnectionVariable = "SYNCSHARK_LIVE_CONNECTION";
@@ -221,6 +221,7 @@ internal sealed class Scenario : IDisposable
     internal int EndedWorkPasses => Volatile.Read(ref observedStore.EndedWorkPasses);
     internal Action? PassEnded { set => observedStore.PassEnded = value; }
     internal Action? BeforeRepairCheckpoint { set => observedStore.BeforeRepairCheckpoint = value; }
+    internal Action<string>? Progress { get; set; }
     internal Action<RepairSummary>? RepairFinished { set => observedStore.RepairFinished = value; }
     internal Action? ObligationObserved { set => observedStore.ObligationObserved = value; }
     internal Action? BeforePairs { set => observedStore.BeforePairs = value; }
@@ -467,12 +468,13 @@ internal sealed class Scenario : IDisposable
     }
 
     /// <summary>Runs the change between a row's freshness read and its effect, after the target side's binding read.</summary>
-    public void AfterFreshRead(Side side, string path, Action change)
+    public void AfterFreshRead(Side side, string path, Action change, int occurrence = 1)
     {
         var key = side == Side.Local ? PathNames.Key(path) : PathNames.DropboxKey(path);
+        var reads = 0;
         observedStore.AfterSyncedByKey = (readSide, readKey) =>
         {
-            if (readSide != side || readKey != key) return;
+            if (readSide != side || readKey != key || ++reads != occurrence) return;
             observedStore.AfterSyncedByKey = null;
             change();
         };
@@ -1192,9 +1194,10 @@ internal sealed class Scenario : IDisposable
             ConnectionId: Pair.ConnectionId);
         new DropboxConnectionStore(authority.StateAuthority).SaveNewAsync(binding with
             { ConnectionId = Pair.ConnectionId }).GetAwaiter().GetResult();
-        return EngineHost.Compose(authority.StateAuthority.ProductRoot, _ => { }, authority.StateAuthority, Settings,
-            http!, TimeProvider.System, _ => RunLog.Open(Logs, Pair.PairId, ResourceNames.NewId(), _ => { },
-                Settings.LogBufferCharacters), validator =>
+        return EngineHost.Compose(authority.StateAuthority.ProductRoot, message => Progress?.Invoke(message),
+            authority.StateAuthority, Settings,
+            http!, TimeProvider.System, _ => RunLog.Open(Logs, Pair.PairId, ResourceNames.NewId(),
+                message => Progress?.Invoke(message), Settings.LogBufferCharacters), validator =>
                 {
                     Store = StateStore.Open(Path.Combine(Root, "state.db"), validator);
                     Store.SavePair(Pair);
@@ -1359,9 +1362,9 @@ internal sealed class Scenario : IDisposable
             }
         }
 
-        public override IEnumerable<Row> ScanRows(string pairId, Func<Row, RowContext> context)
+        public override IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context)
         {
-            foreach (var row in base.ScanRows(pairId, context))
+            foreach (var row in base.ScanRows(pairId, scanId, context))
             {
                 scanKey = row.Key;
                 yield return row;
