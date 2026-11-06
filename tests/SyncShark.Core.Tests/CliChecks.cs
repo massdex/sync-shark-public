@@ -2933,7 +2933,9 @@ internal static partial class CliChecks
             var conflictsList = SyncCliRegistry.Rows.Single(row => row.Command == "conflicts list");
             Require(conflictsList.Usage.Contains(ignoredFlag, StringComparison.Ordinal) &&
                     conflictsList.Options.Split(',').Contains(ignoredFlag) &&
-                    conflictsList.Effect.Contains("ignored lists hidden, non-dismissed notices with Restore",
+                    conflictsList.Effect.Contains(
+                        "--ignored lists hidden, non-dismissed notices with Restore through the Engine host; " +
+                        "the direct-v2 fallback and legacy routes do not forward it",
                         StringComparison.Ordinal),
                 "conflicts list publishes its ignored filter in usage, options and effect");
             Require(SyncCli.HelpText().Contains(conflictsList.Usage, StringComparison.Ordinal) &&
