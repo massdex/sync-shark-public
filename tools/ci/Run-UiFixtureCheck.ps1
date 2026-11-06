@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Selector,
-    [ValidateSet('root', 'none', 'assembly')][string]$Arguments = 'root',
+    # Omitted: the selector's own default below decides, so every caller agrees.
+    [ValidateSet('root', 'none', 'assembly')][string]$Arguments,
     # Hard per-selector bound. A hung fixture is killed and still emits a UI-RESULT line, so one
     # selector can never block the remaining checks until the job timeout.
     [int]$TimeoutSeconds = 300
@@ -13,6 +14,18 @@ param(
 $ErrorActionPreference = 'Stop'
 $flag = '--' + $Selector.TrimStart('-')
 $name = $Selector.TrimStart('-')
+# One owner of each selector's argument shape: these take no fixture root, and
+# mixed-file-retry also takes the core test assembly.
+if (-not $Arguments) {
+    $Arguments = switch -CaseSensitive ($name) {
+        'tray-tooltip-contract' { 'none' }
+        'window-close-contract' { 'none' }
+        'pair-failure-presentation-checks' { 'none' }
+        'tray-client-checks' { 'none' }
+        'mixed-file-retry-ui-checks' { 'assembly' }
+        default { 'root' }
+    }
+}
 $workspace = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 $configuration = if ($env:CONFIGURATION) { $env:CONFIGURATION } else { 'Debug' }
 $base = $env:LOCALAPPDATA

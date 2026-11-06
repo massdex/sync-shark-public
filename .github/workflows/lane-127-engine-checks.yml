@@ -7,6 +7,8 @@ on:
     branches:
       - 'ci/127-wait-output'
       - 'ci/127-wait-output-mutant'
+      - 'ci/127-wait-output-mutant-idle'
+      - 'ci/127-wait-output-mutant-pagewait'
   workflow_dispatch:
 
 jobs:
