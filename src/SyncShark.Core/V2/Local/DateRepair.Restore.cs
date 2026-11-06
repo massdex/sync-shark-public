@@ -37,7 +37,8 @@ internal static partial class DateRepair
             new PilotDirectoryIdentity(identity.Volume, identity.FileId));
         var includes = PairInclude.ForAction(pair, side, store.Pairs(), productOwned);
         var ignores = PairInclude.IgnoreRules(pair);
-        var directory = RunLog.LogsDirectory(productRoot);
+        // Local may not reach Run (engine layout), so this copy of the logs path stays here.
+        var directory = Path.Combine(productRoot, "v2", "logs");
         Directory.CreateDirectory(directory);
         var reportPath = Path.Combine(directory, $"dates-restore-{Guid.NewGuid():N}.jsonl");
         using var output = new FileStream(reportPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
