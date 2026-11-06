@@ -524,6 +524,17 @@ public static class DeletedHistoryChecks
             using var transaction = connection.BeginTransaction();
             changes.SeedPairSources(transaction, PairId);
             transaction.Commit();
+            Execute(connection, "PRAGMA foreign_keys=OFF;INSERT INTO discovery_deleted_delta VALUES(999,'INVALID');PRAGMA foreign_keys=ON;");
+        }
+        try { using var refused = StateStore.Open(path); throw new Exception("invalid foreign key accepted"); }
+        catch (InvalidDataException) { }
+        using (var connection = StateStore.Connect(path, SqliteOpenMode.ReadWrite))
+        {
+            Check.Require(Number(connection, "PRAGMA user_version;") == 9 &&
+                Number(connection, "SELECT count(*) FROM pragma_table_info('discovery_deleted_delta') WHERE name='spent';") == 0 &&
+                Number(connection, "SELECT count(*) FROM discovery_deleted_delta;") == 2,
+                "a refused v9 upgrade rolls back its added column and rows before publishing the version");
+            Execute(connection, "DELETE FROM discovery_deleted_delta WHERE pair_id=999;");
         }
         using var store = StateStore.Open(path);
         store.BeginScan(PairId, Generation(store), true);
@@ -538,7 +549,9 @@ public static class DeletedHistoryChecks
     private static void Retirement(string path)
     {
         using var store = StateStore.Open(path);
-        store.SavePair(Pair());
+        var pair = SourceFixture.Bound(Pair());
+        store.SavePair(pair);
+        SourceFixture.AcquireJournal(store, pair);
         SyncedEntry Binding(string local, string remote) => new(PathNames.Key(local), local, PathNames.DropboxKey(remote), remote,
             false, "local-id", 1, 0, "remote-id", "hash");
         var before = Binding("Parent/\u00e9:Child", "Original");

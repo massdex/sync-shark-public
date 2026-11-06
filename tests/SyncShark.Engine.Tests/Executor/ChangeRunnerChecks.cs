@@ -1173,11 +1173,15 @@ public static class ChangeRunnerChecks
             fixture.Dropbox.Seed(remote with { Revision = "recreated" }, [1]);
             return new Lease();
         });
-        var error = await ThrowsAsync<LiveAdmissionStaleException>(() =>
-            Runner(fixture, selected, boundary, (_, _, _) => Task.FromResult(Coverage(selected))).RunAsync(selected, default));
-        Check.Require(error.Reason == LiveAdmissionStaleReason.RelevantEvidenceChanged && remoteCounter.Reads == 2 &&
-            localCounter.Deletes == 0 && remoteCounter.Deletes == 0 && await fixture.Local.ReadOneAsync(Item, default) is not null,
-            "121 recreated Dropbox item refuses stale delete with two Dropbox reads and zero deletes");
+        var ready = await Runner(fixture, selected, boundary, (_, _, _) => Task.FromResult(Coverage(selected)))
+            .RunAsync(selected, default);
+        Check.Require(ready && remoteCounter.Reads == 3 && localCounter.Reads == 3 &&
+            localCounter.Deletes == 0 && remoteCounter.Deletes == 0 &&
+            await fixture.Local.ReadOneAsync(Item, default) == local &&
+            await fixture.Dropbox.ReadOneAsync(Item, default) == remote with { Revision = "recreated" } &&
+            fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Item)) == SyncedEntries.From(local, remote) &&
+            PendingAt(fixture, Side.Dropbox, Item).Count == 0 && fixture.Inner.Issues(PairId).Count == 0,
+            "121 recreated Dropbox item converges after one reobservation, preserving both files without deletes");
         Console.WriteLine($"121 delete-race Dropbox={remoteCounter.Reads}; deletes={localCounter.Deletes + remoteCounter.Deletes}");
     }
 
@@ -1224,11 +1228,13 @@ public static class ChangeRunnerChecks
 
     private static async Task FreshLocalSelectionAsync()
     {
-        foreach (var mode in new[] { "absent", "identity-deleted", "dropbox", "old-path", "walked" })
+        foreach (var mode in new[] { "absent", "identity-deleted", "dropbox", "old-path", "walked", "known-folder" })
         {
             using var fixture = new Fixture(realStore: true);
-            var path = mode == "walked" ? Folder : Item;
-            var entry = mode == "walked" ? FolderEntry(path, FolderId) : LocalEntry(path, LocalId);
+            var folder = mode is "walked" or "known-folder";
+            if (mode == "walked") fixture.Hooks.RepairDone = false;
+            var path = folder ? Folder : Item;
+            var entry = folder ? FolderEntry(path, FolderId) : LocalEntry(path, LocalId);
             if (mode != "absent")
             {
                 var remote = entry.IsFolder ? FolderEntry(path, DropboxId) : RemoteEntry(path, DropboxId);
@@ -1236,7 +1242,7 @@ public static class ChangeRunnerChecks
                 fixture.Dropbox.Seed(remote, remote.IsFolder ? null : [1]);
                 fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(entry, remote)] });
             }
-            if (mode == "walked")
+            if (folder)
             {
                 var child = LocalEntry(Plain, LocalId);
                 var remoteChild = RemoteEntry(Plain, DropboxId + "-child");
@@ -1254,14 +1260,35 @@ public static class ChangeRunnerChecks
                     [(PairId, Generation, source.Epoch, source.Revision, false)], []);
             }
             var selected = mode == "dropbox" ? SeedRemote(fixture, RemoteEntry(path, DropboxId)) : Seed(fixture, notice);
+            var changedChild = LocalEntry(Plain, LocalId) with { Size = 2, Modified = Stamp.AddMinutes(1) };
+            WorkSelection? childSelection = null;
+            if (mode == "known-folder")
+            {
+                fixture.Local.Seed(changedChild, [2, 3]);
+                childSelection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Plain, null,
+                    LocalId, changedChild, true, false), 2);
+            }
             var reads = new List<string>();
-            fixture.LocalView = new HookedSide(fixture.Local, beforeRead: reads.Add);
+            var counted = new CountingSide(fixture.Local);
+            fixture.LocalView = new HookedSide(counted, beforeRead: reads.Add);
             Console.WriteLine("106 observation case=" + mode);
             await RunSelectionAsync(fixture, selected);
             Check.Require(reads.Count(value => value == path) == 1,
                 "106 primary observation is fresh, including absent and identity-deleted: " + mode + "; reads=" + string.Join(",", reads));
             if (mode == "old-path") Check.Require(reads.Contains(OldPath), "106 old path reads independently");
             if (mode == "walked") Check.Require(reads.Contains(Plain), "106 walked children read independently");
+            if (childSelection is { } childWork)
+            {
+                Check.Require(counted.Listings == 0 && !reads.Contains(Plain) && PendingAt(fixture, Side.Local, Folder).Count == 0 &&
+                    PendingAt(fixture, Side.Local, Plain).Count == 1,
+                    "A known folder touch retires without walking or consuming its child's own event");
+                Check.Require(await RunSelectionAsync(fixture, childWork), "The independently queued child completes");
+                var syncedChild = await fixture.Dropbox.ReadOneAsync(Plain, default);
+                Check.Require(reads.Contains(Plain) && syncedChild?.ContentHash == DropboxContentHash.Compute(new byte[] { 2, 3 }) &&
+                    fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Plain)) == SyncedEntries.From(changedChild, syncedChild!) &&
+                    PendingAt(fixture, Side.Local, Plain).Count == 0,
+                    "A child event acquired beside the folder touch is read, synced and retired independently");
+            }
         }
     }
 
@@ -1716,15 +1743,18 @@ public static class ChangeRunnerChecks
                         "deleted-sibling", "revision", Stamp.AddDays(1), null, remote.ContentHash, null));
                 }
             };
+            ((FakeTimeProvider)context.Time).Advance(Stamp.AddDays(2) - context.Time.GetUtcNow());
             var jobs = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(),
                 new Boundary(_ => new Lease()), RefusingExecutionBoundary.Instance, 0));
             var rows = jobs.Items.ScanContexts(true, null, null,
                 key => fixture.Inner.SavedDeletedNameExact(PairId, key));
             var row = new Row(rows.For, PathNames.Key(sibling.Path), sibling, null, null, [], null);
+            Check.Require(row.Context.DeletionEligible, "an unrelated sibling retains ancestor deletion eligibility");
             var outcome = await jobs.Items.RunAdmittedAsync(row, default, execution: new Lease());
-            Check.Require(row.Context.DeletionEligible && outcome.Kind == ActionKind.DeleteLocal && outcome.Succeeded() &&
+            Check.Require(outcome.Kind == ActionKind.DeleteLocal && outcome.Succeeded() &&
                 evidenceReads == 1 && await fixture.Local.ReadOneAsync(sibling.Path, default) is null,
-                "an unrelated ancestor-matching sibling still takes T09 evidence and checked removal");
+                "an unrelated ancestor-matching sibling still takes T09 evidence and checked removal: " +
+                $"outcome={outcome}; eligible={row.Context.DeletionEligible}; evidenceReads={evidenceReads}");
         }
     }
 

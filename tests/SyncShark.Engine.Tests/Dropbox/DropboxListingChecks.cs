@@ -529,15 +529,20 @@ public static class DropboxListingChecks
                     .Select(row => row.Dropbox! with { Path = PathNames.Key(row.Dropbox!.Path) })
                     .OrderBy(entry => entry.Path, StringComparer.Ordinal).ToArray();
             }
-            // This is the real initially-empty Dropbox consumer; the waiting child never becomes a phantom row.
-            using var waiting = new Fixture(pair, _ => Page(false, "end", File("/Parent", "X/a/b"),
-                File("/Parent", "X/a"), Folder("/Parent", "X")));
-            var root = new Entry("", true, 0, default, "root", "", "", null);
-            using var plan = store.OpenFolderPlan(pair.PairId,
-                Row.ForOneSide(Side.Dropbox, "", root, null, [], null, RowContext.Neutral), Side.Dropbox);
-            await plan.CaptureAsync(waiting.Listing.ReadAll("", new ListOptions(true, false), BeginListing(), default), default);
-            Check.Require(plan.Entries(default).Select(entry => entry.Path).Order().SequenceEqual(new[] { "X", "X/a" }),
-                "StoredFolderPlan contains no waiting child erased by an ancestor file.");
+            foreach (var input in new object[][]
+            {
+                [File("/Parent", "X/a/b"), File("/Parent", "X/a"), Folder("/Parent", "X")],
+                [Folder("/Parent", "X"), Folder("/Parent", "X/a"), File("/Parent", "X/a/b"), File("/Parent", "X/a")]
+            })
+            {
+                using var listing = new Fixture(pair, _ => Page(false, "end", input));
+                var root = new Entry("", true, 0, default, "root", "", "", null);
+                using var plan = store.OpenFolderPlan(pair.PairId,
+                    Row.ForOneSide(Side.Dropbox, "", root, null, [], null, RowContext.Neutral), Side.Dropbox);
+                await plan.CaptureAsync(listing.Listing.ReadAll("", new ListOptions(true, false), BeginListing(), default), default);
+                Check.Require(plan.Entries(default).Select(entry => entry.Path).Order().SequenceEqual(new[] { "X", "X/a" }),
+                    "StoredFolderPlan contains neither a waiting nor an already-emitted child erased by an ancestor file.");
+            }
         }
         finally { Directory.Delete(directory, true); }
     }

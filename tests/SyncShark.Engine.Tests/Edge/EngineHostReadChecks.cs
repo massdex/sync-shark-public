@@ -121,7 +121,7 @@ public static class EngineHostReadChecks
             item.GetProperty("relativePath").GetString() == InfoPath);
         Check.Require(infoRow.GetProperty("recommendation").GetString() ==
             IssuePresentation.Render(notice, new(RetryPresentationState.Unavailable)) &&
-            Choices(infoRow).SequenceEqual(["Dismiss"]), "Host conflicts use the shared enriched notice renderer.");
+            Choices(infoRow).SequenceEqual(["Dismiss", "Ignore"]), "Host conflicts use the shared enriched notice renderer.");
 
         var account = await ReadAsync(runtime,
             ["--cli", "conflicts", "list", "--account", "connection-b", "--limit", "10", "--json"]);

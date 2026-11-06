@@ -667,7 +667,9 @@ internal static partial class CliChecks
     {
         const string resolveUsage = "engine resolve --pair <exact-id> (--issue <number> | --all) --choice <choice> " +
             "[--name <new-name>] [--first-run newest-wins|local-wins|dropbox-wins] [--rules <kind:value;...>] --yes";
-        const string resolveEffect = "applies a choice to one exact notice; --all is only for retry and reports " +
+        const string resolveEffect = "applies a choice to one exact notice; ignore hides it and unignore restores it " +
+            "without resolving the problem, releasing holds or changing retry work. Visibility choices reject " +
+            "--name, --rules, --first-run and --all. --all is only for retry and reports " +
             "retried and succeeded counts without a single issue ID. Item retries sync only the subject paths, or the " +
             "notice path when no subjects were observed. Prerequisite retries use the automatic prerequisite route; " +
             "only outstanding Repair debt runs Repair. Dismiss keeps " +
@@ -675,7 +677,8 @@ internal static partial class CliChecks
             "no --all/--name/--first-run, and atomically saves covered keep preferences and dismisses that notice " +
             "without Repair or provider effects. First-sync resets history under exact authority while preserving " +
             "root binding and recovery custody; sync-normally retains history. Neither choice approves missing roots " +
-            "or replays uncertain effects";
+            "or replays uncertain effects. Bind-roots checks and binds an unbound pair, or closes its exact root notice " +
+            "only if the saved identities still match; matching bindings preserve source cursors and obligations";
         var resolve = SyncCliRegistry.Rows.Single(row => row.Command == "engine resolve");
         Require(resolve.Usage == resolveUsage && resolve.Effect == resolveEffect,
             "the one registry publishes the exact resolve usage and retry/drive-choice effect");
@@ -687,8 +690,9 @@ internal static partial class CliChecks
 
         var issues = SyncCliRegistry.Rows.Single(row => row.Command == "engine issues");
         Require(issues.Usage ==
-                "engine issues --pair <exact-id> [--kind failure|tie|name-clash|info|skipped|drive-change|root-identity]" &&
-                issues.Options.Split(',').Contains("--kind") && !issues.Mutating && !issues.RequiresYes,
+                "engine issues --pair <exact-id> [--kind failure|tie|name-clash|info|skipped|drive-change|root-identity] [--ignored]" &&
+                issues.Options.Split(',').Contains("--kind") && issues.Options.Split(',').Contains("--ignored") &&
+                !issues.Mutating && !issues.RequiresYes,
             "the one registry publishes drive-change and root-identity without making the listing mutating");
         Require(SyncCliRegistry.Parse(["--cli", "engine", "issues", "--pair", "pair-a", "--kind", "root-identity"])
             .Value("--kind") == "root-identity", "root-identity filter reaches the same read-only dispatcher");
@@ -710,7 +714,10 @@ internal static partial class CliChecks
             ["engine", "resolve", "--pair", "p", "--issue", "1", "--choice", "first-sync", "--first-run",
                 "dropbox-wins", "--yes"],
             ["engine", "resolve", "--pair", "p", "--issue", "1", "--choice", "sync-normally", "--yes"],
-            ["engine", "issues", "--pair", "p", "--kind", "drive-change"]
+            ["engine", "issues", "--pair", "p", "--kind", "drive-change"],
+            ["engine", "issues", "--pair", "p", "--ignored"],
+            ["engine", "resolve", "--pair", "p", "--issue", "1", "--choice", "ignore", "--yes"],
+            ["engine", "resolve", "--pair", "p", "--issue", "1", "--choice", "unignore", "--yes"]
         ];
         foreach (var args in forms)
             Require(EngineCliCatalog.Owns(SyncCliRegistry.Parse(["--cli", ..args]).Command),

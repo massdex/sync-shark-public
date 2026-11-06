@@ -762,6 +762,12 @@ jobs:
         shell: pwsh
         run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector tray-client-checks -Arguments none
 
+      - name: 'UI check: engine startup readiness'
+        id: ui-engine-startup-readiness
+        continue-on-error: true
+        shell: pwsh
+        run: ./tools/ci/Run-UiFixtureCheck.ps1 -Selector engine-startup-readiness-checks -Arguments none
+
       # Run every check before failing, so one red selector never hides the rest.
       - name: Enforce UI check results
         if: always()

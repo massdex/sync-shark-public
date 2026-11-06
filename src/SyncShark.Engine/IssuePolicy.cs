@@ -113,10 +113,14 @@ public static class IssuePolicy
     internal static (string Key, string? Local, string? Dropbox, string? ObservedLocal,
         string? ObservedDropbox, string? DestinationLocal, string? DestinationDropbox) HoldKeys(Row row) =>
         (row.Key, row.Synced?.LocalKey, row.Synced?.DropboxKey,
-            row.Local is { } local ? PathNames.KeyFor(Side.Local, local.Path) : null,
-            row.Dropbox is { } dropbox ? PathNames.KeyFor(Side.Dropbox, dropbox.Path) : null,
-            row.Local is null && row.Context?.Destination is { } toLocal ? PathNames.KeyFor(Side.Local, toLocal) : null,
-            row.Dropbox is null && row.Context?.Destination is { } toDropbox ? PathNames.KeyFor(Side.Dropbox, toDropbox) : null);
+            AdditionalHoldKey(row, Side.Local, row.Local?.Path),
+            AdditionalHoldKey(row, Side.Dropbox, row.Dropbox?.Path),
+            row.Local is null ? AdditionalHoldKey(row, Side.Local, row.Context?.Destination) : null,
+            row.Dropbox is null ? AdditionalHoldKey(row, Side.Dropbox, row.Context?.Destination) : null);
+
+    private static string? AdditionalHoldKey(Row row, Side side, string? path) =>
+        path is null || PathNames.Same(row.Key, path) || PathNames.Same(row.Synced?.LocalKey, path) ||
+        PathNames.Same(row.Synced?.DropboxKey, path) ? null : PathNames.KeyFor(side, path);
 
     /// <summary>The subject keys held by an issue; subject-less Failures name both sides.</summary>
     public static IEnumerable<string> HeldKeys(Issue issue)

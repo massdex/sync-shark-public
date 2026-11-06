@@ -394,8 +394,10 @@ public static class IssuePolicyChecks
         Check.Require(Outcome(null, deferred: true).OwesWork(row, store, "pair") is null &&
             Outcome(null, false, NoneReason.RemovedWithFolder).OwesWork(row, store, "pair") is null,
             "OwesWork: a deferred or removed-with-folder outcome gives no answer");
+        var excluded = row with { Context = row.Context with { OutOfScope = true } };
         Check.Require(Outcome(null, false, NoneReason.InSync).OwesWork(row, store, "pair") == false &&
-            Outcome(null, false, NoneReason.OutOfScope).OwesWork(row, store, "pair") == false &&
+            Outcome(null, false, NoneReason.OutOfScope).OwesWork(excluded, store, "pair") == false &&
+            Outcome(null, false, NoneReason.OutOfScope).OwesWork(row, store, "pair") == true &&
             Outcome(IssueKind.Failure, false).OwesWork(row, store, "pair") == true,
             "OwesWork: completed, out-of-scope and failing rows give real answers");
         var unresolved = new HashSet<string>(StringComparer.Ordinal) { row.Key };

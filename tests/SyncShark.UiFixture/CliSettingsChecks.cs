@@ -552,16 +552,15 @@ internal static class CliSettingsChecks
     }
     private static T Pump<T>(Task<T> task) { Pump((Task)task); return task.GetAwaiter().GetResult(); }
 
-    // RC05-V5-S: the one Windows registration the CLI saves must target the canonical Engine supervisor,
-    // never the legacy background host. The fixture reads the isolated Run key only.
+    // The canonical CLI startup route starts the supervisor and waits for readiness.
     private static void CheckStartupRegistrationDestination(Action<bool, string> require)
     {
         var executable = Path.Combine(Path.GetTempPath(), "sync-shark-startup-fixture", "SyncShark.exe");
         var canonical = AutoSyncProcess.StartupCommand(executable);
-        require(canonical.EndsWith(" " + AutoSyncProcess.EngineSupervisorArguments, StringComparison.Ordinal) &&
+        require(canonical.EndsWith(" --cli engine host start --yes", StringComparison.Ordinal) &&
                 AutoSyncProcess.IsProductStartupCommand(canonical) &&
                 !canonical.Contains(AutoSyncProcess.LegacyArguments, StringComparison.Ordinal),
-            "Start With Windows registers the canonical Engine-supervisor command, not the legacy host");
+            "Start With Windows registers the readiness-gated Engine start command, not the legacy host");
     }
 
     // RC05-V5-S/RC05-T4: a one-field legacy CLI save must merge only that field, persist, refresh the

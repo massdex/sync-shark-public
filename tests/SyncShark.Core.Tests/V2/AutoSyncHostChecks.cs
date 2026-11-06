@@ -60,7 +60,7 @@ internal static class AutoSyncHostChecks
         AutoSyncProcess.ClearExistingOwnerNotice(ownerNotice);
         Require(File.ReadAllText(ownerNotice).Length == 0, "successful ownership clears the stale notice");
         Require(AutoSyncProcess.StartupCommand(Path.Combine(Path.GetTempPath(), "Product", "SyncShark.exe"))
-            .EndsWith("--core v2 --engine-supervisor", StringComparison.Ordinal), "startup explicitly selects v2 and supervises crashes");
+            .EndsWith("--cli engine host start --yes", StringComparison.Ordinal), "startup uses the readiness-gated Engine host start command");
         if (OperatingSystem.IsWindows()) await AutoSyncProcessChecks.RunAsync();
         Console.WriteLine("AutoSync host checks passed (fake transport peers and isolated empty temp composition only).");
     }

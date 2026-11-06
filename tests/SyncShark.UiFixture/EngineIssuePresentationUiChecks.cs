@@ -25,7 +25,7 @@ internal static class EngineIssuePresentationUiChecks
         CheckIsolatedRuntimeRoot();
         CheckBusyExitWritesAndClearsOwnerNotice();
         CheckNoticeWriteFailureLogsOneIdentityOnlyLine();
-        CheckStartupCommandIsCanonicalEngineSupervisor();
+        CheckStartupCommandIsCanonicalEngineStart();
         CheckReadinessVariableIsClearedOnClaim();
 
         var app = new App { SuppressProductStartup = true, ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -299,14 +299,13 @@ internal static class EngineIssuePresentationUiChecks
         }
     }
 
-    // RC05-V5-S: Start with Windows targets the canonical Engine supervisor, and only the owned
-    // supervisor spellings count as a product startup command.
-    private static void CheckStartupCommandIsCanonicalEngineSupervisor()
+    // Startup uses the readiness-gated CLI route; old owned supervisor registrations remain recognizable.
+    private static void CheckStartupCommandIsCanonicalEngineStart()
     {
         var executable = Path.Combine(Path.GetTempPath(), "SyncShark.exe");
         var command = AutoSyncProcess.StartupCommand(executable);
-        Require(command == "\"" + Path.GetFullPath(executable) + "\" --core v2 --engine-supervisor",
-            "Start with Windows targets the canonical Engine supervisor command");
+        Require(command == "\"" + Path.GetFullPath(executable) + "\" --cli engine host start --yes",
+            "Start with Windows targets the readiness-gated Engine host start command");
         Require(AutoSyncProcess.IsProductStartupCommand(command),
             "The canonical command is recognized as an owned product startup");
         Require(AutoSyncProcess.IsProductStartupCommand(
