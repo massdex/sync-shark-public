@@ -1,0 +1,15 @@
+{
+  "build": [
+    "core-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [],
+  "core": [
+    "--cli-checks"
+  ],
+  "ui": [
+    "engine-issue-presentation-checks"
+  ]
+}
