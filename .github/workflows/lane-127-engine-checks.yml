@@ -1,0 +1,44 @@
+# Lane 127 test branch only: builds the engine test project and runs every engine check group this
+# lane touches, because the shared workflow builds only the Core test project.
+name: Lane 127 engine checks
+
+on:
+  push:
+    branches:
+      - 'ci/127-wait-output'
+      - 'ci/127-wait-output-mutant'
+  workflow_dispatch:
+
+jobs:
+  engine-checks:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build engine tests
+        shell: pwsh
+        run: |
+          dotnet build 'tests/SyncShark.Engine.Tests/SyncShark.Engine.Tests.csproj' -c Debug --nologo
+          exit $LASTEXITCODE
+
+      - name: Run engine check groups
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'tests/SyncShark.Engine.Tests/bin/Debug/net8.0-windows/SyncShark.Engine.Tests.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Test executable not found: $exe" }
+          $failed = 0
+          foreach ($group in 'dropbox', 'engine-host', 'repair', 'strings', 'literals') {
+            Write-Host "::group::engine-checks $group"
+            & $exe --engine-checks $group
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+            Write-Host "::endgroup::"
+          }
+          exit $failed
