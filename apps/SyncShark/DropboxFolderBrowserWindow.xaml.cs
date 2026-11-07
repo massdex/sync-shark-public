@@ -546,7 +546,7 @@ public sealed class DropboxFolderNode : INotifyPropertyChanged
 
         if (page.ContinueCursor is not null && _seenCursors.Contains(page.ContinueCursor))
         {
-            var cycle = "Dropbox returned a repeated or cyclic continuation cursor. Loading more has been stopped for this folder.";
+            var cycle = "The provider returned a repeated or cyclic continuation cursor. Loading more has been stopped for this folder.";
             BlockPagination(cycle);
             throw new InvalidDataException(cycle);
         }
@@ -669,11 +669,11 @@ internal sealed class DropboxFolderGraphBudget
             var nextPages = checked(RetainedPages - oldPages + newPages);
             var nextFolders = checked(RetainedFolders - oldFolders + newFolders);
             if (nextPages > MaxRetainedPages)
-                return $"This Dropbox browser reached its retained-page ceiling ({MaxRetainedPages:N0}). Refresh or start a new search to continue safely.";
+                return $"This folder browser reached its retained-page ceiling ({MaxRetainedPages:N0}). Refresh or start a new search to continue safely.";
             if (nextFolders > MaxRetainedFolders)
-                return $"This Dropbox browser reached its retained-folder ceiling ({MaxRetainedFolders:N0}). Refresh or start a new search to continue safely.";
+                return $"This folder browser reached its retained-folder ceiling ({MaxRetainedFolders:N0}). Refresh or start a new search to continue safely.";
             if (nextPages < 0 || nextFolders < 0)
-                throw new InvalidOperationException("Dropbox folder graph accounting became inconsistent.");
+                throw new InvalidOperationException("Folder graph accounting became inconsistent.");
 
             RetainedPages = nextPages;
             RetainedFolders = nextFolders;

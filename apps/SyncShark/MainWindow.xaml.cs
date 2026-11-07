@@ -2323,7 +2323,7 @@ public partial class MainWindow : Window
                 requestedFilesOnDemand) || _draftNeedsCloudFiles;
             if (_draftNeedsCloudFiles && !AppDialogWindow.Confirm(this, "Enable Folder Storage Controls",
                 "Let Sync Shark manage storage for this pair?",
-                "The pair's default stays Keep Offline. Only folders you choose as Cloud Only can be freed after their exact Dropbox copy is verified. This does not take over folders managed by another provider.",
+                "The pair's default stays Keep Offline. Only folders you choose as Cloud Only can be freed after their exact provider copy is verified. This does not take over folders managed by another provider.",
                 "Enable and Save")) return false;
             var retention = SelectedRecoveryRetentionDays();
             var bindingRequest = new SyncPairBindingRequest(selectedId,

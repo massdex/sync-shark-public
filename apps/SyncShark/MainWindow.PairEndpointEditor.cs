@@ -820,7 +820,9 @@ public partial class MainWindow
                 return;
             }
             var browser = new DropboxFolderBrowserWindow(transport,
-                EndpointBrowserAccountLabel(picker.Kind, picker.ConnectionId)) { Owner = this };
+                EndpointBrowserAccountLabel(picker.Kind, picker.ConnectionId),
+                ProviderForConnectionId(picker.ConnectionId) ??
+                ProviderPresentation.ForEndpointKind(picker.Kind).Key) { Owner = this };
             // The modal is the only thing the fixture seam replaces; a null seam opens the real window and
             // reads the real selection exactly as before.
             var chosen = PairEndpointFolderBrowserDialogForTest is null
