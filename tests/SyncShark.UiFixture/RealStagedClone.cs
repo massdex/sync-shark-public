@@ -8,7 +8,6 @@ internal static partial class Program
     private static int RunRealStagedGuardChecks() =>
         throw new NotSupportedException("Live-data operator tooling is not distributed in this snapshot.");
 }
-
 // Published checks in ClonedStateAdapterChecks.cs and OperationLogUiChecks.cs read the operator's
 // retained identities through this type, so the stub must carry it. It holds environment-variable
 // names and no values. Keep it in step with the excluded RealStagedClone.cs declaration.
@@ -29,4 +28,5 @@ internal static class RetainedCloneIdentities
             ? value
             : throw new InvalidOperationException(
                 "Set " + variable + " to the exact retained identity before running this mode.");
+
 }
