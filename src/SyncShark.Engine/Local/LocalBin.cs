@@ -1,0 +1,463 @@
+using System.ComponentModel;
+using System.Globalization;
+using System.Runtime.InteropServices;
+
+namespace Massdex.SyncShark.Engine.Local;
+
+// One removal lifetime: the held handle stays open from proof verification through the shell action and receipt classification.
+/// <summary>Sends a local item to the Recycle Bin through IFileOperation on an STA thread (section 4.5, D6/D7).
+/// A file's selected removal proof is verified against the file held for the operation before the shell acts, the
+/// pathname identity is rechecked from the progress sink, and the actual receipt classifies the outcome (C-10).
+/// The Windows constants are named here; they are OS facts. Verification, receipt and exact-handle disposition are
+/// one removal job, so they stay in this type.</summary>
+public static class LocalBin
+{
+    private const string ShellLibrary = "shell32.dll";
+    private const string FileOperationClassId = "3ad05575-8857-4850-9277-11b85bdb8e09";
+    private const string FileOperationInterfaceId = "947aab5f-0a5c-4c13-b4d6-4bf7836fc9f8";
+    private const string ShellItemInterfaceId = "43826d1e-e718-42ee-bc55-a1e261c37bfe";
+    private const string ProgressSinkInterfaceId = "04b0f1a7-9490-44bc-96e1-4296a31252e2";
+    private const uint FOF_ALLOWUNDO = 0x0040;
+    private const uint FOF_NOCONFIRMATION = 0x0010;
+    private const uint FOF_NOERRORUI = 0x0400;
+    private const uint FOF_SILENT = 0x0004;
+    private const uint FOFX_RECYCLEONDELETE = 0x00080000;
+    private const uint TSF_DELETE_RECYCLE_IF_POSSIBLE = 0x0080;
+    private const uint SigdnFileSystemPath = 0x80058000;
+    private const int S_OK = 0;
+    private const int E_ABORT = unchecked((int)0x80004004);
+
+    /// <summary>Test seam: when set, called instead of the shell; true means a verified expected recycle.</summary>
+    internal static Func<string, bool>? SendOverride { get; set; }
+
+    /// <summary>Recycles fullPath on an STA thread. A file proof is verified against the held source before the
+    /// shell acts: a stale or mismatched proof throws without an effect, and a file removal without a proof is
+    /// refused. Once the shell may have acted, the result is conservative: NoEffect only for a definite pre-effect
+    /// refusal, Removed only when the receipt proves the recycled object is the held one, Retained when the receipt
+    /// is another object, and Unknown otherwise. The returned bin locator is the receipt path the shell named, when
+    /// it named one; a Retained receipt also returns its victim StageProof (observed identity, size and full content
+    /// hash) for the pending owner's wrong-victim recovery. OperationId and Final belong to the pending owner and
+    /// stay absent; a folder carries no file proof and keeps the folder owner's removal contract.</summary>
+    public static async Task<(RemovalResult Result, string? BinLocator, StageProof? Victim)> SendAsync(
+        string fullPath, RemovalProof? proof, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        SyncLocalFileAuthority? held = null;
+        PilotDirectoryIdentity? identity = null;
+        try
+        {
+            if (proof is null)
+            {
+                if (File.Exists(fullPath)) throw new ArgumentNullException(nameof(proof));
+            }
+            else
+            {
+                held = OpenGuard(fullPath);
+                identity = Verify(held, proof, fullPath);
+                await VerifySelectedContentAsync(held, proof, fullPath, ct).ConfigureAwait(false);
+            }
+            ct.ThrowIfCancellationRequested();
+            var (result, binLocator) = RunShell(fullPath, identity);
+            if (result is null)
+                return await VerifyReceiptAsync(binLocator, identity, ct).ConfigureAwait(false);
+            return (result, binLocator, null);
+        }
+        finally { held?.Dispose(); }
+    }
+
+    /// <summary>Permanently disposes the exact selected file named by an armed pending note from a newly opened
+    /// writer-and-delete-refusing handle after its identity and complete selected content are revalidated. Only the
+    /// removal owner calls this, after it durably armed the permitted fallback after a definite no-effect recycle
+    /// refusal and rechecked the live setting; missing or stale evidence throws without an effect, and a failure
+    /// after the disposition is marked is Unknown, never success.</summary>
+    internal static async Task<RemovalResult> DeletePermanentlyAsync(string fullPath, PendingEffect note,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        SyncLocalFileAuthority? held = null;
+        try
+        {
+            held = OpenExclusive(fullPath);
+            Verify(held, note.Losing, fullPath);
+            await VerifySelectedContentAsync(held, note.Losing, fullPath, ct).ConfigureAwait(false);
+            // The mark has no effect until the held handle closes.
+            held.DeleteOnClose();
+        }
+        catch
+        {
+            if (held is not null)
+            {
+                try { held.Dispose(); }
+                catch (Exception error) when (LocalErrors.IsFileFailure(error))
+                {
+                    // Preserve the primary failure; the permanent disposition was never marked.
+                }
+            }
+            throw;
+        }
+        try { held.Dispose(); }
+        catch (Exception error)
+        {
+            // Closing the marked handle performs the disposition; any failure here is an uncertain effect.
+            return new RemovalResult(RemovalOutcome.Unknown, null, null,
+                CauseOf(error, TextKey.RecycleFailed));
+        }
+        return new RemovalResult(RemovalOutcome.Removed, null, null, null);
+    }
+
+    private static SyncLocalFileAuthority OpenGuard(string fullPath)
+    {
+        try { return SyncLocalFileAuthority.OpenExistingRecycleGuard(fullPath); }
+        catch (Exception error) when (LocalErrors.IsFileFailure(error))
+        {
+            throw new ItemFailedException(fullPath, CauseOf(error, TextKey.RecycleFailed), error);
+        }
+    }
+
+    private static SyncLocalFileAuthority OpenExclusive(string fullPath)
+    {
+        try { return SyncLocalFileAuthority.OpenExistingExclusive(fullPath); }
+        catch (Exception error) when (LocalErrors.IsFileFailure(error))
+        {
+            throw new ItemFailedException(fullPath, CauseOf(error, TextKey.RecycleFailed), error);
+        }
+    }
+
+    // The proof names the selected object by volume serial (RemovalProof.VolumeId) and file ID
+    // (RemovalProof.Expected.Id) in invariant decimal; VerifySelectedContentAsync checks its size and complete
+    // content hash. An in-place edit keeps the identity, so identity alone is never content authority.
+    private static PilotDirectoryIdentity Verify(SyncLocalFileAuthority held, RemovalProof proof, string fullPath)
+    {
+        PilotDirectoryIdentity identity;
+        try { identity = held.ReadIdentity(); }
+        catch (Exception error) when (LocalErrors.IsFileFailure(error))
+        {
+            throw new ItemFailedException(fullPath, CauseOf(error, TextKey.RecycleFailed), error);
+        }
+        if (!LocalSide.SameObject(identity, proof.VolumeId, proof.Expected.Id))
+            throw new ChangedUnderneathException(fullPath);
+        return identity;
+    }
+
+    private static async Task VerifySelectedContentAsync(SyncLocalFileAuthority held, RemovalProof proof,
+        string fullPath, CancellationToken ct)
+    {
+        try
+        {
+            if (!await LocalSide.SameContent(held, proof.Expected.Size, proof.ContentHash, ct).ConfigureAwait(false))
+                throw new ChangedUnderneathException(fullPath);
+        }
+        catch (Exception error) when (LocalErrors.IsFileFailure(error))
+        {
+            throw new ItemFailedException(fullPath, CauseOf(error, TextKey.RecycleFailed), error);
+        }
+    }
+
+    private static (RemovalResult? Result, string? BinLocator) RunShell(string fullPath,
+        PilotDirectoryIdentity? held)
+    {
+        var sendOverride = SendOverride;
+        RemovalResult? result = null;
+        string? binLocator = null;
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                if (sendOverride is null)
+                {
+                    (result, binLocator) = SendToShell(fullPath, held);
+                }
+                else
+                {
+                    result = sendOverride(fullPath)
+                        ? new RemovalResult(RemovalOutcome.Removed, null, null, null)
+                        : new RemovalResult(RemovalOutcome.NoEffect, null, null, TextKey.RecycleUnavailable);
+                }
+            }
+            catch (Exception error)
+                when (error is ChangedUnderneathException or ItemFailedException) { failure = error; }
+            catch (Exception error)
+            {
+                failure = new ItemFailedException(fullPath, CauseOf(error, TextKey.RecycleFailed), error);
+            }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null) throw failure;
+        return (result, binLocator);
+    }
+
+    private static (RemovalResult? Result, string? BinLocator) SendToShell(string fullPath,
+        PilotDirectoryIdentity? held)
+    {
+        IFileOperation? operation = null;
+        var item = IntPtr.Zero;
+        var sink = new DeleteSink(fullPath, held);
+        try
+        {
+            operation = (IFileOperation)Activator.CreateInstance(
+                Type.GetTypeFromCLSID(new Guid(FileOperationClassId), throwOnError: true)!)!;
+            CheckResult(operation.SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMATION |
+                FOF_NOERRORUI | FOF_SILENT | FOFX_RECYCLEONDELETE), fullPath);
+            var iid = new Guid(ShellItemInterfaceId);
+            CheckResult(SHCreateItemFromParsingName(fullPath, IntPtr.Zero, ref iid, out item), fullPath);
+            CheckResult(operation.DeleteItem(item, sink), fullPath);
+            int aggregate;
+            try { aggregate = operation.PerformOperations(); }
+            catch (Exception error)
+            {
+                return (new RemovalResult(RemovalOutcome.Unknown, null, null,
+                    CauseOf(error, TextKey.RecycleFailed)), null);
+            }
+            return Classify(operation, sink, aggregate, held);
+        }
+        finally
+        {
+            if (item != IntPtr.Zero) Marshal.Release(item);
+            if (operation is not null) Marshal.FinalReleaseComObject(operation);
+            GC.KeepAlive(sink);
+        }
+    }
+
+    // The sink's own veto is the only definite pre-effect outcome. A specific per-item HRESULT outranks the
+    // aggregate PerformOperations/FinishOperations result, and an abort never becomes an in-use cause. A named
+    // receipt that must be checked against the held identity is left to the caller (null result), because reading
+    // its content is asynchronous.
+    private static (RemovalResult? Result, string? BinLocator) Classify(IFileOperation operation, DeleteSink sink,
+        int aggregate, PilotDirectoryIdentity? held)
+    {
+        if (sink.VetoCause is { } veto)
+            return (new RemovalResult(RemovalOutcome.NoEffect, null, null, veto), null);
+        if (sink.ItemResult < 0)
+            return (new RemovalResult(RemovalOutcome.Unknown, null, null, CauseOf(sink.ItemResult)), null);
+        if (aggregate < 0)
+            return (new RemovalResult(RemovalOutcome.Unknown, null, null, CauseOf(aggregate)), null);
+        if (sink.FinishResult < 0)
+            return (new RemovalResult(RemovalOutcome.Unknown, null, null, CauseOf(sink.FinishResult)), null);
+        if (operation.GetAnyOperationsAborted(out var aborted) < 0 || aborted)
+            return (new RemovalResult(RemovalOutcome.Unknown, null, null, TextKey.RecycleFailed), null);
+        if (!sink.Received) return (new RemovalResult(RemovalOutcome.Unknown, null, null, null), null);
+        if (held is null) return (new RemovalResult(RemovalOutcome.Removed, null, null, null), sink.ReceiptPath);
+        if (sink.ReceiptPath is null) return (new RemovalResult(RemovalOutcome.Unknown, null, null, null), null);
+        return (null, sink.ReceiptPath);
+    }
+
+    // The receipt names the exact recycled object by opening only that Shell-returned path read-only and reading its
+    // identity and complete content from that one handle; a missing or unreadable receipt is Unknown, never success.
+    // A mismatch hashes only the receipt and returns it as the victim proof the wrong-restore order records.
+    private static async Task<(RemovalResult Result, string? BinLocator, StageProof? Victim)> VerifyReceiptAsync(
+        string? receiptPath, PilotDirectoryIdentity? expected, CancellationToken ct)
+    {
+        if (receiptPath is null || expected is null)
+            return (new RemovalResult(RemovalOutcome.Unknown, null, null, null), receiptPath, null);
+        try
+        {
+            using var receipt = SyncLocalFileAuthority.OpenExistingSharedRead(receiptPath);
+            var identity = receipt.ReadIdentity();
+            if (identity == expected)
+                return (new RemovalResult(RemovalOutcome.Removed, null, null, null), receiptPath, null);
+            // A read failure here is Unknown, never a pre-effect refusal: the shell may already have acted.
+            var hash = await LocalSide.HashAsync(receipt.Stream, ct).ConfigureAwait(false);
+            var victim = new StageProof(receiptPath,
+                identity.VolumeSerialNumber.ToString(CultureInfo.InvariantCulture),
+                LocalIdentity.FileIdText(identity.FileId),
+                receipt.Stream.Length, hash);
+            return (new RemovalResult(RemovalOutcome.Retained, null, null, null), receiptPath, victim);
+        }
+        catch (OperationCanceledException)
+        {
+            // The shell may already have acted; a cancelled proof read is an unknown effect, not an absent one.
+            return (new RemovalResult(RemovalOutcome.Unknown, null, null, null), receiptPath, null);
+        }
+        catch (Exception error) when (LocalErrors.IsFileFailure(error))
+        {
+            return (new RemovalResult(RemovalOutcome.Unknown, null, null, null), receiptPath, null);
+        }
+    }
+
+    private static void CheckResult(int result, string path)
+    {
+        if (result < 0)
+            throw new ItemFailedException(path, CauseOf(result), Marshal.GetExceptionForHR(result));
+    }
+
+    // The native wrapper reports a generic outer HRESULT, so the specific Win32 result underneath it is classified.
+    private static TextKey CauseOf(Exception error, TextKey fallback) =>
+        LocalErrors.Cause(error is IOException { InnerException: Win32Exception native } ? native : error, fallback);
+
+    private static TextKey CauseOf(int result) =>
+        LocalErrors.Cause(Marshal.GetExceptionForHR(result) ?? new COMException(string.Empty, result),
+            TextKey.RecycleFailed);
+
+    [DllImport(ShellLibrary, CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern int SHCreateItemFromParsingName(string path, IntPtr bindContext,
+        ref Guid interfaceId, out IntPtr item);
+
+    // COM vtable order includes unused methods; trimming them would call the wrong shell operation.
+    [ComImport, Guid(FileOperationInterfaceId), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IFileOperation
+    {
+        [PreserveSig] int Advise(IFileOperationProgressSink sink, out uint cookie);
+        [PreserveSig] int Unadvise(uint cookie);
+        [PreserveSig] int SetOperationFlags(uint flags);
+        [PreserveSig] int SetProgressMessage([MarshalAs(UnmanagedType.LPWStr)] string message);
+        [PreserveSig] int SetProgressDialog(IntPtr dialog);
+        [PreserveSig] int SetProperties(IntPtr properties);
+        [PreserveSig] int SetOwnerWindow(IntPtr window);
+        [PreserveSig] int ApplyPropertiesToItem(IntPtr item);
+        [PreserveSig] int ApplyPropertiesToItems(IntPtr items);
+        [PreserveSig] int RenameItem(IntPtr item, [MarshalAs(UnmanagedType.LPWStr)] string name,
+            IFileOperationProgressSink sink);
+        [PreserveSig] int RenameItems(IntPtr items, [MarshalAs(UnmanagedType.LPWStr)] string name);
+        [PreserveSig] int MoveItem(IntPtr item, IntPtr destination,
+            [MarshalAs(UnmanagedType.LPWStr)] string name, IFileOperationProgressSink sink);
+        [PreserveSig] int MoveItems(IntPtr items, IntPtr destination);
+        [PreserveSig] int CopyItem(IntPtr item, IntPtr destination,
+            [MarshalAs(UnmanagedType.LPWStr)] string name, IFileOperationProgressSink sink);
+        [PreserveSig] int CopyItems(IntPtr items, IntPtr destination);
+        [PreserveSig] int DeleteItem(IntPtr item, IFileOperationProgressSink sink);
+        [PreserveSig] int DeleteItems(IntPtr items);
+        [PreserveSig] int NewItem(IntPtr destination, uint attributes,
+            [MarshalAs(UnmanagedType.LPWStr)] string name, [MarshalAs(UnmanagedType.LPWStr)] string template,
+            IFileOperationProgressSink sink);
+        [PreserveSig] int PerformOperations();
+        [PreserveSig] int GetAnyOperationsAborted([MarshalAs(UnmanagedType.Bool)] out bool aborted);
+    }
+
+    // COM vtable order includes unused methods; trimming them would call the wrong shell item operation.
+    [ComImport, Guid(ShellItemInterfaceId), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IShellItem
+    {
+        [PreserveSig] int BindToHandler(IntPtr bindContext, ref Guid handler, ref Guid interfaceId,
+            out IntPtr result);
+        [PreserveSig] int GetParent(out IntPtr parent);
+        [PreserveSig] int GetDisplayName(uint displayName, out IntPtr name);
+        [PreserveSig] int GetAttributes(uint mask, out uint attributes);
+        [PreserveSig] int Compare(IntPtr other, uint hint, out int order);
+    }
+
+    [ComImport, Guid(ProgressSinkInterfaceId), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IFileOperationProgressSink
+    {
+        [PreserveSig] int StartOperations();
+        [PreserveSig] int FinishOperations(int result);
+        [PreserveSig] int PreRenameItem(uint flags, IntPtr item, [MarshalAs(UnmanagedType.LPWStr)] string name);
+        [PreserveSig] int PostRenameItem(uint flags, IntPtr item,
+            [MarshalAs(UnmanagedType.LPWStr)] string name, int result, IntPtr created);
+        [PreserveSig] int PreMoveItem(uint flags, IntPtr item, IntPtr destination,
+            [MarshalAs(UnmanagedType.LPWStr)] string name);
+        [PreserveSig] int PostMoveItem(uint flags, IntPtr item, IntPtr destination,
+            [MarshalAs(UnmanagedType.LPWStr)] string name, int result, IntPtr created);
+        [PreserveSig] int PreCopyItem(uint flags, IntPtr item, IntPtr destination,
+            [MarshalAs(UnmanagedType.LPWStr)] string name);
+        [PreserveSig] int PostCopyItem(uint flags, IntPtr item, IntPtr destination,
+            [MarshalAs(UnmanagedType.LPWStr)] string name, int result, IntPtr created);
+        [PreserveSig] int PreDeleteItem(uint flags, IntPtr item);
+        [PreserveSig] int PostDeleteItem(uint flags, IntPtr item, int result, IntPtr created);
+        [PreserveSig] int PreNewItem(uint flags, IntPtr destination,
+            [MarshalAs(UnmanagedType.LPWStr)] string name);
+        [PreserveSig] int PostNewItem(uint flags, IntPtr destination,
+            [MarshalAs(UnmanagedType.LPWStr)] string name, [MarshalAs(UnmanagedType.LPWStr)] string template,
+            uint attributes, int result, IntPtr created);
+        [PreserveSig] int UpdateProgress(uint total, uint completed);
+        [PreserveSig] int ResetTimer();
+        [PreserveSig] int PauseTimer();
+        [PreserveSig] int ResumeTimer();
+    }
+
+    [ComVisible(true), ClassInterface(ClassInterfaceType.None)]
+    private sealed class DeleteSink(string path, PilotDirectoryIdentity? held) : IFileOperationProgressSink
+    {
+        /// <summary>The definite pre-effect refusal cause, or null when the shell was allowed to act.</summary>
+        public TextKey? VetoCause { get; private set; }
+        /// <summary>The first specific per-item failing HRESULT the sink saw, or zero.</summary>
+        public int ItemResult { get; private set; }
+        /// <summary>The generic FinishOperations failure, or zero; never replaces <see cref="ItemResult"/>.</summary>
+        public int FinishResult { get; private set; }
+        /// <summary>Whether the shell reported a recycled item.</summary>
+        public bool Received { get; private set; }
+        /// <summary>The recycled item's exact path when the shell named it.</summary>
+        public string? ReceiptPath { get; private set; }
+
+        int IFileOperationProgressSink.PreDeleteItem(uint flags, IntPtr item)
+        {
+            if (held is not null && !MatchesHeld(path, held)) return E_ABORT;
+            if ((flags & TSF_DELETE_RECYCLE_IF_POSSIBLE) != 0) return S_OK;
+            VetoCause = TextKey.RecycleUnavailable;
+            return E_ABORT;
+        }
+
+        // The held identity is rechecked on the exact pathname at the last moment before the shell selects its
+        // victim; the check and the shell action are not atomic, so a later arrival is detected after the effect.
+        private bool MatchesHeld(string target, PilotDirectoryIdentity expected)
+        {
+            try
+            {
+                using var fresh = SyncLocalFileAuthority.OpenExistingRecycleGuard(target);
+                if (fresh.ReadIdentity() == expected) return true;
+                VetoCause = TextKey.FailChanged;
+                return false;
+            }
+            catch (Exception error) when (LocalErrors.IsFileFailure(error))
+            {
+                VetoCause = CauseOf(error, TextKey.FailChanged);
+                return false;
+            }
+        }
+
+        int IFileOperationProgressSink.PostDeleteItem(uint flags, IntPtr item, int result, IntPtr created)
+        {
+            if (result < 0 && ItemResult == 0) ItemResult = result;
+            if (created != IntPtr.Zero)
+            {
+                Received = true;
+                ReceiptPath = DisplayName(created);
+            }
+            return S_OK;
+        }
+
+        int IFileOperationProgressSink.FinishOperations(int result)
+        {
+            if (result < 0) FinishResult = result;
+            return S_OK;
+        }
+
+        private static string? DisplayName(IntPtr shellItem)
+        {
+            IShellItem? item = null;
+            IntPtr name = IntPtr.Zero;
+            try
+            {
+                item = (IShellItem)Marshal.GetObjectForIUnknown(shellItem);
+                if (item.GetDisplayName(SigdnFileSystemPath, out name) < 0 || name == IntPtr.Zero) return null;
+                return Marshal.PtrToStringUni(name);
+            }
+            catch (Exception) { return null; }
+            finally
+            {
+                if (name != IntPtr.Zero) Marshal.FreeCoTaskMem(name);
+                if (item is not null) Marshal.ReleaseComObject(item);
+            }
+        }
+
+        int IFileOperationProgressSink.StartOperations() => S_OK;
+        int IFileOperationProgressSink.PreRenameItem(uint flags, IntPtr item, string name) => S_OK;
+        int IFileOperationProgressSink.PostRenameItem(uint flags, IntPtr item, string name,
+            int result, IntPtr created) => S_OK;
+        int IFileOperationProgressSink.PreMoveItem(uint flags, IntPtr item, IntPtr destination, string name) => S_OK;
+        int IFileOperationProgressSink.PostMoveItem(uint flags, IntPtr item, IntPtr destination, string name,
+            int result, IntPtr created) => S_OK;
+        int IFileOperationProgressSink.PreCopyItem(uint flags, IntPtr item, IntPtr destination, string name) => S_OK;
+        int IFileOperationProgressSink.PostCopyItem(uint flags, IntPtr item, IntPtr destination, string name,
+            int result, IntPtr created) => S_OK;
+        int IFileOperationProgressSink.PreNewItem(uint flags, IntPtr destination, string name) => S_OK;
+        int IFileOperationProgressSink.PostNewItem(uint flags, IntPtr destination, string name, string template,
+            uint attributes, int result, IntPtr created) => S_OK;
+        int IFileOperationProgressSink.UpdateProgress(uint total, uint completed) => S_OK;
+        int IFileOperationProgressSink.ResetTimer() => S_OK;
+        int IFileOperationProgressSink.PauseTimer() => S_OK;
+        int IFileOperationProgressSink.ResumeTimer() => S_OK;
+    }
+}

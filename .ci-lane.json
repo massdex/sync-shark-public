@@ -1,0 +1,15 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "paths",
+    "dropbox",
+    "limiter",
+    "human-log",
+    "syncer",
+    "store"
+  ],
+  "core": [],
+  "ui": []
+}
