@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "transport"
+  ],
+  "core": [
+    "--cli-checks",
+    "--v2-autosync-phase3-checks"
+  ],
+  "ui": []
+}
