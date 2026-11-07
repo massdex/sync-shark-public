@@ -1,0 +1,22 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "live-reservation",
+    "persistent-failure",
+    "syncer",
+    "repair",
+    "live-admission",
+    "budget",
+    "transport",
+    "work-lifecycle",
+    "limiter",
+    "dependencies",
+    "literals",
+    "strings",
+    "scenarios-offline"
+  ],
+  "core": [],
+  "ui": []
+}
