@@ -1,0 +1,124 @@
+namespace Massdex.SyncShark.V2;
+
+internal static partial class ExecutorChecks
+{
+    internal static async Task ThrottleReleasesWorkerAsync()
+    {
+        ThrottleCauseContract();
+        var clock = new ThrottleClock();
+        var admission = new SyncTransferResourceController(new(MaximumConcurrentFiles: 2, ResourceMode: "Performance"),
+            clock, () => new SyncResourcePressure(.1, .4, 8L * 1024 * 1024 * 1024));
+        using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "throttle-" + Guid.NewGuid().ToString("N")),
+            StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash);
+        store.SavePair(Pair());
+        var retry = FailureRetryOwner.SaveFailedRetry(store, Pair().PairId, "first", "Provider cooldown", null,
+            clock.GetUtcNow(), FailureRetryOwner.FailureKind.ProviderThrottle, clock.GetUtcNow().AddMinutes(1));
+        var notice = FailureRetryOwner.RetryNotice(Pair().PairId, "first", retry.LastError, retry.Attempts);
+        store.AddNotices([notice, notice]);
+        Require(store.OpenNotices(Pair().PairId).Count == 1, "throttle notice is deduplicated in SQLite");
+        var a = new FakeEndpoint(Side.A, "ra");
+        var b = new FakeEndpoint(Side.B, "rb");
+        var executor = new Executor(store, Settings(1), admission,
+            isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException);
+        var progressed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var parked = false;
+        var writer = new RecordingWriter(b)
+        {
+            BeforePut = async (action, ct) =>
+            {
+                if (action.Path == "second") { progressed.TrySetResult(); return; }
+                var lease = SyncTransferResourceController.Lease.Current.Value!;
+                await admission.WaitForCooldownAsync(TimeSpan.FromSeconds(2), "read", async (delay, token) =>
+                {
+                    parked = !lease.Holding;
+                    await progressed.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+                    clock.Advance(delay);
+                }, ct);
+                Require(lease.Holding, "executor action re-admitted after cooldown");
+            }
+        };
+        var results = await Apply(executor, Plan([
+            Act(ActionKind.CopyNew, Side.B, "first", source: a.Seed("first", "a"), key: "first"),
+            Act(ActionKind.CopyNew, Side.B, "second", source: a.Seed("second", "b"), key: "second")]), a, writer);
+        Require(parked && progressed.Task.IsCompletedSuccessfully && results.All(r => r.Outcome == Outcome.Done),
+            "a single executor worker releases its gate during cooldown so independent work completes");
+        Require(admission.Snapshot().ActiveFiles == 0, "executor cooldown accounting is balanced");
+        // Notice closure is exercised through the real incremental Done path in RunChecks.ThrottleConsumersAsync.
+
+        var deadline = clock.GetUtcNow().AddMinutes(1);
+        writer.BeforePut = (_, _) => Task.FromException(new ProviderThrottleExhaustedException(deadline, "retry-bound", "read"));
+        var failedAction = Act(ActionKind.CopyNew, Side.B, "third", source: a.Seed("third", "c"), key: "third");
+        var failed = (await Apply(executor, Plan(failedAction), a, writer)).Single();
+        Require(failed.Outcome == Outcome.Failed && failed.FailureKind == FailureRetryOwner.FailureKind.ProviderThrottle &&
+            failed.RetryNotBefore == deadline, "executor retains typed throttle cause and retry deadline without marking the item synced");
+        var durable = FailureRetryOwner.SaveFailedRetry(store, Pair().PairId, "third", failed.Reason, null,
+            clock.GetUtcNow(), failed.FailureKind, failed.RetryNotBefore);
+        Require(durable.RetryAfter >= deadline && durable.FailureKind == FailureRetryOwner.FailureKind.ProviderThrottle,
+            "executor failure reaches durable shared retry state unchanged");
+    }
+
+    private static void ThrottleCauseContract()
+    {
+        var deadline = DateTimeOffset.UnixEpoch.AddMinutes(7);
+        foreach (var cause in new[] { "retry-bound", "wait-bound", "backoff-bound" })
+        {
+            var error = new ProviderThrottleExhaustedException(deadline, cause, "read");
+            var result = FailureRetryOwner.WithCause(new("action", Outcome.Failed, null, null, null, error.Message), error);
+            Require(result.FailureKind == FailureRetryOwner.FailureKind.ProviderThrottle &&
+                result.RetryNotBefore == deadline && result.FailureHResult == error.HResult &&
+                error.StatusCode == System.Net.HttpStatusCode.TooManyRequests && error.Cause == cause && error.Route == "read",
+                "provider contract preserves all throttle causes, HTTP status, HResult and exact retry deadline");
+        }
+        var throttle = new ProviderThrottleExhaustedException(deadline, "wait-bound", "read");
+        foreach (var wrapped in new Exception[] { new IOException("stream", throttle),
+            new DropboxEffectUncertainException("unverified", new IOException("stream", throttle)) })
+        {
+            var result = FailureRetryOwner.WithCause(new("action", Outcome.Uncertain, null, null, null, wrapped.Message), wrapped);
+            Require(result.FailureKind == FailureRetryOwner.FailureKind.ProviderThrottle && result.RetryNotBefore == deadline &&
+                result.Outcome == Outcome.Uncertain && result.FailureHResult == wrapped.HResult,
+                "wrapped throttle retains its deadline without converting an uncertain effect to a safe replay");
+        }
+        var ordinary = FailureRetryOwner.WithCause(new("action", Outcome.Failed, null, null, null, "transport"),
+            new HttpRequestException("transport"));
+        Require(ordinary.FailureKind is null && ordinary.RetryNotBefore is null,
+            "ordinary provider failure does not acquire a throttle kind or deadline");
+    }
+
+    private static void AssertAdmissionRetryNotice(InMemoryStateStore store, Executor executor,
+        SyncAction action, ActionResult result, ThrottleClock clock, DateTimeOffset retryAt)
+    {
+        var pair = Pair();
+        var run = new SyncRun(store, executor, new FakeEndpointProvider(), Settings(64), clock);
+        var saveFailure = typeof(SyncRun).GetMethod("SaveFailedRetry",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        ReflectionInvoke.WithDefaults(saveFailure, run, pair, action.Path, result.Reason, null, null, result);
+        var retry = store.SyncRetryAt(pair.PairId, action.Path)!;
+        Require(retry is { Attempts: 1, Kind: "sync", FailureKind: FailureRetryOwner.FailureKind.ProviderThrottle } &&
+            retry.RetryAfter == retryAt && retry.LastError == result.Reason,
+            "run failure owner retains the refused item as typed retry work at the provider deadline");
+        Require(!FailureRetryOwner.IsDue(retry.RetryAfter, retryAt.AddTicks(-1)) &&
+            FailureRetryOwner.IsDue(retry.RetryAfter, retryAt),
+            "refused work remains queued, not due before the cooldown and due at its exact deadline");
+        var notice = store.OpenNotices(pair.PairId).Single();
+        Require(notice.Path == action.Path && notice.ReasonKey == "sync-retry" &&
+            notice.CauseKey == result.Reason && notice.Detail.Contains(result.Reason!, StringComparison.Ordinal),
+            "shared notice owner reports the refused item's exact cause");
+        var choices = NoticeOptions.Options(notice);
+        Require(choices.Any(choice => choice.Choice == NoticeChoices.RetryNow) &&
+            choices.Any(choice => choice.Choice == NoticeChoices.Ignore),
+            "throttle retry notice offers Retry and Ignore without dropping the item");
+        ReflectionInvoke.WithDefaults(saveFailure, run, pair, action.Path, result.Reason, retry, null, result);
+        Require(store.OpenNotices(pair.PairId).Count == 1 &&
+            store.SyncRetryAt(pair.PairId, action.Path) is { Attempts: 2 } repeated && repeated.RetryAfter == retryAt,
+            "repeated failure reports preserve the provider deadline and deduplicate the notice");
+    }
+
+    private sealed class ThrottleClock : TimeProvider
+    {
+        private long _ticks;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => _ticks;
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch.AddTicks(_ticks);
+        internal void Advance(TimeSpan delay) => _ticks += delay.Ticks;
+    }
+}
