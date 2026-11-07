@@ -240,19 +240,21 @@ public static class ChangeRunnerChecks
         var localCounter = new CountingSide(fixture.Local);
         fixture.LocalView = localCounter;
         LiveAdmissionStaleException? refused = null;
+        // The first admission runs the deferred folder row; the second is the folder plan's own (SelectionPass.cs:234-246).
+        var admissions = 0;
         try
         {
             await Runner(fixture, selected, new Boundary(_ =>
             {
-                OweLocal(fixture, SourceObligation.LocalSkippedCoverage);
+                if (++admissions == 2) OweLocal(fixture, SourceObligation.LocalSkippedCoverage);
                 return new Lease();
             }), (selection, _, _) => Task.FromResult(Coverage(selection))).RunAsync(selected, default);
         }
         catch (LiveAdmissionStaleException error) { refused = error; }
-        Check.Require(refused is { Reason: LiveAdmissionStaleReason.CoverageChanged } && LocalWrites(localCounter) == 0 &&
-            await fixture.Local.ReadOneAsync(Plain, default) is not null,
-            "R6-F2 Local debt installed while a folder plan's admission is pending refuses the Local removal: refused=" +
-            refused?.Reason + "; localWrites=" + LocalWrites(localCounter));
+        Check.Require(admissions == 2 && refused is { Reason: LiveAdmissionStaleReason.CoverageChanged } &&
+            LocalWrites(localCounter) == 0 && await fixture.Local.ReadOneAsync(Plain, default) is not null,
+            "R6-F2 Local debt installed while a folder plan's admission is pending refuses the Local removal: admissions=" +
+            admissions + "; refused=" + refused?.Reason + "; localWrites=" + LocalWrites(localCounter));
     }
 
     // R6-F4: under Local debt a Dropbox rename notice is judged by RenameDecision.WrittenSide(): finishing a case
