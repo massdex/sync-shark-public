@@ -42,18 +42,10 @@ public sealed class EngineHostServer
         {
             while (!acceptStop.IsCancellationRequested)
             {
-                try
-                {
-                    await waiting.WaitForConnectionAsync(acceptStop).ConfigureAwait(false);
-                }
-                catch (IOException error) when (LocalPipePeer.Disconnected(error))
-                {
-                    // A probe may connect and close before accept begins; keep the pipe name owned while recycling.
-                    var abandoned = waiting;
-                    waiting = createListener();
-                    abandoned.Dispose();
-                    continue;
-                }
+                var accept = await LocalPipePeer.AcceptAsync(waiting, createListener, acceptStop)
+                    .ConfigureAwait(false);
+                waiting = accept.Waiting;
+                if (!accept.Accepted) continue;
                 var connected = waiting;
                 // Retain an instance while replacing the listener; there is no free-name handover window.
                 waiting = createListener();

@@ -15,9 +15,39 @@ public static class LocalPipePeer
     // lookup is an SMB client, including loopback SMB, and is rejected even when it names this machine.
     private const int ErrorPipeLocal = 229;
 
-    /// <summary>Windows pipe disconnects that invalidate one connection, not the listener's lifetime.</summary>
+    // Microsoft Windows system error codes 0-499 (https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-):
+    // ERROR_BROKEN_PIPE (109), ERROR_NO_DATA (232), ERROR_PIPE_NOT_CONNECTED (233). These invalidate the one
+    // connection, not the listener's lifetime.
+    private const int ErrorBrokenPipe = 109;
+    private const int ErrorNoData = 232;
+    private const int ErrorPipeNotConnected = 233;
+
+    /// <summary>True when the error means one pipe connection ended, not that the listener itself failed.</summary>
     public static bool Disconnected(IOException error) =>
-        (error.HResult & 0xffff) is 109 or 232 or 233;
+        (error.HResult & 0xffff) is ErrorBrokenPipe or ErrorNoData or ErrorPipeNotConnected;
+
+    /// <summary>Waits for one connection, or recycles the listener when a probe connects and closes before the
+    /// accept begins. <c>Accepted</c> is false when the abandoned instance was replaced; <c>Waiting</c> is then the
+    /// replacement the caller must accept on. The replacement is created before the abandoned instance is disposed,
+    /// so the pipe name is never left unowned.</summary>
+    public static async Task<(bool Accepted, NamedPipeServerStream Waiting)> AcceptAsync(
+        NamedPipeServerStream waiting, Func<NamedPipeServerStream> createListener, CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(waiting);
+        ArgumentNullException.ThrowIfNull(createListener);
+        try
+        {
+            await waiting.WaitForConnectionAsync(token).ConfigureAwait(false);
+            return (true, waiting);
+        }
+        catch (IOException error) when (Disconnected(error))
+        {
+            var abandoned = waiting;
+            var replacement = createListener();
+            abandoned.Dispose();
+            return (false, replacement);
+        }
+    }
 
     /// <summary>
     /// True when the connected pipe's peer is this product executable, in the same Windows session and

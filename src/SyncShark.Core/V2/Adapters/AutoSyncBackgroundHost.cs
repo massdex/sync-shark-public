@@ -106,7 +106,7 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
         {
             while (!_acceptStop.IsCancellationRequested)
             {
-                await waiting.WaitForConnectionAsync(_acceptStop.Token).ConfigureAwait(false);
+                await waiting!.WaitForConnectionAsync(_acceptStop.Token).ConfigureAwait(false);
                 var connected = waiting;
                 // Retain an instance while replacing the listener; there is no free-name handover window.
                 waiting = NewListener(_pipeName);
