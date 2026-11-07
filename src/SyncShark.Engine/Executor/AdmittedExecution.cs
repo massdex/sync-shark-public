@@ -9,7 +9,8 @@ internal static class AdmittedExecution
     /// <summary>Acquires the canonical permits and the union footprint for the exact requests, releasing every
     /// acquired resource when a later acquisition or cancellation fails; the returned lease is disposed once.</summary>
     internal static async Task<IAdmittedExecution> AcquireAsync(
-        IReadOnlyList<ExecutionRequest> requests, Func<bool> acceptGrant, CancellationToken ct)
+        IReadOnlyList<ExecutionRequest> requests, Func<bool> acceptGrant, CancellationToken ct,
+        Action? revalidate = null)
     {
         ArgumentNullException.ThrowIfNull(requests);
         ArgumentNullException.ThrowIfNull(acceptGrant);
@@ -42,7 +43,7 @@ internal static class AdmittedExecution
             }
             locks = await PathLocks.Shared.EnterAsync(footprint, ct).ConfigureAwait(false);
             RequireGrant();
-            return new Lease(permits, locks, requests);
+            return new Lease(permits, locks, requests, revalidate);
         }
         catch
         {
@@ -69,7 +70,8 @@ internal static class AdmittedExecution
     /// <summary>The ephemeral lease for one admitted callback: it validates the admitted pair, generation and lock
     /// keys, never widens the footprint, and is disposed exactly once.</summary>
     private sealed class Lease(
-        IReadOnlyList<IAsyncDisposable> permits, IAsyncDisposable locks, IReadOnlyList<ExecutionRequest> requests)
+        IReadOnlyList<IAsyncDisposable> permits, IAsyncDisposable locks, IReadOnlyList<ExecutionRequest> requests,
+        Action? revalidate)
         : IAdmittedExecution
     {
         private int disposed;
@@ -96,6 +98,9 @@ internal static class AdmittedExecution
             }
             if (!admitted) throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged);
         }
+
+        /// <summary>Re-runs this lease's own admission validation; only a live selection is asked to.</summary>
+        public void Revalidate() => revalidate?.Invoke();
 
         public ValueTask ReleaseAdmissionAsync()
         {

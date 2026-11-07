@@ -349,6 +349,12 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         inner.RequireRepairAfterLoss(pairId, expectedGeneration);
     }
 
+    public void RequireRepairForOwedHistory(string pairId, long expectedGeneration)
+    {
+        Command();
+        inner.RequireRepairForOwedHistory(pairId, expectedGeneration);
+    }
+
     public SourceObligation LostIntervalObligation(string pairId)
     {
         Command();

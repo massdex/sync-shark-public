@@ -792,7 +792,7 @@ public sealed class StateStore : IStateStore
         }
         catch (InvalidDataException)
         {
-            InvalidateCorruptDeletedHistory(pairId);
+            InvalidateCorruptDeletedHistory(pairId, requireRepair: false);
             return null;
         }
         RequireScan(pairId, scanToken).ResumedHistory = true;
@@ -810,24 +810,34 @@ public sealed class StateStore : IStateStore
         return cursor;
     });
 
-    private void InvalidateCorruptDeletedHistory(string pairId)
+    private void InvalidateCorruptDeletedHistory(string pairId, bool requireRepair = true) => Write(() =>
     {
-        Execute(_connection, null, StateSchema.ClearDeletedHistory, (StateSchema.ParamPair, pairId));
-        if (_scans.Any(item => item.Key.PairId == pairId && item.Value.Active && item.Value.Record.Discovery))
+        // The held store lock fences the generation read and the loss transition together.
+        var generation = ReadPairExecution(pairId)!.Value.Generation;
+        var clearScan = _scans.Any(item => item.Key.PairId == pairId && item.Value.Active && item.Value.Record.Discovery);
+        if (clearScan) AttachScan(pairId, create: false);
+        var change = StateChange.Empty with
         {
-            AttachScan(pairId, create: false);
-            Execute(_connection, null, StateSchema.ClearScanDeletedNames, (StateSchema.ParamPair, pairId));
+            Raise = [(IssueKind.Info, TextKey.DeletedHistoryCorrupt, string.Empty, new IssueSubject([], null))]
+        };
+        using (var transaction = _connection.BeginTransaction())
+        {
+            Execute(_connection, transaction, StateSchema.ClearDeletedHistory, (StateSchema.ParamPair, pairId));
+            if (clearScan)
+                Execute(_connection, transaction, StateSchema.ClearScanDeletedNames, (StateSchema.ParamPair, pairId));
+            // Restore's current Repair reacquires history before executing rows; other readers need new debt.
+            if (requireRepair) _changes.RequireRepairAfterLoss(transaction, pairId, generation);
+            StateCommitter.Commit(_connection, transaction, _changes, pairId, change, DateTimeOffset.UtcNow,
+                narrowRecordUpdates: true, raised: null);
+            transaction.Commit();
         }
         foreach (var partition in _scans.Where(item => item.Key.PairId == pairId).Select(item => item.Value))
         {
             partition.ResumedHistory = false;
             partition.IncrementalHistory = false;
         }
-        Commit(pairId, StateChange.Empty with
-        {
-            Raise = [(IssueKind.Info, TextKey.DeletedHistoryCorrupt, string.Empty, new IssueSubject([], null))]
-        });
-    }
+        UpdateClosures(pairId, change);
+    });
 
     private string? DeletedHistoryCursor(string pairId)
     {
@@ -1412,6 +1422,14 @@ public sealed class StateStore : IStateStore
         using var transaction = _connection.BeginTransaction();
         _changes.RequireRepairAfterLoss(transaction, pairId, expectedGeneration);
         transaction.Commit();
+    });
+
+    /// <inheritdoc />
+    public void RequireRepairForOwedHistory(string pairId, long expectedGeneration) => Write(() =>
+    {
+        RequireGeneration(null, pairId, expectedGeneration);
+        if (!DeletedHistoryOwed(pairId) || _changes.Obligated(pairId)) return;
+        RequireRepairAfterLoss(pairId, expectedGeneration);
     });
 
     /// <inheritdoc />
@@ -2885,7 +2903,7 @@ public sealed class StateStore : IStateStore
         catch (InvalidDataException)
         {
             InvalidateCorruptDeletedHistory(pairId);
-            return false;
+            throw;
         }
     }
 

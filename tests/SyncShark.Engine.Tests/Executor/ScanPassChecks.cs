@@ -1391,6 +1391,7 @@ public static class ScanPassChecks
         {
             public void Require(string pairId, long generation, IReadOnlyList<string> requiredLockKeys) { }
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) { }
+            public void Revalidate() { }
             public ValueTask ReleaseAdmissionAsync() => default;
             public ValueTask DisposeAsync() => default;
         }

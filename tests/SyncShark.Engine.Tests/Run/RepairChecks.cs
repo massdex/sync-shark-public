@@ -47,6 +47,12 @@ public static class RepairChecks
         [
             () => DisabledAsync(),
             () => EmptyRunAsync(),
+            () => CorruptHistoryWakesRepairAsync(),
+            () => CorruptHistoryRestoreAsync(),
+            () => CorruptHistoryRestoreAsync(incomplete: true),
+            () => CorruptHistoryRestoreAsync(incomplete: false),
+            () => CorruptHistoryRevisionRetryAsync(),
+            () => CorruptHistoryDuringRowsAsync(),
             () => ListingProgressAsync(),
             () => ListingsOverlapAsync(),
             () => JournalChangedAsync(),
@@ -2542,6 +2548,343 @@ public static class RepairChecks
         Check.Require(!later.FirstRun && later.RunId == "run-2", "a later run is not a first run");
     });
 
+    private static Task CorruptHistoryRestoreAsync(bool? incomplete = null) => WithFolder("corrupt-history-restore-" + incomplete, async folder =>
+    {
+        var monitor = new Massdex.SyncShark.Engine.Run.Monitor(TimeProvider.System);
+        StateStore storage = null!;
+        var finishes = 0;
+        var recovering = false;
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var rig = await ComposeRigAsync(folder, monitor: monitor,
+            openLog: id => RunLog.Open(folder, id, "automatic-restore", _ => { }, Settings.LogBufferCharacters),
+            decorate: inner =>
+        {
+            storage = (StateStore)inner;
+            return new HookStore(inner)
+            {
+                BeforeFinishRepair = () =>
+                {
+                    finishes++;
+                    if (recovering) finished.TrySetResult();
+                }
+            };
+        });
+        rig.Wire.SeedDeletedEntry("Unused");
+        using (var baseline = rig.Log(folder, "baseline"))
+            Check.Require((await rig.RunAsync(baseline, default)).Completed, "restore fixture baseline completes");
+        await File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, "A"), "retained");
+        using (var setup = rig.Log(folder, "retained-issue"))
+            await rig.Host.DispatchSessionAsync(rig.Pair.PairId, () => setup, async (session, ct) =>
+            {
+                var entry = (await session.Local.ReadOneAsync("A", ct))!;
+                rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with
+                {
+                    Raise = [(IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, "A",
+                        new IssueSubject([new IssueItem(Side.Local, "A", entry.Id)], null,
+                            FirstRunDeletion: IssueSubject.FirstRunDeletionKind.Item))]
+                });
+                return true;
+            }, default);
+        Massdex.SyncShark.Engine.Tests.Storage.DeletedHistoryChecks.CorruptSavedHistory(storage);
+        var revision = storage.ReadSource(rig.Pair.PairId, Side.Local)!.Value.Revision;
+        if (incomplete is { } classified)
+        {
+            var fault = classified ? (Exception)new InventoryIncompleteException("incomplete", null)
+                : new InvalidOperationException("listing failed");
+            rig.Wire.RequestException = route => route.EndsWith("/list_folder", StringComparison.Ordinal) ? fault : null;
+            RepairSummary? failed = null;
+            var operations = new EngineOperations(rig.Instance.StateAuthority.ProductRoot, _ => { }, rig.Host);
+            try { failed = await operations.RepairAsync(rig.Pair.PairId, default); }
+            catch (InvalidOperationException error) when (ReferenceEquals(error, fault)) { }
+            Check.Require((classified ? failed is { Completed: false } : failed is null) &&
+                storage.DeletedHistoryOwed(rig.Pair.PairId) && storage.Obligated(rig.Pair.PairId) &&
+                storage.ReadSource(rig.Pair.PairId, Side.Local)!.Value.Revision == revision + 1 &&
+                storage.SyncedByKey(rig.Pair.PairId, Side.Dropbox, "A") is null &&
+                File.Exists(Path.Combine(rig.Pair.LocalRoot, "A")) &&
+                storage.Issues(rig.Pair.PairId).Any(issue => issue.Path == "A" && issue.Kind == IssueKind.Failure),
+                "both incomplete and exceptional Restore exits retain rows and install acquisition responsibility");
+            rig.Wire.RequestException = null;
+            recovering = true;
+            monitor.Start();
+            try { await finished.Task.WaitAsync(TimeSpan.FromSeconds(30)); }
+            finally { await monitor.StopAsync(); }
+            Check.Require(finishes == 2 && storage.LastRepair(rig.Pair.PairId) is { Completed: true, RunId: "automatic-restore" } &&
+                !storage.DeletedHistoryOwed(rig.Pair.PairId) && !storage.Obligated(rig.Pair.PairId) &&
+                !storage.Issues(rig.Pair.PairId).Any(issue => issue.Cause == TextKey.RequiredRepairRetry ||
+                    issue.Path == "A" && issue.Kind == IssueKind.Failure) &&
+                storage.SyncedByKey(rig.Pair.PairId, Side.Dropbox, "A") is not null,
+                "Monitor automatically reacquires history and settles the retained row after a failed Restore attempt");
+            return;
+        }
+        using var log = rig.Log(folder, "restore-repair");
+        var summary = await rig.RunAsync(log, default);
+        Check.Require(summary.Completed && !log.HasFailed && finishes == 2 &&
+            storage.ReadSource(rig.Pair.PairId, Side.Local)!.Value.Revision == revision &&
+            !storage.DeletedHistoryOwed(rig.Pair.PairId) && !storage.Obligated(rig.Pair.PairId) &&
+            storage.ReadPrerequisiteRetry(rig.Pair.PairId) is null &&
+            storage.Issues(rig.Pair.PairId).Any(issue => issue.Cause == TextKey.DeletedHistoryCorrupt) &&
+            !storage.Issues(rig.Pair.PairId).Any(issue => issue.Cause == TextKey.RequiredRepairRetry ||
+                issue.Path == "A" && issue.Kind == IssueKind.Failure) &&
+            storage.SyncedByKey(rig.Pair.PairId, Side.Dropbox, "A") is not null,
+            "Restore corruption is recovered by exactly one completed Repair without retry debt or failure notice");
+    });
+
+    private static Task CorruptHistoryRevisionRetryAsync() => WithFolder("corrupt-revision-retry", async folder =>
+    {
+        var clock = new FakeTimeProvider();
+        var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        StateStore storage = null!;
+        var overlap = false;
+        var finishes = 0;
+        await using var rig = await ComposeRigAsync(folder, time: clock, monitor: monitor,
+            openLog: id => RunLog.Open(folder, id, "prerequisite-" + Guid.NewGuid().ToString("N"),
+                _ => { }, Settings.LogBufferCharacters),
+            decorate: inner =>
+            {
+                storage = (StateStore)inner;
+                return new HookStore(inner)
+                {
+                    BeforeFinishRepair = () =>
+                    {
+                        if (!overlap) return;
+                        if (++finishes == 1)
+                        {
+                            entered.TrySetResult();
+                            // FinishRepair is synchronous; the test holds its worker, not the async driver.
+                            Check.Require(release.Wait(TimeSpan.FromSeconds(30)), "overlap driver releases the finish gate");
+                        }
+                        else finished.TrySetResult();
+                    }
+                };
+            });
+        var pairId = rig.Pair.PairId;
+        Directory.CreateDirectory(Path.Combine(rig.Pair.LocalRoot, "Parent"));
+        rig.Wire.SeedFolder("Parent");
+        rig.Wire.SeedDeletedEntry("Unused");
+        using (var baseline = rig.Log(folder, "baseline"))
+            Check.Require((await rig.RunAsync(baseline, default)).Completed, "overlap fixture baseline completes");
+        await File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, "A"), "settled");
+        var generation = storage.ReadPairExecution(pairId)!.Value.Generation;
+        storage.RequireRepairAfterLoss(pairId, generation);
+        var revision = storage.ReadSource(pairId, Side.Local)!.Value.Revision;
+        overlap = true;
+        var first = Task.Run(() => rig.Host.RunPrerequisiteAsync(pairId, default));
+        var refused = false;
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            Check.Require(storage.SyncedByKey(pairId, Side.Local, "A") is not null,
+                "the whole Repair commits a row before the overlapping Retry");
+            await File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, "Parent", "B"), "retained");
+            using (var setup = rig.Log(folder, "retained-issues"))
+                await rig.Host.DispatchSessionAsync(pairId, () => setup, async (session, ct) =>
+                {
+                    var entry = (await session.Local.ReadOneAsync("Parent/B", ct))!;
+                    var parent = (await session.Dropbox.ReadOneAsync("Parent", ct))!;
+                    storage.Commit(pairId, StateChange.Empty with
+                    {
+                        Raise = [
+                            (IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, "Parent/B",
+                                new IssueSubject([new IssueItem(Side.Local, "Parent/B", entry.Id)], null,
+                                    FirstRunDeletion: IssueSubject.FirstRunDeletionKind.Item)),
+                            (IssueKind.Failure, TextKey.FailChanged, "Parent",
+                                new IssueSubject([new IssueItem(Side.Dropbox, "Parent", parent.Id)], null))]
+                    });
+                    return true;
+                }, default);
+            Massdex.SyncShark.Engine.Tests.Storage.DeletedHistoryChecks.CorruptSavedHistory(storage);
+            var issue = storage.Issues(pairId).Single(value => value.Path == "Parent");
+            var operations = new EngineOperations(rig.Instance.StateAuthority.ProductRoot, _ => { }, rig.Host);
+            await operations.ResolveAsync(pairId, issue.Id, ResolutionChoice.Retry, null, null, false, null, default);
+            Check.Require(storage.DeletedHistoryOwed(pairId) && File.Exists(Path.Combine(rig.Pair.LocalRoot, "Parent", "B")) &&
+                storage.SyncedByKey(pairId, Side.Dropbox, PathNames.Key("Parent/B")) is null &&
+                storage.Issues(pairId).Any(value => value.Path == "Parent/B" && value.Kind == IssueKind.Failure),
+                "overlapping Retry discovers corrupt history and retains its affected row without upload or deletion");
+        }
+        finally
+        {
+            release.Set();
+            try { await first; }
+            catch (InvalidOperationException) { refused = true; }
+        }
+        var committed = storage.SyncedByKey(pairId, Side.Local, "A");
+        var retry = storage.ReadPrerequisiteRetry(pairId);
+        Check.Require(refused && committed is not null && storage.Obligated(pairId) &&
+            storage.ReadSource(pairId, Side.Local)!.Value.Revision == revision + 1 && retry is { Attempts: 1 } &&
+            storage.Issues(pairId).Any(issue => issue.Cause == TextKey.RequiredRepairRetry) &&
+            storage.LastRepair(pairId) is { RunId: "baseline" },
+            "refused finish preserves committed rows and newer debt and records the failed prerequisite");
+        clock.Advance(retry!.Value.RetryAfter - clock.GetUtcNow());
+        monitor.Start();
+        try { await finished.Task.WaitAsync(TimeSpan.FromSeconds(30)); }
+        finally { await monitor.StopAsync(); }
+        Check.Require(finishes == 2 && storage.LastRepair(pairId) is { Completed: true } &&
+            !storage.DeletedHistoryOwed(pairId) && !storage.Obligated(pairId) &&
+            storage.ReadPrerequisiteRetry(pairId) is null &&
+            !storage.Issues(pairId).Any(issue => issue.Cause == TextKey.RequiredRepairRetry ||
+                issue.Path == "Parent/B" && issue.Kind == IssueKind.Failure) &&
+            storage.SyncedByKey(pairId, Side.Local, "A") == committed &&
+            storage.SyncedByKey(pairId, Side.Dropbox, PathNames.Key("Parent/B")) is not null,
+            "the same host automatically retries, retains settled rows, settles held rows and clears the retry notice");
+    });
+
+    private static Task CorruptHistoryDuringRowsAsync() => WithFolder("corrupt-during-rows", async folder =>
+    {
+        StateStore storage = null!;
+        var inject = false;
+        var detected = false;
+        void Corrupt()
+        {
+            if (!inject) return;
+            Check.Require(!storage!.DeletedHistoryOwed("pair-a"), "corruption is injected after history publication");
+            Massdex.SyncShark.Engine.Tests.Storage.DeletedHistoryChecks.CorruptSavedHistory(storage);
+        }
+        await using var rig = await ComposeRigAsync(folder, decorate: inner =>
+        {
+            storage = (StateStore)inner;
+            return new HookStore(inner)
+            {
+                OnScanRows = Corrupt
+            };
+        });
+        using (var baseline = rig.Log(folder, "baseline"))
+            Check.Require((await rig.RunAsync(baseline, default)).Completed, "corruption fixture baseline completes");
+        var pairId = rig.Pair.PairId;
+        var local = rig.Store.ReadSource(pairId, Side.Local)!.Value;
+        Check.Require(!rig.Store.Obligated(pairId), "corruption starts without prior Repair debt");
+        rig.Wire.SeedDeletedEntry("Unused");
+        {
+            await File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, "A"), "retained");
+            using var setup = rig.Log(folder, "retained-issue");
+            await rig.Host.DispatchSessionAsync(pairId, () => setup, async (session, ct) =>
+            {
+                var entry = (await session.Local.ReadOneAsync("A", ct))!;
+                rig.Store.Commit(pairId, StateChange.Empty with
+                {
+                    Raise = [(IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, "A",
+                        new IssueSubject([new IssueItem(Side.Local, "A", entry.Id)], null,
+                            FirstRunDeletion: IssueSubject.FirstRunDeletionKind.Item))]
+                });
+                return true;
+            }, default);
+        }
+        // A null saved cursor forces acquisition of the scripted tombstone, not an unrelated empty delta page.
+        var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
+        var token = storage!.BeginScan(pairId, generation, true);
+        storage!.ResetDeletedHistory(pairId, token, discardNames: true);
+        await storage.EndScanAsync(pairId, token, Settings.StoragePageSize);
+        inject = true;
+        using var log = rig.Log(folder, "corrupt-run");
+        RepairSummary? summary = null;
+        try { summary = await rig.RunAsync(log, default); }
+        catch (InvalidDataException) { detected = true; }
+        var after = rig.Store.ReadSource(pairId, Side.Local)!.Value;
+        Check.Require(detected && storage.DeletedHistoryOwed(pairId) && rig.Store.Obligated(pairId) &&
+            after.Revision == local.Revision + 1 && after.Obligation == SourceObligation.NormalRepair,
+            "corruption advances the obligation revision and an already-running Repair cannot erase it");
+        Check.Require(summary is null, "Repair row-pass corruption returns no completed summary");
+        Check.Require(File.Exists(Path.Combine(rig.Pair.LocalRoot, "A")),
+            "Repair row-pass corruption preserves the local file");
+        Check.Require(rig.Wire.LastUploadCommitPaths.Count == 0,
+            "Repair row-pass corruption performs no upload");
+        Check.Require(rig.Store.Issues(pairId).Any(issue => issue.Path == "A" && issue.Kind == IssueKind.Failure),
+            "Repair row-pass corruption preserves the retained issue");
+        RequireFailed(log.Path, nameof(InvalidDataException));
+    });
+
+    private static Task CorruptHistoryWakesRepairAsync() => WithFolder("corrupt-history-wake", async folder =>
+    {
+        var monitor = new Massdex.SyncShark.Engine.Run.Monitor(TimeProvider.System);
+        var finishing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var repairing = false;
+        StateStore storage = null!;
+        await using var rig = await ComposeRigAsync(folder, monitor: monitor,
+            openLog: pair => RunLog.Open(folder, pair, "automatic-repair", _ => { }, Settings.LogBufferCharacters),
+            decorate: inner =>
+            {
+                storage = (StateStore)inner;
+                return new HookStore(inner) { BeforeFinishRepair = () => { if (repairing) finishing.TrySetResult(); } };
+            });
+        Directory.CreateDirectory(Path.Combine(rig.Pair.LocalRoot, "Parent"));
+        rig.Wire.SeedFolder("Parent");
+        using (var baseline = rig.Log(folder, "baseline"))
+            Check.Require((await rig.RunAsync(baseline, default)).Completed, "wake fixture baseline completes");
+        var pairId = rig.Pair.PairId;
+        Check.Require(!rig.Store.Obligated(pairId) &&
+            rig.Store.ReadSource(pairId, Side.Local)!.Value.Obligation is null &&
+            rig.Store.ReadSource(pairId, Side.Dropbox)!.Value.Obligation is null,
+            "both sources are healthy before history corruption");
+        var paths = new[] { "Parent/A", "Parent/B" };
+        foreach (var path in paths) await File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, path), "retained");
+        using (var setup = rig.Log(folder, "retained-issues"))
+            await rig.Host.DispatchSessionAsync(pairId, () => setup, async (session, ct) =>
+            {
+                foreach (var path in paths)
+                {
+                    var entry = (await session.Local.ReadOneAsync(path, ct))!;
+                    rig.Store.Commit(pairId, StateChange.Empty with
+                    {
+                        Raise = [(IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, path,
+                            new IssueSubject([new IssueItem(Side.Local, path, entry.Id)], null,
+                                FirstRunDeletion: IssueSubject.FirstRunDeletionKind.Item))]
+                    });
+                }
+                var parent = (await session.Dropbox.ReadOneAsync("Parent", ct))!;
+                rig.Store.Commit(pairId, StateChange.Empty with
+                {
+                    Raise = [(IssueKind.Failure, TextKey.FailChanged, "Parent",
+                        new IssueSubject([new IssueItem(Side.Dropbox, "Parent", parent.Id)], null))]
+                });
+                return true;
+            }, default);
+        var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
+        var token = storage!.BeginScan(pairId, generation, true);
+        var sink = storage!.OpenScan(pairId, Side.Dropbox, ScanTestSettings.BatchRows);
+        await sink.AddAsync(new Listed("Unused", null), default);
+        await sink.CompleteAsync();
+        storage.SaveDeletedHistory(pairId, token, "retained-history");
+        await storage.EndScanAsync(pairId, token, Settings.StoragePageSize);
+        Massdex.SyncShark.Engine.Tests.Storage.DeletedHistoryChecks.CorruptSavedHistory(storage);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Wire.BeforeListingAsync = async (_, _) =>
+        {
+            if (!storage.DeletedHistoryOwed(pairId)) return;
+            repairing = true;
+            entered.TrySetResult();
+            await release.Task;
+        };
+        monitor.Start();
+        try
+        {
+            var issue = rig.Store.Issues(pairId).Single(value => value.Path == "Parent");
+            var operations = new EngineOperations(rig.Instance.StateAuthority.ProductRoot, _ => { }, rig.Host);
+            await operations.ResolveAsync(pairId, issue.Id, ResolutionChoice.Retry, null, null, false, null, default);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            Check.Require(storage.DeletedHistoryOwed(pairId) && rig.Store.Obligated(pairId) &&
+                rig.Store.ReadSource(pairId, Side.Local)!.Value.Obligation == SourceObligation.NormalRepair &&
+                paths.All(path => File.Exists(Path.Combine(rig.Pair.LocalRoot, path)) &&
+                    rig.Store.Issues(pairId).Any(value => value.Path == path && value.Kind == IssueKind.Failure)),
+                "operation completion automatically schedules owed-history Repair while retained rows stay held");
+            release.TrySetResult();
+            await finishing.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            release.TrySetResult();
+            await monitor.StopAsync();
+        }
+        Check.Require(!storage.DeletedHistoryOwed(pairId) && !rig.Store.Obligated(pairId) &&
+            rig.Store.LastRepair(pairId) is { Completed: true, RunId: "automatic-repair" } &&
+            paths.All(path => File.Exists(Path.Combine(rig.Pair.LocalRoot, path)) &&
+                !rig.Store.Issues(pairId).Any(value => value.Path == path && value.Kind == IssueKind.Failure) &&
+                rig.Store.SyncedByKey(pairId, Side.Dropbox, PathNames.Key(path)) is not null),
+            "automatic Repair reacquires history and settles every retained row without another user action");
+    });
+
     private static Task ListingsOverlapAsync() => WithFolder("overlap", async folder =>
     {
         var dropboxListing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -3189,7 +3532,8 @@ public static class RepairChecks
         Action<int>? onRow = null, ILocalRecovery? recovery = null, DriveEvidence? drive = null,
         Func<IStateStore, HookStore>? decorate = null, int level = 3,
         Func<PairConfig, PairConfig>? configure = null, TimeProvider? time = null, EngineSettings? settings = null,
-        Action<string>? progress = null)
+        Action<string>? progress = null, Massdex.SyncShark.Engine.Run.Monitor? monitor = null,
+        Func<string, RunLog?>? openLog = null)
     {
         var root = Path.Combine(folder, "local");
         Directory.CreateDirectory(root);
@@ -3211,14 +3555,14 @@ public static class RepairChecks
         {
             await new DropboxConnectionStore(instance.StateAuthority).SaveAsync(binding);
             host = EngineHost.Compose(instance.StateAuthority.ProductRoot, progress ?? (_ => { }), instance.StateAuthority,
-                settings ?? Settings, http, time ?? TimeProvider.System, _ => null,
+                settings ?? Settings, http, time ?? TimeProvider.System, openLog ?? (_ => null),
                 validator =>
                 {
                     var store = StateStore.Open(Path.Combine(folder, "composed.db"), validator);
                     return decorate?.Invoke(store) ?? new HookStore(store) { OnRow = onRow };
                 }, EngineHost.Mode.Direct,
                 new EngineExternals(new SyntheticCredentials(),
-                    _ => new HttpClient(transport, disposeHandler: false), Recovery: recovery));
+                    _ => new HttpClient(transport, disposeHandler: false), Recovery: recovery), startupMonitor: monitor);
             pair = host.Store.Pair(pair.PairId) ?? pair;
             host.Store.SavePair(pair);
             host.Store.SaveLimiterLevel(connection, level);

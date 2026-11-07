@@ -3632,6 +3632,8 @@ public static class ChangeRunnerChecks
                 throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.FootprintChanged);
         }
 
+        public void Revalidate() { }
+
         public ValueTask ReleaseAdmissionAsync() => AllowsRelease
             ? default : throw new NotSupportedException(nameof(ReleaseAdmissionAsync));
 

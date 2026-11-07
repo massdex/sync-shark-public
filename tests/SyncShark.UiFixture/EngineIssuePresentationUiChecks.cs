@@ -5,7 +5,9 @@ using Massdex.SyncShark.V2;
 using Side = Massdex.SyncShark.Engine.Side;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Threading;
 
 // T318: the Engine issue/notice presentation on the ACTUAL window refresh route, plus the bounded
@@ -65,6 +67,7 @@ internal static class EngineIssuePresentationUiChecks
             CheckRecoveryLabelsAreDataOwned();
             CheckOnlyMatchingCloseRemovesRows(window);
             CheckUnrelatedLegacyRowsSurvive(window);
+            CheckRefreshDuringDestinationDialogStopsTheChoice(window);
         }
         finally
         {
@@ -218,6 +221,39 @@ internal static class EngineIssuePresentationUiChecks
         {
             window.ConflictRows.Remove(legacy);
         }
+    }
+
+    // F4: the destination dialog pumps messages, so a refresh can remove the exact row while it is open.
+    // The real action must revalidate before composing the confirmation, never index the cleared issue map.
+    private static void CheckRefreshDuringDestinationDialogStopsTheChoice(MainWindow window)
+    {
+        const long id = 600;
+        var issue = new Issue(id, IssueKind.Info, TextKey.InfoIgnoredFolderKept, "kept-folder",
+            new IssueSubject([new IssueItem(Side.Dropbox, "kept-folder", "id:600")], null),
+            DateTimeOffset.UnixEpoch, false);
+        window.ApplyEngineIssues([issue], new Dictionary<long, IssueRetryView>());
+        var row = Row(window, id);
+        var option = row.NoticeOptions!.Single(item => item.Choice == nameof(ResolutionChoice.KeepFolderAlways));
+        typeof(MainWindow).GetField("_engineSelectedPair", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(window, new Massdex.SyncShark.Engine.Edge.Results.PairView(row.PairId, "Pair " + row.PairId,
+                "local", "dropbox", "account", FirstRunPolicy.NewestWins, true, [], RootsBound: true));
+
+        // Runs inside the dialog's nested message loop: refresh removes the row and its issue, then confirm.
+        window.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+        {
+            window.ApplyEngineIssues([], new Dictionary<long, IssueRetryView>());
+            var dialog = Application.Current.Windows.OfType<Window>()
+                .First(candidate => candidate is not MainWindow && candidate.IsVisible);
+            var panel = (StackPanel)dialog.Content;
+            ((TextBox)panel.Children[1]).Text = "FileExtension:tmp";
+            ((Button)panel.Children[2]).RaiseEvent(
+                new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
+        }));
+
+        var action = typeof(MainWindow).GetMethod("ApplyEngineNoticeOptionAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic)!;
+        ((Task)action.Invoke(window, [row, option])!).GetAwaiter().GetResult();
+        Require(!HasRow(window, id), "A refresh during the destination dialog leaves the removed notice unapplied");
     }
 
     // AUDIT-D1-rev5 section N: the effective product root drives the lock, the supervisor notice and the

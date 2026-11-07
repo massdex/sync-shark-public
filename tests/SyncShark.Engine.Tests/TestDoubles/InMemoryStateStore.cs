@@ -647,6 +647,16 @@ public sealed class InMemoryStateStore : IStateStore
         }
     }
 
+    public void RequireRepairForOwedHistory(string pairId, long expectedGeneration)
+    {
+        lock (_gate)
+        {
+            RequireGeneration(pairId, expectedGeneration);
+            if (DeletedHistoryOwed(pairId) && !Obligated(pairId))
+                RequireRepairAfterLoss(pairId, expectedGeneration);
+        }
+    }
+
     public void RequireRepairAfterLoss(string pairId, long expectedGeneration)
     {
         lock (_gate)

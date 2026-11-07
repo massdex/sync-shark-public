@@ -369,6 +369,8 @@ internal sealed class ItemSync
                     var fresh = await ReobserveAsync(row, observer, ct);
                     unchanged = fresh.Local == row.Local && fresh.Dropbox == row.Dropbox && fresh.Synced == row.Synced;
                     row = fresh;
+                    // A live selection applies only its admitted evidence; a later acquisition waits for its own record.
+                    if (execution is not null && selection is not null) execution.Revalidate();
                     action = null;
                 }
                 action ??= await PrepareAsync(row, ct);
@@ -456,7 +458,7 @@ internal sealed class ItemSync
             _ancestors.Refuse();
             return await RefusedAsync(action, ct, committedIssue, firstRunFolder, attemptId, expectedAttempt, selection);
         }
-        if (!fresh.Fresh)
+        if (!fresh.Fresh || !ReferenceEquals(Rows.RefreshInventory(action.Row), action.Row))
         {
             return (null, true);
         }

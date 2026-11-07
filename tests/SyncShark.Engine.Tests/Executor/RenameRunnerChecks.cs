@@ -1568,6 +1568,8 @@ public static class RenameRunnerChecks
         public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) =>
             inner.RequireScopes(pairId, generation, scopes);
 
+        public void Revalidate() => inner.Revalidate();
+
         public ValueTask ReleaseAdmissionAsync() => inner.ReleaseAdmissionAsync();
 
         public ValueTask DisposeAsync()

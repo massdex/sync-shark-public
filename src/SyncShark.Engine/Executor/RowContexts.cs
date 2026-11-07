@@ -17,12 +17,14 @@ internal sealed class RowContexts(ExecutorContext context, bool firstRun, bool c
 
     private readonly object _gate = new();
     private readonly string _pairId = context.Pair.PairId;
+    private volatile bool _historyInvalidated;
     private RowContext _ordinary = new(false, false, false, null, false, firstRun, completeInventory, false);
 
     internal RowContexts ForScan(bool initialRun, IReadOnlySet<long>? retries,
         IReadOnlyDictionary<string, IssueSubject>? proofs, Func<string, bool>? deleted)
     {
         firstRun = initialRun;
+        _historyInvalidated = false;
         completeInventory = context.BatchScope is null || !context.Store.DeletedHistoryOwed(_pairId);
         retryIssues = retries;
         subjects = proofs;
@@ -251,19 +253,30 @@ internal sealed class RowContexts(ExecutorContext context, bool firstRun, bool c
             // kind, so no issue's refresh rule can release a dependent row while its prerequisite is unresolved.
             if (_dependentRoots is { } dependents && IssuePolicy.CoveredKey(row, dependents) is not null)
                 heldKind = IssueKind.Failure;
+            var eligible = DeletionEligible(row, kept, inventory);
             var ordinary = context.BatchScope is not null && kept == IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice
                 ? _ordinary with { CompleteInventory = true } : _ordinary;
             return RowContext.ForRow(row, context.Scope, ordinary, skipped, heldKind, underFolderDelete,
-                DeletionEligible(row, kept, inventory), kept);
+                eligible, kept);
         }
     }
 
     // Membership has authority only over a completed acquisition (RQ-178, engine 8.1): before one a selected row waits
     // in None(Held); after one a match selects and a nonmatch is ordinary first-run sync, retained or not.
-    internal Row RefreshDeletionEligibility(Row row) =>
-        row.Context.DeletionEligible && row.Local is { } local &&
-        context.Store.DeletedNameSpent(_pairId, PathNames.DropboxKey(local.Path))
-            ? row with { Context = row.Context with { DeletionEligible = false } }
+    internal Row RefreshDeletionEligibility(Row row)
+    {
+        row = RefreshInventory(row);
+        return row.Context.DeletionEligible && row.Local is { } local &&
+            context.Store.DeletedNameSpent(_pairId, PathNames.DropboxKey(local.Path))
+                ? row with { Context = row.Context with { DeletionEligible = false } }
+                : row;
+    }
+
+    // Prepared rows share this acquisition's lifetime, including a negative membership answer.
+    internal Row RefreshInventory(Row row) =>
+        _historyInvalidated && row.Context.CompleteInventory &&
+        IssuePolicy.InFirstRunScope(row, row.Context.FirstRun, row.Context.FirstRunDeletion)
+            ? row with { Context = row.Context with { CompleteInventory = false, DeletionEligible = true } }
             : row;
 
     private bool DeletionEligible(Row row, IssueSubject.FirstRunDeletionKind kept, bool inventory)
@@ -275,8 +288,19 @@ internal sealed class RowContexts(ExecutorContext context, bool firstRun, bool c
         if (!inventory || !completeInventory) return true;
         var probe = deletedName;
         if (probe is null) return false;
-        foreach (var ancestor in PathNames.Ancestors(path))
-            if (probe(PathNames.DropboxKey(ancestor))) return true;
-        return probe(key);
+        try
+        {
+            foreach (var ancestor in PathNames.Ancestors(path))
+                if (probe(PathNames.DropboxKey(ancestor))) return true;
+            return probe(key);
+        }
+        catch (InvalidDataException)
+        {
+            if (context.BatchScope is null) throw;
+            completeInventory = false;
+            _ordinary = _ordinary with { CompleteInventory = false };
+            _historyInvalidated = true;
+            return true;
+        }
     }
 }

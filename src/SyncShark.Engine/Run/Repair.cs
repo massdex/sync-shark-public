@@ -182,9 +182,13 @@ public static class Repair
         }
         finally
         {
-            if (scanId is { } token)
-                try { await store.EndScanAsync(pair.PairId, token, session.Settings.StoragePageSize).ConfigureAwait(false); }
-                catch (Exception cleanup) { log.Failed(cleanup); }
+            try { store.RequireRepairForOwedHistory(pair.PairId, session.ExpectedGeneration); }
+            finally
+            {
+                if (scanId is { } token)
+                    try { await store.EndScanAsync(pair.PairId, token, session.Settings.StoragePageSize).ConfigureAwait(false); }
+                    catch (Exception cleanup) { log.Failed(cleanup); }
+            }
         }
     }
 

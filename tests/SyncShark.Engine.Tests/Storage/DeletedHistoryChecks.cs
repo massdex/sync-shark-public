@@ -46,6 +46,9 @@ public static class DeletedHistoryChecks
     private static SqliteConnection Connection(StateStore store) => (SqliteConnection)typeof(StateStore)
         .GetField("_connection", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(store)!;
 
+    internal static void CorruptSavedHistory(StateStore store) =>
+        Execute(Connection(store), "UPDATE discovery_deleted_block SET names=x'010203';");
+
     private static long Generation(IStateStore store) => store.ReadPairExecution(PairId)!.Value.Generation;
 
     private static void Execute(SqliteConnection connection, string sql, params (string Name, object? Value)[] args)
@@ -460,7 +463,10 @@ public static class DeletedHistoryChecks
         }
         using (var store = StateStore.Open(path))
         {
-            Check.Require(!store.SavedDeletedNameExact(PairId, "UNSEEN") && store.DeletedHistoryOwed(PairId) &&
+            var unavailable = false;
+            try { store.SavedDeletedNameExact(PairId, "UNSEEN"); }
+            catch (InvalidDataException) { unavailable = true; }
+            Check.Require(unavailable && store.DeletedHistoryOwed(PairId) &&
                 store.DeletedNameSpent(PairId, "COPY"), "A corrupt outside-scan probe diagnoses reacquisition and preserves spent facts.");
             var token = store.BeginScan(PairId, Generation(store), true);
             Seed(Connection(store), ["COPY", "FRESH"]);

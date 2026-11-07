@@ -23,6 +23,11 @@ public partial class MainWindow
         if (pair is null || pair.Id != row.PairId || EngineIssueId(row) is not { } id ||
             !_engineIssueRows.TryGetValue(id, out var current) || !ReferenceEquals(current, row) ||
             row.NoticeOptions?.Contains(option) != true) return;
+        // A refresh replaces the row record and clears the issue map, so a stale click must stop.
+        bool StillCurrent() =>
+            !_closing && ReferenceEquals(pair, _engineSelectedPair) &&
+            _engineIssueRows.TryGetValue(id, out current) && ReferenceEquals(current, row) &&
+            row.NoticeOptions?.Contains(option) == true;
         var options = new List<(EngineOptionKey Key, string Value)>
         {
             (EngineOptionKey.Pair, pair.Id),
@@ -37,12 +42,13 @@ public partial class MainWindow
             var value = NoticeDestination(
                 input == EngineOptionKey.Name ? option.Label : EngineCliCatalog.Flag(input));
             if (value is null) return;
+            // The dialog pumped messages, so the row may have been refreshed while it was open.
+            if (!StillCurrent()) return;
             options.Add((input, value));
         }
-        if (!AppDialogWindow.Confirm(this, option.Label, row.Path, row.Reason + Environment.NewLine + Massdex.SyncShark.Engine.Edge.IssuePresentation.ResolutionConfirmation(_engineIssues[id], Enum.Parse<Massdex.SyncShark.Engine.ResolutionChoice>(option.Choice)), option.Label)) return;
-        if (_closing || !ReferenceEquals(pair, _engineSelectedPair) ||
-            !_engineIssueRows.TryGetValue(id, out current) || !ReferenceEquals(current, row) ||
-            row.NoticeOptions?.Contains(option) != true) return;
+        if (!_engineIssues.TryGetValue(id, out var issue) ||
+            !AppDialogWindow.Confirm(this, option.Label, row.Path, row.Reason + Environment.NewLine + Massdex.SyncShark.Engine.Edge.IssuePresentation.ResolutionConfirmation(issue, Enum.Parse<Massdex.SyncShark.Engine.ResolutionChoice>(option.Choice)), option.Label)) return;
+        if (!StillCurrent()) return;
         var result = await EngineReplyAsync(EngineCommandKey.Resolve, options.ToArray(), json: false);
         if (_closing) return;
         await RefreshEnginePresentationAsync();

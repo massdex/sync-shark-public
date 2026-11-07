@@ -47,6 +47,13 @@ public static class ResolutionRunnerChecks
         foreach (var failCopy in new[] { false, true })
             await FolderOverFolderAsync(side, failCopy);
         await FolderRetryAsync();
+        var failures = new List<Exception>();
+        foreach (var matched in new[] { false, true })
+        {
+            try { await CorruptHistoryRetryAsync(matched); }
+            catch (Exception error) { failures.Add(new InvalidOperationException("Corrupt Retry matched=" + matched, error)); }
+        }
+        if (failures.Count != 0) throw new AggregateException(failures);
         await InvalidAsync(false);
         await InvalidAsync(true);
         await StaleBeforeBadChoiceAsync();
@@ -186,6 +193,125 @@ public static class ResolutionRunnerChecks
             Check.Require(store.SyncedByKey(pair, Side.Dropbox, PathNames.DropboxKey("Parent/F1")) is not null,
                 "an independent successful sibling is retained");
         }
+    }
+
+    private static async Task CorruptHistoryRetryAsync(bool matched)
+    {
+        var paths = new[] { "Parent/A", "Parent/B", "Parent/C" };
+        var original = Context(new FakeAdmission { Level = paths.Length });
+        using var store = (StateStore)original.Store;
+        var pair = original.Pair.PairId;
+        var parent = await original.Dropbox.EnsureFolderAsync("Parent", default);
+        await original.Local.EnsureFolderAsync("Parent", default);
+        var entries = new List<Entry>();
+        foreach (var path in paths)
+        {
+            var entry = await PutAsync(original.Local, path, "retained");
+            entries.Add(entry);
+            store.Commit(pair, StateChange.Empty with
+            {
+                Raise = [(IssueKind.Failure, TextKey.FailFirstSyncCheckWaiting, path,
+                    new IssueSubject([new IssueItem(Side.Local, path, entry.Id)], null,
+                        FirstRunDeletion: IssueSubject.FirstRunDeletionKind.Item))]
+            });
+        }
+        var hash = await original.Local.ContentHashAsync(entries[0], default);
+        async Task SaveHistoryAsync(bool includeMatches)
+        {
+            var token = store.BeginScan(pair, 0, true);
+            var sink = store.OpenScan(pair, Side.Dropbox, ScanTestSettings.BatchRows);
+            if (includeMatches) await sink.AddAsync(new Listed(paths[0], null), default);
+            await sink.AddAsync(new Listed(paths[1], null), default);
+            await sink.CompleteAsync();
+            store.SaveDeletedHistory(pair, token, "history");
+            await store.EndScanAsync(pair, token, original.Settings.StoragePageSize);
+        }
+        await SaveHistoryAsync(matched);
+        var prepared = false;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var corrupt = new CorruptRetryStore(store, paths[1], () =>
+        {
+            Check.Require(prepared, "The earlier Retry action reached freshness before corruption.");
+            Massdex.SyncShark.Engine.Tests.Storage.DeletedHistoryChecks.CorruptSavedHistory(store);
+        }, () => release.TrySetResult());
+        var context = original with
+        {
+            Store = corrupt,
+            ReadDeletionEvidenceAsync = (path, _, _) => Task.FromResult<DeletionEvidence>(
+                new DeletionEvidence.DeletedFile(path, "domain", "deleted-id", "revision",
+                    DateTimeOffset.UtcNow.AddDays(-1), null, hash, null)),
+            Local = new ProxySide(original.Local)
+            {
+                BeforeRead = async (path, ct) =>
+                {
+                    if (path != paths[0] || prepared) return;
+                    prepared = true;
+                    await release.Task.WaitAsync(ct);
+                }
+            }
+        };
+        var boundary = new TestSelectedBoundary(context);
+        var ports = new SyncPorts(PassthroughRecoveryBoundary.Instance, RefusingExecutionBoundary.Instance, boundary, 0);
+        ports = ports with
+        {
+            RunBatchAsync = (selection, side, scope, retries, settles, ct) =>
+                SyncJobs.RunBatchAsync(context, ports, selection, scope, ct, side, retries, settles)
+        };
+        var syncer = new Syncer(context, ports);
+        async Task RetryAsync()
+        {
+            store.Commit(pair, StateChange.Empty with
+            {
+                Raise = [(IssueKind.Failure, TextKey.FailChanged, "Parent",
+                    new IssueSubject([new IssueItem(Side.Dropbox, "Parent", parent.Id)], null))]
+            });
+            var issue = store.Issues(pair).Single(value => value.Path == "Parent");
+            await syncer.ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
+        }
+        await RetryAsync();
+        Check.Require(corrupt.Injected && store.DeletedHistoryOwed(pair) &&
+            store.Issues(pair).Any(value => value.Cause == TextKey.DeletedHistoryCorrupt),
+            "Retry discovers corrupt saved history and retains its reacquisition diagnostic.");
+        // A second Retry without acquisition must preserve the same obligations, not turn absence into authority.
+        await RetryAsync();
+        foreach (var entry in entries)
+            Check.Require(await original.Local.ReadOneAsync(entry.Path, default) == entry &&
+                await original.Dropbox.ReadOneAsync(entry.Path, default) is null &&
+                store.Issues(pair).Any(value => value.Path == entry.Path && value.Kind == IssueKind.Failure),
+                "Corruption holds prepared, detecting and later Retry rows without upload or deletion: " + entry.Path);
+        await SaveHistoryAsync(matched);
+        await RetryAsync();
+        foreach (var entry in entries)
+        {
+            var deleted = entry.Path == paths[1] || matched && entry.Path == paths[0];
+            Check.Require(deleted ? await original.Local.ReadOneAsync(entry.Path, default) is null
+                : await original.Dropbox.ReadOneAsync(entry.Path, default) is not null,
+                "Reacquired history settles each retained Retry obligation: " + entry.Path);
+            Check.Require(!store.Issues(pair).Any(value => value.Path == entry.Path && value.Kind == IssueKind.Failure),
+                "Successful history-backed Retry clears the retained failure.");
+        }
+    }
+
+    private sealed class CorruptRetryStore(IStateStore inner, string detectingPath, Action inject, Action release)
+        : ForwardingStateStore(inner)
+    {
+        public bool Injected { get; private set; }
+        public override bool FirstRepairDone(string pairId) => true;
+        public override bool SavedDeletedNameExact(string pairId, string key)
+        {
+            if (!Injected && key == PathNames.DropboxKey(detectingPath))
+            {
+                Injected = true;
+                inject();
+            }
+            return base.SavedDeletedNameExact(pairId, key);
+        }
+        public override IEnumerable<Row> ScanRows(string pairId, Guid scanId, Func<Row, RowContext> context) =>
+            base.ScanRows(pairId, scanId, row =>
+            {
+                try { return context(row); }
+                finally { if (row.Key == PathNames.Key(detectingPath)) release(); }
+            });
     }
 
     private sealed class RepairedStore(IStateStore inner) : ForwardingStateStore(inner)
@@ -1563,6 +1689,8 @@ public static class ResolutionRunnerChecks
         public void RequireScopes(string pairId, long requiredGeneration, IReadOnlyList<PathLockScope> scopes) =>
             Require(pairId, requiredGeneration, scopes.Select(scope => scope.Key).ToArray());
 
+        public void Revalidate() { }
+
         public ValueTask ReleaseAdmissionAsync() => throw new NotSupportedException(nameof(ReleaseAdmissionAsync));
 
         public ValueTask DisposeAsync() => default;
@@ -1599,6 +1727,7 @@ public static class ResolutionRunnerChecks
         {
             public void Require(string pairId, long generation, IReadOnlyList<string> requiredLockKeys) { }
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) { }
+            public void Revalidate() { }
             public ValueTask ReleaseAdmissionAsync() => default;
             public ValueTask DisposeAsync() => default;
         }

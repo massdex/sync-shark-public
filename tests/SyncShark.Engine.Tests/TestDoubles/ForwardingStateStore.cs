@@ -86,6 +86,8 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
         Inner.AcquireJournalPage(volumeKey, expected, next, members, notices);
     public virtual void RequireRepairAfterLoss(string pairId, long expectedGeneration) =>
         Inner.RequireRepairAfterLoss(pairId, expectedGeneration);
+    public virtual void RequireRepairForOwedHistory(string pairId, long expectedGeneration) =>
+        Inner.RequireRepairForOwedHistory(pairId, expectedGeneration);
     public virtual SourceObligation LostIntervalObligation(string pairId) =>
         Inner.LostIntervalObligation(pairId);
     public virtual (long Epoch, SourceProvenance? Provenance, string? Cursor, SourceObligation? Obligation, long Revision)? ReadSource(string pairId, Side side) =>

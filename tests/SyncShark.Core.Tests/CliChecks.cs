@@ -2927,6 +2927,21 @@ internal static partial class CliChecks
             }
             Require(SyncCliRegistry.Rows.Select(row => row.Command).Distinct(StringComparer.Ordinal).Count() ==
                     SyncCliRegistry.Rows.Count, "the command registry has no duplicate command");
+            // AGENTS.md CLI parity: the accepted --ignored filter is one fact in usage, options, effect, help
+            // and the capability projection, so no one of them can drift back to omitting it.
+            var ignoredFlag = EngineCliCatalog.Flag(EngineOptionKey.Ignored);
+            var conflictsList = SyncCliRegistry.Rows.Single(row => row.Command == "conflicts list");
+            Require(conflictsList.Usage.Contains(ignoredFlag, StringComparison.Ordinal) &&
+                    conflictsList.Options.Split(',').Contains(ignoredFlag) &&
+                    conflictsList.Effect.Contains(
+                        "--ignored lists hidden, non-dismissed notices with Restore through the Engine host; " +
+                        "the direct-v2 fallback and legacy routes do not forward it",
+                        StringComparison.Ordinal),
+                "conflicts list publishes its ignored filter in usage, options and effect");
+            Require(SyncCli.HelpText().Contains(conflictsList.Usage, StringComparison.Ordinal) &&
+                    SyncCliRegistry.Capabilities().Commands.Single(row => row.Command == "conflicts list")
+                        .Usage.Contains(ignoredFlag, StringComparison.Ordinal),
+                "conflicts list help and capabilities carry the ignored filter from the one registry");
             var duplicateRow = SyncCliRegistry.Rows.Single(row => row.Command == "pairs duplicate");
             Require(duplicateRow.Usage.Contains("--settings", StringComparison.Ordinal) &&
                 duplicateRow.Options.Contains("--settings", StringComparison.Ordinal),

@@ -264,7 +264,7 @@ internal static class PairSafety
                 if (!session.Host.TryHoldGeneration(session.Registration)) return false;
             return true;
         }
-        await using var execution = await AdmittedExecution.AcquireAsync(requests, AcceptGrant, ct).ConfigureAwait(false);
+        await using var execution = await AdmittedExecution.AcquireAsync(requests, AcceptGrant, ct, validate).ConfigureAwait(false);
         var checkedPairs = new HashSet<string>(StringComparer.Ordinal);
         foreach (var session in sessions)
         {

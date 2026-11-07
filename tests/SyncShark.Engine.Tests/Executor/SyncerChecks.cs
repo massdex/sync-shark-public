@@ -55,6 +55,8 @@ public static class SyncerChecks
         await FreeIncomingAsync();
         await ReturningOriginalsAsync();
         await MappedReobserveAsync();
+        await ReobserveFailureAsync();
+        await SingleLegKeepBothAsync();
         await LocksAsync();
         await LabelRaceAsync();
         await SkippedDropboxLabelRaceAsync();
@@ -703,6 +705,7 @@ public static class SyncerChecks
         }
         public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) =>
             Require(pairId, generation, []);
+        public void Revalidate() { }
         public ValueTask ReleaseAdmissionAsync() => throw new NotSupportedException(nameof(ReleaseAdmissionAsync));
         public ValueTask DisposeAsync() => default;
     }
@@ -1594,6 +1597,79 @@ public static class SyncerChecks
                 Check.Require(store.ReadWorkWatermark() == watermark,
                     "An ordinary mapped Record has no crossed partner to release.");
         }
+    }
+
+    private static async Task ReobserveFailureAsync()
+    {
+        using var store = new InMemoryStateStore();
+        var context = Context(store);
+        var local = await PutAsync(context.Local, "item_");
+        var partner = await PutAsync(context.Local, "elsewhere");
+        var remote = await PutAsync(context.Dropbox, "item_");
+        // The binding sits under the other side's key, but its recorded Dropbox identity no longer matches the live
+        // file, so observation cannot adopt it and the Record row re-observes to exactly itself.
+        var saved = Save(context, partner, remote);
+        var replaced = remote with { Id = "replaced", Revision = "replaced-revision" };
+        ((FakeSide)context.Dropbox).Seed(replaced, [1]);
+        var watermark = store.ReadWorkWatermark();
+        var result = await NewJobs(context).Items.RunRowAttemptAsync(Row(local, replaced, null), CancellationToken.None);
+        Check.Require(result.Raised == IssueKind.Failure &&
+            store.Issues(context.Pair.PairId).Single().Cause == TextKey.FailChanged,
+            "An unchanged row that still fails its required re-observation is that item's own Failure, not a silent result.");
+        Check.Require(store.SyncedByKey(context.Pair.PairId, Side.Local, saved.LocalKey) == saved &&
+            store.SyncedByKey(context.Pair.PairId, Side.Dropbox, saved.DropboxKey) == saved &&
+            store.ReadWorkWatermark() == watermark,
+            "The item's Failure keeps custody of the crossed binding and releases neither endpoint as work.");
+        Check.Require(await context.Local.ReadOneAsync(local.Path, CancellationToken.None) == local &&
+            await context.Dropbox.ReadOneAsync(replaced.Path, CancellationToken.None) == replaced,
+            "Neither live endpoint is overwritten, moved or removed by the re-observation Failure.");
+    }
+
+    private static async Task SingleLegKeepBothAsync()
+    {
+        using var store = new InMemoryStateStore();
+        var context = Context(store);
+        var partner = await PutAsync(context.Local, "Partner", [2]);
+        var original = await PutAsync(context.Dropbox, "Original", [3]);
+        // A crossed file binding: the Local name "Partner" still records the Dropbox file now spelled "Original".
+        var saved = SyncedEntries.From(partner, original) with { DropboxContentHash = "previous-content" };
+        store.Commit(context.Pair.PairId, StateChange.Empty with { Record = [saved] });
+        var returning = await PutAsync(context.Local, "Original", [4]);
+        var row = Row(returning, original, saved) with
+        {
+            LocalHash = await context.Local.ContentHashAsync(returning, CancellationToken.None)
+        };
+        Check.Require(Decide.CrossedFar(row.Local, row.Dropbox, saved) == Side.Local &&
+            Decide.For(row, FirstRunPolicy.NewestWins, DateTimeOffset.UnixEpoch.AddDays(1), localContentDirty: false).Kind
+                == ActionKind.KeepBoth,
+            "The fixture is a returning original whose divergent edit decides keep-both.");
+        var watermark = store.ReadWorkWatermark();
+        var jobs = NewJobs(context);
+        var labels = await jobs.KeepBoth.ChooseLabelsAsync(row, CancellationToken.None, Side.Dropbox);
+        Check.Require(labels.DropboxLabel is not null && labels.LocalLabel is null,
+            "An exclusion keeps only the retained side's leg.");
+        store.Commit(context.Pair.PairId, await jobs.KeepBoth.RunAsync(row, labels, CancellationToken.None));
+        var copy = await context.Dropbox.ReadOneAsync(labels.DropboxLabel!, CancellationToken.None);
+        Check.Require(copy is not null && await context.Dropbox.ContentHashAsync(copy, CancellationToken.None) ==
+                await context.Local.ContentHashAsync(returning, CancellationToken.None),
+            "The one kept leg preserves the returning original's exact bytes.");
+        Check.Require(store.SyncedByKey(context.Pair.PairId, Side.Local, saved.LocalKey) is null &&
+            store.SyncedByKey(context.Pair.PairId, Side.Dropbox, saved.DropboxKey) is null &&
+            store.ReadWorkWatermark() == watermark,
+            "Retiring the crossed binding on one leg releases no endpoint, so the far local partner stays unsynced.");
+        Check.Require(await context.Local.ReadOneAsync(partner.Path, CancellationToken.None) == partner &&
+            await context.Dropbox.ReadOneAsync(original.Path, CancellationToken.None) == original &&
+            await context.Local.ReadOneAsync(returning.Path, CancellationToken.None) == returning,
+            "No original is overwritten, moved or removed by the one-leg change.");
+        var edited = await PutAsync(context.Local, partner.Path, [5], partner, partner.Modified.AddSeconds(1));
+        var outcome = await NewJobs(context).Items.SyncPathAsync(Side.Local, edited.Path, CancellationToken.None);
+        var arrived = await context.Dropbox.ReadOneAsync(edited.Path, CancellationToken.None);
+        Check.Require(outcome.Kind == ActionKind.Upload && outcome.Succeeded() && arrived is not null &&
+            await context.Dropbox.ContentHashAsync(arrived, CancellationToken.None) ==
+                await context.Local.ContentHashAsync(edited, CancellationToken.None) &&
+            store.SyncedByKey(context.Pair.PairId, Side.Local, PathNames.Key(edited.Path)) is { } rebuilt &&
+            rebuilt.DropboxPath == edited.Path,
+            "The retained far partner is reached by its change event and converges instead of staying stuck.");
     }
 
     private static async Task LocksAsync()
@@ -2639,6 +2715,7 @@ public static class SyncerChecks
 
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> required) =>
                 Require(pairId, generation, required.Select(scope => scope.Key).ToArray());
+            public void Revalidate() { }
             public ValueTask ReleaseAdmissionAsync() => default;
             public ValueTask DisposeAsync() => default;
         }
@@ -2694,6 +2771,7 @@ public static class SyncerChecks
             public void Require(string pairId, long generation, IReadOnlyList<string> requiredLockKeys) =>
                 call.Required.AddRange(requiredLockKeys);
             public void RequireScopes(string pairId, long generation, IReadOnlyList<PathLockScope> scopes) { }
+            public void Revalidate() { }
             public ValueTask ReleaseAdmissionAsync() => default;
             public ValueTask DisposeAsync() => default;
         }

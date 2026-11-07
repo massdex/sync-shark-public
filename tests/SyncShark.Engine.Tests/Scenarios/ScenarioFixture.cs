@@ -468,12 +468,13 @@ internal sealed class Scenario : IDisposable
     }
 
     /// <summary>Runs the change between a row's freshness read and its effect, after the target side's binding read.</summary>
-    public void AfterFreshRead(Side side, string path, Action change)
+    public void AfterFreshRead(Side side, string path, Action change, int occurrence = 1)
     {
         var key = side == Side.Local ? PathNames.Key(path) : PathNames.DropboxKey(path);
+        var reads = 0;
         observedStore.AfterSyncedByKey = (readSide, readKey) =>
         {
-            if (readSide != side || readKey != key) return;
+            if (readSide != side || readKey != key || ++reads != occurrence) return;
             observedStore.AfterSyncedByKey = null;
             change();
         };

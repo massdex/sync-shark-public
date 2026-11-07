@@ -1,0 +1,16 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "dropbox",
+    "engine-host",
+    "repair",
+    "strings",
+    "literals",
+    "live-wake",
+    "live-admission"
+  ],
+  "core": [],
+  "ui": []
+}

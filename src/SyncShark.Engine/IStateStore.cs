@@ -84,6 +84,8 @@ public interface IStateStore : IDisposable
     SourceObligation LostIntervalObligation(string pairId);
     /// <summary>Invalidates Local Repair completion after source loss, preserving existing debt and acquired work.</summary>
     void RequireRepairAfterLoss(string pairId, long expectedGeneration);
+    /// <summary>Retains automatic acquisition responsibility when a Repair leaves history owed without existing debt.</summary>
+    void RequireRepairForOwedHistory(string pairId, long expectedGeneration);
 
     /// <summary>The authoritative source fence, or null before the source is installed; reread after a lost page reply.</summary>
     (long Epoch, SourceProvenance? Provenance, string? Cursor, SourceObligation? Obligation, long Revision)?
@@ -280,6 +282,7 @@ public interface IStateStore : IDisposable
     /// <summary>Checks the completed discovery relation once per immutable scan, bypassing per-row work when empty.</summary>
     bool HasDeletedNames(string pairId, Guid scanId);
     /// <summary>Probes one path-owner-supplied exact key in discovery or retained history, masked by spent state; a match is not deletion proof.</summary>
+    /// <exception cref="InvalidDataException">Saved history was corrupt and its acquisition authority was revoked.</exception>
     bool DeletedNameExact(string pairId, Guid scanId, string key);
     /// <summary>Whether this exact history key was consumed by committed Local removal or endpoint retirement; independent of scans.</summary>
     bool DeletedNameSpent(string pairId, string key);
@@ -288,6 +291,7 @@ public interface IStateStore : IDisposable
     /// <summary>Whether a full deleted-name acquisition is still owed, independently of first-Repair completion.</summary>
     bool DeletedHistoryOwed(string pairId);
     /// <summary>Exact membership in completed durable history; a match selects evidence, never removal authority.</summary>
+    /// <exception cref="InvalidDataException">Saved history was corrupt and its acquisition authority was revoked.</exception>
     bool SavedDeletedNameExact(string pairId, string key);
     /// <summary>Seeds deleted names from a completed acquisition, returning its own continuation cursor.</summary>
     string? RestoreDeletedHistory(string pairId, Guid scanToken);

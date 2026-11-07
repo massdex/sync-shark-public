@@ -18,7 +18,7 @@ public static class LiveRunChecks
     public static void RunWake()
     {
         var wakeFailures = new List<Exception>();
-        foreach (var exit in new[] { "hash-provider-clone", "folder-hash-unrelated", "folder-hash-change", "hash-unrelated", "hash-change", "attempt-change", "attempt-unrelated", "progress", "progress-false", "progress-ancestor", "resolve", "failed-install", "reopen", "prerequisite", "global-resume", "platform-wake", "host-stop", "selection-refusal", "pass-refusal", "request", "pause", "host", "stop", "fault" })
+        foreach (var exit in new[] { "hash-provider-clone", "folder-hash-unrelated", "folder-hash-change", "folder-admission-change", "folder-replacement-admission", "hash-unrelated", "hash-change", "attempt-change", "attempt-unrelated", "progress", "progress-false", "progress-ancestor", "resolve", "failed-install", "reopen", "prerequisite", "global-resume", "platform-wake", "host-stop", "selection-refusal", "pass-refusal", "request", "pause", "host", "stop", "fault" })
         {
             Console.WriteLine("START live-last-selection-wake-" + exit);
             try
@@ -644,7 +644,7 @@ public static class LiveRunChecks
             "W3: resolving a hold wakes and settles its retained selection without another source notice");
     }
 
-    private static void FolderHashEvidence(Scenario scenario, bool related)
+    private static void FolderHashEvidence(Scenario scenario, bool related, bool admitted = false)
     {
         const string folder = "planned";
         const string child = folder + "/child.txt";
@@ -666,11 +666,8 @@ public static class LiveRunChecks
             [new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, folder, null, remote.Id, null, false, false)], source.Cursor!);
         scenario.Host.CatchUpLocalAsync(pairId, generation, Scenario.Cancellation).GetAwaiter().GetResult();
         var reads = 0;
-        scenario.BeforeDirtyRead = () =>
+        void Change()
         {
-            if (++reads != 2) return;
-            scenario.BeforeDirtyRead = null;
-            Console.WriteLine("X1 folder hash proof changed: related=" + related);
             scenario.LocalFile(related ? child : "unrelated.txt", related ? Second : First, Scenario.T2);
             var localSource = scenario.Store.ReadSource(pairId, Side.Local)!.Value;
             var volume = scenario.Pair.Roots!.LocalVolumeKey();
@@ -679,6 +676,14 @@ public static class LiveRunChecks
             scenario.Store.AcquireJournalPage(volume, position, position,
                 [(pairId, generation, localSource.Epoch, localSource.Revision, false)],
                 [(pairId, new ChangeNotice(Side.Local, ChangeKind.Changed, entry.Path, null, entry.Id, entry, true, false))]);
+        }
+        if (admitted) scenario.AfterFreshRead(Side.Local, folder, () => { reads = 2; Change(); }, occurrence: 2);
+        else scenario.BeforeDirtyRead = () =>
+        {
+            if (++reads != 2) return;
+            scenario.BeforeDirtyRead = null;
+            Console.WriteLine("X1 folder hash proof changed: related=" + related);
+            Change();
         };
         var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         scenario.PassEnded = () => ended.TrySetResult();
@@ -688,14 +693,115 @@ public static class LiveRunChecks
         {
             auto.Start();
             ended.Task.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+            if (admitted)
+            {
+                scenario.Require(reads == 2 && opportunities == 1 &&
+                    scenario.Store.Issues(pairId, [IssueKind.Failure]).Count == 0,
+                    "X1: the live folder plan hashes its child and neither evidence change stops the host or raises Failure");
+                var retainedBeforeWake = PendingWork.ByIdentity(scenario.Store, Side.Dropbox,
+                    scenario.Pair.Roots!.Dropbox.RootNamespaceId, remote.Id).Any();
+                var refused = scenario.ObserveRefusal();
+                scenario.Require(related && refused.IsCompleted &&
+                    refused.Result == LiveAdmissionStaleReason.RelevantEvidenceChanged && retainedBeforeWake &&
+                    scenario.LocalFiles().ContainsKey(child),
+                    "X1: a related change acquired after admission refuses the live folder plan and retains its selection");
+                // The child's own change must settle first, then the retained folder selection clears.
+                for (var wake = 0; wake < 3; wake++)
+                {
+                    ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    auto.Kick(pairId);
+                    ended.Task.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+                    if (!PendingWork.ByIdentity(scenario.Store, Side.Dropbox,
+                            scenario.Pair.Roots!.Dropbox.RootNamespaceId, remote.Id).Any())
+                        break;
+                }
+                scenario.Require(!PendingWork.ByIdentity(scenario.Store, Side.Dropbox,
+                        scenario.Pair.Roots!.Dropbox.RootNamespaceId, remote.Id).Any() &&
+                    scenario.DropboxFiles().ContainsKey(child) &&
+                    scenario.Store.Issues(pairId, [IssueKind.Failure]).Count == 0,
+                    "X1: the refused plan converges on its following wake; opportunities=" + opportunities);
+            }
         }
         finally { auto.StopAsync().GetAwaiter().GetResult(); }
+        if (admitted) return;
         scenario.Require(reads == 2 && opportunities == 1 && scenario.Store.Issues(pairId, [IssueKind.Failure]).Count == 0,
             "X1: the live folder plan hashes its child and neither evidence change stops the host or raises Failure");
         var retained = PendingWork.ByIdentity(scenario.Store, Side.Dropbox, scenario.Pair.Roots!.Dropbox.RootNamespaceId, remote.Id).Any();
         scenario.Require(related ? retained && scenario.LocalFiles().ContainsKey(child) :
                 !retained && !Directory.Exists(Path.Combine(scenario.LocalRoot, folder)),
             "X1: unrelated volume progress completes the plan; changed child evidence refuses and retains its selection");
+    }
+
+    private static void FolderReplacementEvidence(Scenario scenario)
+    {
+        const string folder = "planned-swap";
+        const string replacement = "replacement bytes";
+        scenario.LocalFolder(folder);
+        scenario.RepairAsync();
+        var pairId = scenario.Pair.PairId;
+        var generation = scenario.Store.ReadPairExecution(pairId)!.Value.Generation;
+        var domain = scenario.Pair.Roots!.LocalVolumeKey();
+        // The synced folder becomes a local file: its Dropbox folder needs the live replacement phase.
+        scenario.RemoveLocal(folder);
+        scenario.LocalFile(folder, replacement);
+        var entry = scenario.Local.ReadOneAsync(folder, Scenario.Cancellation).GetAwaiter().GetResult()!;
+        void Acquire()
+        {
+            var localSource = scenario.Store.ReadSource(pairId, Side.Local)!.Value;
+            var position = scenario.Store.ReadJournal(domain)!;
+            var current = scenario.Local.ReadOneAsync(folder, Scenario.Cancellation).GetAwaiter().GetResult()!;
+            scenario.Store.AcquireJournalPage(domain, position, position,
+                [(pairId, generation, localSource.Epoch, localSource.Revision, false)],
+                [(pairId, new ChangeNotice(Side.Local, ChangeKind.Changed, current.Path, null, current.Id, current, true, false))]);
+        }
+        // The removal owns the Dropbox folder while it is admitted; a change acquired after that admission must
+        // refuse its re-observation, so watch every observation and inject once, at the first one after it.
+        var armed = false;
+        var injected = 0;
+        void Watch() => scenario.AfterFreshRead(Side.Local, folder, () =>
+        {
+            Watch();
+            if (!armed || injected != 0) return;
+            injected++;
+            Acquire();
+        });
+        Watch();
+        scenario.BeforeLiveValidation = _ =>
+        {
+            if (injected == 0 &&
+                scenario.Dropbox.ReadOneAsync(folder, Scenario.Cancellation).GetAwaiter().GetResult() is { IsFolder: true })
+                armed = true;
+        };
+        scenario.InSession("replace-folder-live", session =>
+        {
+            session.Host.CatchUpLocalAsync(pairId, generation, Scenario.Cancellation).GetAwaiter().GetResult();
+            session.Store.EndWorkPass(pairId);
+            session.Syncer.SyncWorkAsync(Scenario.Cancellation).GetAwaiter().GetResult();
+            var refused = scenario.ObserveRefusal();
+            scenario.Require(injected == 1 && scenario.LiveValidations >= 3 &&
+                scenario.Store.Issues(pairId, [IssueKind.Failure]).Count == 0,
+                "R4: the live replacement re-observes its row after its admission; injected=" + injected +
+                " validations=" + scenario.LiveValidations);
+            scenario.Require(refused.IsCompleted && refused.Result == LiveAdmissionStaleReason.RelevantEvidenceChanged &&
+                PendingWork.ByIdentity(scenario.Store, Side.Local, domain, entry.Id).Any() &&
+                scenario.LocalFiles().ContainsKey(folder) && scenario.Snapshot().Contains("D:" + folder + "/"),
+                "R4: a related change acquired after admission refuses the live replacement and retains its selection; reason=" +
+                (refused.IsCompleted ? refused.Result.ToString() : "none"));
+        });
+        for (var pass = 0; pass < 3; pass++)
+        {
+            if (scenario.DropboxFiles().ContainsKey(folder)) break;
+            scenario.InSession("replace-folder-next-opportunity", session =>
+            {
+                session.Store.EndWorkPass(pairId);
+                session.Syncer.SyncWorkAsync(Scenario.Cancellation).GetAwaiter().GetResult();
+            });
+        }
+        scenario.Require(scenario.DropboxFiles().TryGetValue(folder, out var content) &&
+            content.SequenceEqual(System.Text.Encoding.UTF8.GetBytes(replacement)) &&
+            !PendingWork.ByIdentity(scenario.Store, Side.Local, domain, entry.Id).Any() &&
+            scenario.Store.Issues(pairId, [IssueKind.Failure]).Count == 0,
+            "R4: the refused replacement converges on its following opportunity");
     }
 
     private static void CurrentHashProvider(Scenario scenario)
@@ -729,9 +835,14 @@ public static class LiveRunChecks
             CurrentHashProvider(scenario);
             return;
         }
-        if (exit is "folder-hash-unrelated" or "folder-hash-change")
+        if (exit is "folder-hash-unrelated" or "folder-hash-change" or "folder-admission-change")
         {
-            FolderHashEvidence(scenario, exit == "folder-hash-change");
+            FolderHashEvidence(scenario, exit != "folder-hash-unrelated", exit == "folder-admission-change");
+            return;
+        }
+        if (exit == "folder-replacement-admission")
+        {
+            FolderReplacementEvidence(scenario);
             return;
         }
         if (exit == "resolve")

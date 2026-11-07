@@ -196,9 +196,10 @@ public static class RowContextsChecks
             Consume(contexts.For(rows[0]));
             var forAllocated = AllocProbe.Measure(i => Consume(contexts.For(rows[i % rows.Length])), 1_000, 0);
             var folderAllocated = AllocProbe.Measure(i => Consume(rows[i % rows.Length].IsFolder()), 1_000, 0);
-            Check.Require(forAllocated == 0 && folderAllocated == 0,
-                "with no held rows, ordinary rows' RowContexts.For and Row.IsFolder allocate nothing (observed For=" +
-                forAllocated + " B, IsFolder=" + folderAllocated + " B per 1,000 calls)");
+            var refreshAllocated = AllocProbe.Measure(i => Consume(contexts.RefreshDeletionEligibility(rows[i % rows.Length]).Context), 1_000, 0);
+            Check.Require(forAllocated == 0 && folderAllocated == 0 && refreshAllocated == 0,
+                "with no held rows, ordinary projection and freshness allocate nothing (observed For=" +
+                forAllocated + " B, IsFolder=" + folderAllocated + " B, Refresh=" + refreshAllocated + " B per 1,000 calls)");
         }
         finally
         {

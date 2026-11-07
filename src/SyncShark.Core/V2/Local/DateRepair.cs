@@ -67,6 +67,7 @@ internal static partial class DateRepair
         var identity = LocalItems.ParseObjectId(localRoot.RootObjectId);
         using var root = PilotDirectoryLease.OpenDirectoryReadGuard(localRoot.RootPath,
             new PilotDirectoryIdentity(identity.Volume, identity.FileId));
+        // Local may not reach Run (engine layout), so this copy of the logs path stays here.
         var directory = Path.Combine(productRoot, "v2", "logs");
         Directory.CreateDirectory(directory);
         var reportPath = Path.Combine(directory, $"dates-repair-{DateTime.UtcNow:yyyyMMddTHHmmss}-{Guid.NewGuid():N}.jsonl");

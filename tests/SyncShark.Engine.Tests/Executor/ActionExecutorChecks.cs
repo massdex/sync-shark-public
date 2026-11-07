@@ -2262,6 +2262,7 @@ public static class ActionExecutorChecks
         public bool FirstRepairDone(string pairId) => throw new NotSupportedException();
         public SourceObligation LostIntervalObligation(string pairId) => throw new NotSupportedException();
         public void RequireRepairAfterLoss(string pairId, long expectedGeneration) => throw new NotSupportedException();
+        public void RequireRepairForOwedHistory(string pairId, long expectedGeneration) => throw new NotSupportedException();
         public RepairSummary? LastRepair(string pairId) => throw new NotSupportedException();
         public void MarkRepairLogFailed(string pairId, string runId) => throw new NotSupportedException();
         public void FinishRepair(string pairId, RepairSummary summary) => throw new NotSupportedException();
