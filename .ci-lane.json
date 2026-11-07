@@ -1,0 +1,16 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "syncer",
+    "scenarios-offline",
+    "folder-deletes",
+    "decide",
+    "exclusions",
+    "scope",
+    "stale-freshness"
+  ],
+  "core": [],
+  "ui": []
+}
