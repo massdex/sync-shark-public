@@ -1,0 +1,11 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--cloud-pro-authority-preflight",
+    "--cli-checks"
+  ],
+  "ui": []
+}
