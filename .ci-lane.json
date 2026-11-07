@@ -1,0 +1,15 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "dropbox",
+    "local",
+    "live-wake",
+    "repair",
+    "dependencies",
+    "literals"
+  ],
+  "core": [],
+  "ui": []
+}
