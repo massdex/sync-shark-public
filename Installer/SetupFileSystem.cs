@@ -63,17 +63,6 @@ public sealed class SetupFileSystem : IDisposable
         catch (DirectoryNotFoundException) { return false; }
     }
 
-    /// <summary>Proves that an alternate file path resolves to this held file.</summary>
-    public void VerifyFilePath(string path)
-    {
-        // No-follow applies to the final file; opening it traverses the parent junction.
-        using (var resolved = OpenFile(path))
-        {
-            if (!String.Equals(Identity, resolved.Identity, StringComparison.Ordinal))
-                throw new InvalidDataException(Massdex.SyncShark.SetupMessages.Text("recovery.changed", path));
-        }
-    }
-
     public string Hash()
     {
         using (var borrowed = new SafeFileHandle(handle.DangerousGetHandle(), false))

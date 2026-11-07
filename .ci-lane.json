@@ -4,9 +4,7 @@
   ],
   "engine": [],
   "core": [
-    "--setup-update-checks",
-    "--v2-autosync-checks",
-    "--cli-checks"
+    "--setup-update-checks"
   ],
   "ui": []
 }

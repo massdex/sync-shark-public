@@ -259,8 +259,6 @@ function Invoke-SetupInstall([string]$Archive, [string]$Root) {
         $publishedTree = Open-SetupTree $destination $manifest -RequireComplete
         if ($active) { $active.Retarget([Convert]::FromBase64String($previous), $candidate) }
         else { $next.Rename($activePath) }
-        $publishedExecutable = $publishedTree | Where-Object Path -CEQ (Join-Path $destination 'SyncShark.exe')
-        $publishedExecutable.VerifyFilePath((Join-Path $activePath 'SyncShark.exe'))
         $state.Committed = $true
         Write-SetupFrame $journal $state
         $journal.Delete(); $journal = $null

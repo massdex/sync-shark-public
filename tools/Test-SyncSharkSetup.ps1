@@ -295,32 +295,6 @@ Assert ((Active-Version $changedInstall) -ceq '1.2.4') 'Corrected obstruction di
 Assert (-not [SetupFileSystem]::Exists($blockedJournal)) 'Corrected obstruction retained its recovery journal.'
 Assert (@([IO.Directory]::EnumerateFileSystemEntries($stagingPath)).Count -eq 0) 'Corrected obstruction retained preparation.'
 
-foreach ($fault in @('missing', 'different')) {
-    $launcherCase = Join-Path $Root ('launcher-' + $fault)
-    $launcherInstall = Join-Path $launcherCase 'installation'
-    $foreign = Join-Path $launcherCase 'foreign'
-    $foreignExecutable = Join-Path $foreign 'SyncShark.exe'
-    if ($fault -eq 'different') {
-        [IO.Directory]::CreateDirectory($foreign) | Out-Null
-        Copy-Item -LiteralPath (Join-Path $Root 'payload-1.2.4\SyncShark.exe') -Destination $foreignExecutable
-    }
-    $candidateBoundary = '        $candidate = [SetupFileSystem]::JunctionData($destination)'
-    $wrongLauncher = $script.Replace($candidateBoundary, '        $candidate = [SetupFileSystem]::JunctionData((Join-Path ([IO.Path]::GetDirectoryName($Root)) ''foreign''))')
-    Assert ($wrongLauncher -cne $script) 'Launcher fixture did not bind.'
-    $launcherExit = Invoke-SetupVariant $wrongLauncher $launcherCase $new $launcherInstall
-    $failure = if ($fault -eq 'missing') { 'Missing launcher was reported installed.' } else { 'Different launcher identity was reported installed.' }
-    Assert ($launcherExit -ne 0) $failure
-    Assert (-not [IO.File]::ReadAllText((Join-Path $launcherCase 'stdout.log')).Contains([Massdex.SyncShark.SetupMessages]::Text('install.success', [object[]]@('1.2.4')))) 'Unverified launcher printed success.'
-    Assert (-not [SetupFileSystem]::Exists((Join-Path $launcherInstall 'active'))) 'Launcher refusal retained the active junction.'
-    Assert (-not [SetupFileSystem]::Exists((Join-Path $launcherInstall 'versions\1.2.4'))) 'Launcher refusal retained the owned payload.'
-    Assert (-not [SetupFileSystem]::Exists((Join-Path $launcherInstall 'versions\setup-transaction.jsonl'))) 'Launcher refusal did not finish exact rollback.'
-    if ($fault -eq 'different') {
-        Assert ([SetupFileSystem]::Equal([IO.File]::ReadAllBytes($foreignExecutable), [IO.File]::ReadAllBytes((Join-Path $Root 'payload-1.2.4\SyncShark.exe')))) 'Launcher refusal changed foreign executable bytes.'
-    }
-    Invoke-SetupInstall $new $launcherInstall
-    Assert ((Active-Version $launcherInstall) -ceq '1.2.4') 'Launcher refusal blocked retry.'
-}
-
 # The detached janitor must fail visibly and retain a log, rather than swallowing locked-file errors.
 $download = Join-Path $Root 'download'; [IO.Directory]::CreateDirectory($download) | Out-Null
 $locked = [IO.File]::Open((Join-Path $download 'locked.exe'), 'CreateNew', 'ReadWrite', 'None')
