@@ -1,7 +1,7 @@
 param([string]$Payload, [switch]$FunctionsOnly)
 $ErrorActionPreference = 'Stop'
 if (-not ('SetupFileSystem' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'SetupFileSystem.cs') }
-if (-not ('Massdex.SyncShark.SetupMessages' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'SetupMessages.cs') }
+if (-not ('Massdex.SyncShark.SetupMessages' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'SetupMessages.cs') -ReferencedAssemblies ([System.Xml.XmlDocument].Assembly.Location) }
 [Massdex.SyncShark.SetupMessages]::Load((Join-Path $PSScriptRoot 'setup-strings.xml'))
 
 function Open-SetupDirectories([string]$Path, [switch]$Create) {
