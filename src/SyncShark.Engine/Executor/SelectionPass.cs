@@ -175,8 +175,11 @@ internal sealed class SelectionPass
             });
             if (row is null) continue;
             var observed = row.EntryOn(notice.Side);
-            // control: the rename dispatch is bypassed for this run.
-            RenameCandidate? candidate = null;
+            // control: bypass the rename dispatch only for a destination under an ignored folder.
+            RenameCandidate? candidate = notice.Path.StartsWith("Ignored/", StringComparison.Ordinal)
+                ? null
+                : settled is not null ? null : Renames.Candidate(notice.Side, observed,
+                    observed is null ? null : _context.Store.SyncedById(selection.PairId, notice.Side, observed.Id));
             if (candidate is not null)
             {
                 var rename = await RenameAsync(selection, notice, original, row, candidate,
