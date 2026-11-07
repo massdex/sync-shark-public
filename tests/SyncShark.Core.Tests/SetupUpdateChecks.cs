@@ -65,6 +65,7 @@ internal static class SetupUpdateChecks
             if (Directory.Exists(retained)) throw new Exception("Cleanup did not remove the unlocked download.");
         }
         finally { if (Directory.Exists(retained)) Directory.Delete(retained, true); }
+        SetupCleanupLaunchChecks.Run();
         try { SyncCliParser.Parse(["--cli", "setup", "apply", "--update", "1.2.3"]); }
         catch (SyncCliUsageException) { return 0; }
         throw new Exception("Setup apply accepted missing confirmation.");

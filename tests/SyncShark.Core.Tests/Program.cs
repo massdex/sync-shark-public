@@ -20,6 +20,8 @@ AppDomain.CurrentDomain.ProcessExit += (_, _) =>
     if (OperatingSystem.IsWindows()) Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(startupTestKey, throwOnMissingSubKey: false);
 };
 
+if (args is ["--setup-cleanup-launch-child", var setupCleanupRoot])
+    return SetupCleanupLaunchChecks.Child(setupCleanupRoot);
 if (args is ["--setup-update-checks"])
     return SetupUpdateChecks.Run();
 

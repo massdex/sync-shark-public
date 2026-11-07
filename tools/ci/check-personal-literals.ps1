@@ -36,7 +36,7 @@ if ($ExportRoot) {
     foreach ($file in Get-ChildItem -LiteralPath $ExportRoot -Recurse -File -Force) {
         $bytes = [IO.File]::ReadAllBytes($file.FullName)
         $text = $file.FullName.Substring($ExportRoot.Length) + "`n" + [Text.Encoding]::UTF8.GetString($bytes) +
-            "`n" + [Text.Encoding]::Unicode.GetString($bytes)
+            "`n" + [Text.Encoding]::Unicode.GetString($bytes) + "`n" + [Text.Encoding]::BigEndianUnicode.GetString($bytes)
         foreach ($pattern in $patterns) {
             if ([regex]::IsMatch($text, $pattern, 'IgnoreCase')) {
                 Write-Host ("Personal literal match in " + $file.FullName.Substring($ExportRoot.Length))
@@ -47,7 +47,7 @@ if ($ExportRoot) {
     }
     if ($found) { throw 'check-personal-literals: exported tree refused (no exclusions).' }
     Write-Host 'check-personal-literals: exported tree clean (no exclusions).'
-    exit 0
+    return
 }
 if ($NoExclusions) { throw '-NoExclusions requires -ExportRoot.' }
 

@@ -10,6 +10,8 @@ $mutants = @(
     @('first-rollback', 'setup.ps1', '$active.Delete(); $active = $null', '$active.Dispose(); $active = $null', 'First-install rollback retained the launcher.'),
     @('upgrade-rollback', 'setup.ps1', '$active.Retarget($candidate, $previous)', '$active.ReadJunction() | Out-Null', 'Interrupted switch lost the active launcher.'),
     @('cleanup-report', 'cleanup.ps1', 'exit 1', 'exit 0', 'Detached cleanup hid a retained download.'),
+    @('obstruction-journal', 'setup.ps1', 'catch { throw ([Massdex.SyncShark.SetupMessages]::Text(''install.rollback''', 'catch { $journal.Delete(); throw ([Massdex.SyncShark.SetupMessages]::Text(''install.rollback''', 'Persistent obstruction discarded its recovery journal.'),
+    @('obstruction-report', 'setup-strings.xml', 'run setup again after correcting the reported obstruction.', 'exit setup.', 'Missing retry trigger left an unreported automatic wait.'),
     @('invoker', 'setup.manifest', 'asInvoker', 'requireAdministrator', 'Setup elevation contract changed.'),
     @('process-policy', 'SyncSharkSetup.cs', '-ExecutionPolicy Bypass', '-ExecutionPolicy RemoteSigned', 'Setup lost process-scoped policy.'),
     @('torn-frame', 'setup.ps1', '.GetString($bytes, 0, $end)', '.GetString($bytes)', 'Torn UTF-8 tail hid the durable journal frame.'),

@@ -111,8 +111,8 @@ function Invoke-SetupVariant([string]$Source, [string]$Case, [string]$Archive, [
     }
     [IO.File]::WriteAllText((Join-Path $Case 'setup.ps1'), $Source)
     $child = Join-Path $Case 'child.ps1'
-    [IO.File]::WriteAllText($child, "param(`$Archive,`$Install)`r`n. (Join-Path `$PSScriptRoot 'setup.ps1') -FunctionsOnly`r`nInvoke-SetupInstall `$Archive `$Install")
-    $process = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', ('"' + $child + '"'), ('"' + $Archive + '"'), ('"' + $Install + '"')) -PassThru -Wait
+    [IO.File]::WriteAllText($child, "param(`$Archive,`$Install)`r`ntry { . (Join-Path `$PSScriptRoot 'setup.ps1') -FunctionsOnly; Invoke-SetupInstall `$Archive `$Install } catch { [Console]::Error.WriteLine(`$_.Exception.Message); exit 1 }")
+    $process = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', ('"' + $child + '"'), ('"' + $Archive + '"'), ('"' + $Install + '"')) -PassThru -Wait -RedirectStandardOutput (Join-Path $Case 'stdout.log') -RedirectStandardError (Join-Path $Case 'stderr.log')
     try { return $process.ExitCode } finally { $process.Dispose() }
 }
 $boundaries = @(
@@ -168,6 +168,28 @@ $changedSource = $script.Replace($boundaries[1], ('            [IO.File]::WriteA
 Assert ((Invoke-SetupVariant $changedSource $changedCase $new $changedInstall) -ne 0) 'Changed payload was published.'
 Assert ((Active-Version $changedInstall) -ceq '1.2.3') 'Changed payload switched the active launcher.'
 Assert ([IO.File]::ReadAllText((Join-Path $changedInstall 'versions\1.2.4\content.txt')) -ceq 'foreign bytes') 'Rollback erased a changed payload.'
+$blockedJournal = Join-Path $changedInstall 'versions\setup-transaction.jsonl'
+Assert ([SetupFileSystem]::Exists($blockedJournal)) 'Persistent obstruction discarded its recovery journal.'
+$journalBytes = [IO.File]::ReadAllBytes($blockedJournal)
+$stagingPath = Join-Path $changedInstall 'versions\.staging'
+$preparationBefore = @([IO.Directory]::EnumerateFileSystemEntries($stagingPath) | Sort-Object) -join "`n"
+# With no later invocation the first child has exited with an explicit user action, not an automatic wait.
+Assert ([IO.File]::ReadAllText((Join-Path $changedCase 'stderr.log')).Contains('run setup again after correcting the reported obstruction')) 'Missing retry trigger left an unreported automatic wait.'
+foreach ($attempt in @('first-retry', 'repeated-retry')) {
+    $retryCase = Join-Path $changedCase $attempt
+    Assert ((Invoke-SetupVariant $script $retryCase $new $changedInstall) -ne 0) 'Persistent obstruction was silently accepted.'
+    Assert ([IO.File]::ReadAllText((Join-Path $retryCase 'stderr.log')).Contains('run setup again after correcting the reported obstruction')) 'Persistent obstruction did not report a terminal user action.'
+    Assert ([SetupFileSystem]::Equal([IO.File]::ReadAllBytes($blockedJournal), $journalBytes)) 'Persistent obstruction changed its pending recovery record.'
+    Assert ((@([IO.Directory]::EnumerateFileSystemEntries($stagingPath) | Sort-Object) -join "`n") -ceq $preparationBefore) 'Persistent obstruction accumulated preparation.'
+    Assert ((Active-Version $changedInstall) -ceq '1.2.3') 'Persistent obstruction changed the active predecessor.'
+    Assert ([IO.File]::ReadAllText((Join-Path $changedInstall 'versions\1.2.4\content.txt')) -ceq 'foreign bytes') 'Persistent obstruction erased changed content.'
+}
+# Restore the fixture's original bytes in place, retaining the recorded file identity.
+[IO.File]::WriteAllText((Join-Path $changedInstall 'versions\1.2.4\content.txt'), '1.2.4')
+Invoke-SetupInstall $new $changedInstall
+Assert ((Active-Version $changedInstall) -ceq '1.2.4') 'Corrected obstruction did not permit install retry.'
+Assert (-not [SetupFileSystem]::Exists($blockedJournal)) 'Corrected obstruction retained its recovery journal.'
+Assert (@([IO.Directory]::EnumerateFileSystemEntries($stagingPath)).Count -eq 0) 'Corrected obstruction retained preparation.'
 
 # The detached janitor must fail visibly and retain a log, rather than swallowing locked-file errors.
 $download = Join-Path $Root 'download'; [IO.Directory]::CreateDirectory($download) | Out-Null

@@ -1,5 +1,6 @@
+// The Framework compiler rejects #nullable even inside an inactive conditional.
 #if NET8_0_OR_GREATER
-#nullable disable
+#pragma warning disable CS8618, CS8602, CS8604
 #endif
 using System;
 using System.IO;
