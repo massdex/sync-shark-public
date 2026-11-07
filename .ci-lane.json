@@ -1,0 +1,15 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [
+    "local"
+  ],
+  "core": [],
+  "ui": [
+    "provider-package-checks"
+  ]
+}
