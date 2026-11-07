@@ -293,6 +293,19 @@ internal static class ProviderPackageChecks
                 var retained = Pump(window.AuthorityHost.LoadPairsAsync()).Pairs.Single(pair => pair.Id == boundPair.Id);
                 Check(retained.Provider == SyncProviders.GoogleDrive && retained.ConnectionId == google.ConnectionId,
                     "The stored pair keeps its exact provider binding and connection after the editor refreshes");
+                // B-45: the one enable-storage consent both save paths ask states the pair default that Save
+                // derives from this same control, so it cannot promise Keep Offline while saving Cloud Only.
+                var consentDetail = typeof(MainWindow).GetMethod("FolderStorageConsentDetail",
+                    BindingFlags.Instance | BindingFlags.NonPublic)!;
+                var filesOnDemand = (CheckBox)window.FindName("PairFilesOnDemandBox");
+                filesOnDemand.IsChecked = true;
+                var cloudConsent = (string)consentDetail.Invoke(window, null)!;
+                filesOnDemand.IsChecked = false;
+                var offlineConsent = (string)consentDetail.Invoke(window, null)!;
+                Check(cloudConsent.StartsWith("The pair's default is Cloud Only.", StringComparison.Ordinal) &&
+                        offlineConsent.StartsWith("The pair's default stays Keep Offline.", StringComparison.Ordinal),
+                    "The shared storage consent states the pair default the save will actually persist ('" +
+                    cloudConsent + "' / '" + offlineConsent + "')");
             }
             finally { window.Close(); }
         }
@@ -349,7 +362,7 @@ internal static class ProviderPackageChecks
 
     private static FileStream? InstalledIdentityPackage()
     {
-        foreach (var version in new[] { "0.3.36", "0.3.35" })
+        foreach (var version in new[] { "0.3.36" })
         {
             var path = Path.Combine(SyncSharkRuntimePaths.InstalledVersionsRoot, version, "SyncShark.msix");
             if (File.Exists(path))

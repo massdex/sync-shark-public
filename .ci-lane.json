@@ -10,6 +10,8 @@
   ],
   "core": [],
   "ui": [
-    "provider-package-checks"
+    "provider-package-checks",
+    "endpoint-reversed-ui-checks",
+    "folder-browser-pagination-contract-all"
   ]
 }

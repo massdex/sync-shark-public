@@ -2029,7 +2029,7 @@ public partial class MainWindow : Window
             var folderBrowser = PairFolderBrowserFactoryForTest is null
                 ? await _authorityHost.CreateFolderBrowserAsync(connectionId: SelectedPairConnectionId)
                 : await PairFolderBrowserFactoryForTest(CancellationToken.None);
-            var browser = CreateRecoveryFolderBrowser(folderBrowser, PairAccountLabel);
+            var browser = CreateRecoveryFolderBrowser(folderBrowser, PairAccountLabel, ProviderPresentation.Key);
             browser.Owner = this;
             var selected = RecoveryFolderDialogForTest is null
                 ? browser.ShowDialog() == true ? browser.SelectedFolder : null
@@ -2055,12 +2055,13 @@ public partial class MainWindow : Window
     }
 
     internal static DropboxFolderBrowserWindow CreateRecoveryFolderBrowser(
-        IDropboxFolderBrowserService folderBrowser, string connectionLabel) =>
+        IDropboxFolderBrowserService folderBrowser, string connectionLabel, string provider) =>
         new(folderBrowser, connectionLabel, DropboxFolderGraphBudget.CreateDefault(),
             allowFolderCreation: false,
             selectionPredicate: entry => IsCanonicalRecoveryFolder(entry.Path),
             selectionRestrictionMessage:
-            $"Recovery must use {SyncDropboxArtifactPaths.RecoveryContainerPath}. Use recommended if it does not exist yet.")
+            $"Recovery must use {SyncDropboxArtifactPaths.RecoveryContainerPath}. Use recommended if it does not exist yet.",
+            provider: provider)
         {
             Title = "Select dedicated Sync Shark recovery folder"
         };
@@ -2321,10 +2322,7 @@ public partial class MainWindow : Window
             var makeAvailableOfflineAfterSave = false;
             var filesOnDemandForBinding = FilesOnDemandValueForBinding(existing?.FilesOnDemandEnabled,
                 requestedFilesOnDemand) || _draftNeedsCloudFiles;
-            if (_draftNeedsCloudFiles && !AppDialogWindow.Confirm(this, "Enable Folder Storage Controls",
-                "Let Sync Shark manage storage for this pair?",
-                "The pair's default stays Keep Offline. Only folders you choose as Cloud Only can be freed after their exact provider copy is verified. This does not take over folders managed by another provider.",
-                "Enable and Save")) return false;
+            if (_draftNeedsCloudFiles && !ConfirmFolderStorageConsent()) return false;
             var retention = SelectedRecoveryRetentionDays();
             var bindingRequest = new SyncPairBindingRequest(selectedId,
                 name, localRoot, dropboxRoot, _selectedRecoveryFolder,
@@ -5410,7 +5408,7 @@ public partial class MainWindow : Window
         if (_runActive || PairList.SelectedItem is not PairRow row) return;
         if (!AppDialogWindow.Confirm(this, "Change storage",
                 "Make every file in this pair available offline?",
-                "Sync Shark downloads online-only content before turning off online-only storage. Nothing is deleted from this computer or Dropbox.",
+                "Sync Shark downloads online-only content before turning off online-only storage. Nothing is deleted from this computer or the cloud provider.",
                 "Make available offline"))
             return;
         try

@@ -92,4 +92,23 @@ public partial class MainWindow
         RefreshLocalGlobalSelectionTree(); RefreshDropboxGlobalSelectionTree(); UpdatePairSaveAvailability();
         ShowPairEditorStatus("Folder storage has unsaved changes. Save Changes applies them; Discard Changes keeps the current policy.");
     }
+
+    /// <summary>
+    /// The one enable-storage consent both save paths ask. Its default sentence is read from the same
+    /// pair-wide control the save derives DefaultStorage from, so the consent cannot promise a different
+    /// default from the one being saved. The caller keeps its own eligibility condition.
+    /// </summary>
+    private bool ConfirmFolderStorageConsent() =>
+        AppDialogWindow.Confirm(this, "Enable Folder Storage Controls",
+            "Let Sync Shark manage storage for this pair?", FolderStorageConsentDetail(), "Enable and Save");
+
+    private string FolderStorageConsentDetail()
+    {
+        var pairDefault = PairFilesOnDemandBox.IsChecked == true
+            ? "The pair's default is Cloud Only."
+            : "The pair's default stays Keep Offline.";
+        return pairDefault +
+            " Only folders you choose as Cloud Only can be freed after their exact provider copy is verified." +
+            " This does not take over folders managed by another provider.";
+    }
 }

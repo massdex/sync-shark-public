@@ -83,10 +83,7 @@ public partial class MainWindow
             // endpoint keeps the established value and the explicit cloud-files confirmation.
             var filesOnDemandForBinding = supportsDeviceStorage && (FilesOnDemandValueForBinding(existing?.FilesOnDemandEnabled,
                 requestedFilesOnDemand) || _draftNeedsCloudFiles);
-            if (supportsDeviceStorage && _draftNeedsCloudFiles && !AppDialogWindow.Confirm(this, "Enable Folder Storage Controls",
-                "Let Sync Shark manage storage for this pair?",
-                "The pair's default stays Keep Offline. Only folders you choose as Cloud Only can be freed after their exact provider copy is verified. This does not take over folders managed by another provider.",
-                "Enable and Save")) return false;
+            if (supportsDeviceStorage && _draftNeedsCloudFiles && !ConfirmFolderStorageConsent()) return false;
             // The explicitly selected Recovery container is retained only for the cloud account this
             // explicit draft names; otherwise the host prepares the recommended Recovery as before.
             var recovery = supportsDeviceStorage && _selectedRecoveryFolder is { } selectedRecovery &&

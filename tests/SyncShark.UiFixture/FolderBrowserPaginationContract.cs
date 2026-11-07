@@ -512,13 +512,19 @@ internal static class FolderBrowserPaginationContract
                 new DropboxFolderEntry("Unexpected", "/Unexpected", "id:unexpected"))
         };
         var window = MainWindow.CreateRecoveryFolderBrowser(service,
-            "Dropbox · fixture@example.invalid");
+            "Google Drive · fixture@example.invalid", SyncProviders.GoogleDrive);
         ConfigureOffscreen(window);
         window.Show();
         try
         {
             PumpUntil(() => window.Roots[0].IsLoaded && !window.Roots[0].IsLoading,
                 "restricted Recovery browser initial load");
+            Require(window.BrowserTitle == "Browse Google Drive" &&
+                    window.Roots.Single().Name == "Google Drive" &&
+                    ((TextBlock)window.FindName("BreadcrumbText")).Text == "Google Drive /",
+                "The Recovery browser did not present the selected Google Drive provider in its title, root " +
+                "and breadcrumb ('" + window.BrowserTitle + "' / '" + window.Roots.Single().Name + "' / '" +
+                ((TextBlock)window.FindName("BreadcrumbText")).Text + "')");
             Require(!window.AllowsFolderCreationForTest &&
                     ((FrameworkElement)window.FindName("CreateFolderPanel")).Visibility == Visibility.Collapsed &&
                     ((MenuItem)window.FindName("CreateFolderContextMenuItem")).Visibility == Visibility.Collapsed,
@@ -601,7 +607,7 @@ internal static class FolderBrowserPaginationContract
             (google.SelectedFolder?.Path ?? "none") + ").");
 
         var recovery = MainWindow.CreateRecoveryFolderBrowser(MinimalBrowserService(),
-            "Dropbox · fixture@example.invalid");
+            "Dropbox · fixture@example.invalid", SyncProviders.Dropbox);
         var recoveryEscape = RunModalKey(recovery, window => PostKey(window, VirtualKeyEscape));
         Require(recoveryEscape.Posted && !recoveryEscape.TimedOut && recoveryEscape.DialogResult == false &&
                 recovery.SelectedFolder is null && !recovery.AllowsFolderCreationForTest &&

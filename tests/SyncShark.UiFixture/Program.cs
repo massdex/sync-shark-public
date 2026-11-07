@@ -296,6 +296,9 @@ internal static partial class Program
             if (args.Length != 2) throw new ArgumentException("Provide one supported folder-browser contract mode.");
             return FolderBrowserPaginationContract.Run(args[1]);
         }
+        // The CI selector runner always passes a fixture root; this contract takes its own mode instead.
+        if (args.Length == 2 && string.Equals(args[0], "--folder-browser-pagination-contract-all", StringComparison.Ordinal))
+            return FolderBrowserPaginationContract.Run("all");
         if (args.Length == 1 && string.Equals(args[0], "--real-dpi-probe", StringComparison.Ordinal))
             return ProbeRealDpiProcess();
         if (args.Length == 3 && string.Equals(args[0], "--capture-real-dpi", StringComparison.Ordinal))

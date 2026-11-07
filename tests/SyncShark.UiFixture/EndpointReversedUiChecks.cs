@@ -765,6 +765,13 @@ internal static partial class Program
             RaiseEndpointPolicyButton(harness.Window, "LeftEndpointBrowseButton");
             PumpUntil(harness.Window, () => captured.Count == 1,
                 "Endpoint label: the real Browse click opens the folder browser once");
+            var googleBreadcrumb = ((TextBlock)captured[0].FindName("BreadcrumbText")).Text;
+            EndpointUiRequire(captured[0].BrowserTitle == "Browse Google Drive" &&
+                captured[0].Roots.Single().Name == "Google Drive" &&
+                googleBreadcrumb == "Google Drive /",
+                "Endpoint label: the Google Drive endpoint's browser names Google Drive in its title, root and " +
+                "breadcrumb ('" + captured[0].BrowserTitle + "' / '" + captured[0].Roots.Single().Name +
+                "' / '" + googleBreadcrumb + "')");
             var selected = AccountSubtitle(captured[0]);
             var selectedLabel = SyncEndpointPresentation.AccountLabel(
                 SyncEndpointPresentation.ShortLabel(SyncEndpointKind.GoogleDrive),
@@ -789,6 +796,13 @@ internal static partial class Program
             RaiseEndpointPolicyButton(harness.Window, "LeftEndpointBrowseButton");
             PumpUntil(harness.Window, () => captured.Count == 2,
                 "Endpoint label: the second Browse click opens the folder browser once");
+            var dropboxBreadcrumb = ((TextBlock)captured[1].FindName("BreadcrumbText")).Text;
+            EndpointUiRequire(captured[1].BrowserTitle == "Browse Dropbox" &&
+                captured[1].Roots.Single().Name == "Dropbox" &&
+                dropboxBreadcrumb == "Dropbox /",
+                "Endpoint label: the Dropbox endpoint's browser names Dropbox in its title, root and breadcrumb " +
+                "('" + captured[1].BrowserTitle + "' / '" + captured[1].Roots.Single().Name + "' / '" +
+                dropboxBreadcrumb + "')");
             var other = AccountSubtitle(captured[1]);
             var otherLabel = SyncEndpointPresentation.AccountLabel(
                 SyncEndpointPresentation.ShortLabel(SyncEndpointKind.Dropbox),
