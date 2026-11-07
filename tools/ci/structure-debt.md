@@ -21,7 +21,7 @@ member requires a fresh review, never a rolling baseline. A REASON-RECORDED verd
 comment immediately above the unit. N/R seed rows remain SPLIT-PENDING until the reason-writing lane records
 and verifies the reason; S rows remain linked to this register. R2 also owns the 13 existing-reason rows. Removing a receipt or ledger is not clearance.
 
-Human provenance fields `source_row`, `source_revision` and optional `source_review` identify the original review row, reviewed source and external review evidence;
+Human provenance fields `source_row` and `source_revision` identify the original review row and reviewed source;
 they are audit references, not freshness inputs. The three fresh split verdicts for rows 43, 207 and 226
 were reviewed by DeepSeek at source 1ba4297d3; original anchors remain at 3f6745416.
 An XML summary satisfies the mechanical nonempty-comment check; semantic review still verifies its reason.
@@ -873,4 +873,4 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 1 | file-size | file-size | Split by job | Per-execution row-context projection, the run-local hold/Retry-authority state machine and completed-acquisition first-run deletion/inventory projection are distinct jobs with separate consumers and output types; split into RowContexts, ExecutionHolds and FirstRunProjection, calling IssuePolicy for hold/first-run policy and spent-key queries through IStateStore. ExecutionHolds and FirstRunProjection share the existing gate by reference; preserve the current critical-section span and store-call order, without replacing Build's protected combination with separately locked snapshots. FirstRunProjection also owns firstRun and deletedName alongside acquisition validity and the template; eligibility is checked before the template read. Confirmation evidence: SIZE-VERDICT-ROWCONTEXTS-ASTRA-1.md (external review record). |
+| 1 | file-size | file-size | Split by job | Per-execution row-context projection, the run-local hold/Retry-authority state machine and completed-acquisition first-run deletion/inventory projection are distinct jobs with separate consumers and output types; split into RowContexts, ExecutionHolds and FirstRunProjection, calling IssuePolicy for hold/first-run policy and spent-key queries through IStateStore. ExecutionHolds and FirstRunProjection share the existing gate by reference; preserve the current critical-section span and store-call order, without replacing Build's protected combination with separately locked snapshots. FirstRunProjection also owns firstRun and deletedName alongside acquisition validity and the template; eligibility is checked before the template read. |

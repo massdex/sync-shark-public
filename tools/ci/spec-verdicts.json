@@ -12936,8 +12936,7 @@
       "verdict": "SPLIT-PENDING",
       "family": "openai+deepseek",
       "register": "tools/ci/structure-debt.md",
-      "source_revision": "093156603",
-      "source_review": "SIZE-VERDICT-ROWCONTEXTS-ASTRA-1.md"
+      "source_revision": "093156603"
     }
   ],
   "register_reviews": [],
