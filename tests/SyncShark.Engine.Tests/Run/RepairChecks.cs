@@ -954,6 +954,8 @@ public static class RepairChecks
         store.RequireRepairAfterLoss(pairId, generation);
         Check.Require(store.Obligated(pairId), "ancestor-refusal control starts with a Repair obligation");
         await File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, "Parent", "Child"), "content");
+        await rig.Host.RecomposeCurrentAsync(pairId, default);
+        await rig.Host.EnsureSourceBasesAsync(pairId, default);
         inject = true;
         listings = 0;
         using var log = rig.Log(folder, "refused-row");
