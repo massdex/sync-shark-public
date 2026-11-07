@@ -1,0 +1,14 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--cli-checks",
+    "--cli-deadline-checks",
+    "--cli-local-path-checks",
+    "--public-update-checks",
+    "--setup-update-checks"
+  ],
+  "ui": []
+}
