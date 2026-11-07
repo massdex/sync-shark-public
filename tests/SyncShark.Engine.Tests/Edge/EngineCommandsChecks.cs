@@ -1301,7 +1301,7 @@ public static class EngineCommandsChecks
             "the CLI dispatch writes only under the temporary product root");
     }
 
-    // R1 review 2/3/Â§4.2: the stored-log view streams readable blocks through the caller's transport, keeps the
+    // R1 review 2/3/§4.2: the stored-log view streams readable blocks through the caller's transport, keeps the
     // stored file untouched, and structured output carries the canonical six-field records.
     private static void LogsViewStreamsAndStructures(string root)
     {
@@ -1505,7 +1505,7 @@ public static class EngineCommandsChecks
         IssueItem upload = new(Side.Dropbox, "Other/local-copy.txt", "upload");
         IssueItem download = new(Side.Local, "Parent/remote-copy.txt", "download");
         const string generic = "Parent/local.txt: both versions were kept. Linked originals and labelled copies are synced files, not independent backups. Deleting either endpoint of a linked version also deletes its unchanged counterpart on the other side; an edited counterpart is kept and copied back to where it was deleted. To retain a version before cleaning up, copy it outside all synced folders and verify that copy before deleting. Dismiss only hides this notice; it does not delete files or stop syncing.";
-        var locations = Environment.NewLine + "Locations recorded when the versions were kept (paths relative to this pairâ€™s roots):" + Environment.NewLine;
+        var locations = Environment.NewLine + "Locations recorded when the versions were kept (paths relative to this pair’s roots):" + Environment.NewLine;
         (IssueItem[] Items, string Expected)[] layouts =
         [
             ([], generic), ([local], generic), ([local, remote], generic),
@@ -1552,7 +1552,7 @@ public static class EngineCommandsChecks
             store.DismissIssue("pair", saved.Id);
             Check.Require(store.Issues("pair").Count == 0, "Dismiss still removes the informational notice.");
         });
-        var unusual = local with { Path = "Parent/{Name} \"é›ª\".txt" };
+        var unusual = local with { Path = "Parent/{Name} \"雪\".txt" };
         var escaped = IssueAt(8, IssueKind.Info, TextKey.InfoKeptBoth, unusual.Path) with
             { Subject = new IssueSubject([unusual, remote, upload, download], null) };
         Check.Require(IssuePresentation.Render(escaped, new(RetryPresentationState.Unavailable)).Contains(unusual.Path),

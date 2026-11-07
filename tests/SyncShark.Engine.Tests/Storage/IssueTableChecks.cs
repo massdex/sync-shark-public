@@ -189,7 +189,7 @@ public static class IssueTableChecks
 
             writer.SavePair(Pair("pair-a", "connection-a"));
             writer.SavePair(Pair("pair-b", "connection-b"));
-            Raise(writer, "pair-a", IssueKind.Tie, TextKey.TieEqualTimes, "CafÃƒÂ©.txt");
+            Raise(writer, "pair-a", IssueKind.Tie, TextKey.TieEqualTimes, "Café.txt");
             Raise(writer, "pair-a", IssueKind.Failure, TextKey.FailChanged, "b.txt");
             Raise(writer, "pair-b", IssueKind.Tie, TextKey.TieEqualTimes, "c.txt");
 
@@ -198,8 +198,8 @@ public static class IssueTableChecks
             Check.Require(snapshot.Total == 2 && snapshot.Page.Count == 2,
                 "the page and count share one snapshot; a commit between them is not visible");
 
-            var accented = IssueTable.OpenPage(reader, "pair-a", null, "CAFÃƒâ€°", null, 10, 0);
-            Check.Require(accented.Total == 1 && accented.Page.Single().Issue.Path == "CafÃƒÂ©.txt",
+            var accented = IssueTable.OpenPage(reader, "pair-a", null, "CAFÉ", null, 10, 0);
+            Check.Require(accented.Total == 1 && accented.Page.Single().Issue.Path == "Café.txt",
                 "the SQLite page search follows PathNames' Unicode case rule");
 
             var account = IssueTable.OpenPage(reader, null, "connection-b", null, null, 10, 0);

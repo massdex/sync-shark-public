@@ -22,6 +22,6 @@
     "--cli-checks"
   ],
   "ui": [
-    "engine-issue-presentation"
+    "engine-issue-presentation-checks"
   ]
 }
