@@ -159,7 +159,7 @@ public static class DependencyChecks
     [
         DropboxApiOwner,
         In(Dropbox, "DropboxEntries", "Dropbox/DropboxEntries.cs"),
-        In(Dropbox, "DropboxReply", "Dropbox/DropboxReplyShapes.cs"),
+        In(Dropbox, "DropboxReply", "Dropbox/DropboxReply.cs"),
     ];
     private static readonly Owner DropboxListingOwner = In(Dropbox, "DropboxListing", "Dropbox/DropboxListing.cs");
     private static readonly string[] BodyReaders =
@@ -504,7 +504,7 @@ public static class DependencyChecks
         WithFiles(_ => DropboxFolder + "DropboxEntries.cs", () =>
             Check.Require(!CheckTransport(UsesOf(typeof(JsonParseFixture)), entries).Any(),
                 "READING 8.3: DropboxEntries owns its selected-field parse"));
-        WithFiles(_ => DropboxFolder + "DropboxReplyShapes.cs", () =>
+        WithFiles(_ => DropboxFolder + "DropboxReply.cs", () =>
             Check.Require(!CheckTransport(UsesOf(typeof(JsonParseFixture)), reply).Any(),
                 "READING 8.3: DropboxReply owns its typed response parse"));
         WithFiles(_ => DropboxFolder + "DropboxFeed.cs", () =>
@@ -876,7 +876,7 @@ public static class DependencyChecks
             (typeof(EntryConstructorFixture), new TypeId(RootNamespace + "." + Dropbox, "DropboxPage"),
                 "Dropbox/DropboxPage.cs", null),
             (typeof(EntryConstructorFixture), new TypeId(RootNamespace + "." + Dropbox, "DropboxReply"),
-                "Dropbox/DropboxReplyShapes.cs", "construction"),
+                "Dropbox/DropboxReply.cs", "construction"),
             (typeof(EntryConstructorFixture), listing, "Dropbox/DropboxListing.cs", "construction"),
             (typeof(EntryCopyFixture), listing, "Dropbox/DropboxListing.cs", null),
             (typeof(EntryCopyFixture), writer, "Dropbox/DropboxWriter.cs", "copies"),
