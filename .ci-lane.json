@@ -1,0 +1,28 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "settings",
+    "cli",
+    "engine-operations",
+    "human-log",
+    "local",
+    "literals",
+    "dependencies",
+    "budget",
+    "dropbox",
+    "scenarios"
+  ],
+  "core": [
+    "--cli-checks",
+    "--v2-dropbox-checks",
+    "--v2-run-checks",
+    "--v2-deferred-intake-bound-checks",
+    "--v2-local-journal-checks",
+    "--v2-dates-checks",
+    "--v2-autosync-checks"
+  ],
+  "ui": []
+}
