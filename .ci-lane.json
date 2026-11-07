@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "repair",
+    "syncer",
+    "safety"
+  ],
+  "core": [],
+  "ui": []
+}
