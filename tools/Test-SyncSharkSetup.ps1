@@ -29,6 +29,37 @@ function Make-Payload([string]$Version) {
 function Active-Version([string]$Install) {
     return [IO.File]::ReadAllText((Join-Path $Install 'active\content.txt'))
 }
+# Only fixture copies are instrumented; no runtime failure hook ships in setup.
+$script = [IO.File]::ReadAllText((Join-Path $repository 'Installer/setup.ps1'))
+function Invoke-SetupVariant([string]$Source, [string]$Case, [string]$Archive, [string]$Install,
+    [string]$NativeSource, [string]$Action = 'Invoke-SetupInstall $Archive $Install') {
+    [IO.Directory]::CreateDirectory($Case) | Out-Null
+    foreach ($resource in @('SetupFileSystem.cs','SetupMessages.cs','setup-strings.xml')) {
+        Copy-Item -LiteralPath (Join-Path $repository ('Installer/' + $resource)) -Destination $Case
+    }
+    if ($NativeSource) { [IO.File]::WriteAllText((Join-Path $Case 'SetupFileSystem.cs'), $NativeSource) }
+    [IO.File]::WriteAllText((Join-Path $Case 'setup.ps1'), $Source)
+    $child = Join-Path $Case 'child.ps1'
+    [IO.File]::WriteAllText($child, "param(`$Archive,`$Install)`r`ntry { . (Join-Path `$PSScriptRoot 'setup.ps1') -FunctionsOnly; $Action } catch { [Console]::Error.WriteLine(`$_.Exception.Message); exit 1 }")
+    $process = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', ('"' + $child + '"'), ('"' + $Archive + '"'), ('"' + $Install + '"')) -PassThru -Wait -RedirectStandardOutput (Join-Path $Case 'stdout.log') -RedirectStandardError (Join-Path $Case 'stderr.log')
+    try { return $process.ExitCode } finally { $process.Dispose() }
+}
+$native = [IO.File]::ReadAllText((Join-Path $repository 'Installer/SetupFileSystem.cs'))
+
+$terminationCase = Join-Path $Root 'rename-termination'
+[IO.Directory]::CreateDirectory($terminationCase) | Out-Null
+$terminationSource = Join-Path $terminationCase 'source'
+$terminationTarget = Join-Path $terminationCase 'target'
+[IO.File]::WriteAllText($terminationSource, 'rename')
+$allocation = '        IntPtr buffer = Marshal.AllocHGlobal(bufferSize);'
+# Poison the WCHAR immediately after the name; the real writer must terminate it.
+$poisonedRename = $native.Replace($allocation, '        IntPtr buffer = Marshal.AllocHGlobal(bufferSize + sizeof(char)); Marshal.WriteInt16(buffer, nameOffset + name.Length, (short)''X''); Marshal.WriteInt16(buffer, nameOffset + name.Length + sizeof(char), 0);')
+Assert ($poisonedRename -cne $native) 'Rename termination fixture did not bind.'
+$terminationAction = '$held = [SetupFileSystem]::OpenMutableFile($Archive); try { $held.Rename($Install) } finally { $held.Dispose() }'
+$terminationExit = Invoke-SetupVariant $script $terminationCase $terminationSource $terminationTarget $poisonedRename $terminationAction
+Assert (($terminationExit -eq 0) -and [IO.File]::Exists($terminationTarget)) 'Native rename did not publish the exact target name.'
+Assert (([IO.File]::ReadAllText($terminationTarget) -ceq 'rename') -and -not [SetupFileSystem]::Exists($terminationSource)) 'Native rename changed file content or retained the source.'
+
 $older = Make-Payload '1.2.2'; $old = Make-Payload '1.2.3'; $new = Make-Payload '1.2.4'
 $sharingSource = Join-Path $Root 'sharing\source'; $sharingTarget = Join-Path $Root 'sharing\target'
 $sharingParents = Open-SetupDirectories $sharingSource -Create
@@ -54,28 +85,6 @@ try {
 }
 $install = Join-Path $Root 'ordinary'
 Invoke-SetupInstall $old $install
-# Diagnostic branch only: retain the namespace evidence before the original assertion.
-Write-Output 'B-33: owned install root and versions'
-Get-ChildItem -LiteralPath $install -Force | Format-List * | Out-String | Write-Output
-Get-ChildItem -LiteralPath (Join-Path $install 'versions') -Force | Format-List * | Out-String | Write-Output
-$diagnosticPaths = @((Join-Path $install 'active')) + @(Get-ChildItem -LiteralPath (Join-Path $install 'versions\.staging') -Force | Where-Object { $_.Name.EndsWith('.active') } | ForEach-Object { $_.FullName })
-foreach ($diagnosticPath in $diagnosticPaths) {
-    Write-Output "B-33: junction $diagnosticPath"
-    try { Get-Item -LiteralPath $diagnosticPath -Force | Format-List * | Out-String | Write-Output } catch { Write-Output $_ }
-    try { & fsutil.exe reparsepoint query $diagnosticPath 2>&1 | Out-String | Write-Output } catch { Write-Output $_ }
-    $diagnosticJunction = $null
-    try {
-        $diagnosticJunction = [SetupFileSystem]::OpenJunction($diagnosticPath)
-        $diagnosticTarget = $diagnosticJunction.JunctionTarget()
-        Write-Output ("B-33: identity={0}; raw={1}; target={2}; targetExists={3}; targetContentExists={4}; activeContentExists={5}" -f $diagnosticJunction.Identity, [Convert]::ToBase64String($diagnosticJunction.ReadJunction()), $diagnosticTarget, (Test-Path -LiteralPath $diagnosticTarget), (Test-Path -LiteralPath (Join-Path $diagnosticTarget 'content.txt')), (Test-Path -LiteralPath (Join-Path $diagnosticPath 'content.txt')))
-    } catch { Write-Output $_ } finally { if ($diagnosticJunction) { $diagnosticJunction.Dispose() } }
-}
-try {
-    $diagnosticDestination = Join-Path $install 'versions\1.2.3'
-    Get-ChildItem -LiteralPath $diagnosticDestination -Force | Format-List * | Out-String | Write-Output
-    Write-Output ('B-33: destination content=' + [IO.File]::ReadAllText((Join-Path $diagnosticDestination 'content.txt')))
-} catch { Write-Output $_ }
-$global:LASTEXITCODE = 0
 Assert ((Active-Version $install) -ceq '1.2.3') 'First install did not publish the launcher.'
 $active = [SetupFileSystem]::OpenJunction((Join-Path $install 'active'))
 $identity = $active.Identity; $active.Dispose()
@@ -177,23 +186,6 @@ try {
     Assert ($frame.Value -ceq 'durable') 'Torn UTF-8 tail hid the durable journal frame.'
 } finally { $journal.Dispose() }
 
-# Exercise the same program-file transaction with injected interruption at each effect boundary.
-# Only fixture copies are instrumented; no runtime failure hook ships in setup.
-$script = [IO.File]::ReadAllText((Join-Path $repository 'Installer/setup.ps1'))
-function Invoke-SetupVariant([string]$Source, [string]$Case, [string]$Archive, [string]$Install,
-    [string]$NativeSource, [string]$Action = 'Invoke-SetupInstall $Archive $Install') {
-    [IO.Directory]::CreateDirectory($Case) | Out-Null
-    foreach ($resource in @('SetupFileSystem.cs','SetupMessages.cs','setup-strings.xml')) {
-        Copy-Item -LiteralPath (Join-Path $repository ('Installer/' + $resource)) -Destination $Case
-    }
-    if ($NativeSource) { [IO.File]::WriteAllText((Join-Path $Case 'SetupFileSystem.cs'), $NativeSource) }
-    [IO.File]::WriteAllText((Join-Path $Case 'setup.ps1'), $Source)
-    $child = Join-Path $Case 'child.ps1'
-    [IO.File]::WriteAllText($child, "param(`$Archive,`$Install)`r`ntry { . (Join-Path `$PSScriptRoot 'setup.ps1') -FunctionsOnly; $Action } catch { [Console]::Error.WriteLine(`$_.Exception.Message); exit 1 }")
-    $process = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', ('"' + $child + '"'), ('"' + $Archive + '"'), ('"' + $Install + '"')) -PassThru -Wait -RedirectStandardOutput (Join-Path $Case 'stdout.log') -RedirectStandardError (Join-Path $Case 'stderr.log')
-    try { return $process.ExitCode } finally { $process.Dispose() }
-}
-$native = [IO.File]::ReadAllText((Join-Path $repository 'Installer/SetupFileSystem.cs'))
 $fixtureNative = $native + "`r`n" + $junctionSource.Substring($junctionSource.IndexOf('public static class'))
 $renameCase = Join-Path $Root 'post-rename-conversion'
 $renameFrom = Join-Path $renameCase 'before'; $renameTo = Join-Path $renameCase 'after'
@@ -302,6 +294,32 @@ Invoke-SetupInstall $new $changedInstall
 Assert ((Active-Version $changedInstall) -ceq '1.2.4') 'Corrected obstruction did not permit install retry.'
 Assert (-not [SetupFileSystem]::Exists($blockedJournal)) 'Corrected obstruction retained its recovery journal.'
 Assert (@([IO.Directory]::EnumerateFileSystemEntries($stagingPath)).Count -eq 0) 'Corrected obstruction retained preparation.'
+
+foreach ($fault in @('missing', 'different')) {
+    $launcherCase = Join-Path $Root ('launcher-' + $fault)
+    $launcherInstall = Join-Path $launcherCase 'installation'
+    $foreign = Join-Path $launcherCase 'foreign'
+    $foreignExecutable = Join-Path $foreign 'SyncShark.exe'
+    if ($fault -eq 'different') {
+        [IO.Directory]::CreateDirectory($foreign) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $Root 'payload-1.2.4\SyncShark.exe') -Destination $foreignExecutable
+    }
+    $candidateBoundary = '        $candidate = [SetupFileSystem]::JunctionData($destination)'
+    $wrongLauncher = $script.Replace($candidateBoundary, '        $candidate = [SetupFileSystem]::JunctionData((Join-Path ([IO.Path]::GetDirectoryName($Root)) ''foreign''))')
+    Assert ($wrongLauncher -cne $script) 'Launcher fixture did not bind.'
+    $launcherExit = Invoke-SetupVariant $wrongLauncher $launcherCase $new $launcherInstall
+    $failure = if ($fault -eq 'missing') { 'Missing launcher was reported installed.' } else { 'Different launcher identity was reported installed.' }
+    Assert ($launcherExit -ne 0) $failure
+    Assert (-not [IO.File]::ReadAllText((Join-Path $launcherCase 'stdout.log')).Contains([Massdex.SyncShark.SetupMessages]::Text('install.success', [object[]]@('1.2.4')))) 'Unverified launcher printed success.'
+    Assert (-not [SetupFileSystem]::Exists((Join-Path $launcherInstall 'active'))) 'Launcher refusal retained the active junction.'
+    Assert (-not [SetupFileSystem]::Exists((Join-Path $launcherInstall 'versions\1.2.4'))) 'Launcher refusal retained the owned payload.'
+    Assert (-not [SetupFileSystem]::Exists((Join-Path $launcherInstall 'versions\setup-transaction.jsonl'))) 'Launcher refusal did not finish exact rollback.'
+    if ($fault -eq 'different') {
+        Assert ([SetupFileSystem]::Equal([IO.File]::ReadAllBytes($foreignExecutable), [IO.File]::ReadAllBytes((Join-Path $Root 'payload-1.2.4\SyncShark.exe')))) 'Launcher refusal changed foreign executable bytes.'
+    }
+    Invoke-SetupInstall $new $launcherInstall
+    Assert ((Active-Version $launcherInstall) -ceq '1.2.4') 'Launcher refusal blocked retry.'
+}
 
 # The detached janitor must fail visibly and retain a log, rather than swallowing locked-file errors.
 $download = Join-Path $Root 'download'; [IO.Directory]::CreateDirectory($download) | Out-Null

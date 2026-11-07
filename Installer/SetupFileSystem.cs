@@ -63,6 +63,17 @@ public sealed class SetupFileSystem : IDisposable
         catch (DirectoryNotFoundException) { return false; }
     }
 
+    /// <summary>Proves that an alternate file path resolves to this held file.</summary>
+    public void VerifyFilePath(string path)
+    {
+        // No-follow applies to the final file; opening it traverses the parent junction.
+        using (var resolved = OpenFile(path))
+        {
+            if (!String.Equals(Identity, resolved.Identity, StringComparison.Ordinal))
+                throw new InvalidDataException(Massdex.SyncShark.SetupMessages.Text("recovery.changed", path));
+        }
+    }
+
     public string Hash()
     {
         using (var borrowed = new SafeFileHandle(handle.DangerousGetHandle(), false))
@@ -156,13 +167,16 @@ public sealed class SetupFileSystem : IDisposable
         target = System.IO.Path.GetFullPath(target);
         byte[] name = Encoding.Unicode.GetBytes(target);
         int nameOffset = IntPtr.Size == 8 ? 20 : 12;
-        IntPtr buffer = Marshal.AllocHGlobal(nameOffset + name.Length);
+        int bufferSize = nameOffset + name.Length + sizeof(char);
+        IntPtr buffer = Marshal.AllocHGlobal(bufferSize);
         try
         {
             Marshal.Copy(new byte[nameOffset], 0, buffer, nameOffset);
             Marshal.WriteInt32(buffer, nameOffset - 4, name.Length);
             Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
-            if (!SetFileInformationByHandle(handle, 3, buffer, (uint)(nameOffset + name.Length))) throw new Win32Exception();
+            // FILE_RENAME_INFO.FileName is NUL-terminated; FileNameLength excludes that WCHAR.
+            Marshal.WriteInt16(buffer, nameOffset + name.Length, 0);
+            if (!SetFileInformationByHandle(handle, 3, buffer, (uint)bufferSize)) throw new Win32Exception();
             Path = target;
             Verify();
         }
