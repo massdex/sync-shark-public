@@ -1,0 +1,10 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--discovery-correction-preflight"
+  ],
+  "ui": []
+}
