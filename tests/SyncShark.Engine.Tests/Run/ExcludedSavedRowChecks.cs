@@ -213,9 +213,8 @@ public static class ExcludedSavedRowChecks
         var localSide = new ScopedSide(rig.Local, rig.Scope);
         var dropboxSide = new ScopedSide(rig.Dropbox, rig.Scope);
         using var log = Log(rig, folder, "run-1");
-        var summary = await ScanAsync(rig, log, localSide, dropboxSide);
+        await ScanAsync(rig, log, localSide, dropboxSide);
 
-        Check.Require(!summary.Refused, "both absent: the Repair completes");
         Check.Require(localSide.Mutations.IsEmpty && dropboxSide.Mutations.IsEmpty,
             "both absent: absence of a prefixed file causes no transfer or delete");
         Check.Require(rig.Store.SyncedByKey(rig.Pair.PairId, Side.Local, PathNames.Key("~$gone.txt")) is not null,
@@ -282,8 +281,7 @@ public static class ExcludedSavedRowChecks
         foreach (var runId in new[] { "pending-1", "pending-2" })
         {
             using var log = Log(rig, folder, runId);
-            var summary = await ScanAsync(rig, log, localSide, dropboxSide);
-            Check.Require(!summary.Refused, resolution + ": a blocked exclusion does not abort Repair");
+            await ScanAsync(rig, log, localSide, dropboxSide);
             Check.Require(Lines(log.Path).Any(fields => fields[1] == nameof(RunEventKind.Issue) &&
                     fields[3] == "guarded" && fields[5] == nameof(TextKey.FailExcludeHoldsProtected)),
                 resolution + ": each blocked attempt reports its protective failure");
@@ -317,8 +315,7 @@ public static class ExcludedSavedRowChecks
         var resolvedDropbox = new ScopedSide(rig.Dropbox, resolved.Scope);
         using (var log = Log(resolved, folder, "resolved"))
         {
-            var summary = await ScanAsync(resolved, log, resolvedLocal, resolvedDropbox);
-            Check.Require(!summary.Refused, resolution + ": the follow-up Repair completes");
+            await ScanAsync(resolved, log, resolvedLocal, resolvedDropbox);
         }
         Check.Require(!rig.Store.Issues(pair.PairId).Any(issue => issue.Kind == IssueKind.Failure),
             resolution + ": completed or configured-out-of-scope exclusion failures retire");
@@ -354,7 +351,7 @@ public static class ExcludedSavedRowChecks
             new FakeAdmission { Level = 3 }, new PathScope(pair, [pair]));
     }
 
-    private static Task<ScanOutcome> ScanAsync(Rig rig, RunLog log, ISide local, ISide dropbox) =>
+    private static Task ScanAsync(Rig rig, RunLog log, ISide local, ISide dropbox) =>
         ScanPassChecks.RunScanAsync(new ScanPassChecks.Rig(rig.Pair, rig.Store, rig.Local, rig.Dropbox,
             rig.Recovery, rig.Admission, rig.Scope), log, local, dropbox);
 

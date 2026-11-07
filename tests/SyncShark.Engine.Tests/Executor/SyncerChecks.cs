@@ -138,11 +138,12 @@ public static class SyncerChecks
             var labels = kind == ActionKind.KeepBoth ? new KeepBothLabels("Parent/RemoteCopy", false, "Parent/LocalCopy", false) : null;
             var result = await jobs.Items.ExecuteLockedAsync(action, labels, keys, keys, default, null, null);
             var qualifies = action.CreatesNewItem();
-            Check.Require(jobs.Ancestors.AncestorRefused != qualifies,
+            Check.Require((result.Outcome?.Raised != IssueKind.Failure) == qualifies,
                 $"A233/A234/A81: {kind}, target={target}, bound={bound}, occupied={occupied} preserves action containment");
             if (!qualifies)
             {
-                Check.Require(result.Outcome?.Raised == IssueKind.Failure,
+                Check.Require(result.Outcome?.Raised == IssueKind.Failure &&
+                    store.Issues(context.Pair.PairId).Single(issue => issue.Path == incoming.Path).Cause == TextKey.FailChanged,
                     $"A233/A81: {kind}, occupied={occupied} is refused before effects");
                 var after = await context.For(target).ReadOneAsync(incoming.Path, default);
                 Check.Require(occupiedTarget is null ? after is null : after == occupiedTarget,
@@ -186,11 +187,10 @@ public static class SyncerChecks
             var keys = LockKeys.ForPaths(context.Pair, [(Side.Local, incoming.Path), (Side.Dropbox, incoming.Path)]);
             var result = await jobs.Items.ExecuteLockedAsync(action, null, keys, keys, default, null, null);
             if (withNotice)
-                Check.Require(result.Reobserve == false && result.Outcome?.Raised == IssueKind.Failure &&
-                    jobs.Ancestors.AncestorRefused,
+                Check.Require(result.Reobserve == false && result.Outcome?.Raised == IssueKind.Failure,
                     "A223: a changed own read under a matching echo refuses without reobserving");
             else
-                Check.Require(result.Reobserve && result.Outcome is null && !jobs.Ancestors.AncestorRefused,
+                Check.Require(result.Reobserve && result.Outcome is null,
                     "A223: the same changed row with no later ancestor work reobserves as today");
         }
     }

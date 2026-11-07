@@ -3,7 +3,10 @@
     "engine-tests"
   ],
   "engine": [
-    "repair"
+    "repair",
+    "syncer",
+    "safety",
+    "scenarios-offline"
   ],
   "core": [],
   "ui": []

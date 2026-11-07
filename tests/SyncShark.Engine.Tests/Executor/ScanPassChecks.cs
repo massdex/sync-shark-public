@@ -1131,18 +1131,17 @@ public static class ScanPassChecks
     }
 
     /// <summary>Runs one scan pass over the rig's current fake sides, seeding the scan through the store.</summary>
-    internal static async Task<ScanOutcome> RunScanAsync(Rig rig, RunLog log, ISide? local = null,
+    internal static async Task RunScanAsync(Rig rig, RunLog log, ISide? local = null,
         ISide? dropbox = null, IStateStore? store = null, CancellationToken ct = default,
         IReadOnlySet<long>? retryIssues = null, bool includeDeleted = false) =>
-        (await RunScannedCoreAsync(rig, log, null, local, dropbox, store, ct, retryIssues, includeDeleted)).Outcome;
+        await RunScannedCoreAsync(rig, log, null, local, dropbox, store, ct, retryIssues, includeDeleted);
 
     /// <summary>Runs one scan pass and records its authoritative completion, making later scans non-first-run.</summary>
     internal static async Task RunCompletedScanAsync(Rig rig, RunLog log, ISide? local = null,
         ISide? dropbox = null, IStateStore? store = null, CancellationToken ct = default,
         IReadOnlySet<long>? retryIssues = null, bool includeDeleted = false)
     {
-        var (outcome, token) = await RunScannedCoreAsync(rig, log, null, local, dropbox, store, ct, retryIssues, includeDeleted);
-        if (outcome.Refused) throw new InvalidOperationException("a refused scan is not a completed Repair");
+        var token = await RunScannedCoreAsync(rig, log, null, local, dropbox, store, ct, retryIssues, includeDeleted);
         CompleteScan(rig, store ?? rig.Store, token, log);
         Check.Require((store ?? rig.Store).FirstRepairDone(rig.Pair.PairId),
             "the completed scan records first-repair done for later passes");
@@ -1163,9 +1162,8 @@ public static class ScanPassChecks
         if (before is not null)
             await before(Context(rig, target, log, local ?? rig.Local, dropbox ?? rig.Dropbox, settings,
                 readEvidence, itemAttempts), ct);
-        var (outcome, token) = await RunScannedCoreAsync(rig, log, settings, local, dropbox, target, ct,
+        var token = await RunScannedCoreAsync(rig, log, settings, local, dropbox, target, ct,
             retryIssues, includeDeleted, readEvidence);
-        if (outcome.Refused) throw new InvalidOperationException("a refused scan is not a completed Repair");
         var scan = target.ReadScan(rig.Pair.PairId, token);
         var now = DateTimeOffset.UtcNow;
         var summary = new RepairSummary(log.RunId, now, now, true, scan.FirstRun, null, false,
@@ -1202,7 +1200,7 @@ public static class ScanPassChecks
             new DropboxCatchUp(pairId, generation, scan.DropboxEpoch, cursor!, scan.ThroughWorkId));
     }
 
-    internal static async Task<(ScanOutcome Outcome, Guid Token)> RunScannedCoreAsync(Rig rig, RunLog log,
+    internal static async Task<Guid> RunScannedCoreAsync(Rig rig, RunLog log,
         EngineSettings? settings, ISide? local, ISide? dropbox, IStateStore? store, CancellationToken ct,
         IReadOnlySet<long>? retryIssues, bool includeDeleted,
         Func<string, bool, CancellationToken, Task<DeletionEvidence>>? readEvidence = null,
@@ -1238,8 +1236,9 @@ public static class ScanPassChecks
             settings ?? Settings, readEvidence, itemAttempts);
         var syncer = new Syncer(context, new SyncPorts(new LeaseBoundary(),
             RefusingExecutionBoundary.Instance, new LeaseBoundary(), LocalSide.HashSlots));
-        return (await syncer.SyncScannedAsync(token,
-            new ListedSkips(localSkipped, remoteSkipped, localFolders, remoteFolders), retryIssues, ct), token);
+        await syncer.SyncScannedAsync(token,
+            new ListedSkips(localSkipped, remoteSkipped, localFolders, remoteFolders), retryIssues, ct);
+        return token;
     }
 
     private static async Task ListAsync(ISide side, IScanSink sink,

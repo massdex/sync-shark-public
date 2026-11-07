@@ -192,7 +192,7 @@ public static class ParentsChecks
             release[index].SetResult();
         }
         await creating;
-        Check.Require(await waiting == AncestorNews.Restated && !fence.AncestorRefused,
+        Check.Require(await waiting == AncestorNews.Restated,
             "A227/A228/A229: nested concurrent creation reaches matching durable bindings in both directions");
         var unbound = asks.Log
             .Where(entry => entry.Side == target && entry.Answer.News == AncestorNews.Unbound)
@@ -344,7 +344,7 @@ public static class ParentsChecks
         Check.Require(keys.Length == 3, "A227: the fixture supplies three distinct ancestor keys");
         AncestorAnswer Unbound(int level) => new(AncestorNews.Unbound, keys[level]);
 
-        async Task<(AncestorNews Result, bool Refused, int Asks)> Drive(params AncestorAnswer[] answers)
+        async Task<(AncestorNews Result, int Asks)> Drive(params AncestorAnswer[] answers)
         {
             using var inner = new InMemoryStateStore();
             var store = new ScriptedAskStore(inner, target, answers);
@@ -358,23 +358,23 @@ public static class ParentsChecks
             var result = await fence.BeforeExecutionAsync(action, new Parents(context), default);
             Check.Require(store.Asks(PathNames.Other(target)) <= 1,
                 $"A224/A227: the non-target side is asked at most once ({target})");
-            return (result, fence.AncestorRefused, store.Asks(target));
+            return (result, store.Asks(target));
         }
 
         var full = await Drive(Unbound(0), Unbound(1), Unbound(2), new AncestorAnswer(AncestorNews.Restated));
-        Check.Require(full.Result == AncestorNews.Restated && !full.Refused && full.Asks == 4,
+        Check.Require(full.Result == AncestorNews.Restated && full.Asks == 4,
             $"A227/A228: three joined ancestors ask depth+1 times per side (got {full.Asks}, {target})");
 
         var repeat = await Drive(Unbound(0), Unbound(0));
-        Check.Require(repeat.Result == AncestorNews.Changed && repeat.Refused && repeat.Asks == 2,
+        Check.Require(repeat.Result == AncestorNews.Changed && repeat.Asks == 2,
             "A230: a repeated unbound key refuses after one extra ask without a wait");
 
         var mismatch = await Drive(new AncestorAnswer(AncestorNews.Changed));
-        Check.Require(mismatch.Result == AncestorNews.Changed && mismatch.Refused && mismatch.Asks == 1,
+        Check.Require(mismatch.Result == AncestorNews.Changed && mismatch.Asks == 1,
             "A230: a definite mismatch refuses on the first ask, before any join");
 
         var late = await Drive(Unbound(0), new AncestorAnswer(AncestorNews.Changed));
-        Check.Require(late.Result == AncestorNews.Changed && late.Refused && late.Asks == 2,
+        Check.Require(late.Result == AncestorNews.Changed && late.Asks == 2,
             "A230: a mismatch after a join still refuses");
     }
 

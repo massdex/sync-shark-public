@@ -52,7 +52,7 @@ public static class OwnFolderChecks
             var result = await jobs.Items.ExecuteLockedAsync(action, null, keys, keys, default, null, null);
             var landed = await context.For(target).ReadOneAsync("Box/Child", default);
             Check.Require(result.Outcome?.Effect == (target == Side.Local ? EffectKind.Downloaded : EffectKind.Uploaded) &&
-                !jobs.Ancestors.AncestorRefused && landed is not null,
+                landed is not null,
                 "A220: the healthy child proceeds beside an unreadable sibling, target=" + target);
             var protectedAfter = store.UnreadableUnder(context.Pair.PairId, PathNames.Key("Box"))
                 .OrderBy(key => key, StringComparer.Ordinal).ToArray();
@@ -130,7 +130,8 @@ public static class OwnFolderChecks
             var keys = LockKeys.ForPaths(context.Pair, [(Side.Local, "Box/Child"), (Side.Dropbox, "Box/Child")]);
             var result = await jobs.Items.ExecuteLockedAsync(action, null, keys, keys, default, null, null);
             var after = await context.Dropbox.ReadOneAsync("Box/Child", default);
-            Check.Require(result.Outcome?.Raised == IssueKind.Failure && jobs.Ancestors.AncestorRefused &&
+            Check.Require(result.Outcome?.Raised == IssueKind.Failure &&
+                store.Issues(context.Pair.PairId).Single(issue => issue.Path == "Box/Child").Cause == TextKey.FailChanged &&
                 after == target,
                 "A81: a target present before the fresh read refuses the create and stays unchanged, folder=" + folder);
         }
@@ -150,7 +151,8 @@ public static class OwnFolderChecks
             var jobs = NewJobs(context);
             jobs.Ancestors.CoverListedWork(0);
             var outcome = await jobs.Items.RunRowAttemptAsync(row, default);
-            Check.Require(outcome.Raised == IssueKind.Failure && !jobs.Ancestors.AncestorRefused &&
+            Check.Require(outcome.Raised == IssueKind.Failure &&
+                store.Issues(context.Pair.PairId).Single(issue => issue.Path == "Box/Child").Cause == TextKey.ReadDropboxFailed &&
                 await context.Dropbox.ReadOneAsync("Box/Child", default) is null,
                 "A81: a failed fresh read is the row's Failure; the create exception never fires");
         }
@@ -203,7 +205,7 @@ public static class OwnFolderChecks
         jobs.Ancestors.CoverListedWork(0);
         var keys = LockKeys.ForPaths(context.Pair, [(Side.Local, "Box/Child"), (Side.Dropbox, "Box/Child")]);
         var result = await jobs.Items.ExecuteLockedAsync(action, null, keys, keys, default, null, null);
-        Check.Require(result.Outcome?.Raised == IssueKind.Failure && jobs.Ancestors.AncestorRefused &&
+        Check.Require(result.Outcome?.Raised == IssueKind.Failure &&
             await context.Dropbox.ReadOneAsync("Box/Child", default) is null,
             what + " refuses the create and writes nothing");
     }
@@ -235,7 +237,7 @@ public static class OwnFolderChecks
         var keys = LockKeys.ForPaths(context.Pair, [(Side.Local, "new/file.txt"), (Side.Dropbox, "new/file.txt")]);
         var result = await jobs.Items.ExecuteLockedAsync(action, null, keys, keys, default, null, null);
         var landed = await context.Local.ReadOneAsync("new/file.txt", default);
-        Check.Require(result.Outcome?.Effect == EffectKind.Downloaded && !jobs.Ancestors.AncestorRefused &&
+        Check.Require(result.Outcome?.Effect == EffectKind.Downloaded &&
             landed is not null,
             "A79: the new child proceeds under the rename-produced ancestor binding and downloads");
     }
