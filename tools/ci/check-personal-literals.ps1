@@ -47,7 +47,7 @@ if ($ExportRoot) {
     }
     if ($found) { throw 'check-personal-literals: exported tree refused (no exclusions).' }
     Write-Host 'check-personal-literals: exported tree clean (no exclusions).'
-    exit 0
+    return
 }
 if ($NoExclusions) { throw '-NoExclusions requires -ExportRoot.' }
 

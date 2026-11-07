@@ -9,4 +9,5 @@ TestResults/
 *.key
 *.token
 *.secret
+/.export-tooling-checks/
 
