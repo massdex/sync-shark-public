@@ -695,10 +695,14 @@ public static class SyncCliRegistry
     /// <summary>The one target rule shared by the AutoSync rows and the Engine pair commands they run.</summary>
     public const string PairOrAllRefusal = "Choose --pair <exact-id> or --all, not both.";
 
+    private const string RetiredCommandGroup = "autosync";
+    private const string RetiredIntervalWord = "interval";
+
     /// <summary>Why <c>autosync interval</c> is retired (owner ruling): the Engine has no safety-poll interval
     /// to hold, so the command has no owner and is refused instead of being routed anywhere.</summary>
     public const string IntervalRetiredReason =
-        "The engine is event-driven and has no safety-poll interval, so there is nothing to set.";
+        "autosync interval is retired. The engine is event-driven and has no safety-poll interval, " +
+        "so there is nothing to set.";
 
     /// <summary>The AutoSync commands the Engine already owns, by their registry name; null keeps the row on its
     /// existing route. The names live here with the other command text, so Engine code holds none of them.</summary>
@@ -799,9 +803,16 @@ public static class SyncCliRegistry
                       .Select(count => string.Join(' ', words.Take(count)))
                       .Select(candidate => Rows.FirstOrDefault(item => string.Equals(item.Command, candidate,
                           StringComparison.Ordinal)))
-                      .FirstOrDefault(item => item is not null)
-                  ?? throw new SyncCliUsageException($"Unknown command '{string.Join(' ', words)}'. Run: " +
-                      $"{SyncCli.ExecutableName} --cli help");
+                      .FirstOrDefault(item => item is not null);
+        if (row is null)
+        {
+            // A retired row names its reason instead of being reported as an unknown command.
+            if (words.Length == 2 && string.Equals(words[0], RetiredCommandGroup, StringComparison.Ordinal) &&
+                string.Equals(words[1], RetiredIntervalWord, StringComparison.Ordinal))
+                throw new SyncCliUsageException(IntervalRetiredReason);
+            throw new SyncCliUsageException($"Unknown command '{string.Join(' ', words)}'. Run: " +
+                $"{SyncCli.ExecutableName} --cli help");
+        }
         var command = row.Command;
         var next = command.Split(' ').Length;
 

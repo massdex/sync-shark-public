@@ -64,6 +64,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Runs the step below against a workspace with no .ci-lane.json, so a full
+      # run can never silently skip the registry's engine groups again.
+      - name: Check full-run engine selection
+        shell: pwsh
+        run: ./tools/ci/check-lane-selection.ps1
+
       - name: Read .ci-lane.json
         id: read
         shell: pwsh
@@ -75,7 +81,12 @@ jobs:
             # No selection: today's full matrix. quick/** still skips the UI fixture.
             $build = @('core', 'core-tests', 'fod-tests', 'app', 'ui-fixture')
             if ($env:GITHUB_REF -like 'refs/heads/quick/*') { $build = @('core', 'core-tests', 'fod-tests', 'app') }
-            $data = [ordered]@{ has_selection = 'false'; build = $build; engine = @(); core = @(); ui = @() }
+            # A full run verifies every registered engine group, not only the projects above.
+            $registry = Get-Content -Raw 'tests/SyncShark.Engine.Tests/CheckRegistry.cs'
+            $engine = @([regex]::Matches($registry, '\["([a-z0-9-]+)"\]\s*=') | ForEach-Object { $_.Groups[1].Value })
+            if ($engine.Count -eq 0) { throw 'No engine groups found in CheckRegistry.' }
+            $build += 'engine-tests'
+            $data = [ordered]@{ has_selection = 'false'; build = $build; engine = $engine; core = @(); ui = @() }
           } else {
             $lane = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
             if ($null -eq $lane) { throw '.ci-lane.json is empty; list engine groups, core switches, ui selectors or build projects.' }

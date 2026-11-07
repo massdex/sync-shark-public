@@ -62,15 +62,6 @@ internal static class CliEntry
             }
             if (!selection.UseV2) TryWrite(standardError, Massdex.SyncShark.V2.CoreSwitch.LegacyNotice);
             args = selection.Args;
-            // Retired by owner ruling: the Engine has no safety-poll interval to hold, so this row has no owner
-            // to route to and is refused with that reason rather than reported as an unknown command.
-            if (args.Length >= 3 && string.Equals(args[1], "autosync", StringComparison.Ordinal) &&
-                string.Equals(args[2], "interval", StringComparison.Ordinal))
-            {
-                TryWrite(standardError, "Sync Shark (usage): autosync interval is retired. " +
-                    SyncCliRegistry.IntervalRetiredReason);
-                return (int)SyncCliExitCode.Usage;
-            }
             if (!selection.UseV2 && args.Contains("autosync", StringComparer.Ordinal))
             {
                 TryWrite(standardError, "AutoSync uses core v2. Core v1 remains selected and nothing was started. To switch explicitly, repeat with --cli --core v2 autosync <command>.");
