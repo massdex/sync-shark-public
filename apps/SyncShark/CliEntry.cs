@@ -97,8 +97,11 @@ internal static class CliEntry
                 return Task.Run(() => SyncCli.ExecuteAsync(args, standardOutput, standardError,
                     () => Massdex.SyncShark.V2.V2CliRuntime.AcquireProduction(args), cancellation.Token)).GetAwaiter().GetResult();
             }
-            return Task.Run(() => SyncCli.ExecuteAsync(args, standardOutput, standardError,
-                SyncCliRuntime.AcquireProduction, cancellation.Token)).GetAwaiter().GetResult();
+            // Core v1 is retired (retirement map step 4): the Engine is the only core, so an explicit legacy
+            // selection is refused here, before any lock, store or provider is opened.
+            TryWrite(standardError, "Sync Shark (usage): core v1 is retired. The Engine is the only core. " +
+                "Run the same command without --core v1; nothing was opened, created or changed.");
+            return (int)SyncCliExitCode.Usage;
         }
         catch (SyncCliUsageException error)
         {
