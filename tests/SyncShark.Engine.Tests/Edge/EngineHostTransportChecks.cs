@@ -911,6 +911,8 @@ public static class EngineHostTransportChecks
         "yyyyMMddHHmmss", "Local", "Dropbox", ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "",
         262144, ScanTestSettings.BatchRows)
     {
+        JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes,
+        LogReadBufferCharacters = ScanTestSettings.LogReadBufferCharacters,
         Backoff = new FailureRetryOwner.BackoffSettings(1, 1.6, 0.2, 120),
     };
 

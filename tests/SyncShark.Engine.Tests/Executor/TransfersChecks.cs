@@ -1236,7 +1236,7 @@ public static class TransfersChecks
         var pair = Pair();
         if (store.Pair(pair.PairId) is null) store.SavePair(pair);
         var settings = new EngineSettings("", "", "", "", "", RecycleFallback.Fail, default,
-            FirstRunPolicy.NewestWins, default, "", LogBufferCharacters, ScanTestSettings.BatchRows);
+            FirstRunPolicy.NewestWins, default, "", LogBufferCharacters, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferCharacters = ScanTestSettings.LogReadBufferCharacters };
         return new ExecutorContext(
             Local: new FakeSide(Side.Local), Dropbox: new FakeSide(Side.Dropbox), Recovery: new FakeRecovery(),
             Store: store, Pair: pair, Scope: new PathScope(pair, [pair]), Settings: settings,

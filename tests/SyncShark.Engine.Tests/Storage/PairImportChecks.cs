@@ -13,7 +13,7 @@ public static class PairImportChecks
     {
         SQLitePCL.Batteries_V2.Init();
         var settings = new EngineSettings("", "", "", "", "", RecycleFallback.Fail, 0,
-            FirstRunPolicy.LocalWins, 1, "", 262144, ScanTestSettings.BatchRows);
+            FirstRunPolicy.LocalWins, 1, "", 262144, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferCharacters = ScanTestSettings.LogReadBufferCharacters };
         BaselineChecks(settings);
 
         WithRoot(root =>

@@ -359,7 +359,7 @@ public static class OwnFolderChecks
         store.SavePair(pair);
         SourceFixture.AcquireJournal(store, pair);
         var settings = new EngineSettings("{name} ({side} {time}){ext}", "yyyyMMddHHmmss", "Local", "Dropbox",
-            ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows);
+            ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferCharacters = ScanTestSettings.LogReadBufferCharacters };
         var local = new FakeSide(Side.Local);
         return new ExecutorContext(local, new FakeSide(Side.Dropbox), new FakeRecovery(), store, pair,
             new PathScope(pair, [pair]), settings, new ReplaceTurn(), new FakeAdmission { Level = 1 }, false, _ => { },

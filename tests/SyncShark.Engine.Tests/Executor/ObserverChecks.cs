@@ -634,7 +634,7 @@ public static class ObserverChecks
         var pair = Pair();
         store.SavePair(pair);
         var settings = new EngineSettings("", "", "", "", "", RecycleFallback.Fail, 1,
-            FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows);
+            FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferCharacters = ScanTestSettings.LogReadBufferCharacters };
         return new ExecutorContext(Local: new FakeSide(Side.Local), Dropbox: new FakeSide(Side.Dropbox),
             Recovery: new FakeRecovery(), Store: store, Pair: pair, Scope: scope ?? new PathScope(pair, [pair]),
             Settings: settings, Runtime: new ReplaceTurn(), Admission: new FakeAdmission(), Priority: false,

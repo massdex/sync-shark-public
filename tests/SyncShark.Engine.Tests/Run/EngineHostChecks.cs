@@ -16,6 +16,8 @@ public static class EngineHostChecks
     private static readonly EngineSettings Settings = new("{name} ({side} {time}){ext}", "yyyyMMddHHmmss",
         "Local", "Dropbox", ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows)
     {
+        JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes,
+        LogReadBufferCharacters = ScanTestSettings.LogReadBufferCharacters,
         Backoff = new FailureRetryOwner.BackoffSettings(1, 1.6, 0.2, 120),
         // The shipped defaults for the paging and folder-poll values these checks exercise.
         StoragePageSize = 100, BatchPollIntervalSeconds = 0.1, FolderDeleteMinimumPollSeconds = 1

@@ -2497,7 +2497,7 @@ public static class ActionExecutorChecks
             Store.SavePair(Pair);
             Recovery.Hash = Local.ContentHashAsync;
             var settings = new EngineSettings("{name} ({side} {time}){ext}", "yyyyMMddHHmmss", "Local", "Dropbox",
-                ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows);
+                ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferCharacters = ScanTestSettings.LogReadBufferCharacters };
             Context = new ExecutorContext(
                 Local: Local, Dropbox: Dropbox, Recovery: Recovery, Store: Store, Pair: Pair,
                 Scope: new PathScope(Pair, [Pair]), Settings: settings, Runtime: new ReplaceTurn(),

@@ -1958,7 +1958,9 @@ public static class ExclusionRunnerChecks
         return new ExecutorContext(new FakeSide(Side.Local), new FakeSide(Side.Dropbox),
             new FakeRecovery { Evidence = new DriveEvidence(1, null, null) }, store,
             pair, new PathScope(pair, [pair]), new EngineSettings("", "", "", "", "", default, default,
-                FirstRunPolicy.NewestWins, default, "", 262144, ScanTestSettings.BatchRows) { StoragePageSize = PageSize },
+                FirstRunPolicy.NewestWins, default, "", 262144, ScanTestSettings.BatchRows) {
+        JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes,
+        LogReadBufferCharacters = ScanTestSettings.LogReadBufferCharacters, StoragePageSize = PageSize },
             new ReplaceTurn(), new FakeAdmission(), false, _ => { },
             (_, _, _, _) => ValueTask.FromResult<IAsyncDisposable>(new SpaceLease()), new FakeTimeProvider(),
             RefuseDeletionEvidence, attempts.Begin, attempts.Complete,
