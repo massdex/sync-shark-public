@@ -74,9 +74,9 @@ public static class FailureRetryOwner
     {
         var next = countAttempt ? (attempts >= int.MaxValue ? int.MaxValue : Math.Max(0, attempts) + 1)
             : Math.Max(0, attempts);
-        var delay = Math.Min(settings.RetryMaximumDelay.TotalSeconds,
-            settings.RetryInitialDelay.TotalSeconds *
-            Math.Pow(settings.RetryDelayMultiplier, Math.Clamp(next - 1, 0, settings.RetryMaximumDoublings)));
+        var delay = Math.Min(settings.Tunables.RetryMaximumDelay.TotalSeconds,
+            settings.Tunables.RetryInitialDelay.TotalSeconds *
+            Math.Pow(settings.Tunables.RetryDelayMultiplier, Math.Clamp(next - 1, 0, settings.Tunables.RetryMaximumDoublings)));
         return new(next, now.AddSeconds(delay));
     }
 

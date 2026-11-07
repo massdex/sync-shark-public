@@ -47,8 +47,8 @@ internal static partial class LocalJournalChecks
         var proofs = await inventory.HashAsync(["bulk.txt", "edited.txt"], default);
         LocalChecks.Require(proofs.ContainsKey("edited.txt") && !proofs.ContainsKey("bulk.txt"),
             "foreground proof shares urgent classification and retains bulk idle gate");
-        var budget = new VerificationBudget(V2Settings.Default.UrgentHashCap, () => TimeSpan.Zero);
-        for (var i = 0; i < V2Settings.Default.UrgentHashCap; i++)
+        var budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => TimeSpan.Zero);
+        for (var i = 0; i < V2Tunables.Default.UrgentHashCap; i++)
             LocalChecks.Require(budget.AdmitUrgent(true), "urgent admission fits existing cap");
         LocalChecks.Require(!budget.AdmitUrgent(true) && !budget.AdmitUrgent(false), "urgent cap cannot be exceeded across proof pages");
     }

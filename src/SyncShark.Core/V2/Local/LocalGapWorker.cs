@@ -189,7 +189,7 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
 
     internal async Task<bool> HashPage(RootDef root, LocalGapEpoch epoch, CancellationToken ct)
     {
-        var page = store.GapHashWorkPage(root.RootId, epoch, settings.LocalGapHashPageRows, includeBulk: !io.Paused);
+        var page = store.GapHashWorkPage(root.RootId, epoch, settings.Tunables.LocalGapHashPageRows, includeBulk: !io.Paused);
         if (page.Count == 0) return false;
         using var proofPass = io.BeginProofPass(root, page.Select(row => row.Item).ToArray());
         using var availability = io.OpenProbes(root);

@@ -388,7 +388,7 @@ internal static partial class DropboxChecks
     {
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
         var provider = new FakeEndpointProvider().Add(pair.A, local)
-            .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId, V2Settings.Default))
+            .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer(Path.Combine(productRoot, "spool")));
         var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
             provider, settings, time);

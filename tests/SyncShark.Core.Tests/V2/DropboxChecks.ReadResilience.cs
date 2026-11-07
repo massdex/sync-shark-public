@@ -46,7 +46,7 @@ internal static partial class DropboxChecks
         {
             sql.SavePair(new PairDef("p1", "Listing fixture", new RootDef("ra", "Local", null, state, "local"),
                 Root(), [], [], true));
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             try
             {
                 await inventory.ChangesSinceAsync("outage-start", 1, _ => true, default);
@@ -58,7 +58,7 @@ internal static partial class DropboxChecks
         h.Wire.AfterContinueResponse = null;
         h.Client.ListingTransientBudget = TimeSpan.FromMinutes(45);
         using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
-        var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1", V2Settings.Default);
+        var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
         var delta = await resumed.ChangesSinceAsync("outage-start", 2, _ => true, default);
         Require(!delta.CursorInvalid && delta.CursorAfter == "outage-end" && delta.Changes.Count == 2,
             "exhausted delta resumes after database reopen without losing changes");
@@ -89,7 +89,7 @@ internal static partial class DropboxChecks
         {
             sql.SavePair(new PairDef("p1", "Listing fixture", new RootDef("ra", "Local", null, state, "local"),
                 Root(), [], [], true));
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             if (exhaust)
             {
                 try
@@ -113,7 +113,7 @@ internal static partial class DropboxChecks
         {
             h.Client.ListingTransientBudget = TimeSpan.FromMinutes(45);
             using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
             var snapshot = await inventory.FullAsync(2, _ => true, Sink, default);
             Require(snapshot.Items.Count == 7 && snapshot.IncompleteSubtrees.Count == 0,
                 "reopened checkpoint resumes after exhausted budget");
@@ -282,7 +282,7 @@ internal static partial class DropboxChecks
         using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             sql.SavePair(pair);
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             var run = ReadResilienceRun(sql, pair, local, writerA, h.Writer(spool), inventory);
             Require((await FirstSyncAsync(run, pair.PairId)).Failed == 0, "fixture completes first sync");
             cursor = sql.Cursor(RootId) ?? "";
@@ -321,7 +321,7 @@ internal static partial class DropboxChecks
                 { ReadRoots = [Root().RootId] });
         var listsBefore = h.Wire.ListRequests.Count;
         var callsBefore = h.Wire.Calls.Count;
-        var resumedInventory = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1", V2Settings.Default);
+        var resumedInventory = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
         var resumed = ReadResilienceRun(reopened, pair, local, writerA, h.Writer(spool), resumedInventory);
         var second = await resumed.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         Require(second.Failed == 0, "the next run replays the delta cleanly");
@@ -353,7 +353,7 @@ internal static partial class DropboxChecks
         using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             sql.SavePair(pair);
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             var run = ReadResilienceRun(sql, pair, local, writerA, h.Writer(spool), inventory);
             Require((await FirstSyncAsync(run, pair.PairId)).Failed == 0, "healthy-edit fixture completes first sync");
             cursor = sql.Cursor(RootId) ?? "";
@@ -381,7 +381,7 @@ internal static partial class DropboxChecks
             h.Wire.SeedChangePage(cursor, [], false, cursor + "-recovered");
         }
         using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
-        var resumedInventory = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1", V2Settings.Default);
+        var resumedInventory = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
         var resumed = ReadResilienceRun(reopened, pair, local, writerA, h.Writer(spool), resumedInventory);
         var recovery = await resumed.IncrementalAsync(pair.PairId, new RecordingProgress(), default);
         Require(recovery.Failed == 0, "the recovery run completes");
@@ -406,7 +406,7 @@ internal static partial class DropboxChecks
         using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             sql.SavePair(pair);
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             var run = ReadResilienceRun(sql, pair, local, writerA, h.Writer(spool), inventory);
             Require((await FirstSyncAsync(run, pair.PairId)).Failed == 0, "adversarial fixture completes first sync");
             cursor = sql.Cursor(RootId) ?? "";
@@ -460,7 +460,7 @@ internal static partial class DropboxChecks
         using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             sql.SavePair(pair);
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             var run = ReadResilienceRun(sql, pair, local, writerA, h.Writer(spool), inventory);
             Require((await FirstSyncAsync(run, pair.PairId)).Failed == 0, "membership fixture completes first sync");
             var cursor = sql.Cursor(RootId) ?? "";

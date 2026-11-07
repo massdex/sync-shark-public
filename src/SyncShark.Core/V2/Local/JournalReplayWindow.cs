@@ -10,8 +10,8 @@ internal sealed class JournalReplayWindow
     internal long MinimumBytes { get; }
     internal JournalReplayWindow(V2Settings settings, long? learned = null)
     {
-        _maximumBytes = settings.JournalReplayWindowBytes;
-        MinimumBytes = settings.JournalReplayMinimumWindowBytes;
+        _maximumBytes = settings.Tunables.JournalReplayWindowBytes;
+        MinimumBytes = settings.Tunables.JournalReplayMinimumWindowBytes;
         _bytes = Math.Clamp(learned is > 0 ? learned.Value : _maximumBytes, MinimumBytes, _maximumBytes);
     }
 

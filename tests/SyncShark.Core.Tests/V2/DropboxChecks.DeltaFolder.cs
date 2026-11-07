@@ -120,7 +120,7 @@ internal static partial class DropboxChecks
         h.Wire.OnRevisionAsync = null;
         h.Known.SaveSyncRetry("p1", h.Known.SyncRetryAt("p1", "gone.txt")! with { RetryAfter = DateTimeOffset.MinValue });
         var probesBeforeRetry = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
-        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1", V2Settings.Default));
+        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
         Console.WriteLine("released evidence retry before: " + System.Text.Json.JsonSerializer.Serialize(h.Known.SyncRetryAt("p1", "gone.txt")));
         var second = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Console.WriteLine($"released evidence result: failed={second.Failed}; cursor={h.Known.Cursor(RootId)}; " +

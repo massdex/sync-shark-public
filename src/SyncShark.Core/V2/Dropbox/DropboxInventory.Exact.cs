@@ -3,19 +3,19 @@ namespace Massdex.SyncShark.V2;
 public sealed partial class DropboxInventory
 {
     internal Func<IReadOnlyList<string>, CancellationToken, Task<IReadOnlyDictionary<string, PilotRemoteEntry?>>>? ExactMetadataForTest { get; set; }
-    internal async Task<Delta> ReadExactAsync(IReadOnlyList<string> paths, string cursor, long gen,
+    internal async Task<Delta> ReadExactAsync(IReadOnlyList<string> paths, int pagePaths, string cursor, long gen,
         Func<string, bool> include, CancellationToken ct)
     {
         var exact = paths.Where(include).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var changes = new List<Change>();
         var missingFolders = new List<ItemState>();
         var failures = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var page in exact.Chunk(_settings.MetadataPagePaths))
+        foreach (var page in exact.Chunk(pagePaths))
         {
             // Existing metadata owner verifies the account/root and uses the existing HTTP limiter.
             // Only a present dictionary key with a null value is proven provider not_found.
             var metadata = ExactMetadataForTest is { } read ? await read(page, ct) :
-                await _client.ReadMetadataPageAsync(page, _settings.MetadataPagePaths, ct, (path, error) => failures[path] = error.Message);
+                await _client.ReadMetadataPageAsync(page, pagePaths, ct, (path, error) => failures[path] = error.Message);
             var before = _known.Live(_root.RootId, page);
             foreach (var path in page)
             {

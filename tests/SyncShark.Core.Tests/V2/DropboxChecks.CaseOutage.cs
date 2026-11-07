@@ -43,7 +43,7 @@ internal static partial class DropboxChecks
         var endpoints = new FakeEndpointProvider().AddWriter(pair.A, localWriter).AddWriter(pair.B, writer)
             .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, reopened, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
                 { GapIo = new LocalGapIo(reopened, settings, new HashSet<string>(), () => false) })
-            .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, reopened, pair.PairId, V2Settings.Default));
+            .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, reopened, pair.PairId));
         var preview = new PlanOnlyEndpoints(endpoints);
         var calls = h.Wire.Calls.Count;
         var previewResult = await ((IProviderEffectReconciler)preview.Writer(pair.B)).ResolveProviderEffectAsync(action, null, CancellationToken.None);

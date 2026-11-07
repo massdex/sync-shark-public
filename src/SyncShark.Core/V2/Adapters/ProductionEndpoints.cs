@@ -111,7 +111,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
         {
             var checkedSide = await CheckSideAsync(root, ct).ConfigureAwait(false);
             return checkedSide.Client is { } client
-                ? new DropboxInventory(root, side, client, _store, pair.PairId, _settings)
+                ? new DropboxInventory(root, side, client, _store, pair.PairId)
                 : new LocalInventory(root, side, _store, OwnedInside(root, checkedSide.Recovery!), _settings, _time, isStateDamage: StorageFailureClassifier.IsStateDamage, pairId: pair.PairId);
         }
     }
@@ -263,7 +263,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
     {
         if (checkedSide.Client is { } client)
         {
-            var dropbox = new DropboxInventory(root, side, client, _store, pair.PairId, _settings);
+            var dropbox = new DropboxInventory(root, side, client, _store, pair.PairId);
             // Another run on this root replaces the slot and invalidates reuse. Unrelated roots do not.
             if (continuation is not null && _open.TryGetValue(root.RootId, out var previous) &&
                 previous.Preview == continuation && previous.Inventory is DropboxInventory earlier)

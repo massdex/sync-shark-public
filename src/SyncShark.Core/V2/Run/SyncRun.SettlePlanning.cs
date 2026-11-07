@@ -23,9 +23,9 @@ public sealed partial class SyncRun
             return ([], [], 0);
         }
         var started = PlanningStepStarted();
-        RunLog.Trace($"planning settle: start; ordinary={ordinary.Count}; capacity={SqliteStateStore.SettlePathCapacity(ordinary, _settings.DeferredIntakePathCap)}");
+        RunLog.Trace($"planning settle: start; ordinary={ordinary.Count}; capacity={SqliteStateStore.SettlePathCapacity(ordinary, _settings.Tunables.DeferredIntakePathCap)}");
         var candidates = store.SettlePlanningCandidates(pair.PairId, _time.GetUtcNow().UtcTicks,
-            SqliteStateStore.SettlePathCapacity(ordinary, _settings.DeferredIntakePathCap), ordinary, advance: _endpoints is not PlanOnlyEndpoints);
+            SqliteStateStore.SettlePathCapacity(ordinary, _settings.Tunables.DeferredIntakePathCap), ordinary, advance: _endpoints is not PlanOnlyEndpoints);
         var accepted = new List<SqliteStateStore.DeferredPlanning>();
         var adopts = new List<SyncAction>();
         // No active-retry or user-decision exemption: settle must leave ALL such work to ordinary intake.

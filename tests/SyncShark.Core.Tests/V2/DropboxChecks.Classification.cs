@@ -47,12 +47,12 @@ internal static partial class DropboxChecks
         using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(ClassificationPair());
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
             await inventory.FullAsync(1, _ => true, new Progress<string>(), CancellationToken.None);
         }
         using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
             var lists = h.Wire.ListRequests.Count;
             h.Wire.SeedChangePage("scale-start", [], false, "scale-end");
             var delta = await inventory.ChangesSinceAsync("scale-start", 2, _ => true, CancellationToken.None, true);
@@ -83,13 +83,13 @@ internal static partial class DropboxChecks
         using (var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             store.SavePair(ClassificationPair());
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
             await inventory.FullAsync(1, _ => true, new Progress<string>(), CancellationToken.None);
             await inventory.DeletionTimesAsync(["gone.txt"], CancellationToken.None);
         }
         var revisions = h.Wire.Calls.Count(call => call.Contains("list_revisions", StringComparison.Ordinal));
         using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
-        var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1", V2Settings.Default);
+        var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
         h.Wire.SeedChangePage("cache-start", [], false, "cache-next");
         await resumed.ChangesSinceAsync("cache-start", 2, _ => true, CancellationToken.None, true);
         var evidence = await resumed.PrepareDeletionEvidenceAsync(["gone.txt"], CancellationToken.None);
@@ -107,7 +107,7 @@ internal static partial class DropboxChecks
         h.Wire.SeedChangePage("transient-start", [], false, "transient-start");
         using var store = SqliteStateStore.Open(Path.Combine(_root, "released-transient"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(ClassificationPair());
-        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1", V2Settings.Default);
+        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
         var gen = store.BeginGeneration(RootId, "full");
         var full = await inventory.FullAsync(gen, _ => true, new Progress<string>(), CancellationToken.None);
         store.WriteSnapshot(full); store.CompleteGeneration(gen, full.CursorAfter, true);
@@ -175,7 +175,7 @@ internal static partial class DropboxChecks
         catch (IOException) { }
         Require(store.ReadDeletionClassification(Root()) is null,
             "interrupted multi-batch classification cannot retain the old complete header or publish partial absence");
-        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1", V2Settings.Default);
+        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
         var delta = await inventory.ChangesSinceAsync("old-complete", 1, _ => true, CancellationToken.None, true);
         Require(delta.CursorInvalid, "leftover staging rows without a published header require bootstrap");
         static IEnumerable<(string Path, bool Deleted)> InterruptedRows()

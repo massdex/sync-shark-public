@@ -27,7 +27,7 @@ internal static partial class DropboxChecks
         Require(initial.Failed == 0 && store.FirstSyncDone(pair.PairId), "folder retry fixture establishes baselines");
         var selected = store.Live(pair.B.RootId, ["Missing"]).Single();
         // The actual metadata/listing endpoint now has neither folder nor child; cached rows remain.
-        provider.AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId, V2Settings.Default))
+        provider.AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer());
         a.AppliedActions.Clear();
         var batch = new ReconcileBatch("batch", ["Missing"], new HashSet<string>(),

@@ -44,7 +44,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Seed(root, "anchor.txt", "unchanged");
         var settings = StorageChecks.Fast with { LocalReplayWindowsPerRun = budget };
         var start = new NtfsUsnCheckpoint(1, 0, 128, 0);
-        var target = start with { NextUsn = start.NextUsn + V2Settings.Default.JournalReplayWindowBytes * 7 / 2 };
+        var target = start with { NextUsn = start.NextUsn + V2Tunables.Default.JournalReplayWindowBytes * 7 / 2 };
         var reads = new List<long>();
         var persisted = new List<string>();
         using var initialStore = SqliteStateStore.Open(Path.Combine(folder, "store"), settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
@@ -106,7 +106,7 @@ internal static partial class LocalJournalChecks
                 out IReadOnlyList<NtfsUsnChange> changes, out string? failure, out NtfsUsnReadFailure kind, CancellationToken ct) =>
             {
                 reads.Add(from.NextUsn);
-                var index = (from.NextUsn - start.NextUsn) / V2Settings.Default.JournalReplayWindowBytes;
+                var index = (from.NextUsn - start.NextUsn) / V2Tunables.Default.JournalReplayWindowBytes;
                 var name = $"window-{index}.txt";
                 var id = LocalItems.ParseObjectId(WindowFileObjectId(root, name)).FileId;
                 changes = [new(id, LocalItems.ParseObjectId(local.RootObjectId).FileId, from.NextUsn, 0x100, FileAttributes.Normal, name)];
@@ -138,7 +138,7 @@ internal static partial class LocalJournalChecks
         LocalChecks.Seed(root, "anchor.txt", "content");
         using var store = SqliteStateStore.Open(Path.Combine(folder, "store"), StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         var start = new NtfsUsnCheckpoint(1, 0, 128, 0);
-        var target = start with { NextUsn = start.NextUsn + 2 * V2Settings.Default.JournalReplayWindowBytes };
+        var target = start with { NextUsn = start.NextUsn + 2 * V2Tunables.Default.JournalReplayWindowBytes };
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System,
             settings: StorageChecks.Fast with { LocalDeltaMaxPaths = 1, LocalReplayWindowsPerRun = 64 });
         inventory.WalkCheckpointForTest = () => (start, false);
@@ -155,7 +155,7 @@ internal static partial class LocalJournalChecks
             out IReadOnlyList<NtfsUsnChange> changes, out string? failure, out NtfsUsnReadFailure kind, CancellationToken ct) =>
         {
             var size = through.NextUsn - from.NextUsn; sizes.Add(size);
-            var overflow = from.NextUsn > start.NextUsn && (floor || size > V2Settings.Default.JournalReplayMinimumWindowBytes * 2);
+            var overflow = from.NextUsn > start.NextUsn && (floor || size > V2Tunables.Default.JournalReplayMinimumWindowBytes * 2);
             changes = from.NextUsn == start.NextUsn
                 ? [new(early, parent, from.NextUsn, 0x100, FileAttributes.Normal, "early.txt")]
                 : overflow ? [new(one, parent, from.NextUsn, 0x100, FileAttributes.Normal, "one.txt"),
@@ -177,12 +177,12 @@ internal static partial class LocalJournalChecks
             LocalChecks.Require(windowLines.Length > 1 && WindowRecords(windowLines[0]) == 1 &&
                 windowLines.Skip(1).All(line => WindowRecords(line) == 0),
                 "each halved journal window reports its own record count, never a negative difference");
-        LocalChecks.Require(sizes.Contains(V2Settings.Default.JournalReplayWindowBytes / 2), "overflow halves the window");
+        LocalChecks.Require(sizes.Contains(V2Tunables.Default.JournalReplayWindowBytes / 2), "overflow halves the window");
         if (floor)
         {
             var gap = ((ILocalGapStore)store).GapEpoch("root-local")!;
-            LocalChecks.Require(delta.CursorInvalid && sizes.Last() == V2Settings.Default.JournalReplayMinimumWindowBytes &&
-                gap.Boundary == start.NextUsn + V2Settings.Default.JournalReplayWindowBytes,
+            LocalChecks.Require(delta.CursorInvalid && sizes.Last() == V2Tunables.Default.JournalReplayMinimumWindowBytes &&
+                gap.Boundary == start.NextUsn + V2Tunables.Default.JournalReplayWindowBytes,
                 "floor fallback protects only history after the persisted first window");
             LocalChecks.Require(store.Live("root-local", ["early.txt"]).Single().ObjectId ==
                 WindowFileObjectId(root, "early.txt"), "floor fallback retains the earlier window's persisted change");

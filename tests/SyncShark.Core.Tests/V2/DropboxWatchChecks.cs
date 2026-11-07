@@ -618,7 +618,7 @@ internal static class DropboxWatchChecks
         internal InMemoryStateStore Store { get; }
         internal DropboxPilotClient Client { get; }
 
-        internal DropboxInventory Inventory() => new(Root(), Side.B, Client, Store, "p1", V2Settings.Default);
+        internal DropboxInventory Inventory() => new(Root(), Side.B, Client, Store, "p1");
 
         internal DropboxWriter Writer() => new(Root(), Side.B, Client, Path.Combine(Path.GetTempPath(),
             "syncshark-v2-dropboxwatch-spool"), isStateDamage: StorageFailureClassifier.IsStateDamage);

@@ -13,7 +13,6 @@ public sealed partial class DropboxInventory : IInventorySource, IDeferredDeleti
     private readonly DropboxPilotClient _client;
     private readonly IStateStore _known;
     private readonly string _pairId;
-    private readonly V2Settings _settings;
     // Complete first-sync tombstones come from a full listing or its persisted cursor-bound classification.
     // The ancestor set also keeps tombstones for re-created folders; exact matches exclude live replacements.
     // Only tombstone-matched file candidates require revision-history evidence.
@@ -21,15 +20,13 @@ public sealed partial class DropboxInventory : IInventorySource, IDeferredDeleti
     private IReadOnlySet<string>? _deletedAncestorsFromFull;
     private string? _evidenceBasis;
 
-    public DropboxInventory(RootDef root, Side side, DropboxPilotClient client, IStateStore known, string pairId,
-        V2Settings settings)
+    public DropboxInventory(RootDef root, Side side, DropboxPilotClient client, IStateStore known, string pairId)
     {
         _root = root;
         _side = side;
         _client = client;
         _known = known;
         _pairId = pairId;
-        _settings = settings;
     }
 
     public Task ReadSubtreeAsync(string path, Func<IReadOnlyList<ItemState>, Task> accept, CancellationToken ct,

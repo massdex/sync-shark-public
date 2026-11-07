@@ -19,7 +19,7 @@ internal static partial class DropboxChecks
             }
             var pair = new PairDef("p1", "Pair A", new("ra", SyncProviders.Local, null, "/local", "id:ra"), Root(), [], [], true);
             store.SavePair(pair);
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId, V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId);
             var writer = h.Writer(Path.Combine(home, "spool"));
             var provider = new FakeEndpointProvider().Add(pair.A, local).AddInventory(pair.B, inventory).AddWriter(pair.B, writer);
             var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };
@@ -72,7 +72,7 @@ internal static partial class DropboxChecks
         h.Wire.SeedFile("Folder/Two", "same");
         var pair = new PairDef("p1", "Pair A", new("ra", SyncProviders.Local, null, "/local", "id:ra"), Root(), [], [], true);
         store.SavePair(pair);
-        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId, V2Settings.Default);
+        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId);
         var writer = h.Writer(Path.Combine(folder, "spool"));
         var provider = new FakeEndpointProvider().Add(pair.A, local).AddInventory(pair.B, inventory).AddWriter(pair.B, writer);
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };

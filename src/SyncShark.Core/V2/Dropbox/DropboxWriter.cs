@@ -171,7 +171,7 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
         var result = new Dictionary<string, ItemState?>(StringComparer.Ordinal);
         foreach (var page in paths.Chunk(128))
         {
-            var entries = await _client.ReadMetadataPageAsync(page, _settings.MetadataPagePaths, ct).ConfigureAwait(false);
+            var entries = await _client.ReadMetadataPageAsync(page, _settings.Tunables.MetadataPagePaths, ct).ConfigureAwait(false);
             foreach (var entry in entries) result[entry.Key] = entry.Value is null ? null : DropboxItems.ToItem(entry.Value);
         }
         return result;

@@ -60,15 +60,15 @@ internal static partial class RunChecks
         var connection = PriorityConnection(store);
         CheckPriorityPlan(connection, SqliteStateStore.UrgentGapSql,
             [("$r", 1L), ("$e", "epoch"), ("$now", long.MaxValue),
-                ("$candidates", V2Settings.Default.UrgentCandidateCap), ("$limit", V2Settings.Default.UrgentHashCap)], "planning_deferred_user_rv", boundedSort: true);
+                ("$candidates", V2Tunables.Default.UrgentCandidateCap), ("$limit", V2Tunables.Default.UrgentHashCap)], "planning_deferred_user_rv", boundedSort: true);
         var sql = SqliteStateStore.UrgentGapSql;
         var start = sql.IndexOf("SELECT object_id,version", StringComparison.Ordinal);
         var end = sql.IndexOf(") GROUP BY", start, StringComparison.Ordinal);
-        CheckPriorityPlan(connection, sql[start..end], [("$r", 1L), ("$candidates", V2Settings.Default.UrgentCandidateCap)],
+        CheckPriorityPlan(connection, sql[start..end], [("$r", 1L), ("$candidates", V2Tunables.Default.UrgentCandidateCap)],
             "planning_deferred_user_rv");
         CheckPriorityPlan(connection, SqliteStateStore.UrgentPlanningIntakeSql,
             [("$p", 1L), ("$before", long.MaxValue), ("$limit", 128)], "planning_deferred_user_pv");
-        Require(V2Settings.Default.UrgentCandidateCap == 1024 &&
+        Require(V2Tunables.Default.UrgentCandidateCap == 1024 &&
             SqliteStateStore.UrgentGapSql.IndexOf("LIMIT $candidates", StringComparison.Ordinal) <
             SqliteStateStore.UrgentGapSql.IndexOf("CROSS JOIN", StringComparison.Ordinal),
             "candidate LIMIT bounds input to DISTINCT and the gap join, not only returned matches");

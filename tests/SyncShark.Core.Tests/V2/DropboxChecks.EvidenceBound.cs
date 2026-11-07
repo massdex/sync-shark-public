@@ -53,7 +53,7 @@ internal static partial class DropboxChecks
         int CloudWrites() => h.Wire.Calls.Count(call => call.Contains("/delete", StringComparison.Ordinal) ||
             call.Contains("/upload", StringComparison.Ordinal) || call.Contains("/restore", StringComparison.Ordinal));
         var cloudWritesBeforeHold = CloudWrites();
-        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1", V2Settings.Default));
+        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
         var delaysBefore = delays.Count;
         var probesBefore = h.Wire.Calls.Count(call => call == "/2/files/list_revisions");
         var first = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
@@ -109,7 +109,7 @@ internal static partial class DropboxChecks
                 [new DeletionEvidenceRecord("held.txt", DateTimeOffset.Parse("2026-10-12T00:00:00Z"))]);
         if (mode == "attempts") h.Wire.OnRevisionAsync = null; // Successful evidence must retire on recreation too.
         else h.Wire.OnRevisionAsync = _ => throw new InvalidDataException("malformed revision history");
-        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1", V2Settings.Default));
+        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
         var decisionRun = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Require(decisionRun.Failed == 0 && await local.ObserveAsync("held.txt", CancellationToken.None) is not null &&
             local.WriteCalls == localWritesBeforeHold && CloudWrites() == cloudWritesBeforeHold,
@@ -131,7 +131,7 @@ internal static partial class DropboxChecks
         // ingests the current remote content. It is not a stale deletion.
         h.Wire.SeedFile("held.txt", "remote restored content", clientModified: DateTimeOffset.Parse("2026-10-13T00:00:00Z"));
         h.Wire.SeedChangePage("bound-next", [h.Wire.ChangeExistingFile("held.txt")], false, "bound-restored");
-        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1", V2Settings.Default));
+        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
         var restored = await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Require(restored.Failed == 0 && h.Known.Cursor(RootId) == "bound-restored" &&
             h.Known.SyncRetryAt("p1", "held.txt") is null && h.Known.ReadSyncRetries("p1").Count() == 0 &&
@@ -151,7 +151,7 @@ internal static partial class DropboxChecks
         h.Wire.OnRevisionAsync = _ => throw new TaskCanceledException("request timeout");
         h.Wire.MoveOutsideRoot("held.txt", "removed-again/held.txt");
         h.Wire.SeedChangePage("bound-restored", [h.Wire.ChangeDeleted("/Pilot/held.txt")], false, "bound-deleted-again");
-        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1", V2Settings.Default));
+        provider.AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, h.Known, "p1"));
         await run.IncrementalAsync("p1", new Progress<RunProgress>(), CancellationToken.None);
         Require(h.Known.Cursor(RootId) == "bound-deleted-again" && h.Known.Live(RootId, ["held.txt"]).Count == 0 &&
             await local.ObserveAsync("held.txt", CancellationToken.None) is not null &&

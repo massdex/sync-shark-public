@@ -8,21 +8,21 @@ internal static partial class LocalJournalChecks
     {
         VerificationTruthTable();
         var elapsed = TimeSpan.Zero;
-        var budget = new VerificationBudget(V2Settings.Default.UrgentHashCap, () => elapsed);
+        var budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => elapsed);
         LocalChecks.Require(budget.Admit(VerificationBudget.MaximumBytes + 1) && !budget.CanStart,
             "one oversized file can progress independently, then pass yields");
-        budget = new VerificationBudget(V2Settings.Default.UrgentHashCap, () => elapsed);
+        budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => elapsed);
         LocalChecks.Require(budget.Admit(1), "first file admitted");
         elapsed = VerificationBudget.MaximumTime;
         LocalChecks.Require(!budget.Admit(1), "elapsed budget prevents another file, never abandons a reader");
         elapsed = TimeSpan.Zero;
-        budget = new VerificationBudget(V2Settings.Default.UrgentHashCap, () => elapsed);
+        budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => elapsed);
         LocalChecks.Require(budget.Admit(VerificationBudget.MaximumBytes - 1) && !budget.Admit(2),
             "remaining byte admission cannot overshoot except first file");
-        budget = new VerificationBudget(V2Settings.Default.UrgentHashCap, () => TimeSpan.Zero);
+        budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => TimeSpan.Zero);
         for (var i = 0; i < 512; i++) LocalChecks.Require(budget.Admit(0), "512 item admission boundary");
         LocalChecks.Require(!budget.CanStart && !budget.Admit(0), "513th item is refused");
-        budget = new VerificationBudget(V2Settings.Default.UrgentHashCap, () => TimeSpan.Zero);
+        budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => TimeSpan.Zero);
         LocalChecks.Require(budget.Admit(long.MaxValue) && !budget.Admit(long.MaxValue) && !budget.CanStart,
             "maximum-sized first item saturates without overflow or another admission");
         LocalChecks.Require(NtfsUsnJournal.CanProveContents(FileAttributes.ReparsePoint, 0x9000001a) &&

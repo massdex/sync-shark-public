@@ -46,7 +46,7 @@ internal sealed partial class PairLoop
     // page, a held page, an admission, or a first report with no previous count waits for the normal schedule.
     private bool DrainedPlanning(RunReport report, RunReport? previous) =>
         report.PlanningBacklog > 0 && previous is { PlanningBacklog: > 0 } prior &&
-        (long)prior.PlanningBacklog - report.PlanningBacklog >= _in.Settings.DeferredIntakeEntityCap;
+        (long)prior.PlanningBacklog - report.PlanningBacklog >= _in.Settings.Tunables.DeferredIntakeEntityCap;
 
     private void ScheduleRetry()
     {
@@ -64,7 +64,7 @@ internal sealed partial class PairLoop
         _deferredRetry = true;
         var now = _in.Time.GetUtcNow();
         var floor = now + _in.Settings.MinSafetyPoll;
-        var ceiling = now + _in.Settings.RetryMaximumDelay;
+        var ceiling = now + _in.Settings.Tunables.RetryMaximumDelay;
         var deadline = _in.Store.EarliestSyncRetryAfter(_pairId) ?? ceiling;
         if (deadline < floor) deadline = floor;
         if (deadline > ceiling) deadline = ceiling;

@@ -252,7 +252,7 @@ internal static partial class RunChecks
             "operation-local wait stays independent of the pair episode");
         // Legacy entry points keep their ten-second/300-second schedule for their existing consumers.
         Require(FailureRetryOwner.Failed(V2Settings.Default, 0, now) == new FailureRetryOwner.State(1, now.AddSeconds(10)) &&
-            V2Settings.Default.RetryMaximumDelay == TimeSpan.FromMinutes(5),
+            V2Tunables.Default.RetryMaximumDelay == TimeSpan.FromMinutes(5),
             "legacy failure entry points retain their ten-second/300-second schedule");
         Console.WriteLine("PASS Completion_AdoptedBackoffSchedule");
     }

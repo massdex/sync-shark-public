@@ -65,7 +65,7 @@ public sealed partial class SqliteStateStore
 
     public void RequireRehashBatch(string rootId, IEnumerable<ItemState> items, string reason)
     {
-        foreach (var batch in items.DistinctBy(item => item.ObjectId).Chunk(_settings.RehashBatchRows))
+        foreach (var batch in items.DistinctBy(item => item.ObjectId).Chunk(_settings.Tunables.RehashBatchRows))
             InIndexingStore(() =>
             {
                 var root = RootNo(rootId);

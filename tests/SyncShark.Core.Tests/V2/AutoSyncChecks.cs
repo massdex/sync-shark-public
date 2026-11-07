@@ -353,7 +353,7 @@ internal static partial class AutoSyncChecks
         foreach (var side in new[] { Side.A, Side.B })
         {
             await using var rig = new Rig(["p1"]);
-            var due = rig.Clock.GetUtcNow() + V2Settings.Default.RetryMaximumDelay;
+            var due = rig.Clock.GetUtcNow() + V2Tunables.Default.RetryMaximumDelay;
             rig._store.SaveSyncRetry("p1", new SyncRetry("sleeping.txt", "sync", 6, "Content proof is unavailable", due));
             FailureRetryOwner.RecordDeferredRetry(rig._store, "p1", 1,
                 FailureRetryOwner.Failed(V2Settings.Default, 5, rig.Clock.GetUtcNow()));

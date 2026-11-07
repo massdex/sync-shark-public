@@ -17,7 +17,7 @@ internal static partial class DropboxChecks
             Client = new DropboxPilotClient(_http, new FixedTokenSource(), "/Pilot", binding ?? Binding(), DropboxWire.RootId,
                 transferLimiter: limiter, uploadSessionThresholdBytes: uploadThreshold);
 
-            Inventory = new DropboxInventory(Root(), Side.B, Client, Known, "p1", V2Settings.Default);
+            Inventory = new DropboxInventory(Root(), Side.B, Client, Known, "p1");
         }
 
         public DropboxWire Wire { get; }

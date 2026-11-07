@@ -26,7 +26,7 @@ internal static partial class RunChecks
         store.SavePair(pair);
         store.MarkFirstSyncDone(pair.PairId);
         var start = new NtfsUsnCheckpoint(1, 0, 128, 0);
-        var target = start with { NextUsn = start.NextUsn + V2Settings.Default.JournalReplayWindowBytes * 7 / 2 };
+        var target = start with { NextUsn = start.NextUsn + V2Tunables.Default.JournalReplayWindowBytes * 7 / 2 };
         var checkpoint = start;
         var inventory = new LocalInventory(root, Side.A, store, new HashSet<string>(), settings,
             clock, StorageFailureClassifier.IsStateDamage, pairId: pair.PairId)
@@ -48,7 +48,7 @@ internal static partial class RunChecks
             failure = null; kind = NtfsUsnReadFailure.Transient;
             if (from.NextUsn == through.NextUsn) { changes = []; return true; }
             reads.Add(from.NextUsn);
-            var index = (from.NextUsn - start.NextUsn) / V2Settings.Default.JournalReplayWindowBytes;
+            var index = (from.NextUsn - start.NextUsn) / V2Tunables.Default.JournalReplayWindowBytes;
             var item = store.Live(root.RootId, [$"edit-{index}.txt"]).Single();
             changes = [new(LocalItems.ParseObjectId(item.ObjectId).FileId, LocalItems.ParseObjectId(root.RootObjectId).FileId,
                 from.NextUsn, index == 3 ? 0x1U : 0x100U, FileAttributes.Normal, item.Path)];

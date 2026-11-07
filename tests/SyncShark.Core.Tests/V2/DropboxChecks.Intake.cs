@@ -62,7 +62,7 @@ internal static partial class DropboxChecks
         using var store = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(new PairDef("p1", "collapse fixture",
             new RootDef("ra", SyncProviders.Local, null, state, "id:ra"), Root(), [], [], true));
-        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1", V2Settings.Default);
+        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
         var collapse = typeof(DropboxInventory).GetMethod("Collapse", BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("The keyed collapse seam is missing.");
         const int count = 10_000;
@@ -380,7 +380,7 @@ internal static partial class DropboxChecks
             var seed = store.BeginGeneration(RootId, "snapshot");
             store.WriteSnapshot(new Snapshot(RootId, Side.B, seed, "c0", [Stored("gone.txt", "id:gone", new string('a', 64))], []));
             store.CompleteGeneration(seed, "c0", true);
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, "p1");
             var delta = await inventory.ChangesSinceAsync("sqlite-start", store.BeginGeneration(RootId, "delta"),
                 _ => true, CancellationToken.None);
             Require(delta.PendingDeletionEvidence.ContainsKey("gone.txt") &&

@@ -29,7 +29,7 @@ internal static partial class DropboxChecks
         var observed = DispatchProxy.Create<IStateStore, EvidenceReadProxy>();
         var proxy = (EvidenceReadProxy)(object)observed;
         proxy.Store = sqlite;
-        var inventory = new DropboxInventory(Root(), Side.B, h.Client, observed, pair.PairId, V2Settings.Default);
+        var inventory = new DropboxInventory(Root(), Side.B, h.Client, observed, pair.PairId);
         var delta = await inventory.ChangesSinceAsync("start", 2, _ => true, CancellationToken.None, firstSync: true);
         Require(!delta.CursorInvalid && delta.CursorAfter == "next", "paged history retains the refreshed cursor");
         Require(proxy.FullReads == 0 && proxy.MaxPage <= 256 && proxy.PageReads == 3 * ((count + 255) / 256 + 1),

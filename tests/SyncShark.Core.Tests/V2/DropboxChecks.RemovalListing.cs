@@ -18,7 +18,7 @@ internal static partial class DropboxChecks
             var other = root with { RootId = "other" };
             var pair = new PairDef("removal-pair", "Pair A", side == Side.A ? root : other,
                 side == Side.B ? root : other, [], [], true);
-            var inventory = new DropboxInventory(root, side, fixture.Client, fixture.Known, pair.PairId, V2Settings.Default);
+            var inventory = new DropboxInventory(root, side, fixture.Client, fixture.Known, pair.PairId);
             var folder = (await fixture.Writer().ObserveAsync("reviewed", default))!;
             var action = new SyncAction("reviewed", 40, ActionKind.Delete, side, folder.Path,
                 null, null, folder, false, null) { RemovalReviewChoice = true };

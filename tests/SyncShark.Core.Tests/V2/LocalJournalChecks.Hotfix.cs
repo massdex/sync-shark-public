@@ -145,7 +145,7 @@ internal static partial class LocalJournalChecks
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap("root-local", "0000000000000001:100", 50, true);
         var oldEpoch = gaps.GapEpoch("root-local")!;
-        var now = new NtfsUsnCheckpoint(1, 0, 100 + V2Settings.Default.JournalReplayWindowBytes + 1, 0);
+        var now = new NtfsUsnCheckpoint(1, 0, 100 + V2Tunables.Default.JournalReplayWindowBytes + 1, 0);
         inventory.WalkCheckpointForTest = () => (now, false);
         inventory.JournalReadForTest = (string _, NtfsUsnCheckpoint from, NtfsUsnCheckpoint through,
             out IReadOnlyList<NtfsUsnChange> changes, out string? failure, out NtfsUsnReadFailure kind, CancellationToken ct) =>

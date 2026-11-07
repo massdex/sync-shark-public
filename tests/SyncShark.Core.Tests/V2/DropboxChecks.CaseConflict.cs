@@ -107,7 +107,7 @@ internal static partial class DropboxChecks
         DropboxWriter writer, Harness h, ItemState original)
     {
         var provider = new FakeEndpointProvider().Add(pair.A, a).AddWriter(pair.B, writer)
-            .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId, V2Settings.Default));
+            .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId));
         store.MarkFirstSyncDone(pair.PairId);
         var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(),
             isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),

@@ -55,7 +55,7 @@ internal static partial class DropboxChecks
         });
         store.SaveSyncRetry(pair.PairId, new("", "scan", 1, "root read failed", DateTimeOffset.MinValue,
             ReadRoots: [RootId]));
-        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId, V2Settings.Default);
+        var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId);
         var provider = new FakeEndpointProvider().Add(pair.A, local).AddInventory(pair.B, inventory)
             .AddWriter(pair.B, h.Writer(Path.Combine(folder, "spool")));
         var settings = V2Settings.Default with { ProgressInterval = TimeSpan.Zero, MaxWorkers = 1 };

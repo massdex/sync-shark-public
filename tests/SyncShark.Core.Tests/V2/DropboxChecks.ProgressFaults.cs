@@ -31,7 +31,7 @@ internal static partial class DropboxChecks
         var endpoints = new FakeEndpointProvider().AddWriter(pair.A, localWriter)
             .AddInventory(pair.A, new LocalInventory(pair.A, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
                 { GapIo = new LocalGapIo(store, settings, new HashSet<string>(), () => false) })
-            .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId, V2Settings.Default))
+            .AddInventory(pair.B, new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId))
             .AddWriter(pair.B, h.Writer(Path.Combine(product, "spool")));
         var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), endpoints, settings,
             TimeProvider.System);
@@ -41,7 +41,7 @@ internal static partial class DropboxChecks
 
         // A full listing (the server-side scan and the deletion-evidence reads) survives a throwing string sink.
         var listingSink = new ThrowingProgress<string>();
-        var snapshot = await new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId, V2Settings.Default)
+        var snapshot = await new DropboxInventory(pair.B, Side.B, h.Client, store, pair.PairId)
             .FullAsync(1, _ => true, listingSink, CancellationToken.None);
         Require(listingSink.Calls > 0 && snapshot.Items.Any(item => item.Path == "listed.txt"),
             "a throwing listing progress sink notifies, yet the full scan still completes");

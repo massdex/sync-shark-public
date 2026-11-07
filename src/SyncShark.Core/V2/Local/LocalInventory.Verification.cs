@@ -4,7 +4,7 @@ public sealed partial class LocalInventory
 {
     private IReadOnlyList<(ItemState Item, bool Urgent)> VerificationPage(ILocalGapIo io, long through)
     {
-        var urgent = _known.UrgentRehashCandidates(_root.RootId, _settings.UrgentHashCap, through)
+        var urgent = _known.UrgentRehashCandidates(_root.RootId, _settings.Tunables.UrgentHashCap, through)
             .Select(item => (Item: item, Urgent: true));
         var bulk = io.Paused ? Enumerable.Empty<(ItemState Item, bool Urgent)>() :
             _known.RehashCandidates(_root.RootId, VerificationBudget.MaximumItems, through, needsVerification: true)

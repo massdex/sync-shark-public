@@ -32,16 +32,19 @@ internal static class TunableSettingsChecks
         var now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
         var tuned = V2Settings.Default with
         {
-            RetryInitialDelay = TimeSpan.FromSeconds(3),
-            RetryDelayMultiplier = 3,
-            RetryMaximumDoublings = 2,
-            RetryMaximumDelay = TimeSpan.FromSeconds(20)
+            Tunables = V2Tunables.Default with
+            {
+                RetryInitialDelay = TimeSpan.FromSeconds(3),
+                RetryDelayMultiplier = 3,
+                RetryMaximumDoublings = 2,
+                RetryMaximumDelay = TimeSpan.FromSeconds(20)
+            }
         };
         Require(FailureRetryOwner.Failed(tuned, 0, now).RetryAfter == now.AddSeconds(3), "first wait is the configured base");
         Require(FailureRetryOwner.Failed(tuned, 1, now).RetryAfter == now.AddSeconds(9), "second wait uses the configured multiplier");
         Require(FailureRetryOwner.Failed(tuned, 2, now).RetryAfter == now.AddSeconds(20), "a wait past the configured ceiling is capped");
         // A ceiling above the growth shows the doubling count itself stops the growth at the configured exponent.
-        var roomy = tuned with { RetryMaximumDelay = TimeSpan.FromMinutes(5) };
+        var roomy = tuned with { Tunables = tuned.Tunables with { RetryMaximumDelay = TimeSpan.FromMinutes(5) } };
         Require(FailureRetryOwner.Failed(roomy, 3, now).RetryAfter == now.AddSeconds(27),
             "the configured doubling count stops further growth");
     }
@@ -51,8 +54,11 @@ internal static class TunableSettingsChecks
     {
         var tuned = V2Settings.Default with
         {
-            JournalReplayWindowBytes = 4L * 1024 * 1024,
-            JournalReplayMinimumWindowBytes = 1024 * 1024
+            Tunables = V2Tunables.Default with
+            {
+                JournalReplayWindowBytes = 4L * 1024 * 1024,
+                JournalReplayMinimumWindowBytes = 1024 * 1024
+            }
         };
         var window = new JournalReplayWindow(tuned);
         Require(window.Bytes == 4L * 1024 * 1024 && window.MaximumBytes == 4L * 1024 * 1024,
@@ -79,14 +85,14 @@ internal static class TunableSettingsChecks
     // The moved values keep exactly today's defaults, so moving them changed no behaviour.
     private static void ShippedDefaultsUnchanged()
     {
-        var settings = V2Settings.Default;
+        var settings = V2Tunables.Default;
         Require(settings.RetryInitialDelay == TimeSpan.FromSeconds(10) &&
             settings.RetryDelayMultiplier == 2 && settings.RetryMaximumDoublings == 5 &&
             settings.RetryMaximumDelay == TimeSpan.FromMinutes(5), "retry defaults unchanged");
         Require(settings.JournalReplayWindowBytes == 64L * 1024 * 1024 &&
             settings.JournalReplayMinimumWindowBytes == 1024L * 1024, "journal window defaults unchanged");
-        Require(settings.MaximumLocalReplayWindowsPerRun == 64 && settings.LocalReplayWindowsPerRun == 8,
-            "journal replay window-count defaults unchanged");
+        Require(settings.MaximumLocalReplayWindowsPerRun == 64 &&
+            V2Settings.Default.LocalReplayWindowsPerRun == 8, "journal replay window-count defaults unchanged");
         Require(settings.LocalGapContentBufferBytes == 64 * 1024 && settings.LocalGapHashPageRows == 16,
             "background gap defaults unchanged");
         Require(settings.RehearsalPageRows == 256, "rehearsal page default unchanged");

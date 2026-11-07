@@ -31,8 +31,8 @@ public sealed partial class SqliteStateStore
         using (var cmd = StoreSchema.Command(_connection, null, UrgentGapSql))
         {
             cmd.Parameters.AddWithValue("$r", root); cmd.Parameters.AddWithValue("$e", epoch.Epoch);
-            cmd.Parameters.AddWithValue("$candidates", _settings.UrgentCandidateCap);
-            cmd.Parameters.AddWithValue("$limit", Math.Min(limit, _settings.UrgentHashCap));
+            cmd.Parameters.AddWithValue("$candidates", _settings.Tunables.UrgentCandidateCap);
+            cmd.Parameters.AddWithValue("$limit", Math.Min(limit, _settings.Tunables.UrgentHashCap));
             cmd.Parameters.AddWithValue("$now", NowMs());
             using var reader = cmd.ExecuteReader();
             while (reader.Read()) ids.Add(reader.GetString(0));
@@ -72,9 +72,9 @@ public sealed partial class SqliteStateStore
     private List<DeferredPlanning> ReadPlanningIntake(SqliteTransaction tx, long pair, long before, bool userOnly)
     {
         var admitted = new List<DeferredPlanning>();
-        AddPage(UrgentPlanningIntakeSql, _settings.DeferredIntakeEntityCap / 2, _settings.DeferredIntakePathCap / 2);
-        if (!userOnly) AddPage(BulkPlanningIntakeSql, _settings.DeferredIntakeEntityCap - admitted.Count,
-            _settings.DeferredIntakePathCap - admitted.Sum(row => row.Paths.Count));
+        AddPage(UrgentPlanningIntakeSql, _settings.Tunables.DeferredIntakeEntityCap / 2, _settings.Tunables.DeferredIntakePathCap / 2);
+        if (!userOnly) AddPage(BulkPlanningIntakeSql, _settings.Tunables.DeferredIntakeEntityCap - admitted.Count,
+            _settings.Tunables.DeferredIntakePathCap - admitted.Sum(row => row.Paths.Count));
         return admitted;
 
         void AddPage(string sql, int limit, int paths)
@@ -132,8 +132,8 @@ public sealed partial class SqliteStateStore
         cmd.Parameters.AddWithValue("$r", root.Value);
         cmd.Parameters.AddWithValue("$through", through);
         cmd.Parameters.AddWithValue("$now", NowMs());
-        cmd.Parameters.AddWithValue("$candidates", _settings.UrgentCandidateCap);
-        cmd.Parameters.AddWithValue("$limit", Math.Min(limit, _settings.UrgentHashCap));
+        cmd.Parameters.AddWithValue("$candidates", _settings.Tunables.UrgentCandidateCap);
+        cmd.Parameters.AddWithValue("$limit", Math.Min(limit, _settings.Tunables.UrgentHashCap));
         var ids = new List<string>();
         using (var reader = cmd.ExecuteReader())
             while (reader.Read()) ids.Add(reader.GetString(0));

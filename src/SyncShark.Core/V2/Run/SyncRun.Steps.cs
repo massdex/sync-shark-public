@@ -482,7 +482,7 @@ public sealed partial class SyncRun
                     observationStore.StagePrefixHydration(root.RootId, rows.Where(row => include(row.Path))
                         .Select(row => (row.Path, row.Entry is null ? null : DropboxItems.ToItem(row.Entry))).ToArray());
                     return Task.CompletedTask;
-                }, _settings.RehearsalPageRows, ct);
+                }, _settings.Tunables.RehearsalPageRows, ct);
                 observationStore.InstallPrefixHydration(root, side, deltaGen, hydrate,
                     path => include(path) && !DropboxPathIdentity.InScope(hydrationFailures, path), cursor, ct, ids.Add);
             }

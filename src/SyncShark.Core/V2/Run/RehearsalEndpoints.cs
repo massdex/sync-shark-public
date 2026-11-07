@@ -27,9 +27,9 @@ internal sealed partial class RehearsalEndpoints(IEndpointProvider real, Rehears
     {
         var overlay = _roots.GetOrAdd(root.RootId, _ => root.Provider switch
         {
-            SyncProviders.Local => new LocalOverlay(root, side, storage, record, settings.RehearsalPageRows),
-            SyncProviders.Dropbox => new CloudOverlay(root, side, storage, record, settings.RehearsalPageRows),
-            _ => new Overlay(root, side, storage, record, settings.RehearsalPageRows)
+            SyncProviders.Local => new LocalOverlay(root, side, storage, record, settings.Tunables.RehearsalPageRows),
+            SyncProviders.Dropbox => new CloudOverlay(root, side, storage, record, settings.Tunables.RehearsalPageRows),
+            _ => new Overlay(root, side, storage, record, settings.Tunables.RehearsalPageRows)
         });
         overlay.Reader = _reads.Writer(root);
         overlay.Inventory = _reads.Inventory(root);

@@ -35,7 +35,7 @@ internal static partial class RunChecks
             store.SyncRetryAt(pair.PairId, "retained.txt") is null,
             "lost-publication fixture has no effects, baseline or sleeping content-proof failure");
         var debt = store.CountDeferredPlanning(pair.PairId);
-        checkpoint = start with { NextUsn = start.NextUsn + V2Settings.Default.JournalReplayWindowBytes * 7 / 2 };
+        checkpoint = start with { NextUsn = start.NextUsn + V2Tunables.Default.JournalReplayWindowBytes * 7 / 2 };
         // Discard both prepares, as if publication failed. No pending/effect cursor is supplied.
         await fx.Run().PreviewFirstSyncAsync(pair.PairId, new RecordingProgress(), default);
         Require(store.Cursor(root.RootId) is null && store.CountDeferredPlanning(pair.PairId) == debt,

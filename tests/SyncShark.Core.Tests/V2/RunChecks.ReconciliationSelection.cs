@@ -69,7 +69,7 @@ internal static partial class RunChecks
         var root = fx.Pair.B with { Provider = SyncProviders.Dropbox, RootPath = "/Pilot", RootObjectId = DropboxWire.RootId };
         var pair = fx.Pair with { B = root };
         store.SavePair(pair);
-        var inventory = new DropboxInventory(root, Side.B, client, store, pair.PairId, V2Settings.Default);
+        var inventory = new DropboxInventory(root, Side.B, client, store, pair.PairId);
         fx.Provider.AddInventory(root, inventory);
         var snapshot = await inventory.FullAsync(0, _ => true, SilentProgress, default);
         var old = snapshot.Items.Select(item => item.Path == "rev.txt" ? item with { VersionId = "previous-revision" } :

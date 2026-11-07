@@ -75,7 +75,7 @@ internal static partial class DropboxChecks
         using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             sql.SavePair(new PairDef("p1", "Listing fixture", new RootDef("ra", "Local", null, state, "local"), Root(), [], [], true));
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             var progress = new ListingProgress(text =>
             {
                 if (text.Contains("Read Dropbox folder listing page", StringComparison.Ordinal)) sql.SetPairPaused("p1", true);
@@ -97,7 +97,7 @@ internal static partial class DropboxChecks
             sql.SetPairPaused("p1", false);
             if (expire) h.Wire.Script("/2/files/list_folder/continue", HttpStatusCode.Conflict, 1);
             sql.SavePair(new PairDef("p1", "Listing fixture", new RootDef("ra", "Local", null, state, "local"), Root(), [], [], true));
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             var snapshot = await inventory.FullAsync(2, _ => true, Sink, CancellationToken.None);
             Require(snapshot.IncompleteSubtrees.Count == 0 && snapshot.Items.Count == 7 &&
                 snapshot.Items.Select(row => row.Path).Distinct().Count() == 7,
@@ -115,7 +115,7 @@ internal static partial class DropboxChecks
         using (var sql = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash))
         {
             sql.SavePair(new PairDef("p1", "Reset fixture", new RootDef("ra", "Local", null, state, "local"), Root(), [], [], true));
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             h.Wire.Script("/2/files/list_folder/continue", HttpStatusCode.Conflict, 1);
             Require((await inventory.ChangesSinceAsync("bad-cursor", 1, _ => true, CancellationToken.None)).CursorInvalid,
                 "reset delta requests a full listing");
@@ -133,7 +133,7 @@ internal static partial class DropboxChecks
         }
         using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         reopened.SetPairPaused("p1", false);
-        var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1", V2Settings.Default);
+        var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
         Require((await resumed.ChangesSinceAsync("bad-cursor", 3, _ => true, CancellationToken.None)).CursorInvalid,
             "unfinished full listing bypasses delta and selects full fallback");
         var snapshot = await resumed.FullAsync(3, _ => true, Sink, CancellationToken.None);
@@ -203,7 +203,7 @@ internal static partial class DropboxChecks
         {
             h.Wire.AfterContinueResponse = cursor => { if (cursor == "delta-start") sql.SetPairPaused("p1", true); };
             sql.SavePair(new PairDef("p1", "Listing fixture", new RootDef("ra", "Local", null, state, "local"), Root(), [], [], true));
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1", V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, sql, "p1");
             try
             {
                 await inventory.ChangesSinceAsync("delta-start", 1, _ => true, CancellationToken.None);
@@ -215,7 +215,7 @@ internal static partial class DropboxChecks
         h.Wire.AfterContinueResponse = null;
         using var reopened = SqliteStateStore.Open(state, StorageChecks.Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         reopened.SetPairPaused("p1", false);
-        var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1", V2Settings.Default);
+        var resumed = new DropboxInventory(Root(), Side.B, h.Client, reopened, "p1");
         var delta = await resumed.ChangesSinceAsync("delta-start", 2, _ => true, CancellationToken.None);
         Require(!delta.CursorInvalid && delta.CursorAfter == "delta-end" && delta.Changes.Count == 2,
             "delta resumed without missing or duplicate rows");

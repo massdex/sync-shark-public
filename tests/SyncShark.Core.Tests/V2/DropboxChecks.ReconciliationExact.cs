@@ -22,7 +22,7 @@ internal static partial class DropboxChecks
         store.WriteSnapshot(new(RootId, Side.B, gen, "cursor", rows, []));
         store.CompleteGeneration(gen, "cursor", true);
         h.Wire.MetadataFailurePath = DropboxWire.RootId + "/unknown.txt";
-        var cloud = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId, V2Settings.Default);
+        var cloud = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId);
         var provider = new FakeEndpointProvider().Add(local, new FakeEndpoint(Side.A, "ra")).Add(Root(), fake);
         var run = new SyncRun(store, new Executor(store, StorageChecks.Fast, ExecutorChecks.Admission(),
             isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException),
@@ -39,13 +39,13 @@ internal static partial class DropboxChecks
         Require(store.Live(RootId, ["Missing"]).Count == 1 && store.Live(RootId, ["unknown.txt"]).Count == 1 &&
             store.Live(RootId, ["Missing/child.txt"]).Count == 1,
             "a missing folder waits for recursive observation; network errors and unselected descendants remain live");
-        var delta = await cloud.ReadExactAsync(["Missing", "unknown.txt"], "cursor", observedGen, _ => true, default);
+        var delta = await cloud.ReadExactAsync(["Missing", "unknown.txt"], V2Tunables.Default.MetadataPagePaths, "cursor", observedGen, _ => true, default);
         Require(delta.IncompleteSubtrees.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(["Missing", "unknown.txt"]) &&
             delta.Changes.All(change => change.Path != "unknown.txt" && change.Path != "Missing"),
             "failed metadata is explicitly incomplete, never a deletion candidate or observed receipt");
         cloud.ExactMetadataForTest = (_, _) => Task.FromResult<IReadOnlyDictionary<string, PilotRemoteEntry?>>(
             new Dictionary<string, PilotRemoteEntry?>());
-        var omitted = await cloud.ReadExactAsync(["unknown.txt"], "cursor", observedGen, _ => true, default);
+        var omitted = await cloud.ReadExactAsync(["unknown.txt"], V2Tunables.Default.MetadataPagePaths, "cursor", observedGen, _ => true, default);
         store.WriteDelta(omitted);
         Require(omitted.IncompleteSubtrees.SequenceEqual(["unknown.txt"]) &&
             omitted.IncompleteReasons.ContainsKey("unknown.txt") && omitted.IncludesPath!("unknown.txt") == false &&

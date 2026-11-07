@@ -128,7 +128,7 @@ internal static partial class DropboxChecks
         SyncRun MakeRun(IStateStore store)
         {
             var provider = new FakeEndpointProvider().Add(pair.A, a).AddWriter(pair.A, writerA)
-                .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, "p1", V2Settings.Default))
+                .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, "p1"))
                 .AddWriter(pair.B, h.Writer());
             return new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider,
                 settings, TimeProvider.System);

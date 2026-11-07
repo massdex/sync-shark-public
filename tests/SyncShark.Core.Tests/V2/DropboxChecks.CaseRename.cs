@@ -148,7 +148,7 @@ internal static partial class DropboxChecks
                 catch (OperationCanceledException) when (stopBeforeLeg != 0) { }
             }
             finally { ProviderEffectContext.Current.Value = previous; }
-            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId, V2Settings.Default);
+            var inventory = new DropboxInventory(Root(), Side.B, h.Client, store, pair.PairId);
             var snapshot = await inventory.FullAsync(1, PairInclude.For(pair, Side.B, [pair], []), Sink, CancellationToken.None);
             Require(snapshot.Items.All(item => !LocalItems.IsArtifactPath(item.Path)),
                 "interrupted case rename intermediate never enters inventory");

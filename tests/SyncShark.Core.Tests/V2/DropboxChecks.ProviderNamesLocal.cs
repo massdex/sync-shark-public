@@ -25,7 +25,7 @@ internal static partial class DropboxChecks
         var provider = new FakeEndpointProvider().AddWriter(localRoot, writer)
             .AddInventory(localRoot, new LocalInventory(localRoot, Side.A, store, new HashSet<string>(), settings, TimeProvider.System, isStateDamage: StorageFailureClassifier.IsStateDamage)
                 { GapIo = new LocalGapIo(store, settings, new HashSet<string>(), () => pauseHashing) })
-            .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, "provider-names-local", V2Settings.Default))
+            .AddInventory(pair.B, new DropboxInventory(Root(), Side.B, h.Client, store, "provider-names-local"))
             .AddWriter(pair.B, h.Writer());
         h.Wire.NameWriteErrors["folder/refused.txt"] = "disallowed_name";
         var run = new SyncRun(store, new Executor(store, settings, ExecutorChecks.Admission(), isStateDamage: StorageFailureClassifier.IsStateDamage, isStoreException: StorageFailureClassifier.IsStoreException), provider, settings,

@@ -33,7 +33,7 @@ public sealed partial class V2CliRuntime
             StorageFailureClassifier.IsBusy, localDate, after, PageLock,
             async (paths, failed, token) =>
             {
-                var entries = await client.ReadMetadataPageAsync(paths, Settings.MetadataPagePaths, token, failed);
+                var entries = await client.ReadMetadataPageAsync(paths, Settings.Tunables.MetadataPagePaths, token, failed);
                 return entries.ToDictionary(row => row.Key, row => row.Value is { ClientModifiedUtc: not null } entry
                     ? DropboxItems.ToItem(entry) : null);
             }, from, to, excludeList, reportMismatch, provenanceSources).ConfigureAwait(false);

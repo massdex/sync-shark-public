@@ -43,7 +43,7 @@ public sealed partial class SqliteStateStore
 
     internal void DeferPlanning(string pairId, IEnumerable<(string Root, ItemState Item)> items, bool urgent = false)
     {
-        foreach (var batch in items.Chunk(_settings.DeferredIntakeEntityCap))
+        foreach (var batch in items.Chunk(_settings.Tunables.DeferredIntakeEntityCap))
             InStore(() =>
             {
                 var pair = PairNo(pairId);
