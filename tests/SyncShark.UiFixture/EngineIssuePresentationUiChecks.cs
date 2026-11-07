@@ -226,7 +226,7 @@ internal static class EngineIssuePresentationUiChecks
 
     private static void CheckReviewedNoticeChoice(MainWindow window, string root)
     {
-        var product = Path.Combine(root, "reviewed-notice");
+        var product = TempRoot("t318-reviewed-notice-");
         using var paths = SyncSharkRuntimePaths.OverrideProductRootForTest(product);
         var operations = new Massdex.SyncShark.Engine.Run.EngineOperations(product, _ => { });
         var pair = new PairConfig("reviewed-ui", "Pair A", Path.Combine(root, "local"), "/Remote", "account", [], [],
