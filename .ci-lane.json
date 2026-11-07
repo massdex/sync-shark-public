@@ -1,0 +1,18 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [
+    "literals",
+    "strings"
+  ],
+  "core": [],
+  "ui": [
+    "folder-browser-pagination-contract-all",
+    "provider-package-checks",
+    "endpoint-reversed-ui-checks"
+  ]
+}
