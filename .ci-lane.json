@@ -1,0 +1,12 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--discovery-correction-preflight",
+    "--cloud-public-pair-authoring-checks",
+    "--cli-checks"
+  ],
+  "ui": []
+}
