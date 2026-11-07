@@ -923,13 +923,11 @@ public static class RepairChecks
     {
         IStateStore store = null!;
         var inject = false;
-        var listings = 0;
         await using var rig = await ComposeRigAsync(folder, decorate: inner =>
         {
             store = inner;
             return new HookStore(inner)
             {
-                WrapSink = (_, sink) => { listings++; return sink; },
                 OnScanRows = () =>
                 {
                     if (!inject) return;
@@ -957,13 +955,14 @@ public static class RepairChecks
         await rig.Host.RecomposeCurrentAsync(pairId, default);
         await rig.Host.EnsureSourceBasesAsync(pairId, default);
         inject = true;
-        listings = 0;
+        var listingsBefore = rig.Store.DiscoveryStarts.Count;
         using var log = rig.Log(folder, "refused-row");
         var summary = await rig.RunAsync(log, default);
         Check.Require(!inject, $"the ancestor notice injection was consumed: inject={inject}");
         Check.Require(summary.Completed, $"an ancestor-refused row completes Repair: completed={summary.Completed}, reason={summary.IncompleteReason}");
         Check.Require(!store.Obligated(pairId), $"the completed Repair clears its obligation: obligated={store.Obligated(pairId)}");
-        Check.Require(listings == 2, $"the Repair opens one sink per side: listings={listings}");
+        Check.Require(rig.Store.DiscoveryStarts.Count - listingsBefore == 1,
+            $"the Repair starts one pair listing: listings={rig.Store.DiscoveryStarts.Count - listingsBefore}");
         Check.Require(rig.Wire.Snapshot().All(item => item.Path != "Parent/Child") &&
             File.ReadAllText(Path.Combine(rig.Pair.LocalRoot, "Parent", "Child")) == "content",
             "the ancestor-refused row takes no effect and keeps its source");
@@ -981,7 +980,7 @@ public static class RepairChecks
         await operations.ResolveAsync(pairId, issue.Id, ResolutionChoice.Retry, null, null, false, null, default);
         Check.Require(store.IssueById(pairId, issue.Id) is null &&
             rig.Wire.Snapshot().Any(item => item.Path == "Parent/Child") &&
-            !store.Obligated(pairId) && listings == 2,
+            !store.Obligated(pairId) && rig.Store.DiscoveryStarts.Count - listingsBefore == 1,
             "ordinary ancestor work and exact issue Retry settle the refused child without another pair listing");
     });
 
