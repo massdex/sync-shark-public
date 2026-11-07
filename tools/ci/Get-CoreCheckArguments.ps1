@@ -20,4 +20,12 @@ if ($env:SUITE_EXTRA_ARGS) {
     $extra = $extraArgs.PSObject.Properties[$Flag]
     if ($null -ne $extra) { $arguments += @($extra.Value) }
 }
+# CLI parity compares the registry against the capability inventory only when the path is
+# passed (Program.cs: the three-argument form). The inventory is not published in the public
+# snapshot, so say so rather than skip silently.
+if ($Flag -ceq '--cli-checks') {
+    $inventory = Join-Path $PSScriptRoot '../../CLI-CAPABILITIES.md'
+    if (Test-Path -LiteralPath $inventory -PathType Leaf) { $arguments += [IO.Path]::GetFullPath($inventory) }
+    else { Write-Host 'CLI inventory parity skipped: CLI-CAPABILITIES.md is not present in this snapshot.' }
+}
 $arguments

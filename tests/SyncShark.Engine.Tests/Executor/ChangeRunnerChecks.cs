@@ -184,6 +184,8 @@ public static class ChangeRunnerChecks
         var old = LocalEntry(OldPath, LocalId);
         var remote = RemoteEntry(OldPath, DropboxId);
         fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(old, remote)] });
+        // Local evidence needs an acquired journal boundary; without one every read refuses for that reason alone.
+        SourceFixture.AcquireJournal(fixture.Inner, fixture.Pair);
         fixture.Local.Seed(old, [1]);
         var moved = remote with { Path = Item };
         fixture.Dropbox.Seed(moved, [1]);
@@ -255,6 +257,7 @@ public static class ChangeRunnerChecks
         var local = LocalEntry(Item, LocalId);
         var remote = RemoteEntry(Item, DropboxId);
         fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(local, remote)] });
+        SourceFixture.AcquireJournal(fixture.Inner, fixture.Pair);
         var moved = remote with
         {
             Path = caseRename ? PathNames.CaseRenamePath(Item, fixture.Settings.CaseRenameSuffix) : OldPath
