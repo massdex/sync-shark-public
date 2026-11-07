@@ -1,0 +1,43 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "stale-freshness",
+    "syncer",
+    "store",
+    "issues",
+    "scenarios-offline",
+    "dependencies",
+    "literals",
+    "cli",
+    "strings",
+    "local",
+    "exclusions",
+    "folder-deletes",
+    "containment",
+    "containment-move-out",
+    "repair-claims",
+    "released-history",
+    "mapped-holds",
+    "safety",
+    "repair",
+    "repair-direct",
+    "repair-forgotten",
+    "attempt-cost",
+    "engine-host",
+    "peer",
+    "live-run-core",
+    "live-wake",
+    "live-admission",
+    "random-sequence",
+    "budget",
+    "speed",
+    "scan-pass",
+    "scan-owner",
+    "read-speed",
+    "read-provider-speed"
+  ],
+  "core": [],
+  "ui": []
+}
