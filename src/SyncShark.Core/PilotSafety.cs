@@ -368,7 +368,7 @@ public sealed partial class PilotDirectoryLease : IDisposable
     internal static PilotDirectoryLease OpenDirectoryReadGuard(string path, PilotDirectoryIdentity expected)
         => OpenCore(path, expected, allowProductState: false, directoryReadAccess: true);
 
-    // One open-and-verify: the OS, path and product-state guards run before the open; every check after it reads the opened handle, and the handle is returned only once all pass or disposed on any failure.
+    // One open-and-verify combines pre-open guards, handle-derived identity and final path, and a path-based GetVolumeInformation query cross-checked against the handle's volume serial; return requires all verification to pass, with disposal on failure.
     private static PilotDirectoryLease OpenCore(string path, PilotDirectoryIdentity? expected, bool allowProductState,
         bool deleteAccess = false, bool allowVolumeRoot = false, bool directoryReadAccess = false, bool denyWrite = false)
     {

@@ -260,7 +260,6 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         await RunPreparedFolderRemovalsAsync([id], ct);
         return await FinishFolderRemovalAsync(id, null, ct);
     }
-
     // One live plan: admission, reobserve and the freeze decision run in one admitted execution and return a durable operation id; removal and finish run against that id after the execution ends.
     internal async Task<bool> RunLiveFolderPlanAsync(Row folder, Action<Row, Issue> retainUnfinished,
         WorkSelection selection, LiveCoverage coverage, IReadOnlyList<LiveEffectScope> footprint, CancellationToken ct)

@@ -269,7 +269,7 @@ public static partial class SyncDataLocation
         directory.DeleteOnClose();
     }
 
-    // One manifest and journal drive both the preflight and the verified deletes; each delete reacquires the preserved and removed objects' guards and re-verifies both against that manifest immediately before deleting.
+    // One manifest and journal drive preflight and deletion: guards are reacquired, preserved content is always verified against the manifest, removed content is verified only when the publication phase requires it, and identities are revalidated before deletion.
     private static void RemoveManifestCopy(string root, MoveJournal journal, bool verify, bool keepLock, string authoritative)
     {
         var files = journal.Files.ToDictionary(file => file.Path, StringComparer.OrdinalIgnoreCase);

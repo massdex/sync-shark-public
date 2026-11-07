@@ -3,12 +3,12 @@
     "engine-tests"
   ],
   "engine": [
+    "store",
     "paths",
-    "dropbox",
+    "syncer",
     "limiter",
     "human-log",
-    "syncer",
-    "store"
+    "dropbox"
   ],
   "core": [],
   "ui": []
