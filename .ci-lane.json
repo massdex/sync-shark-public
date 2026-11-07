@@ -1,0 +1,17 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "syncer",
+    "stale-freshness",
+    "scenarios-offline",
+    "issues",
+    "literals",
+    "dependencies",
+    "strings",
+    "cli"
+  ],
+  "core": [],
+  "ui": []
+}
