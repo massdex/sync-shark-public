@@ -976,12 +976,11 @@ public static class RepairChecks
             await session.Syncer.SyncWorkAsync(ct);
             return true;
         }, default);
-        var operations = new EngineOperations(rig.Instance.StateAuthority.ProductRoot, _ => { }, rig.Host);
-        await operations.ResolveAsync(pairId, issue.Id, ResolutionChoice.Retry, null, null, false, null, default);
-        Check.Require(store.IssueById(pairId, issue.Id) is null &&
-            rig.Wire.Snapshot().Any(item => item.Path == "Parent/Child") &&
+        Check.Require(store.IssueById(pairId, issue.Id) is null,
+            "the ordinary successor settles the refused child's exact Failure");
+        Check.Require(rig.Wire.Snapshot().Any(item => item.Path == "Parent/Child") &&
             !store.Obligated(pairId) && rig.Store.DiscoveryStarts.Count - listingsBefore == 1,
-            "ordinary ancestor work and exact issue Retry settle the refused child without another pair listing");
+            "ordinary ancestor work settles the refused child without another pair listing");
     });
 
     private static async Task RootCheckpointRefusalAsync()
