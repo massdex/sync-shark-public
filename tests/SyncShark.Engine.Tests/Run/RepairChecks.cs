@@ -960,8 +960,10 @@ public static class RepairChecks
         listings = 0;
         using var log = rig.Log(folder, "refused-row");
         var summary = await rig.RunAsync(log, default);
-        Check.Require(!inject && summary.Completed && !store.Obligated(pairId) && listings == 2,
-            "an ancestor-refused row completes Repair and clears its obligation after one pair listing");
+        Check.Require(!inject, $"the ancestor notice injection was consumed: inject={inject}");
+        Check.Require(summary.Completed, $"an ancestor-refused row completes Repair: completed={summary.Completed}, reason={summary.IncompleteReason}");
+        Check.Require(!store.Obligated(pairId), $"the completed Repair clears its obligation: obligated={store.Obligated(pairId)}");
+        Check.Require(listings == 2, $"the Repair opens one sink per side: listings={listings}");
         Check.Require(rig.Wire.Snapshot().All(item => item.Path != "Parent/Child") &&
             File.ReadAllText(Path.Combine(rig.Pair.LocalRoot, "Parent", "Child")) == "content",
             "the ancestor-refused row takes no effect and keeps its source");
