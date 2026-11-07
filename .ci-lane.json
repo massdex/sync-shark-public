@@ -1,0 +1,28 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "syncer",
+    "stale-freshness",
+    "safety",
+    "repair",
+    "engine-host",
+    "live-wake",
+    "live-admission",
+    "scenarios-offline",
+    "store",
+    "work-lifecycle",
+    "local",
+    "exclusions",
+    "dependencies",
+    "literals",
+    "strings",
+    "issues",
+    "attempt-cost",
+    "budget",
+    "speed"
+  ],
+  "core": [],
+  "ui": []
+}
