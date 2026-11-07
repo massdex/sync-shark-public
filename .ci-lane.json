@@ -1,0 +1,16 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "store",
+    "repair",
+    "dropbox",
+    "syncer",
+    "budget",
+    "storage-history",
+    "history-restore-speed"
+  ],
+  "core": [],
+  "ui": []
+}
