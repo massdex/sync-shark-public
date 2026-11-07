@@ -121,14 +121,26 @@ jobs:
           $knownBuild = @('core', 'core-tests', 'fod-tests', 'engine-tests', 'app', 'ui-fixture')
           $path = Join-Path $env:GITHUB_WORKSPACE '.ci-lane.json'
           if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            # No selection: today's full matrix. quick/** still skips the UI fixture.
+            # No selection: today's full matrix. quick/** still skips the UI fixture and engine work.
             $build = @('core', 'core-tests', 'fod-tests', 'app', 'ui-fixture')
-            if ($env:GITHUB_REF -like 'refs/heads/quick/*') { $build = @('core', 'core-tests', 'fod-tests', 'app') }
-            # A full run verifies every registered engine group, not only the projects above.
-            $registry = Get-Content -Raw 'tests/SyncShark.Engine.Tests/CheckRegistry.cs'
-            $engine = @([regex]::Matches($registry, '\["([a-z0-9-]+)"\]\s*=') | ForEach-Object { $_.Groups[1].Value })
-            if ($engine.Count -eq 0) { throw 'No engine groups found in CheckRegistry.' }
-            $build += 'engine-tests'
+            $engine = @()
+            if ($env:GITHUB_REF -like 'refs/heads/quick/*') {
+              $build = @('core', 'core-tests', 'fod-tests', 'app')
+            } else {
+              # A full run verifies every registered engine group, not only the projects above.
+              $registry = Get-Content -Raw 'tests/SyncShark.Engine.Tests/CheckRegistry.cs'
+              $engine = @([regex]::Matches($registry, '\["([a-z0-9-]+)"\]\s*=') | ForEach-Object { $_.Groups[1].Value })
+              if ($engine.Count -eq 0) { throw 'No engine groups found in CheckRegistry.' }
+              # Hosted runs cannot reach the live route; name those groups instead of scheduling them.
+              $liveGroups = @('scenarios', 'scenarios-live')
+              $skipped = @($engine | Where-Object { $liveGroups -ccontains $_ })
+              if ($skipped.Count -gt 0 -and $env:GITHUB_STEP_SUMMARY) {
+                'Full run: not run here: needs the authorized live route: ' + ($skipped -join ', ') |
+                  Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              }
+              $engine = @($engine | Where-Object { $liveGroups -cnotcontains $_ })
+              $build += 'engine-tests'
+            }
             $data = [ordered]@{ has_selection = 'false'; build = $build; engine = $engine; core = @(); ui = @() }
           } else {
             $lane = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json

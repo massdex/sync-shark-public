@@ -16,9 +16,13 @@ $mutants = @(
     @('process-policy', 'SyncSharkSetup.cs', '-ExecutionPolicy Bypass', '-ExecutionPolicy RemoteSigned', 'Setup lost process-scoped policy.'),
     @('torn-frame', 'setup.ps1', '.GetString($bytes, 0, $end)', '.GetString($bytes)', 'Torn UTF-8 tail hid the durable journal frame.'),
     @('ancestor-hold', 'SetupFileSystem.cs', 'uint access = ReadAttributes | GenericRead;', 'uint access = ReadAttributes | GenericRead; if (isDirectory && !mutable && !junction) access = ReadAttributes;', 'Held ancestry allowed a directory replacement.'),
-    @('no-follow', 'SetupFileSystem.cs', '((info.Attributes & 0x400) != 0) != junction ||', '', 'Payload inventory followed a junction.'),
-    @('hardlink', 'SetupFileSystem.cs', '(!isDirectory && info.Links != 1) ||', '', 'A hardlinked setup claim was accepted.'),
-    @('exclusive-claim', 'SetupFileSystem.cs', 'claim ? 0U : 1U', 'claim ? 7U : 1U', 'Concurrent setup claim was accepted.')
+    @('rename-parent-sharing', 'SetupFileSystem.cs', 'uint share = isDirectory && !junction ? 3U : 1U;', 'uint share = 1U;', 'Held-parent cross-directory rename failed with 0x80070020.'),
+    @('post-rename-conversion', 'SetupFileSystem.cs', '            Verify();', '', 'Post-rename conversion was not refused.'),
+    @('preparation-conversion', 'setup.ps1', '$guard.Verify()', '', 'Converted staging deleted foreign evidence.'),
+    @('held-directory-conversion', 'SetupFileSystem.cs', 'public void Verify() { Information(); }', 'public void Verify() { }', 'Held empty directory conversion was not refused.'),
+    @('no-follow', 'SetupFileSystem.cs', '((result.Attributes & 0x400) != 0) != junction ||', '', 'Payload inventory followed a junction.'),
+    @('hardlink', 'SetupFileSystem.cs', '(!isDirectory && result.Links != 1) ||', '', 'A hardlinked setup claim was accepted.'),
+    @('exclusive-claim', 'SetupFileSystem.cs', 'claim ? 0U : share', 'claim ? 7U : share', 'Concurrent setup claim was accepted.')
 )
 $failures = [Collections.Generic.List[string]]::new()
 foreach ($mutant in $mutants) {

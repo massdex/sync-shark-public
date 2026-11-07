@@ -30,6 +30,28 @@ function Active-Version([string]$Install) {
     return [IO.File]::ReadAllText((Join-Path $Install 'active\content.txt'))
 }
 $older = Make-Payload '1.2.2'; $old = Make-Payload '1.2.3'; $new = Make-Payload '1.2.4'
+$sharingSource = Join-Path $Root 'sharing\source'; $sharingTarget = Join-Path $Root 'sharing\target'
+$sharingParents = Open-SetupDirectories $sharingSource -Create
+$targetParents = Open-SetupDirectories $sharingTarget -Create
+$sharingPath = Join-Path $sharingSource 'journal'
+[IO.File]::WriteAllText($sharingPath, 'rename')
+$sharingJournal = [SetupFileSystem]::OpenJournal($sharingPath)
+try {
+    try { $sharingJournal.Rename((Join-Path $sharingTarget 'journal')) }
+    catch {
+        $nativeError = $_.Exception
+        while ($nativeError.InnerException) { $nativeError = $nativeError.InnerException }
+        # Win32 ERROR_SHARING_VIOLATION maps to HRESULT_FROM_WIN32(32), 0x80070020.
+        if ($nativeError -is [ComponentModel.Win32Exception] -and $nativeError.NativeErrorCode -eq 32) {
+            throw "Held-parent cross-directory rename failed with 0x80070020. $_"
+        }
+        throw
+    }
+} finally {
+    $sharingJournal.Dispose()
+    foreach ($item in $sharingParents) { $item.Dispose() }
+    foreach ($item in $targetParents) { $item.Dispose() }
+}
 $install = Join-Path $Root 'ordinary'
 Invoke-SetupInstall $old $install
 Assert ((Active-Version $install) -ceq '1.2.3') 'First install did not publish the launcher.'
@@ -82,6 +104,38 @@ Assert (-not (Test-Path -LiteralPath (Join-Path $outside 'child'))) 'Setup creat
 $ancestors = Open-SetupDirectories $protected
 try { Refuses { [IO.Directory]::Move($protected, ($protected + '-moved')) } 'Held ancestry allowed a directory replacement.' }
 finally { foreach ($item in $ancestors) { $item.Dispose() } }
+# Convert only a disposable held directory; no production failure hook is used.
+$junctionSource = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class SetupJunctionFixture {
+    // Windows SDK access/share/create/flag/control values for this fixture-only conversion.
+    private const uint GenericWrite = 0x40000000, ShareAll = 7, OpenExisting = 3;
+    private const uint NoFollowDirectory = 0x02200000, SetReparsePoint = 0x000900A4;
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(SafeFileHandle file, uint code, byte[] input, int length, IntPtr output, int outputLength, out uint returned, IntPtr overlapped);
+    public static void Convert(string path, byte[] data) {
+        using (var handle = CreateFile(path, GenericWrite, ShareAll, IntPtr.Zero, OpenExisting, NoFollowDirectory, IntPtr.Zero)) {
+            if (handle.IsInvalid) throw new Win32Exception();
+            uint returned;
+            if (!DeviceIoControl(handle, SetReparsePoint, data, data.Length, IntPtr.Zero, 0, out returned, IntPtr.Zero)) throw new Win32Exception();
+        }
+    }
+}
+'@
+Add-Type -TypeDefinition $junctionSource
+$empty = Join-Path $Root 'held-empty'; [IO.Directory]::CreateDirectory($empty) | Out-Null
+$heldEmpty = [SetupFileSystem]::OpenDirectory($empty)
+try {
+    $heldEmpty.Verify()
+    [SetupJunctionFixture]::Convert($empty, [SetupFileSystem]::JunctionData($outside))
+    Refuses { $heldEmpty.Verify() } 'Held empty directory conversion was not refused.'
+    Assert ([IO.File]::ReadAllText((Join-Path $outside 'keep')) -ceq 'keep') 'Held-directory refusal changed the external target.'
+} finally { $heldEmpty.Dispose() }
 $claimPath = Join-Path $Root 'exclusive-claim'
 $claim = [SetupFileSystem]::OpenClaim($claimPath)
 try { Refuses { $other = [SetupFileSystem]::OpenClaim($claimPath); $other.Dispose() } 'Concurrent setup claim was accepted.' }
@@ -104,17 +158,53 @@ try {
 # Exercise the same program-file transaction with injected interruption at each effect boundary.
 # Only fixture copies are instrumented; no runtime failure hook ships in setup.
 $script = [IO.File]::ReadAllText((Join-Path $repository 'Installer/setup.ps1'))
-function Invoke-SetupVariant([string]$Source, [string]$Case, [string]$Archive, [string]$Install) {
+function Invoke-SetupVariant([string]$Source, [string]$Case, [string]$Archive, [string]$Install,
+    [string]$NativeSource, [string]$Action = 'Invoke-SetupInstall $Archive $Install') {
     [IO.Directory]::CreateDirectory($Case) | Out-Null
     foreach ($resource in @('SetupFileSystem.cs','SetupMessages.cs','setup-strings.xml')) {
         Copy-Item -LiteralPath (Join-Path $repository ('Installer/' + $resource)) -Destination $Case
     }
+    if ($NativeSource) { [IO.File]::WriteAllText((Join-Path $Case 'SetupFileSystem.cs'), $NativeSource) }
     [IO.File]::WriteAllText((Join-Path $Case 'setup.ps1'), $Source)
     $child = Join-Path $Case 'child.ps1'
-    [IO.File]::WriteAllText($child, "param(`$Archive,`$Install)`r`ntry { . (Join-Path `$PSScriptRoot 'setup.ps1') -FunctionsOnly; Invoke-SetupInstall `$Archive `$Install } catch { [Console]::Error.WriteLine(`$_.Exception.Message); exit 1 }")
+    [IO.File]::WriteAllText($child, "param(`$Archive,`$Install)`r`ntry { . (Join-Path `$PSScriptRoot 'setup.ps1') -FunctionsOnly; $Action } catch { [Console]::Error.WriteLine(`$_.Exception.Message); exit 1 }")
     $process = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', ('"' + $child + '"'), ('"' + $Archive + '"'), ('"' + $Install + '"')) -PassThru -Wait -RedirectStandardOutput (Join-Path $Case 'stdout.log') -RedirectStandardError (Join-Path $Case 'stderr.log')
     try { return $process.ExitCode } finally { $process.Dispose() }
 }
+$native = [IO.File]::ReadAllText((Join-Path $repository 'Installer/SetupFileSystem.cs'))
+$fixtureNative = $native + "`r`n" + $junctionSource.Substring($junctionSource.IndexOf('public static class'))
+$renameCase = Join-Path $Root 'post-rename-conversion'
+$renameFrom = Join-Path $renameCase 'before'; $renameTo = Join-Path $renameCase 'after'
+[IO.Directory]::CreateDirectory($renameFrom) | Out-Null
+[IO.Directory]::CreateDirectory($renameTo + '-outside') | Out-Null
+[IO.File]::WriteAllText((Join-Path ($renameTo + '-outside') 'keep'), 'keep')
+$convertedRename = $fixtureNative.Replace('            Path = target;', '            Path = target; SetupJunctionFixture.Convert(target, JunctionData(target + "-outside"));')
+Assert ($convertedRename -cne $fixtureNative) 'Post-rename fixture did not bind.'
+$renameAction = '$held = [SetupFileSystem]::OpenMutableDirectory($Archive); try { $held.Rename($Install) } finally { $held.Dispose() }'
+$renameExit = Invoke-SetupVariant $script $renameCase $renameFrom $renameTo $convertedRename $renameAction
+Assert ($renameExit -ne 0) 'Post-rename conversion was not refused.'
+Assert ([IO.File]::ReadAllText((Join-Path $renameCase 'stderr.log')).Contains([Massdex.SyncShark.SetupMessages]::Text('object.invalid', [object[]]@($renameTo)))) 'Post-rename refusal did not name the offending path.'
+Assert ((-not [SetupFileSystem]::Exists($renameFrom)) -and [SetupFileSystem]::Exists($renameTo)) 'Post-rename fixture did not complete the real rename.'
+Assert ([IO.File]::ReadAllText((Join-Path ($renameTo + '-outside') 'keep')) -ceq 'keep') 'Post-rename refusal changed foreign content.'
+
+$preparationCase = Join-Path $Root 'converted-preparation'
+$preparationInstall = Join-Path $preparationCase 'installation'
+$preparationTarget = Join-Path $preparationCase 'foreign'
+[IO.Directory]::CreateDirectory($preparationTarget) | Out-Null
+$foreignJournal = Join-Path $preparationTarget ('a' * 32 + '.journal')
+$foreignActive = Join-Path $preparationTarget ('b' * 32 + '.active')
+[IO.File]::WriteAllText($foreignJournal, 'preserve')
+New-Item -ItemType Junction -Path $foreignActive -Target $outside | Out-Null
+$guardBoundary = '    $guard = [SetupFileSystem]::OpenDirectory($parent)'
+$convertedPreparation = $script.Replace($guardBoundary, ($guardBoundary + "`r`n" + '    [SetupJunctionFixture]::Convert($parent, [SetupFileSystem]::JunctionData($Archive))'))
+Assert ($convertedPreparation -cne $script) 'Preparation conversion fixture did not bind.'
+$preparationExit = Invoke-SetupVariant $convertedPreparation $preparationCase $preparationTarget $preparationInstall $fixtureNative 'Clear-SetupPreparation $Install'
+Assert (([SetupFileSystem]::Exists($foreignJournal)) -and ([SetupFileSystem]::Exists($foreignActive))) 'Converted staging deleted foreign evidence.'
+Assert ([IO.File]::ReadAllText($foreignJournal) -ceq 'preserve') 'Converted staging changed foreign evidence.'
+Assert ([IO.File]::ReadAllText((Join-Path $outside 'keep')) -ceq 'keep') 'Converted staging changed the junction target.'
+Assert ($preparationExit -ne 0) 'Converted staging was not refused.'
+Assert ([IO.File]::ReadAllText((Join-Path $preparationCase 'stderr.log')).Contains([Massdex.SyncShark.SetupMessages]::Text('object.invalid', [object[]]@((Join-Path $preparationInstall 'versions\.staging'))))) 'Preparation refusal did not name the offending path.'
+
 $boundaries = @(
     '        $version = Get-SetupVersion (Join-Path $stage ''SyncShark.exe'')',
     '        $stageHandle.Rename($destination)',

@@ -14,6 +14,7 @@
   <message key="recovery.predecessor">Predecessor launcher disappeared; recovery evidence retained.</message>
   <message key="recovery.first">First-install launcher changed.</message>
   <message key="recovery.staged">Staged launcher changed.</message>
+  <message key="object.invalid">Setup refused an unexpected filesystem object; correct the obstruction and run setup again: {0}</message>
   <message key="preparation.unknown">Unrecognized setup preparation retained: {0}</message>
   <message key="preparation.removed">Removed interrupted setup preparation: {0}</message>
   <message key="version.occupied">This version is already installed or its name is occupied.</message>

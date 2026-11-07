@@ -21,25 +21,27 @@ public sealed class SetupFileSystem : IDisposable
     private const uint SetReparsePoint = 0x000900A4;
     private const int MaximumReparseBytes = 16 * 1024; // MAXIMUM_REPARSE_DATA_BUFFER_SIZE, Windows SDK.
     private readonly SafeFileHandle handle;
+    private readonly bool isDirectory;
+    private readonly bool junction;
     public string Path { get; private set; }
     public string Identity { get; private set; }
 
     private SetupFileSystem(string path, bool isDirectory, bool writable, bool junction, bool mutable = false, bool claim = false)
     {
         Path = System.IO.Path.GetFullPath(path);
+        this.isDirectory = isDirectory;
+        this.junction = junction;
         uint access = ReadAttributes | GenericRead;
         if (mutable || junction || writable) access |= DeleteAccess;
         if (writable) access |= GenericWrite;
-        handle = CreateFile(Path, access, claim ? 0U : 1U,
+        // Windows opens a cross-directory rename target for write; never share delete.
+        uint share = isDirectory && !junction ? 3U : 1U;
+        handle = CreateFile(Path, access, claim ? 0U : share,
             IntPtr.Zero, claim ? 4U : 3U, OpenReparsePoint | BackupSemantics, IntPtr.Zero);
         if (handle.IsInvalid) { handle.Dispose(); throw new Win32Exception(); }
         try
         {
             FileInformation info = Information();
-            if (((info.Attributes & 0x10) != 0) != isDirectory ||
-                ((info.Attributes & 0x400) != 0) != junction ||
-                (!isDirectory && info.Links != 1) || (info.Attributes & 0x1000) != 0)
-                throw new InvalidDataException();
             Identity = info.Volume.ToString("X8") + ":" + info.IndexHigh.ToString("X8") + info.IndexLow.ToString("X8");
             if (junction) ReadJunction();
         }
@@ -150,6 +152,7 @@ public sealed class SetupFileSystem : IDisposable
 
     public void Rename(string target)
     {
+        Verify();
         target = System.IO.Path.GetFullPath(target);
         byte[] name = Encoding.Unicode.GetBytes(target);
         int nameOffset = IntPtr.Size == 8 ? 20 : 12;
@@ -161,6 +164,7 @@ public sealed class SetupFileSystem : IDisposable
             Marshal.Copy(name, 0, IntPtr.Add(buffer, nameOffset), name.Length);
             if (!SetFileInformationByHandle(handle, 3, buffer, (uint)(nameOffset + name.Length))) throw new Win32Exception();
             Path = target;
+            Verify();
         }
         finally { Marshal.FreeHGlobal(buffer); }
     }
@@ -185,10 +189,17 @@ public sealed class SetupFileSystem : IDisposable
         return true;
     }
 
+    /// <summary>Revalidates the original object kind through its held no-follow handle.</summary>
+    public void Verify() { Information(); }
+
     private FileInformation Information()
     {
         FileInformation result;
         if (!GetFileInformationByHandle(handle, out result)) throw new Win32Exception();
+        if (((result.Attributes & 0x10) != 0) != isDirectory ||
+            ((result.Attributes & 0x400) != 0) != junction ||
+            (!isDirectory && result.Links != 1) || (result.Attributes & 0x1000) != 0)
+            throw new InvalidDataException(Massdex.SyncShark.SetupMessages.Text("object.invalid", Path));
         return result;
     }
 
