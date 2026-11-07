@@ -72,6 +72,7 @@ public static class EngineHostTransportChecks
         Check.Require(!LocalPipePeer.Disconnected(new IOException("denied", unchecked((int)0x80070005))),
             "unrelated listener IO failures are not hidden");
         EarlyDisconnectDoesNotStopListener();
+        LegacyAutoSyncListenerSurvivesEarlyDisconnect();
         SameProcessPeerIsNeverTrusted();
         AbsentHostIsAbsenceBeforeSending();
         RepairReportsHostWait();
@@ -155,6 +156,50 @@ public static class EngineHostTransportChecks
             try { Await(listening.WaitAsync(TimeSpan.FromSeconds(5))); }
             catch (IOException) { } // the unfixed listener faults with the very disconnect under test
             TryDeleteDirectory(work);
+        }
+    }
+
+    // The legacy AutoSync host owns a second listener. Its engine factory blocks here so the probe can connect and
+    // close before any accept starts; the listener must recycle instead of faulting and stopping the host.
+    private static void LegacyAutoSyncListenerSurvivesEarlyDisconnect()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var pipeName = NewPipeName();
+        using var listening = new ManualResetEventSlim();
+        using var compose = new ManualResetEventSlim();
+        AutoSyncBackgroundHost? host = null;
+        var starting = Task.Run(() =>
+        {
+            host = AutoSyncBackgroundHost.Start(pipeName, () => new Lease(), () =>
+            {
+                listening.Set();
+                compose.Wait(TimeSpan.FromSeconds(5));
+                return new IdleEngine();
+            });
+        });
+        try
+        {
+            Check.Require(listening.Wait(TimeSpan.FromSeconds(5)),
+                "the legacy host listener exists before its engine is composed");
+            using (var probe = new NamedPipeClientStream(LocalServer, pipeName, PipeDirection.InOut,
+                       PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+                Await(probe.ConnectAsync(FixtureConnectionDeadlineMilliseconds));
+            compose.Set();
+            Await(starting.WaitAsync(TimeSpan.FromSeconds(5)));
+            var ended = false;
+            try { ended = host!.Completion.Wait(TimeSpan.FromSeconds(2)); }
+            catch (AggregateException) { ended = true; }
+            Check.Require(!ended,
+                "a connect-close before accept leaves the legacy AutoSync listener running instead of faulting");
+        }
+        finally
+        {
+            compose.Set();
+            if (host is not null)
+            {
+                try { Await(host.DisposeAsync().AsTask()); }
+                catch (IOException) { } // the unfixed listener faults with the very disconnect under test
+            }
         }
     }
 
@@ -1352,5 +1397,18 @@ public static class EngineHostTransportChecks
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class Lease : IDisposable
+    {
+        public void Dispose() { }
+    }
+
+    private sealed class IdleEngine : IAutoSyncHostEngine
+    {
+        public Task<object> ExecuteAsync(AutoSyncHostRequest request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("the listener check sends no request");
+        public Task StopAsync() => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

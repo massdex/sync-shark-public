@@ -106,7 +106,18 @@ public sealed class AutoSyncBackgroundHost : IAsyncDisposable
         {
             while (!_acceptStop.IsCancellationRequested)
             {
-                await waiting.WaitForConnectionAsync(_acceptStop.Token).ConfigureAwait(false);
+                try
+                {
+                    await waiting.WaitForConnectionAsync(_acceptStop.Token).ConfigureAwait(false);
+                }
+                catch (IOException error) when (LocalPipePeer.Disconnected(error))
+                {
+                    // A probe may connect and close before accept begins; keep the pipe name owned while recycling.
+                    var abandoned = waiting;
+                    waiting = NewListener(_pipeName);
+                    abandoned.Dispose();
+                    continue;
+                }
                 var connected = waiting;
                 // Retain an instance while replacing the listener; there is no free-name handover window.
                 waiting = NewListener(_pipeName);
