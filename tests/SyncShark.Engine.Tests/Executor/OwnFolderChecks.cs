@@ -131,6 +131,7 @@ public static class OwnFolderChecks
             var result = await jobs.Items.ExecuteLockedAsync(action, null, keys, keys, default, null, null);
             var after = await context.Dropbox.ReadOneAsync("Box/Child", default);
             Check.Require(result.Outcome?.Raised == IssueKind.Failure &&
+                store.Issues(context.Pair.PairId).Single(issue => issue.Path == "Box/Child").Cause == TextKey.FailChanged &&
                 after == target,
                 "A81: a target present before the fresh read refuses the create and stays unchanged, folder=" + folder);
         }
@@ -151,6 +152,7 @@ public static class OwnFolderChecks
             jobs.Ancestors.CoverListedWork(0);
             var outcome = await jobs.Items.RunRowAttemptAsync(row, default);
             Check.Require(outcome.Raised == IssueKind.Failure &&
+                store.Issues(context.Pair.PairId).Single(issue => issue.Path == "Box/Child").Cause == TextKey.ReadDropboxFailed &&
                 await context.Dropbox.ReadOneAsync("Box/Child", default) is null,
                 "A81: a failed fresh read is the row's Failure; the create exception never fires");
         }

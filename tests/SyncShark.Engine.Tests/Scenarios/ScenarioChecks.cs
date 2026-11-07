@@ -389,11 +389,11 @@ public static class ScenarioChecks
         scenario.DropboxFile("made/a.txt", "a");
         scenario.AcquireJournalAfterFolder(scenario.RemoveDropbox);
         var summary = scenario.RepairAsync(requireCompleted: false);
-        scenario.Require(!summary.Completed, "a changed ancestor leaves the Repair incomplete");
-        scenario.Require(scenario.Store.ReadSource(scenario.Pair.PairId, Side.Local)?.Obligation is not null,
-            "the obligation stays for the next Repair");
+        scenario.Require(summary.Completed, "a refused child does not prevent Repair completion");
+        scenario.Require(!scenario.Store.Obligated(scenario.Pair.PairId), "the completed Repair clears its obligation");
         scenario.Require(!scenario.LocalFiles().ContainsKey("made/a.txt"), "the refused child wrote nothing");
-        scenario.Require(scenario.Store.Issues(scenario.Pair.PairId).Any(issue => issue.Path == "made/a.txt"),
+        scenario.Require(scenario.Store.Issues(scenario.Pair.PairId).Any(issue => issue.Path == "made/a.txt" &&
+            issue.Kind == IssueKind.Failure && issue.Cause == TextKey.FailChanged),
             "the refused child stays visible");
     }
 
@@ -407,11 +407,11 @@ public static class ScenarioChecks
             scenario.DropboxFile("made/a.txt", "a");
         });
         var summary = scenario.RepairAsync(requireCompleted: false);
-        scenario.Require(!summary.Completed, "a replaced ancestor is not an echo");
-        scenario.Require(scenario.Store.ReadSource(scenario.Pair.PairId, Side.Local)?.Obligation is not null,
-            "the obligation stays for the next Repair");
+        scenario.Require(summary.Completed, "a replaced ancestor's refused child does not prevent Repair completion");
+        scenario.Require(!scenario.Store.Obligated(scenario.Pair.PairId), "the completed Repair clears its obligation");
         scenario.Require(!scenario.LocalFiles().ContainsKey("made/a.txt"), "no child write crossed the replacement");
-        scenario.Require(scenario.Store.Issues(scenario.Pair.PairId).Any(issue => issue.Path == "made/a.txt"),
+        scenario.Require(scenario.Store.Issues(scenario.Pair.PairId).Any(issue => issue.Path == "made/a.txt" &&
+            issue.Kind == IssueKind.Failure && issue.Cause == TextKey.FailChanged),
             "the replaced ancestor's child is decided as a changed row");
     }
 
@@ -438,13 +438,15 @@ public static class ScenarioChecks
         scenario.LocalFile("made/a.txt", "a");
         scenario.AcquireFeedAfterFolder(replaced: true);
         var summary = scenario.RepairAsync(requireCompleted: false);
-        scenario.Require(!summary.Completed, "a replaced Dropbox ancestor is not an echo");
+        scenario.Require(summary.Completed, "a replaced Dropbox ancestor's refused child does not prevent Repair completion");
+        scenario.Require(!scenario.Store.Obligated(scenario.Pair.PairId), "the completed Repair clears its obligation");
         var generation = scenario.Store.ReadPairExecution(scenario.Pair.PairId)!.Value.Generation;
         scenario.Require(scenario.Store.PendingAncestors(scenario.Pair.PairId, generation, Side.Dropbox,
                 [PathNames.KeyFor(Side.Dropbox, "made")]).Any(),
-            "the replaced ancestor's notice stays pending for the next Repair");
+            "the replaced ancestor's notice stays pending for ordinary selection");
         scenario.Require(!scenario.DropboxFiles().ContainsKey("made/a.txt"), "no child write crossed the replacement");
-        scenario.Require(scenario.Store.Issues(scenario.Pair.PairId).Any(issue => issue.Path == "made/a.txt"),
+        scenario.Require(scenario.Store.Issues(scenario.Pair.PairId).Any(issue => issue.Path == "made/a.txt" &&
+            issue.Kind == IssueKind.Failure && issue.Cause == TextKey.FailChanged),
             "the replaced Dropbox ancestor's child is decided as a changed row");
     }
 
@@ -552,7 +554,11 @@ public static class ScenarioChecks
         scenario.DropboxFile("made/a.txt", "a");
         scenario.AcquireJournalAfterFolder(_ => scenario.LocalFile("made/a.txt", "local"));
         var summary = scenario.RepairAsync(requireCompleted: false);
-        scenario.Require(!summary.Completed, "a target appearing before the fresh read refuses the create exception");
+        scenario.Require(summary.Completed, "an occupied target's refused create does not prevent Repair completion");
+        scenario.Require(!scenario.Store.Obligated(scenario.Pair.PairId), "the completed Repair clears its obligation");
+        scenario.Require(scenario.Store.Issues(scenario.Pair.PairId).Any(issue => issue.Path == "made/a.txt" &&
+            issue.Kind == IssueKind.Failure && issue.Cause == TextKey.FailChanged),
+            "the refused create retains its exact changed-row Failure");
         scenario.Require(scenario.LocalFiles().TryGetValue("made/a.txt", out var bytes) &&
             bytes.SequenceEqual(System.Text.Encoding.UTF8.GetBytes("local")),
             "the existing target file is left unchanged");

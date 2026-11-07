@@ -5,7 +5,8 @@
   "engine": [
     "repair",
     "syncer",
-    "safety"
+    "safety",
+    "scenarios-offline"
   ],
   "core": [],
   "ui": []

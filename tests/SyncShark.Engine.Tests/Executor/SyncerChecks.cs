@@ -142,7 +142,8 @@ public static class SyncerChecks
                 $"A233/A234/A81: {kind}, target={target}, bound={bound}, occupied={occupied} preserves action containment");
             if (!qualifies)
             {
-                Check.Require(result.Outcome?.Raised == IssueKind.Failure,
+                Check.Require(result.Outcome?.Raised == IssueKind.Failure &&
+                    store.Issues(context.Pair.PairId).Single(issue => issue.Path == incoming.Path).Cause == TextKey.FailChanged,
                     $"A233/A81: {kind}, occupied={occupied} is refused before effects");
                 var after = await context.For(target).ReadOneAsync(incoming.Path, default);
                 Check.Require(occupiedTarget is null ? after is null : after == occupiedTarget,
