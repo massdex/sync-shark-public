@@ -248,7 +248,7 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
             if (choice is ResolutionChoice.Ignore or ResolutionChoice.Unignore)
             {
                 if (!host.Store.SetIssueIgnored(pairId, issue!, choice == ResolutionChoice.Ignore))
-                    throw StaleIssue(issue.Id);
+                    throw StaleIssue(issue!.Id);
                 return new ResolveSummary(SyncOutcome.InSync, false, null);
             }
             if (choice == ResolutionChoice.KeepFolderAlways && keepRules!.Count == 0) throw BadChoice(issueId, choice);
