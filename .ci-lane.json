@@ -1,0 +1,22 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [
+    "engine-operations",
+    "engine-host",
+    "cli",
+    "store",
+    "issues",
+    "strings",
+    "literals",
+    "repair-direct"
+  ],
+  "core": [],
+  "ui": [
+    "engine-issue-presentation-checks"
+  ]
+}
