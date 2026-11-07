@@ -54,6 +54,28 @@ try {
 }
 $install = Join-Path $Root 'ordinary'
 Invoke-SetupInstall $old $install
+# Diagnostic branch only: retain the namespace evidence before the original assertion.
+Write-Output 'B-33: owned install root and versions'
+Get-ChildItem -LiteralPath $install -Force | Format-List * | Out-String | Write-Output
+Get-ChildItem -LiteralPath (Join-Path $install 'versions') -Force | Format-List * | Out-String | Write-Output
+$diagnosticPaths = @((Join-Path $install 'active')) + @(Get-ChildItem -LiteralPath (Join-Path $install 'versions\.staging') -Force | Where-Object { $_.Name.EndsWith('.active') } | ForEach-Object { $_.FullName })
+foreach ($diagnosticPath in $diagnosticPaths) {
+    Write-Output "B-33: junction $diagnosticPath"
+    try { Get-Item -LiteralPath $diagnosticPath -Force | Format-List * | Out-String | Write-Output } catch { Write-Output $_ }
+    try { & fsutil.exe reparsepoint query $diagnosticPath 2>&1 | Out-String | Write-Output } catch { Write-Output $_ }
+    $diagnosticJunction = $null
+    try {
+        $diagnosticJunction = [SetupFileSystem]::OpenJunction($diagnosticPath)
+        $diagnosticTarget = $diagnosticJunction.JunctionTarget()
+        Write-Output ("B-33: identity={0}; raw={1}; target={2}; targetExists={3}; targetContentExists={4}; activeContentExists={5}" -f $diagnosticJunction.Identity, [Convert]::ToBase64String($diagnosticJunction.ReadJunction()), $diagnosticTarget, (Test-Path -LiteralPath $diagnosticTarget), (Test-Path -LiteralPath (Join-Path $diagnosticTarget 'content.txt')), (Test-Path -LiteralPath (Join-Path $diagnosticPath 'content.txt')))
+    } catch { Write-Output $_ } finally { if ($diagnosticJunction) { $diagnosticJunction.Dispose() } }
+}
+try {
+    $diagnosticDestination = Join-Path $install 'versions\1.2.3'
+    Get-ChildItem -LiteralPath $diagnosticDestination -Force | Format-List * | Out-String | Write-Output
+    Write-Output ('B-33: destination content=' + [IO.File]::ReadAllText((Join-Path $diagnosticDestination 'content.txt')))
+} catch { Write-Output $_ }
+$global:LASTEXITCODE = 0
 Assert ((Active-Version $install) -ceq '1.2.3') 'First install did not publish the launcher.'
 $active = [SetupFileSystem]::OpenJunction((Join-Path $install 'active'))
 $identity = $active.Identity; $active.Dispose()
