@@ -32,6 +32,7 @@ internal sealed class TaskSet(CancellationTokenSource cancel)
         return true;
     }
 
+    // One member lifetime under the _members lock: reservation, start, attach, continuation and promotion wake stay together.
     /// <summary>
     /// Starts one tracked row whose callback releases its ordinary share once the work and stage permits are held;
     /// returns false only when the started task has already finished successfully.

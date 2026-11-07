@@ -252,8 +252,8 @@ public sealed partial class DropboxWriter(
         }
     }
 
-    // The one acceptance walk: any reliable throttle is one true event; only a wholly accepted-or-classified reply
-    // resets. A failed feedback event surfaces on every member without repeating or undoing any effect.
+    // The one acceptance walk: every member completion and the single feedback event come from one results array;
+    // a reliable throttle is one true event, and a failure surfaces on every member without repeating an effect.
     private void SettleCohort(List<PendingPublish> cohort,
         IReadOnlyList<(Entry? Entry, Exception? Error, bool KnownNoEffect, bool WriteThrottled)> results,
         RequestAttempt attempt)

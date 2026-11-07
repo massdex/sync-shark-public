@@ -210,7 +210,8 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
             localDestination, dropboxDestination);
     }
 
-    // Each branch is one row of 6.3's results table; Storage owns folder and scan rebasing.
+    // One apply lifetime: every RenameKind branch shares the Save closure, the success flag and the one Dropbox
+    // admission completion released in the finally; Storage owns folder and scan rebasing.
     private async Task ApplyAsync(WorkSelection? selection, RenameDecision decision, IReadOnlyList<RenameCandidate> group, SyncedEntry synced,
         Observations observations, Action<Issue>? retainUnfinished, Guid attempt,
         ItemRetryCandidate? expected, CancellationToken ct)
