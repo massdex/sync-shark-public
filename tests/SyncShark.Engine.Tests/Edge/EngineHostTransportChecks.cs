@@ -39,6 +39,7 @@ public static class EngineHostTransportChecks
     private const string FixtureConnectionDeadlineVariable = "SYNCSHARK_TRANSPORT_FIXTURE_DEADLINE";
     private const string FixtureCancelEventVariable = "SYNCSHARK_TRANSPORT_FIXTURE_CANCEL_EVENT";
     private const string FixtureStatusVariable = "SYNCSHARK_TRANSPORT_FIXTURE_STATUS";
+    private const string FixtureAutoSyncVariable = "SYNCSHARK_TRANSPORT_FIXTURE_AUTOSYNC";
 
     private static readonly string[] ShowArguments = ["--cli", "engine", "preferences", "show", "--json"];
     private static readonly string[] SetArguments =
@@ -107,32 +108,37 @@ public static class EngineHostTransportChecks
         var work = Directory.CreateTempSubdirectory("sync-shark-early-disconnect-").FullName;
         var receiptPath = Path.Combine(work, "receipt.json");
         using var stop = new CancellationTokenSource();
-        var instances = 0;
-        var recycled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        NamedPipeServerStream Create()
-        {
-            var listener = new NamedPipeServerStream(pipeName, PipeDirection.InOut,
-                NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly |
-                (Interlocked.Increment(ref instances) == 1 ? PipeOptions.FirstPipeInstance : PipeOptions.None));
-            if (Volatile.Read(ref instances) >= 2) recycled.TrySetResult();
-            return listener;
-        }
-        var first = Create();
-        // The probe connects and closes before any accept starts: the listener's next wait observes ERROR_NO_DATA.
-        using (var probe = new NamedPipeClientStream(LocalServer, pipeName, PipeDirection.InOut,
-                   PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
-            Await(probe.ConnectAsync(FixtureConnectionDeadlineMilliseconds));
-        var requests = 0;
-        var server = new EngineHostServer(async (_, stdout, _, _) =>
-        {
-            Interlocked.Increment(ref requests);
-            await stdout.WriteAsync(PreferenceReply());
-            return (int)SyncCliExitCode.Success;
-        });
-        var listening = server.ListenAsync(first, Create, 32, stop.Token);
+        NamedPipeServerStream? first = null;
+        var transferred = false;
+        Task? listening = null;
         try
         {
+            var instances = 0;
+            var recycled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            NamedPipeServerStream Create()
+            {
+                var listener = new NamedPipeServerStream(pipeName, PipeDirection.InOut,
+                    NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte,
+                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly |
+                    (Interlocked.Increment(ref instances) == 1 ? PipeOptions.FirstPipeInstance : PipeOptions.None));
+                if (Volatile.Read(ref instances) >= 2) recycled.TrySetResult();
+                return listener;
+            }
+            first = Create();
+            // The probe is disposed before the listener is asked to accept: the next wait observes ERROR_NO_DATA.
+            var probe = new NamedPipeClientStream(LocalServer, pipeName, PipeDirection.InOut,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            try { Await(probe.ConnectAsync(FixtureConnectionDeadlineMilliseconds)); }
+            finally { probe.Dispose(); }
+            var requests = 0;
+            var server = new EngineHostServer(async (_, stdout, _, _) =>
+            {
+                Interlocked.Increment(ref requests);
+                await stdout.WriteAsync(PreferenceReply());
+                return (int)SyncCliExitCode.Success;
+            });
+            listening = server.ListenAsync(first, Create, 32, stop.Token);
+            transferred = true; // ListenAsync's finally owns and disposes the first instance from here.
             Check.Require(recycled.Task.Wait(TimeSpan.FromSeconds(5)),
                 "a connect-close before accept recycles the listener instead of ending it");
             using var child = StartFixtureChild(pipeName, ShowArguments, receiptPath, null, work);
@@ -153,18 +159,27 @@ public static class EngineHostTransportChecks
         finally
         {
             stop.Cancel();
-            try { Await(listening.WaitAsync(TimeSpan.FromSeconds(5))); }
+            try
+            {
+                if (listening is not null) Await(listening.WaitAsync(TimeSpan.FromSeconds(5)));
+            }
             catch (IOException) { } // the unfixed listener faults with the very disconnect under test
-            TryDeleteDirectory(work);
+            finally
+            {
+                if (!transferred) first?.Dispose();
+                TryDeleteDirectory(work);
+            }
         }
     }
 
     // The legacy AutoSync host owns a second listener. Its engine factory blocks here so the probe can connect and
-    // close before any accept starts; the listener must recycle instead of faulting and stopping the host.
+    // close before any accept starts; the listener must recycle and then serve a trusted request.
     private static void LegacyAutoSyncListenerSurvivesEarlyDisconnect()
     {
         if (!OperatingSystem.IsWindows()) return;
         var pipeName = NewPipeName();
+        var work = Directory.CreateTempSubdirectory("sync-shark-legacy-disconnect-").FullName;
+        var receiptPath = Path.Combine(work, "receipt.json");
         using var listening = new ManualResetEventSlim();
         using var compose = new ManualResetEventSlim();
         AutoSyncBackgroundHost? host = null;
@@ -173,33 +188,51 @@ public static class EngineHostTransportChecks
             host = AutoSyncBackgroundHost.Start(pipeName, () => new Lease(), () =>
             {
                 listening.Set();
-                compose.Wait(TimeSpan.FromSeconds(5));
-                return new IdleEngine();
+                // A setup deadline fails the fixture instead of starting the listener before the probe is gone.
+                if (!compose.Wait(TimeSpan.FromSeconds(5)))
+                    throw new InvalidOperationException(
+                        "the early-disconnect probe was not disposed before the listener started");
+                return new ProofEngine();
             });
         });
         try
         {
             Check.Require(listening.Wait(TimeSpan.FromSeconds(5)),
                 "the legacy host listener exists before its engine is composed");
-            using (var probe = new NamedPipeClientStream(LocalServer, pipeName, PipeDirection.InOut,
-                       PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
-                Await(probe.ConnectAsync(FixtureConnectionDeadlineMilliseconds));
-            compose.Set();
+            var probe = new NamedPipeClientStream(LocalServer, pipeName, PipeDirection.InOut,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            try { Await(probe.ConnectAsync(FixtureConnectionDeadlineMilliseconds)); }
+            finally { probe.Dispose(); }
+            compose.Set(); // released only after the probe was disposed
             Await(starting.WaitAsync(TimeSpan.FromSeconds(5)));
-            var ended = false;
-            try { ended = host!.Completion.Wait(TimeSpan.FromSeconds(2)); }
-            catch (AggregateException) { ended = true; }
-            Check.Require(!ended,
-                "a connect-close before accept leaves the legacy AutoSync listener running instead of faulting");
+            using var child = StartFixtureChild(pipeName, ShowArguments, receiptPath, null, work,
+                autoSyncPipe: pipeName);
+            var output = child.StandardOutput.ReadToEndAsync();
+            var errors = child.StandardError.ReadToEndAsync();
+            if (!child.WaitForExit(FixtureChildTimeoutMilliseconds))
+            {
+                child.Kill(entireProcessTree: true);
+                throw new InvalidOperationException(
+                    "the legacy host did not answer the trusted request after the disconnected probe");
+            }
+            Await(output);
+            Await(errors);
+            var receipt = JsonSerializer.Deserialize<FixtureReceipt>(File.ReadAllText(receiptPath))!;
+            Check.Require(receipt.Outcome == ExitOutcome &&
+                receipt.Stdout.Contains("legacy-listener-served", StringComparison.Ordinal),
+                "a connect-close before accept leaves the legacy AutoSync listener running and serving the next trusted request");
         }
         finally
         {
             compose.Set();
+            try { Await(starting.WaitAsync(TimeSpan.FromSeconds(5))); }
+            catch (Exception) { } // a failed setup is reported by the assertion or by the startup task
             if (host is not null)
             {
                 try { Await(host.DisposeAsync().AsTask()); }
                 catch (IOException) { } // the unfixed listener faults with the very disconnect under test
             }
+            TryDeleteDirectory(work);
         }
     }
 
@@ -683,9 +716,36 @@ public static class EngineHostTransportChecks
         }
     }
 
+    // The legacy AutoSync protocol client role: the parent's host must serve this trusted request after recovering
+    // from the early-disconnect probe.
+    private static bool RunLegacyAutoSyncFixtureClient()
+    {
+        var pipe = Environment.GetEnvironmentVariable(FixtureAutoSyncVariable);
+        if (string.IsNullOrEmpty(pipe)) return false;
+        var receiptPath = Environment.GetEnvironmentVariable(FixtureReceiptVariable) ??
+                          throw new InvalidOperationException("The transport fixture child has no receipt path.");
+        FixtureReceipt receipt;
+        try
+        {
+            var reply = Await(new AutoSyncHostClient(pipe).TrySendAsync(
+                AutoSyncHostClient.Request("cli") with { CliArgs = ["--cli", "status"] },
+                TimeSpan.FromMilliseconds(FixtureConnectionDeadlineMilliseconds)));
+            receipt = reply is { Ok: true }
+                ? new FixtureReceipt(ExitOutcome, 0, reply.Data?.GetRawText() ?? "", "", null, false)
+                : new FixtureReceipt(AbsentOutcome, null, "", "", "the legacy host did not reply", false);
+        }
+        catch (Exception error)
+        {
+            receipt = new FixtureReceipt(ExceptionOutcome, null, "", "", error.GetType().FullName, false);
+        }
+        File.WriteAllText(receiptPath, JsonSerializer.Serialize(receipt));
+        return true;
+    }
+
     // The one fixture role: the child performs the real client call and reports its outcome to the parent.
     private static bool RunFixtureClient()
     {
+        if (RunLegacyAutoSyncFixtureClient()) return true;
         if (Environment.GetEnvironmentVariable(FixtureStatusVariable) == "HungRequest")
         {
             var name = Environment.GetEnvironmentVariable(FixturePipeVariable)!;
@@ -974,7 +1034,7 @@ public static class EngineHostTransportChecks
     }
 
     private static Process StartFixtureChild(string pipeName, string[] arguments, string receiptPath,
-        string? cancelEventName, string workDirectory, string? statusScenario = null)
+        string? cancelEventName, string workDirectory, string? statusScenario = null, string? autoSyncPipe = null)
     {
         var executable = Environment.ProcessPath ??
                          throw new InvalidOperationException("The test executable identity is absent.");
@@ -1001,6 +1061,7 @@ public static class EngineHostTransportChecks
             FixtureConnectionDeadlineMilliseconds.ToString(CultureInfo.InvariantCulture);
         if (cancelEventName is not null) start.Environment[FixtureCancelEventVariable] = cancelEventName;
         if (statusScenario is not null) start.Environment[FixtureStatusVariable] = statusScenario;
+        if (autoSyncPipe is not null) start.Environment[FixtureAutoSyncVariable] = autoSyncPipe;
         return Process.Start(start) ??
                throw new InvalidOperationException("The transport fixture child did not start.");
     }
@@ -1404,10 +1465,10 @@ public static class EngineHostTransportChecks
         public void Dispose() { }
     }
 
-    private sealed class IdleEngine : IAutoSyncHostEngine
+    private sealed class ProofEngine : IAutoSyncHostEngine
     {
         public Task<object> ExecuteAsync(AutoSyncHostRequest request, CancellationToken cancellationToken) =>
-            throw new InvalidOperationException("the listener check sends no request");
+            Task.FromResult<object>(new { proof = "legacy-listener-served" });
         public Task StopAsync() => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
