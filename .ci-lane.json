@@ -1,0 +1,10 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--setup-update-checks"
+  ],
+  "ui": []
+}
