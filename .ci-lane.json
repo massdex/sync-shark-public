@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "syncer",
+    "dependencies",
+    "literals",
+    "scan-pass",
+    "renames"
+  ],
+  "core": [],
+  "ui": []
+}
