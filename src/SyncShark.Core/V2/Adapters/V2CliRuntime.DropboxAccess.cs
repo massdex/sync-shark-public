@@ -25,9 +25,9 @@ public sealed partial class V2CliRuntime : IDropboxCliAccess
             if (_dropboxAccounts is not null) return _dropboxAccounts;
             var authority = _instanceLock?.StateAuthority ?? throw new SyncCliUnsupportedException(
                 DropboxCliCatalog.Message(DropboxCliMessage.StateUnavailable));
-            var http = SyncCliRuntime.CreateDropboxCliClient(DropboxHandlerFactory);
+            var http = DropboxCliClients.Create(DropboxHandlerFactory);
             _dropboxHttp = http;
-            _dropboxAccounts = SyncCliRuntime.ComposeDropboxClients(
+            _dropboxAccounts = DropboxCliClients.Compose(
                 authority, http, DropboxCredentialsFactory(), _dropboxLimiter);
             return _dropboxAccounts;
         }

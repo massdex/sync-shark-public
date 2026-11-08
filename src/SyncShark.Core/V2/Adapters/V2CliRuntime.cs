@@ -95,7 +95,7 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
     public static V2CliRuntime AcquireProduction()
     {
         var productRoot = SyncDataLocation.ProductRoot;
-        var instanceLock = SyncCliRuntime.AcquireProductLock(SyncSharkRuntimePaths.InstanceLockFile);
+        var instanceLock = CliProductLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
         try
         {
             var composition = EngineComposition.Open(
