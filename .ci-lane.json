@@ -1,0 +1,11 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--v2-run-checks",
+    "--ntfs-usn-page-checks"
+  ],
+  "ui": []
+}
