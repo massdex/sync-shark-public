@@ -97,7 +97,7 @@ internal sealed class CostProbe : IDisposable
         Execute(StateSchema.Pragmas);
         Execute(StateSchema.Create);
         Execute(StateSchema.SchemaAdditions);
-        Execute(StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn);
+        Execute(StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex);
         Execute(StateSchema.PublishVersion);
         Execute(StateSchema.CreateIssueFactsTriggers);
     }

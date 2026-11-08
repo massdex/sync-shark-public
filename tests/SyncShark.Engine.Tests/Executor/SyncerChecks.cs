@@ -472,6 +472,8 @@ public static class SyncerChecks
                 var local = await PutAsync(context.Local, "Old");
                 var remote = await PutAsync(context.Dropbox, "Old");
                 var saved = Save(context, local, remote);
+                await context.Local.EnsureFolderAsync("Archive", default);
+                await context.Dropbox.EnsureFolderAsync("Archive", default);
                 var movedLocal = await context.Local.MoveAsync(local, "Archive/Item", default);
                 var movedRemote = await context.Dropbox.MoveAsync(remote, "Archive/Item", default);
                 if (liveOld is { } side)

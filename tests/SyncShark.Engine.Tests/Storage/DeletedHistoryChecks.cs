@@ -681,7 +681,7 @@ public static class DeletedHistoryChecks
     {
         using var connection = StateStore.Connect(":memory:", SqliteOpenMode.ReadWriteCreate);
         Execute(connection, StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema +
-            StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn);
+            StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex);
         foreach (var sql in new[] { StateSchema.ReadDeletedBlock, StateSchema.SavedDeletedHistoryKey, StateSchema.ReclaimDeletedHistory,
             StateSchema.DeletedDeltaPage, StateSchema.DeletedKeyDelta, StateSchema.DeletedKeyBlock, StateSchema.SpentDeletedKey })
         {

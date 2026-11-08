@@ -3210,9 +3210,12 @@ public sealed class StateStore : IStateStore
             _closureKeys.Add(pairId, keys);
         }
         foreach (var (path, kinds) in closures)
+        {
+            var key = PathNames.Key(path);
             foreach (var kind in kinds)
                 // Explicit closures outside this cache still reach the ordinary close transaction.
-                if (!ClosureKinds.Contains(kind) || keys.Contains((path, kind))) return true;
+                if (!ClosureKinds.Contains(kind) || keys.Contains((key, kind))) return true;
+        }
         return false;
     }
 
@@ -3221,18 +3224,21 @@ public sealed class StateStore : IStateStore
         if (_closureKeys is null || !_closureKeys.TryGetValue(pairId, out var keys)) return;
         // Closure can retain protected responsibility or restore an invalid-job projection.
         foreach (var (path, kinds) in change.Close)
+        {
+            var key = PathNames.Key(path);
             foreach (var kind in kinds)
             {
                 if (!ClosureKinds.Contains(kind)) continue;
-                var present = ReadOne(null, StateSchema.SelectIssueByPathKind,
+                var present = ReadOne(null, StateSchema.SelectIssueByPathKeyKind,
                     static reader => reader.GetInt64(StateSchema.IssueId),
-                    (StateSchema.ParamPair, pairId), (StateSchema.ParamPath, path), (StateSchema.ParamKind, (int)kind));
-                if (present != 0) keys.Add((path, kind));
-                else keys.Remove((path, kind));
+                    (StateSchema.ParamPair, pairId), (StateSchema.ParamPath, key), (StateSchema.ParamKind, (int)kind));
+                if (present != 0) keys.Add((key, kind));
+                else keys.Remove((key, kind));
             }
-        foreach (var item in change.FirstRunAcknowledged) keys.Add((item.Path, IssueKind.Failure));
+        }
+        foreach (var item in change.FirstRunAcknowledged) keys.Add((PathNames.Key(item.Path), IssueKind.Failure));
         foreach (var issue in change.Raise)
-            if (ClosureKinds.Contains(issue.Kind)) keys.Add((issue.Path, issue.Kind));
+            if (ClosureKinds.Contains(issue.Kind)) keys.Add((PathNames.Key(issue.Path), issue.Kind));
     }
 
     private IEnumerable<byte[]> ActiveScanKeys(string pairId)
@@ -3341,7 +3347,8 @@ public sealed class StateStore : IStateStore
         var actual = (long)version.ExecuteScalar()!;
         using var schema = StorageCommand.Create(connection, null, StateSchema.HasSchema);
         var empty = (long)schema.ExecuteScalar()! == 0;
-        if (actual != StateSchema.Version && actual != StateSchema.DiscoveryRequiredUpgradeVersion &&
+        if (actual != StateSchema.Version && actual != StateSchema.IssuePathKeyUpgradeVersion &&
+            actual != StateSchema.DiscoveryRequiredUpgradeVersion &&
             actual != StateSchema.LocalPublishedUpgradeVersion &&
             actual != StateSchema.SpentHistoryUpgradeVersion &&
             actual != StateSchema.DeletedBlocksUpgradeVersion &&
@@ -3364,7 +3371,8 @@ public sealed class StateStore : IStateStore
             if (actual >= StateSchema.LocalPublishedUpgradeVersion)
                 Execute(reference, null, StateSchema.SpentDeletedHistory);
             if (actual >= StateSchema.DiscoveryRequiredUpgradeVersion) Execute(reference, null, StateSchema.LocalPublishedColumns);
-            if (actual == StateSchema.Version) Execute(reference, null, StateSchema.DiscoveryRequiredColumn);
+            if (actual >= StateSchema.IssuePathKeyUpgradeVersion) Execute(reference, null, StateSchema.DiscoveryRequiredColumn);
+            if (actual >= StateSchema.Version) Execute(reference, null, StateSchema.IssuePathKeyIndex);
             ValidateStructure(connection, null, reference);
         }
         if (!writable)
@@ -3437,8 +3445,16 @@ public sealed class StateStore : IStateStore
                 Execute(connection, transaction, StateSchema.LocalPublishedColumns);
                 Execute(reference, null, StateSchema.LocalPublishedColumns);
             }
-            Execute(connection, transaction, StateSchema.DiscoveryRequiredColumn);
-            Execute(reference, null, StateSchema.DiscoveryRequiredColumn);
+            if (empty || actual < StateSchema.IssuePathKeyUpgradeVersion)
+            {
+                Execute(connection, transaction, StateSchema.DiscoveryRequiredColumn);
+                Execute(reference, null, StateSchema.DiscoveryRequiredColumn);
+            }
+            if (empty || actual < StateSchema.Version)
+            {
+                Execute(connection, transaction, StateSchema.IssuePathKeyIndex);
+                Execute(reference, null, StateSchema.IssuePathKeyIndex);
+            }
             if (empty || actual == StateSchema.UpgradeFromVersion) IssueTable.BackfillSkipMembers(connection, transaction);
             ValidateStructure(connection, transaction, reference);
             using (var foreign = StorageCommand.Create(connection, transaction, StateSchema.ForeignKeyViolations))

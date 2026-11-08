@@ -124,6 +124,10 @@ public static class PathNames
         return cut < 0 ? path : path[(cut + 1)..];
     }
 
+    /// <summary>Whether the leaf names have identical spelling, ignoring ancestor spelling without allocating names.</summary>
+    public static bool SameName(string left, string right) =>
+        left.AsSpan(LastSeparator(left) + 1).SequenceEqual(right.AsSpan(LastSeparator(right) + 1));
+
     /// <summary>The parent of a relative path; "" for a top-level path.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static string Parent(string path)

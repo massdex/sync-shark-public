@@ -100,7 +100,7 @@ public static class Decide
         var localSpelling = PathNames.LocalSpelling(dropbox.Path);
         if (local.IsFolder)
         {
-            return local.Path == localSpelling
+            return PathNames.SameName(local.Path, localSpelling)
                 ? Record(row)
                 : chosen == FirstRunPolicy.DropboxWins
                     ? Target(row, ActionKind.MoveLocal, localSpelling, TextKey.InfoFolderSpelling)

@@ -60,11 +60,11 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/StateStore.cs
 
-<!-- spec-source: 00c92aa0f269~ee23f75744df~27a9d89236d5~9692f7292a6d~0b46d89e4080~393b -->
+<!-- spec-source: cef391c2419c~f5bb1b7fcc0a~f3027538e119~f290f9003cc9~0b0c9d0ba33e~5402 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 8 | class-size | class-size | Split by job | Connection lifetime, schema migration, scan/history and folder persistence are distinct jobs. 0.3.79 adds expected-notice fencing for retry reads and visibility (B-13), the live-refusal read (R6), the published-USN migration step (#90b) and block-wise history restore (B-21) to the same class: 3490 to 3588 lines. 0.3.80: the cut-over deletes SaveImportedPair; selection admission now answers instead of throwing (BeginSelection), WorkAttempted, RequireDiscovery and SelectionBaseline forward to ChangeTable, and InitializeSchema gains the version-12 discovery_required step: 3588 to 3595 lines. Same split; no new job. |
+| 8 | class-size | class-size | Split by job | Connection lifetime, schema migration, scan/history and folder persistence are distinct jobs. 0.3.79 adds expected-notice fencing for retry reads and visibility (B-13), the live-refusal read (R6), the published-USN migration step (#90b) and block-wise history restore (B-21) to the same class: 3490 to 3588 lines. 0.3.80: the cut-over deletes SaveImportedPair; selection admission now answers instead of throwing (BeginSelection), WorkAttempted, RequireDiscovery and SelectionBaseline forward to ChangeTable, and InitializeSchema gains the version-12 discovery_required step: 3588 to 3595 lines. Same split; no new job. 0.3.80.1 (B-93): the closure-key cache holds canonical keys (NeedsClosure :3203, cache update) and InitializeSchema gains the version-13 path-key index step; 3602 to 3618. |
 | 2683 | long-member | AdvanceSubmission(SqliteTransaction,long,FolderSubmission,FolderSubmis | Record why it cannot be split | Record submission and unsettled member transitions as one atomic receipt application. |
 | 2578 | long-member | ArmFolderSubmission(string,IReadOnlyList<FolderRemovalEffect>) 43 | Record why it cannot be split | Record exact-effect validation and immutable wire membership as one all-or-none transition. |
 | 1932 | long-member | BeginFolderRemoval(string,FolderPlan,int,CancellationToken) 134 | Split by job | Counterpart saved-only range discovery with ancestor anchoring and path de-duplication is a separable job from operation and member insertion |
@@ -78,7 +78,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 | 1217 | long-member | SavePairDecision(PairConfig,long,PairConfig,Issue?,bool,string?) 67 | Record why it cannot be split | Record definition, generations, responsibility and scan invalidation as one configuration transition. |
 | 2428 | long-member | ValidateFolderChange(SqliteTransaction,long,string,FolderRemovalState, | Split by job | Pure permitted-change-shape validation differs from database evidence traversal and coverage counting. |
 | 1112 | long-member | static ForgetTouchesUnreadable(SqliteConnection,string,IEnumerable<(Si | Record why it cannot be split | Record local/mapped ranges as one deduplicated forget-footprint overlap query. |
-| 3338 | long-member | static InitializeSchema(SqliteConnection,bool) 126 | Split by job | Version admission/reference validation, read-only handling, transactional upgrade and reclaim/checkpoint maintenance are separable; #90b adds the version-10 published-USN step (111 to 119); 0.3.80 adds the version-12 discovery_required step (119 to 126). |
+| 3344 | long-member | static InitializeSchema(SqliteConnection,bool) 126 | Split by job | Version admission/reference validation, read-only handling, transactional upgrade and reclaim/checkpoint maintenance are separable; #90b adds the version-10 published-USN step (111 to 119); 0.3.80 adds the version-12 discovery_required step (119 to 126). |
 | 8 | file-size | file-size | Split by job | Connection lifetime, migration, scan/history and folder persistence are distinct jobs; 3497 to 3595 lines in 0.3.79, 3602 in 0.3.80 (see class-size). |
 
 ## src/SyncShark.Engine/Run/EngineHost.cs
@@ -142,11 +142,11 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Executor/SelectionPass.cs
 
-<!-- spec-source: 0da8eae0409a~a9cba6006714~0b6ce971b52d~41d41156aa8f~caae33cc4e02~db2b -->
+<!-- spec-source: b0625bf0e529~97f711b13991~97acf4f25dcc~df58589b712e~bd417a3b218f~60ba -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 6 | class-size | class-size | Split by job | Branch execution/settlement is separable from branch acquisition (walks, folder batches, unreadable release/replay). 0.3.79 grew execution with live upload admission :246-265 and branch progress reporting :58-68, :352-363, :374-375 (aggregated by Syncer); same split. 0.3.80 adds the already-attempted admission skip and Refused flag (:44, :47-63) and durable discovery marking for batch folders (:392-393), both inside the same acquisition/execution sequencing; 549 class lines (555 in 0.3.79), same split. |
+| 6 | class-size | class-size | Split by job | Branch execution/settlement is separable from branch acquisition (walks, folder batches, unreadable release/replay). 0.3.79 grew execution with live upload admission :246-265 and branch progress reporting :58-68, :352-363, :374-375 (aggregated by Syncer); same split. 0.3.80 adds the already-attempted admission skip and Refused flag (:44, :47-63) and durable discovery marking for batch folders (:392-393), both inside the same acquisition/execution sequencing; 549 class lines (555 in 0.3.79), same split. 0.3.80.1 (B-10 F1): the unbound excluded Local file guard :146-150 skips the Dropbox read inside projected observation; 554 class lines. |
 | 366 | long-member | EnumerateBranchesAsync(WorkSelection,CancellationToken) 120 | Split by job | Branch discovery, folder dispatch and unreadable-release/replay are distinct protocols. |
 | 515 | long-member | ListAsync(PendingChange,string,ListOptions,CancellationToken) 45 | Record why it cannot be split | Record the manual iterator lifetime needed for failure yield, cancellation and exactly-once disposal. |
 | 72 | long-member | RunSelectionAsync(WorkSelection,CancellationToken) 201 | Split by job | Residual projection, branch observation/claiming and prepared-action dispatch are embedded jobs. |
@@ -252,7 +252,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Dropbox/DropboxWriter.cs
 
-<!-- spec-source: 64366569256a~23d24a1ae134~a11a0a70c43f~c58481f636ca~d451625c7a4c~cf84 -->
+<!-- spec-source: 0608151b5c7a~d14838d284b7~82e3c52a8b48~07e4cf15d616~24ef93b50266~10b1 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -285,14 +285,14 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Executor/RenameRunner.cs
 
-<!-- spec-source: 6abb963c502c~a4fe94396829~6844d5464762~e75be08bbd95~c8c5511a0b83~b247 -->
+<!-- spec-source: 38fcec941a5d~20632775b299~829910928ffe~ed00377a03f8~c28c093d6ab1~4803 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 84 | long-member | RunCurrentAsync(WorkSelection?,IReadOnlyList<RenameCandidate>,SyncedEn | Record why it cannot be split | Record observation, Planner choice and outcome mapping as one current rename attempt. |
-| 33 | long-member | RunUnrecordedAsync(IAdmittedExecution?,WorkSelection?,IReadOnlyList<Re | Record why it cannot be split | Record footprint refresh/reacquisition and binding discovery as one rename preparation loop. |
-| 1 | file-size | file-size | Split by job | Admission/binding resolution, observation+decision, results-table application and failure mapping are separable; header :5 lists them as three steps |
-| 216 | long-member | ApplyAsync(WorkSelection?,RenameDecision,IReadOnlyList<RenameCandidate>,SyncedEntry,Observations,Action<Issue>?,Guid,ItemRetryCandidate?,CancellationToken) | Verify existing reason (R2) | The constraint comment is now directly above the unit (:214-215); record REASON-RECORDED; source row 96. |
+| 106 | long-member | RunCurrentAsync(IAdmittedExecution?,WorkSelection?,IReadOnlyList<RenameCandidate>,SyncedEn | Record why it cannot be split | Record observation, Planner choice and outcome mapping as one current rename attempt. 0.3.80.1 (B-68A): 81 to 103; the fresh re-read :134-152 refreshes the group through ObserveAsync and widens the held footprint once (reacquire callback) inside the same attempt. |
+| 33 | long-member | RunUnrecordedAsync(IAdmittedExecution?,WorkSelection?,IReadOnlyList<Re | Record why it cannot be split | Record footprint refresh/reacquisition and binding discovery as one rename preparation loop. 0.3.80.1 (B-68A): 49 to 71; one reacquired flag :38 bounds both widening sites (:69-89, and the callback :92-99) through IssuePolicy.StaleRetryFailed. |
+| 1 | file-size | file-size | Split by job | Admission/binding resolution, observation+decision, results-table application and failure mapping are separable; header :5 lists them as three steps. 0.3.80.1 (B-68A): 409 to 475, inside the admission and observation jobs; the identity match now has one private owner Matches :259-260. |
+| 282 | long-member | ApplyAsync(WorkSelection?,RenameDecision,IReadOnlyList<RenameCandidate>,SyncedEntry,Observations,Action<Issue>?,Guid,ItemRetryCandidate?,CancellationToken) | Verify existing reason (R2) | The constraint comment is now directly above the unit (:280-281); record REASON-RECORDED; source row 96. |
 
 ## src/SyncShark.Engine/Run/PairSession.cs
 
@@ -306,14 +306,14 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/IssueTable.cs
 
-<!-- spec-source: 0d7abb02e513~9dfdf2507858~ee973f5221fe~6c0cdb2df5f4~41fadabf731b~e864 -->
+<!-- spec-source: 9bd45466cc99~05101776e96f~e1bc46c835f2~c8246b7a4a60~6ec861ab59e7~91c6 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
 | 7 | class-size | class-size | Split by job | IssueTable is the file’s only type, so it has the file-size jobs; the earlier class FALSE-POSITIVE contradicted this register and is not carried forward (851 to 859 lines). |
 | 569 | long-member | static MergeSkip(SqliteConnection,SqliteTransaction,string,long,string | Record why it cannot be split | Record both side members and their single path-level issue as one reconciliation. |
 | 16 | long-member | static Raise(SqliteConnection,SqliteTransaction,string,IssueKind,TextK | Record why it cannot be split | Record continuation/protection/refresh/replacement as one precedence-ordered raise transition. |
-| 7 | file-size | file-size | Split by job | Raise/close lifecycle, paged listing snapshots, skip-member reconciliation, unreadable queries, upgrade backfill, retry-episode lifecycle and invalid-job projection are distinct jobs; header :6 is a grouping. B-13 adds exact-notice SetIgnored to the raise/close lifecycle (857 to 865). |
+| 7 | file-size | file-size | Split by job | Raise/close lifecycle, paged listing snapshots, skip-member reconciliation, unreadable queries, upgrade backfill, retry-episode lifecycle and invalid-job projection are distinct jobs; header :6 is a grouping. B-13 adds exact-notice SetIgnored to the raise/close lifecycle (857 to 865). 0.3.80.1 (B-93): Close :88-101 closes by canonical path key and the closure-key read :441 returns canonical keys, both in the raise/close lifecycle (865 to 869). |
 
 ## src/SyncShark.Engine/Storage/StoredFolderPlan.cs
 
@@ -392,7 +392,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Local/LocalSide.cs
 
-<!-- spec-source: f53fcce94827~dac5d11964e9~4a1cc2e37c56~b34bcfef5807~bc508b030d43~b039 -->
+<!-- spec-source: a6127d6a044d~8865edf39bdd~7ce030a37002~9211537c2060~295cb28f5846~a8f5 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -449,7 +449,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Planner/Decide.cs
 
-<!-- spec-source: c1e7fd58607f~c3d6d3fe328f~ea4d692ff36f~3ebf7f996795~946f9324d0d5~dc87 -->
+<!-- spec-source: c282bf5ddb44~1222da0a1375~ca86e2534359~94fe42344b78~cdc96814b349~2222 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -810,11 +810,11 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/PathNames.cs
 
-<!-- spec-source: 8e8aaebf7c14~f5866e8f92b1~2067bfcfd2f6~43a1bf455500~18f8626cc0c7~a0bf -->
+<!-- spec-source: 5c0bafa3ce34~6bf2c38d5454~db77013332a0~0e40296aecba~b3962a100a9d~34dc -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 9 | file-size | file-size | Record why it cannot be split | Record one frozen path-identity/key facade whose derived operations reuse canonical comparison. |
+| 9 | file-size | file-size | Record why it cannot be split | Record one frozen path-identity/key facade whose derived operations reuse canonical comparison. 0.3.80.1 (B-92): SameName :127-129, the one leaf-spelling compare (Decide.cs:103, LocalSide.cs:462); 318 to 322. |
 
 ## src/SyncShark.Engine/Run/PairSafety.cs
 
@@ -827,11 +827,11 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/StateSchema.cs
 
-<!-- spec-source: cc6b05568efd~f8c0f18c4fc1~95aafe03b9f7~a0db6e1b7e70~a3b60cbe14bc~e8d0 -->
+<!-- spec-source: 3759097992ae~60345ea8aeaf~417a544c8972~8ce9b14d429f~e9908b21dd9a~c111 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 6 | file-size | file-size | Record why it cannot be split | Record one declarative SQL/schema catalogue, without execution or transaction policy (reason :3). #90b adds schema version 11 and the published-USN columns and statements; B-21 adds the batched deleted-name insert (1433 to 1450). 0.3.80: the cut-over deletes the pair-import SQL; schema version 12 adds the discovery_required work column and its two statements (1450 to 1420). |
+| 6 | file-size | file-size | Record why it cannot be split | Record one declarative SQL/schema catalogue, without execution or transaction policy (reason :3). #90b adds schema version 11 and the published-USN columns and statements; B-21 adds the batched deleted-name insert (1433 to 1450). 0.3.80: the cut-over deletes the pair-import SQL; schema version 12 adds the discovery_required work column and its two statements (1450 to 1420). 0.3.80.1 (B-93): schema version 13 adds IssuePathKeyIndex :50 and its upgrade version :13, serving the existing SelectIssueByPathKeyKind :264 (1420 to 1424). |
 
 ## src/SyncShark.Engine/TextKey.cs
 

@@ -83,16 +83,20 @@ public static class IssueTable
                 (StateSchema.ParamPair, pairId), (StateSchema.ParamPath, path), (StateSchema.ParamKind, (int)kind))!);
     }
 
-    /// <summary>Closes the specified kinds at an exact path in the supplied transaction, with their member
+    /// <summary>Closes the specified kinds at a canonical path in the supplied transaction, with their member
     /// associations, leaving any row its owner still retains.</summary>
     public static void Close(SqliteConnection connection, SqliteTransaction transaction, string pairId, string path,
         IReadOnlyList<IssueKind> kinds)
     {
+        var key = PathNames.Key(path);
         foreach (var kind in kinds)
         {
-            var issue = ReadOne(connection, transaction, StateSchema.SelectIssueByPathKind,
-                (StateSchema.ParamPair, pairId), (StateSchema.ParamPath, path), (StateSchema.ParamKind, (int)kind));
-            if (issue is not null) DeleteIssue(connection, transaction, pairId, issue);
+            var matches = new List<Issue>();
+            using (var command = StorageCommand.Create(connection, transaction, StateSchema.SelectIssueByPathKeyKind,
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamPath, key), (StateSchema.ParamKind, (int)kind)))
+            using (var reader = command.ExecuteReader())
+                while (reader.Read()) matches.Add(ReadIssue(reader));
+            foreach (var issue in matches) DeleteIssue(connection, transaction, pairId, issue);
         }
     }
 
@@ -434,7 +438,7 @@ public static class IssueTable
             (StateSchema.ParamPair, pairId), (StateSchema.ParamKinds, JsonSerializer.Serialize(kinds)));
         using var reader = command.ExecuteReader();
         while (reader.Read())
-            keys.Add((reader.GetString(StateSchema.ClosurePath), (IssueKind)reader.GetInt64(StateSchema.ClosureKind)));
+            keys.Add((PathNames.Key(reader.GetString(StateSchema.ClosurePath)), (IssueKind)reader.GetInt64(StateSchema.ClosureKind)));
         return keys;
     }
 

@@ -224,6 +224,8 @@ public static class DropboxWriterChecks
         foreach (var state in new[] { "existing", "file", "absent", "parallel" })
         {
             using var fixture = new Fixture(root);
+            var requests = new List<RunEvent>();
+            using var observation = DropboxApi.ObserveRequests(requests.Add);
             var remote = root == "/" ? "/Child" : "/Parent/Child";
             var present = state is "existing" or "file";
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.GetMetadata,
@@ -246,6 +248,9 @@ public static class DropboxWriterChecks
             {
                 var result = await fixture.Writer.EnsureFolderAsync("Child", default);
                 Check.Require(result.IsFolder && result.Path == "Child", "Folder metadata is parsed, including the create envelope.");
+                if (!present)
+                    Check.Require(requests.Count(item => item.What == DropboxProtocol.CreateFolder && item.Path == "Child") == 2,
+                        "Folder creation request logs carry the path on start and completion.");
             }
             fixture.Done();
         }
@@ -314,6 +319,8 @@ public static class DropboxWriterChecks
         foreach (var destination in new[] { "Other", "child" })
         {
             using var moving = new Fixture();
+            var requests = new List<RunEvent>();
+            using var observation = DropboxApi.ObserveRequests(requests.Add);
             var from = "/Parent/Child";
             if (destination == "child")
             {
@@ -325,6 +332,8 @@ public static class DropboxWriterChecks
             var moved = await moving.Writer.MoveAsync(Source() with { IsFolder = folder }, destination, default);
             Check.Require(moved.Path == destination && moved.IsFolder == folder,
                 "Normal and case-only moves return final envelope metadata for files and folders.");
+            Check.Require(requests.Count(item => item.What == DropboxProtocol.Move && item.Path == destination) == 2 &&
+                requests.All(item => item.Path.Length != 0), "Every move request log carries its destination path.");
             moving.Done();
         }
         using var interrupted = new Fixture();

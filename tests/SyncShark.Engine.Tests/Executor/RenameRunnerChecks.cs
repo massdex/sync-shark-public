@@ -60,6 +60,14 @@ public static class RenameRunnerChecks
         await RebasedChildrenAsync();
         await DropboxFolderCaseAsync();
         await SavedSpellingDriftAsync();
+        var freshnessFailures = new List<string>();
+        foreach (var check in new Func<Task>[] { StaleRenameReversalsAsync, FreshRenameEvidenceAsync,
+            RenameReacquireBoundAsync, RefreshedHintFootprintAsync })
+        {
+            try { await check(); }
+            catch (Exception error) { freshnessFailures.Add(check.Method.Name + ": " + error.Message); }
+        }
+        Check.Require(freshnessFailures.Count == 0, string.Join(Environment.NewLine, freshnessFailures));
         await ListedAdoptionFallbackAsync();
         await RecordedRenameDestinationAsync();
         await DuplicateFolderDestinationAsync();
@@ -70,6 +78,7 @@ public static class RenameRunnerChecks
     private static async Task PendingTargetAncestorAsync()
     {
         using var fixture = new Fixture(realStore: true);
+        await fixture.Local.EnsureFolderAsync("Target", default);
         var moved = await fixture.MoveAsync(Side.Local, "Target/New");
         var store = fixture.Store;
         var pair = fixture.Pair;
@@ -813,6 +822,142 @@ public static class RenameRunnerChecks
             "Refreshing a group drops only its already-accounted-for candidate.");
     }
 
+    private static async Task RefreshedHintFootprintAsync()
+    {
+        foreach (var mode in new[] { "ordinary", "admitted", "repeated" })
+        {
+            using var f = new Fixture(mappedParent: true);
+            var moved = await f.MoveAsync(Side.Dropbox, "a:b/New");
+            if (mode == "repeated") moved = moved with { Synced = moved.Synced with
+                { DropboxPath = "Earlier", DropboxKey = PathNames.DropboxKey("Earlier") } };
+            var hint = f.LocalOld with { Path = "HistoricalHint" };
+            var reads = 0;
+            var context = f.Context with { Local = new ProxySide(f.Local)
+                { OnRead = path => { if (path == f.Saved.LocalPath) reads++; } } };
+            if (mode == "admitted")
+            {
+                var lease = await AdmitAsync(f, [moved], hint, Fixture.Generation);
+                LiveAdmissionStaleException? refusal = null;
+                try { await RunAdmittedAsync(f, lease, Fixture.Generation, [moved], hint, context: context); }
+                catch (LiveAdmissionStaleException error) { refusal = error; }
+                finally { await lease.DisposeAsync(); }
+                Check.Require(refusal?.Reason == LiveAdmissionStaleReason.FootprintChanged && reads == 1 &&
+                    f.Events.Count == 0 && f.Store.SyncedById(f.Pair.PairId, Side.Local, f.Saved.LocalId) == f.Saved,
+                    "A refreshed saved Local hint requires its mapped Dropbox footprint before admitted effects.");
+            }
+            else
+            {
+                var items = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(),
+                    RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0)).Items;
+                var result = await items.RenameAsync([moved], hint, default);
+                Check.Require(mode == "repeated"
+                    ? result.Kind == RenameKind.Hold && reads == 1 &&
+                        f.Store.Issues(f.Pair.PairId).Single().Cause == TextKey.FailChanged &&
+                        f.Store.SyncedById(f.Pair.PairId, Side.Local, f.Saved.LocalId) == f.Saved
+                    : result.Kind == RenameKind.Follow && reads == 2 &&
+                        f.Store.SyncedById(f.Pair.PairId, Side.Local, f.Saved.LocalId)?.LocalPath == "a_b/New",
+                    "A refreshed hint reacquires once; widening after binding reacquisition fails without an effect.");
+            }
+        }
+    }
+
+    private static async Task RenameReacquireBoundAsync()
+    {
+        using var f = new Fixture();
+        var moved = await f.MoveAsync(Side.Local, "New");
+        var store = new ChangingRenameStore(f.Store, f.Saved);
+        RenameDecision? decision = null;
+        try { decision = await f.RunAsync([moved], context: f.Context with { Store = store }); }
+        catch (InvalidOperationException) when (store.Reads > 2) { }
+        Check.Require(decision?.Kind == RenameKind.Hold && store.Reads == 2 && f.Store.Issues(f.Pair.PairId).Single().Cause == TextKey.FailChanged &&
+            f.Events.All(item => item.Kind == RunEventKind.Issue),
+            "A repeatedly widening rename binding ends after the existing diagnostic retry allowance without provider effects.");
+    }
+
+    private static async Task FreshRenameEvidenceAsync()
+    {
+        foreach (var side in new[] { Side.Local, Side.Dropbox })
+        foreach (var failure in new[] { "absent", "replacement", "unreadable" })
+        {
+            using var f = new Fixture();
+            var moved = await f.MoveAsync(side, "New");
+            await f.For(side).MoveAsync(moved.Moved, "Third", default);
+            if (failure == "replacement") f.For(side).Seed(moved.Moved with { Id = "replacement" }, Fixture.Content);
+            if (failure == "unreadable") f.For(side).FailNext("New", new ItemFailedException("New", TextKey.ReadLocalFailed, null));
+            Check.Require((await f.RunAsync([moved])).Kind == RenameKind.Hold &&
+                f.Store.SyncedById(f.Pair.PairId, side, moved.Moved.Id) == f.Saved &&
+                f.Store.Issues(f.Pair.PairId).Single().Kind == IssueKind.Failure &&
+                f.Events.All(item => item.Kind == RunEventKind.Issue),
+                "Unknown initiating identity and read failures preserve history and produce an explicit Failure without effects.");
+        }
+        using var recovery = new Fixture();
+        var marker = await recovery.MoveAsync(Side.Dropbox, "OLD" + recovery.Context.Settings.CaseRenameSuffix);
+        var hint = (await recovery.MoveAsync(Side.Local, "OLD")).Moved;
+        await recovery.Local.MoveAsync(hint, "Old", default);
+        var items = SyncJobs.Create(recovery.Context, new SyncPorts(new RecoveryBoundary(),
+            RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0)).Items;
+        Check.Require((await items.RenameAsync([marker], hint, default)).Kind == RenameKind.FinishCaseRename &&
+            recovery.Store.SyncedById(recovery.Pair.PairId, Side.Local, hint.Id)?.DropboxPath == "Old",
+            "A stale recovery hint cannot override the current saved-endpoint observation.");
+    }
+
+    private static async Task StaleRenameReversalsAsync()
+    {
+        var failures = new List<string>();
+        foreach (var side in new[] { Side.Local, Side.Dropbox })
+        foreach (var scenario in new[] { "file-case", "folder-case", "move-out" })
+        {
+            try
+            {
+                using var f = new Fixture(folder: scenario == "folder-case", realStore: true);
+                var child = scenario == "folder-case" ? f.SeedChild("Old/Child") : null;
+                var local = f.LocalOld;
+                var dropbox = f.DropboxOld;
+                var before = f.Saved;
+                if (scenario == "move-out")
+                {
+                    await f.Local.EnsureFolderAsync("Parent", default);
+                    await f.Dropbox.EnsureFolderAsync("Parent", default);
+                    local = await f.Local.MoveAsync(local, "Parent/Old", default);
+                    dropbox = await f.Dropbox.MoveAsync(dropbox, "Parent/Old", default);
+                    before = SyncedEntries.Relink(before, local, dropbox);
+                    f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Renames = [new RenameApplied(f.Saved, before, null, null, null)] });
+                }
+                var target = scenario == "move-out" ? "Old" : "OLD";
+                await f.ScanAsync();
+                var historical = side == Side.Local ? local : dropbox;
+                var moved = new RenameCandidate(side, await f.For(side).MoveAsync(historical, target, default), before);
+                Check.Require((await f.RunAsync([moved])).Kind == RenameKind.Follow,
+                    "The current rename completes before stale Repair work is executed.");
+                var saved = f.Store.SyncedById(f.Pair.PairId, side, moved.Moved.Id)!;
+                var stale = new RenameCandidate(side, historical, saved);
+                var effects = f.Events.Count;
+                Check.Require((await f.RunAsync([stale])).Kind == RenameKind.None && f.Events.Count == effects &&
+                    f.Store.SyncedById(f.Pair.PairId, side, moved.Moved.Id) == saved &&
+                    (await f.Local.ReadOneAsync(target, default))?.Path == target &&
+                    (await f.Dropbox.ReadOneAsync(target, default))?.Path == target,
+                    "Stale Repair must not reverse a completed file case, folder case, or move-out rename.");
+                if (child is not null)
+                {
+                    var rebased = f.Store.SyncedById(f.Pair.PairId, side, child.IdOn(side))!;
+                    var oldChild = historical with { Path = "Old/Child", IsFolder = false, Id = child.IdOn(side) };
+                    var reads = new List<string>();
+                    var context = f.Context with
+                    {
+                        Local = new ProxySide(f.Local) { OnRead = path => reads.Add(path) },
+                        Dropbox = new ProxySide(f.Dropbox) { OnRead = path => reads.Add(path) }
+                    };
+                    Check.Require((await f.RunAsync([new RenameCandidate(side, oldChild, rebased)], context: context)).Kind == RenameKind.None &&
+                        f.Events.Count == effects && f.Store.SyncedById(f.Pair.PairId, side, child.IdOn(side)) == rebased &&
+                        !reads.Contains("Old/Child"),
+                        "Case-equivalent children use saved-parent spelling, never the historical requested parent.");
+                }
+            }
+            catch (Exception error) { failures.Add($"{side}/{scenario}: {error.Message}"); }
+        }
+        Check.Require(failures.Count == 0, string.Join(Environment.NewLine, failures));
+    }
+
     private static async Task SavedSpellingDriftAsync()
     {
         foreach (var side in new[] { Side.Local, Side.Dropbox })
@@ -894,6 +1039,8 @@ public static class RenameRunnerChecks
         foreach (var liveOld in new[] { "absent", "hardlink", "local-replacement", "cloud-replacement" })
         {
             using var f = new Fixture(realStore: realStore);
+            await f.Local.EnsureFolderAsync("Archive", default);
+            await f.Dropbox.EnsureFolderAsync("Archive", default);
             var local = await f.MoveAsync(Side.Local, "Archive/Item");
             var dropbox = await f.MoveAsync(Side.Dropbox, "Archive/Item");
             var destination = SyncedEntries.Relink(f.Saved, local.Moved, dropbox.Moved);
@@ -1022,10 +1169,17 @@ public static class RenameRunnerChecks
                 { Path = side == Side.Local ? "New" : "OtherLocal", Id = "other-local" },
                 adopt.DropboxOld with { Path = side == Side.Dropbox ? "NEW" : "OtherCloud", Id = "other-cloud" });
             adopt.Store.Commit(adopt.Pair.PairId, StateChange.Empty with { Record = [taken] });
-            adopt.For(side == Side.Local ? Side.Dropbox : Side.Local).FailNext("New",
-                new ItemFailedException("New", TextKey.DropboxRefused, null));
-            var decision = await adopt.RunAsync([local, remote]);
-            Check.Require(decision.Kind == RenameKind.Hold && adopt.Store.Issues(adopt.Pair.PairId).Single() is
+            var unrelated = PathNames.Other(side);
+            var unrelatedReads = 0;
+            var unrelatedView = new ProxySide(adopt.For(unrelated))
+            {
+                ReadFault = path => PathNames.Same(path, "New") && ++unrelatedReads > 1
+                    ? new ItemFailedException("New", TextKey.DropboxRefused, null) : null
+            };
+            var context = unrelated == Side.Local ? adopt.Context with { Local = unrelatedView }
+                : adopt.Context with { Dropbox = unrelatedView };
+            var decision = await adopt.RunAsync([local, remote], context: context);
+            Check.Require(decision.Kind == RenameKind.Hold && unrelatedReads == 1 && adopt.Store.Issues(adopt.Pair.PairId).Single() is
                 { Kind: IssueKind.NameClash, Cause: TextKey.ClashNameTaken },
                 "Adopt probes the actual collision provider, not the unrelated endpoint that fails on read.");
 
@@ -1549,6 +1703,19 @@ public static class RenameRunnerChecks
 
     private static Task<bool> RefuseCompleteDownloadAttempt(RequestAttempt attempt, CancellationToken ct) =>
         throw new InvalidOperationException("Rename never completes a download attempt.");
+
+    private sealed class ChangingRenameStore(IStateStore inner, SyncedEntry saved) : ForwardingStateStore(inner)
+    {
+        public int Reads { get; private set; }
+
+        public override SyncedEntry? SyncedByKey(string pairId, Side side, string key)
+        {
+            Reads++;
+            if (Reads > 2) throw new InvalidOperationException("Rename admission retry did not terminate.");
+            var path = "Changed" + Reads;
+            return saved with { DropboxPath = path, DropboxKey = PathNames.DropboxKey(path) };
+        }
+    }
 
     private sealed class CountingExecution(IAdmittedExecution inner) : IAdmittedExecution
     {

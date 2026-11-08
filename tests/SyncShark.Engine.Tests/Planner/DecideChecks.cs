@@ -26,6 +26,7 @@ public static class DecideChecks
         Steps();
         HeldFailures();
         NoRecordTable();
+        AncestorSpelling();
         WithRecordTable();
         ReturningOriginals();
         FolderDeleteDirtyChild();
@@ -40,6 +41,23 @@ public static class DecideChecks
         UnreliableTime();
         FirstRunDeletion();
         RetainedFolderDecisions();
+    }
+
+    private static void AncestorSpelling()
+    {
+        foreach (var policy in Enum.GetValues<FirstRunPolicy>())
+        foreach (var firstRun in new[] { false, true })
+        {
+            var local = Folder("Parent/Child");
+            var remote = Folder("parent/Child") with { Id = "remote" };
+            var row = MakeRow(local, remote, context: Ctx(firstRun: firstRun));
+            Check.Require(Decide.For(row, policy, ComparedAt, false).Kind == ActionKind.Record,
+                "Ancestor-only casing records the pair without an ineffective leaf move.");
+            var saved = new SyncedEntry(PathNames.Key(local.Path), local.Path, PathNames.DropboxKey(remote.Path),
+                remote.Path, true, local.Id, local.Size, local.Modified.UtcTicks, remote.Id, remote.ContentHash);
+            Check.Require(Decide.For(row with { Synced = saved }, policy, ComparedAt, false).IsInSync(),
+                "After one record pass, identical observations settle without repeating a move.");
+        }
     }
 
     private static void ReturningOriginals()

@@ -312,7 +312,7 @@ public sealed partial class DropboxWriter(
         {
             var parsed = await api.RpcAsync(DropboxProtocol.CreateFolder,
                 new { path = DropboxPaths.Remote(pair, path), autorename = false },
-                DropboxReplyShapes.Metadata(pair, DropboxProtocol.TagFolder, nested: true), Attempt(), ct).ConfigureAwait(false);
+                DropboxReplyShapes.Metadata(pair, DropboxProtocol.TagFolder, nested: true), Attempt(), ct, subject: path).ConfigureAwait(false);
             return DropboxListing.Respelled(parsed, path);
         }
         catch (HttpRequestException error)
@@ -434,7 +434,7 @@ public sealed partial class DropboxWriter(
     }
 
     private Task<T> RpcAsync<T>(string route, object arg, DropboxReply<T> reply, string path, CancellationToken ct) =>
-        MappedAsync(api.RpcAsync(route, arg, reply, Attempt(), ct), route, false, path);
+        MappedAsync(api.RpcAsync(route, arg, reply, Attempt(), ct, subject: path), route, false, path);
 
     private static async Task<T> MappedAsync<T>(Task<T> request, string route, bool expectedIsNull, string path)
     {

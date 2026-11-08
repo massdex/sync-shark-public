@@ -459,7 +459,7 @@ public static class ScanReaderChecks
         Execute(connection, StateSchema.Create);
         // Fresh creation order in StateStore.InitializeSchema: base schema, additions, version.
         Execute(connection, StateSchema.SchemaAdditions);
-        Execute(connection, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn);
+        Execute(connection, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex);
         Execute(connection, StateSchema.PublishVersion);
         Execute(connection, StateSchema.AttachScan, (StateSchema.ParamPath, StateSchema.EmptyScan));
         Execute(connection, StateSchema.ScanPragmas);

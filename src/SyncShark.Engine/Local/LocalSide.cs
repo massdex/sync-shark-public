@@ -459,7 +459,7 @@ public sealed class LocalSide(PairConfig pair, PathScope scope, EngineSettings s
         var source = Recheck(_listing, expected);
         if (source.Path == newPath) return Task.FromResult(source);
         // A parent alias cannot rename the parent; only a different leaf spelling needs a case move.
-        if (PathNames.Same(source.Path, newPath) && PathNames.Name(source.Path) == PathNames.Name(newPath))
+        if (PathNames.Same(source.Path, newPath) && PathNames.SameName(source.Path, newPath))
             return Task.FromResult(source with { Path = newPath });
         var caseOnly = PathNames.CaseOnly(expected.Path, newPath);
         if (!caseOnly && _listing.One(newPath) != null) throw new PathOccupiedException(newPath);

@@ -143,6 +143,11 @@ internal sealed class SelectionPass
                     var suppliedPrimary = freshPrimary;
                     freshPrimary = null;
                     var local = await _observer.ObserveLocalAsync(notice.Side, notice.Path, ct, suppliedPrimary).ConfigureAwait(false);
+                    // Repeating Excludes for in-scope rows is the accepted cost of saving excluded rows' Dropbox read.
+                    if (notice is { Side: Side.Local, Kind: ChangeKind.Changed, OldPath: null } &&
+                        local is { Local: { IsFolder: false } entry, Synced: null } &&
+                        _context.Scope.Excludes(entry.Path, null, entry.IsFolder) &&
+                        _context.Store.SyncedById(selection.PairId, Side.Local, entry.Id) is null) return null;
                     if (notice is { Side: Side.Local, Kind: not ChangeKind.Deleted, IdentityDeleted: false })
                     {
                         if (Decide.LocalMatchesBaseline(local.Local, local.Synced) &&

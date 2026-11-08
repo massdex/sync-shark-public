@@ -344,6 +344,11 @@ public static class IssueTableChecks
 
         Close(connection, pair, "p.txt", IssueKind.Failure, IssueKind.Tie);
         Check.Require(IssueTable.List(connection, pair).Count == 0, "close removes every named kind");
+        foreach (var path in new[] { "Parent/file.txt", "parent/FILE.txt", "Other/file.txt" })
+            Raise(connection, pair, IssueKind.Failure, TextKey.FailChanged, path, Now, Local(path));
+        Close(connection, pair, "PARENT/File.txt", IssueKind.Failure);
+        Check.Require(IssueTable.List(connection, pair).Single().Path == "Other/file.txt",
+            "Canonical closure removes every matching spelling but preserves another key.");
     }
 
     private static void ReadCases(SqliteConnection connection)
@@ -1052,7 +1057,7 @@ public static class IssueTableChecks
         Execute(connection, null, StateSchema.Pragmas);
         Execute(connection, null, StateSchema.Create);
         Execute(connection, null, StateSchema.SchemaAdditions);
-        Execute(connection, null, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn);
+        Execute(connection, null, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex);
         Execute(connection, null, StateSchema.AttachScan, (StateSchema.ParamPath, StateSchema.EmptyScan));
         Execute(connection, null, StateSchema.CreateSkipTouched);
         return connection;

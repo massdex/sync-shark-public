@@ -9,7 +9,8 @@ public static class StateSchema
     public const string Pragmas = "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;";
 
     /// <summary>The schema version this build writes and accepts.</summary>
-    public const int Version = 12;
+    public const int Version = 13;
+    public const int IssuePathKeyUpgradeVersion = 12;
     public const int DiscoveryRequiredUpgradeVersion = 11;
     public const int LocalPublishedUpgradeVersion = 10;
     public const int SpentHistoryUpgradeVersion = 9;
@@ -44,6 +45,9 @@ public static class StateSchema
 
     /// <summary>The schema-4 tables and indexes, without a version: the base of a fresh creation and of the upgrade check.</summary>
     public const string Create = "CREATE TABLE IF NOT EXISTS pair(id INTEGER PRIMARY KEY, pair_id TEXT NOT NULL UNIQUE, def_json TEXT NOT NULL, pending_json TEXT,\r\n  last_repair_json TEXT, first_repair_done INTEGER NOT NULL DEFAULT 0) STRICT;\r\nCREATE TABLE IF NOT EXISTS account(connection_id TEXT PRIMARY KEY, limiter_level INTEGER NOT NULL) STRICT;\r\nCREATE TABLE IF NOT EXISTS synced_entry(pair_id INTEGER NOT NULL REFERENCES pair(id) ON DELETE CASCADE,\r\n  local_path TEXT NOT NULL, dropbox_key_delta TEXT, dropbox_path_delta TEXT,\r\n  dropbox_key TEXT GENERATED ALWAYS AS (coalesce(dropbox_key_delta, " + KeyOf + "local_path))) VIRTUAL,\r\n  dropbox_path TEXT GENERATED ALWAYS AS (coalesce(dropbox_path_delta, local_path)) VIRTUAL,\r\n  is_folder INTEGER NOT NULL, local_id ANY NOT NULL, local_size INTEGER NOT NULL, local_mtime INTEGER NOT NULL,\r\n  dropbox_id TEXT NOT NULL, dropbox_hash ANY NOT NULL) STRICT;\r\nCREATE UNIQUE INDEX IF NOT EXISTS synced_local_key ON synced_entry(pair_id, " + KeyOf + "local_path));\r\nCREATE UNIQUE INDEX IF NOT EXISTS synced_dropbox_key ON synced_entry(pair_id, dropbox_key_delta) WHERE dropbox_key_delta IS NOT NULL;\r\nCREATE INDEX IF NOT EXISTS synced_local_id ON synced_entry(pair_id, local_id);\r\nCREATE INDEX IF NOT EXISTS synced_dropbox_id ON synced_entry(pair_id, dropbox_id);\r\nCREATE TABLE IF NOT EXISTS issue(issue_id INTEGER PRIMARY KEY, pair_id INTEGER NOT NULL REFERENCES pair(id) ON DELETE CASCADE,\r\n  kind INTEGER NOT NULL, cause TEXT NOT NULL, path TEXT NOT NULL, subject_json TEXT NOT NULL,\r\n  at_ticks INTEGER NOT NULL, dismissed INTEGER NOT NULL DEFAULT 0,\r\n  UNIQUE(pair_id, path, kind)) STRICT;";
+
+    /// <summary>Canonical issue lookup, installed after every issue-table rebuild.</summary>
+    public const string IssuePathKeyIndex = "CREATE INDEX issue_path_key ON issue(pair_id, " + KeyOf + "path), kind);";
 
     public const string AttachScan = "ATTACH DATABASE $path AS scan_state;";
     public const string DetachScan = "DETACH DATABASE scan_state;";
@@ -665,7 +669,7 @@ public static class StateSchema
     public const string DropObsoletePhaseIndex = "DROP INDEX folder_item_phase;";
     public const string DiscoveryRequiredColumn = "ALTER TABLE change_work ADD COLUMN discovery_required INTEGER NOT NULL DEFAULT 0 CHECK(discovery_required IN (0,1));";
     /// <summary>The last modifying statement of the upgrade or a fresh creation.</summary>
-    public const string PublishVersion = "PRAGMA user_version=12;";
+    public const string PublishVersion = "PRAGMA user_version=13;";
     public const string LocalAccessRetryCauseFunction = "localaccessretrycause";
 
     // Upgrade validation: the actual structure is compared before and after the additions.

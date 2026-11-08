@@ -1832,7 +1832,7 @@ public static class ChangeRunnerChecks
             }
         };
         Check.Require(await RunSelectionAsync(fixture, selected), "121 post-rename failure is retained");
-        Check.Require(reads == 3 && failed, "121 Dropbox rename reads initial, post-rename and admitted metadata once each");
+        Check.Require(reads == 4 && failed, "121 Dropbox rename reads initial, initiating rename freshness, post-rename and admitted metadata once each");
         var after = fixture.Inner.SyncedById(PairId, Side.Dropbox, DropboxId)!;
         Check.Require(after.DropboxPath == Item && fixture.Inner.Issues(PairId).Any(issue => issue.Kind == IssueKind.Failure),
             "121 Dropbox rename commits before download failure");
@@ -1907,6 +1907,70 @@ public static class ChangeRunnerChecks
                     "A child event acquired beside the folder touch is read, synced and retired independently");
             }
         }
+    }
+
+    private static async Task ExcludedLocalReadAsync()
+    {
+        foreach (var mode in new[] { "excluded", "included", "bound-id", "rename" })
+        {
+            using var fixture = new Fixture(realStore: true);
+            var path = mode == "included" ? "Repo/objects/item" : "Repo/.git/objects/item";
+            SeedFolders(fixture, "Repo", "Repo/objects", "Repo/.git", "Repo/.git/objects");
+            var local = LocalEntry(path, LocalId);
+            var remote = RemoteEntry(path, DropboxId);
+            fixture.Local.Seed(local, [1]);
+            fixture.Dropbox.Seed(remote, [1]);
+            var bound = mode is "bound-id" or "rename";
+            var saved = SyncedEntries.From(local with { Path = OldPath }, remote with { Path = OldPath });
+            if (bound) fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
+            var notice = new ChangeNotice(Side.Local, mode == "rename" ? ChangeKind.Renamed : ChangeKind.Changed,
+                path, mode == "rename" ? OldPath : null, LocalId, local, false, false);
+            var selected = Seed(fixture, notice);
+            var reads = 0;
+            fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: readPath =>
+            {
+                if (readPath == path) reads++;
+            });
+            var context = fixture.Context(selected) with
+            {
+                Scope = new PathScope(fixture.Pair with { IgnoreRules = ["FolderName:.git"] }, [fixture.Pair])
+            };
+            Check.Require(await Counted(fixture, selected, () => { }, context: context).RunAsync(selected, default) is true &&
+                !PendingAt(fixture, Side.Local, path).Any(), "Excluded Local notice retires: " + mode);
+            // Included records and bound renames also pay their existing freshness read.
+            Check.Require(reads == (mode == "excluded" ? 0 : 2),
+                "Excluded Local Dropbox read budget: " + mode + "; reads=" + reads);
+            if (mode == "excluded")
+                Check.Require(fixture.Hooks.Count(nameof(IStateStore.Commit)) == 0,
+                    "Excluded unbound Local notice needs no state commit");
+            if (bound)
+                Check.Require(fixture.Inner.SyncedById(PairId, Side.Local, LocalId) is null &&
+                    await fixture.Local.ReadOneAsync(path, default) == local &&
+                    await fixture.Dropbox.ReadOneAsync(path, default) == remote,
+                    "A bound identity entering an excluded folder keeps Leave without deleting either file: " + mode);
+        }
+    }
+
+    // Characterisation only: an unchanged metadata notice without trusted echo sources still reads Dropbox.
+    private static async Task LocalMetadataReadCharacterisationAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var local = LocalEntry(Item, LocalId);
+        var remote = RemoteEntry(Item, DropboxId);
+        var saved = SyncedEntries.From(local, remote);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
+        fixture.Local.Seed(local, [1]);
+        fixture.Dropbox.Seed(remote, [1]);
+        var selected = Selected(fixture, Item, local);
+        Check.Require(Massdex.SyncShark.Engine.Planner.Decide.LocalMatchesBaseline(local, saved) &&
+            !fixture.Inner.CreateLocalEchoProbe(selected)(saved, fixture.Inner.ReadWorkWatermark()),
+            "Metadata characterisation reaches baseline-match true and echo false");
+        var reads = 0;
+        fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: _ => reads++);
+        Check.Require(await RunSelectionAsync(fixture, selected) && reads == 1 &&
+            !PendingAt(fixture, Side.Local, Item).Any(),
+            "Metadata characterisation preserves the current one Dropbox read: reads=" + reads);
+        Console.WriteLine("Local metadata characterisation: baselineMatch=true; echo=false; DropboxReadOne=" + reads);
     }
 
     private static async Task LocalEchoCasesAsync()
@@ -2258,7 +2322,10 @@ public static class ChangeRunnerChecks
 
     private static async Task OrdinarySelectionsAsync()
     {
+        await LocalMetadataReadCharacterisationAsync();
+        await ExcludedLocalReadAsync();
         await AbsentObservationRetiresAsync();
+        await UnboundCaseFailureClosesAsync();
         await ReleasedHistoryAsync();
         await FreshDropboxSelectionAsync();
         await DropboxDeleteFreshnessAsync();
@@ -2317,6 +2384,30 @@ public static class ChangeRunnerChecks
         await OrdinaryWalkFailureAsync();
         await FolderSurvivorFailureIdentityAsync();
         await LiveReobserveRevokesDirectAsync();
+    }
+
+    private static async Task UnboundCaseFailureClosesAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        const string oldPath = "Parent/file.txt";
+        const string path = "Parent/FILE.txt";
+        var local = LocalEntry(path, LocalId);
+        var remote = RemoteEntry(path, DropboxId);
+        fixture.Local.Seed(local, [1]);
+        fixture.Dropbox.Seed(remote, [1]);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Raise =
+            [(IssueKind.Failure, TextKey.FailChanged, oldPath,
+                new IssueSubject([new IssueItem(Side.Local, oldPath, LocalId)], null))] });
+        var selected = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, path, null, LocalId, local, false, false));
+        ClearObligations(fixture);
+        var context = fixture.Context(selected);
+        var jobs = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(),
+            RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0));
+        var row = new Row(PathNames.Key(path), local, remote, null, [], remote.ContentHash, RowContext.Neutral);
+        var outcome = await jobs.Items.RunAdmittedAsync(row, default);
+        Check.Require(outcome.Succeeded() && fixture.Inner.Issues(PairId).Count == 0 &&
+            fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(path)) is not null,
+            "An unbound case-renamed file's successful in-sync result closes its old-spelling Failure without Retry or Repair.");
     }
 
     private static async Task AbsentObservationRetiresAsync()
@@ -5313,7 +5404,7 @@ public static class ChangeRunnerChecks
         Check.Require(await Runner(fixture, selection, boundary, (_, _, _) => Task.FromResult(Coverage(selection)))
             .RunAsync(selection, default) is true, "the post-rename failure is retained on its notice");
         Console.WriteLine("106 post-rename Local reads=" + primaryReads);
-        Check.Require(primaryReads == 3, "106 rename reads initial, fresh reobservation and admitted freshness once each");
+        Check.Require(primaryReads == 4, "106 rename reads initial, initiating rename freshness, fresh reobservation and admitted freshness once each");
         var after = fixture.Inner.SyncedById(PairId, Side.Local, LocalId)!;
         Check.Require(after.LocalPath == Item && fixture.Inner.Issues(PairId).Any(issue => issue.Kind == IssueKind.Failure),
             "the rename commits before its ordinary branch fails");

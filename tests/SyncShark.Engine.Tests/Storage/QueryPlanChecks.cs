@@ -103,7 +103,7 @@ public static class QueryPlanChecks
         StateStore.OpenConnection(connection);
         using (var create = connection.CreateCommand())
         {
-            create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.PublishVersion +
+            create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.PublishVersion +
                 "ATTACH DATABASE ':memory:' AS scan_state;" + StateSchema.EmptyScanPragmas + StateSchema.CreateScan + StateSchema.CreateSkipTouched + StateSchema.CreateScanIssues;
             create.ExecuteNonQuery();
             // Production semantics: an issue DELETE also plans its child SET NULL program, checked below.
@@ -429,7 +429,7 @@ public static class QueryPlanChecks
             using (var setup = StateStore.Connect(durable, SqliteOpenMode.ReadWriteCreate))
             using (var create = setup.CreateCommand())
             {
-                create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.PublishVersion;
+                create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.PublishVersion;
                 create.ExecuteNonQuery();
             }
 

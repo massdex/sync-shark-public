@@ -628,7 +628,7 @@ public static class CompactStorageChecks
                 "the base schema alone publishes no version");
             using (var create = memory.CreateCommand())
             {
-                create.CommandText = StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.PublishVersion;
+                create.CommandText = StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.PublishVersion;
                 create.ExecuteNonQuery();
             }
             Check.Require(Number(memory, "PRAGMA user_version") == StateSchema.Version,

@@ -55,7 +55,7 @@ public static class StateStoreChecks
         {
             foreach (var test in new Func<string, Task>[]
             {
-                DisposedRecordCases, IssueRollbackCase, IssueUpgradeCases, PersistedImportNoticeCase, BusyReaderCases, BasicCases, MappingCases, ScanCases, DeletedHistoryCases, DeletedHistoryBatchCases, DeletedHistoryUpgradeCases, LocalPublishedUpgradeCases, ScanRecordCases, SkipCases, ProtectingMemberCases, MemberlessUpgradeCases, UnreadableCases, RecordCases, GroupedRecordCases, GroupedAdoptionCases, MarkerCases,
+                DisposedRecordCases, IssueRollbackCase, IssueUpgradeCases, PersistedImportNoticeCase, BusyReaderCases, BasicCases, MappingCases, ScanCases, DeletedHistoryCases, DeletedHistoryBatchCases, DeletedHistoryUpgradeCases, LocalPublishedUpgradeCases, CanonicalClosureCases, ClosureCostCases, ScanRecordCases, SkipCases, ProtectingMemberCases, MemberlessUpgradeCases, UnreadableCases, RecordCases, GroupedRecordCases, GroupedAdoptionCases, MarkerCases,
                 PendingCases, PageCases, JournalCases, PageWaitCases, CompletionCases, ClaimedRepairCases, DropboxBookmarkCases, DropboxResetRetryCases, ConfigurationCases,
                 ItemCases, FolderCases, CounterpartPagesCases, CounterpartSiblingAnchorCases, UpgradeCases, PhaseIndexUpgradeCases, CodecCases, LegacyPendingCases, KeepRulesCases,
                 PendingAcknowledgmentCases, UnsavedPendingBindingRaces, CrossedPendingReplacement, SelectedPendingSettlement, RootContextCases, FolderMemberOrdinalCases, FolderSettlementCases, FolderBatchSettlementCases, InvalidJobCases, FolderRefusalTypeCases, BeginFolderRemovalCancellationCase, BeginFolderRemovalMidCancellationCase, DecoratedCases, PostCommitCases
@@ -445,7 +445,7 @@ public static class StateStoreChecks
     // Both predecessors use their own schema and prove transactional rollback before successful upgrade.
     private static async Task LocalPublishedUpgradeCases(string path)
     {
-        foreach (var version in new[] { StateSchema.LocalPublishedUpgradeVersion, StateSchema.DiscoveryRequiredUpgradeVersion })
+        foreach (var version in new[] { StateSchema.LocalPublishedUpgradeVersion, StateSchema.DiscoveryRequiredUpgradeVersion, StateSchema.IssuePathKeyUpgradeVersion })
             await DiscoveryUpgradeCase(path + version, version);
     }
 
@@ -461,8 +461,10 @@ public static class StateStoreChecks
             Execute(connection, StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema +
                 StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames +
                 StateSchema.SpentDeletedHistory);
-            if (version == StateSchema.DiscoveryRequiredUpgradeVersion)
+            if (version >= StateSchema.DiscoveryRequiredUpgradeVersion)
                 Execute(connection, StateSchema.LocalPublishedColumns);
+            if (version >= StateSchema.IssuePathKeyUpgradeVersion)
+                Execute(connection, StateSchema.DiscoveryRequiredColumn);
             Execute(connection, StateSchema.UpsertPair, (StateSchema.ParamPair, PairId),
                 (StateSchema.ParamDef, JsonSerializer.Serialize(Pair())));
             foreach (var saved in new[] { Saved(), Saved(Other), Saved(Child + "2") })
@@ -470,7 +472,7 @@ public static class StateStoreChecks
                     "dropbox_id,dropbox_hash) VALUES(1,$path,0,$id,0,0,$remote,$hash);", ("$path", saved.LocalPath),
                     ("$id", StateEncoding.LocalId(saved.LocalId)), ("$remote", saved.DropboxId),
                     ("$hash", StateEncoding.Hash(saved.DropboxContentHash)));
-            if (version == StateSchema.DiscoveryRequiredUpgradeVersion)
+            if (version >= StateSchema.DiscoveryRequiredUpgradeVersion)
                 Execute(connection, "UPDATE synced_entry SET local_published_journal=$journal,local_published_usn=$usn WHERE local_path=$path;",
                     ("$journal", Single), ("$usn", BothSides), ("$path", Saved().LocalPath));
             var changes = new ChangeTable(connection, writable: true);
@@ -484,7 +486,7 @@ public static class StateStoreChecks
                 ";PRAGMA foreign_keys=OFF;INSERT INTO synced_entry(pair_id,local_path,is_folder,local_id,local_size," +
                 "local_mtime,dropbox_id,dropbox_hash) VALUES(999,'Orphan',0,'orphan',0,0,'orphan','');PRAGMA foreign_keys=ON;");
             before = Snapshot(connection, Rows);
-            if (version == StateSchema.DiscoveryRequiredUpgradeVersion) publications = Snapshot(connection, Publications);
+            if (version >= StateSchema.DiscoveryRequiredUpgradeVersion) publications = Snapshot(connection, Publications);
         }
         RefuseOldRead(path);
         Refuses<InvalidDataException>(() => StateStore.Open(path).Dispose());
@@ -492,8 +494,9 @@ public static class StateStoreChecks
         {
             Check.Require(Snapshot(connection, "PRAGMA user_version;") == "[[" + version + "]]" &&
                 Snapshot(connection, "SELECT count(*) FROM pragma_table_info('synced_entry') WHERE name LIKE 'local_published%';") ==
-                    (version == StateSchema.DiscoveryRequiredUpgradeVersion ? "[[2]]" : "[[0]]") &&
-                Snapshot(connection, "SELECT count(*) FROM pragma_table_info('change_work') WHERE name='discovery_required';") == "[[0]]" &&
+                    (version >= StateSchema.DiscoveryRequiredUpgradeVersion ? "[[2]]" : "[[0]]") &&
+                Snapshot(connection, "SELECT count(*) FROM pragma_table_info('change_work') WHERE name='discovery_required';") ==
+                    (version >= StateSchema.IssuePathKeyUpgradeVersion ? "[[1]]" : "[[0]]") &&
                 Snapshot(connection, Rows) == before &&
                 (publications is null || Snapshot(connection, Publications) == publications),
                 "a refused predecessor upgrade rolls back its columns and keeps every row, publication boundary and old version");
@@ -1235,6 +1238,74 @@ public static class StateStoreChecks
                         (member.Bad ? null : member.Row), nameof(GroupedRecordCases));
             }
         }
+    }
+
+    private static Task CanonicalClosureCases(string path)
+    {
+        using var store = StateStore.Open(path);
+        store.SavePair(Pair());
+        var original = "Parent/file.txt";
+        var changed = "PARENT/FILE.txt";
+        var ordinary = new IssueSubject([], null);
+        store.Commit(PairId, StateChange.Empty with { Raise = [(IssueKind.Failure, TextKey.FailChanged, original, ordinary)] });
+        store.Commit(PairId, StateChange.Empty with { Close = [(Other, IssueClosure.AfterEffect)] });
+        store.Commit(PairId, StateChange.Empty with { Close = [(changed, IssueClosure.AfterEffect)] });
+        Check.Require(store.Issues(PairId).Count == 0, "Populated canonical cache admits cross-spelling closure-only work.");
+        var item = new IssueItem(Side.Local, original, "local");
+        var protectedSubject = new IssueSubject([item], null, FirstRunDeletion: IssueSubject.FirstRunDeletionKind.Item);
+        store.Commit(PairId, StateChange.Empty with { Raise = [(IssueKind.Failure, TextKey.FailChanged, original, protectedSubject)] });
+        store.Commit(PairId, StateChange.Empty with { Close = [(changed, IssueClosure.AfterEffect)] });
+        Check.Require(store.Issues(PairId).Single().Subject.FirstRunDeletion == IssueSubject.FirstRunDeletionKind.Item,
+            "Canonical closure preserves first-run responsibility.");
+        store.Commit(PairId, StateChange.Empty with { FirstRunAcknowledged = [item] });
+        store.Commit(PairId, StateChange.Empty with { Close = [(changed, IssueClosure.AfterEffect)] });
+        Check.Require(store.Issues(PairId).Count == 0, "Protected survivors retain cache relevance until acknowledgment permits closure.");
+        return Task.CompletedTask;
+    }
+
+    private static Task ClosureCostCases(string path)
+    {
+        foreach (var populated in new[] { false, true })
+        {
+            long? previous = null;
+            foreach (var count in new[] { 1, 2 })
+            {
+                using var store = StateStore.Open(path + populated + count);
+                store.SavePair(Pair());
+                for (var index = 0; index < count; index++)
+                    store.Commit(PairId, StateChange.Empty with { Raise = [(IssueKind.Failure, TextKey.FailChanged,
+                        "Unrelated/" + index, new IssueSubject([], null))] });
+                if (populated) store.Commit(PairId, StateChange.Empty with { Close = [(Other, IssueClosure.AfterEffect)] });
+                var connection = (SqliteConnection)typeof(StateStore).GetField("_connection",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(store)!;
+                long calls = 0;
+                connection.CreateFunction(StateSchema.PathKeyFunction, (string value) =>
+                {
+                    calls++;
+                    return PathNames.Key(value);
+                }, isDeterministic: true);
+                calls = 0;
+                store.Commit(PairId, StateChange.Empty with { Record = [Saved()], Close = [(Child, IssueClosure.AfterEffect)] });
+                var measured = calls;
+                Check.Require(previous is null || previous == measured,
+                    "Entire Record-plus-closure pathkey calls do not grow from one to two unrelated issues.");
+                if (count == 2)
+                using (var plan = StorageCommand.Create(connection, null, "EXPLAIN QUERY PLAN " + StateSchema.SelectIssueByPathKeyKind,
+                    (StateSchema.ParamPair, PairId), (StateSchema.ParamPath, PathNames.Key(Child)),
+                    (StateSchema.ParamKind, (int)IssueKind.Failure)))
+                using (var reader = plan.ExecuteReader())
+                {
+                    var details = new List<string>();
+                    while (reader.Read()) details.Add(reader.GetString(3));
+                    Check.Require(details.Any(detail => detail.Contains("issue_path_key") && detail.Contains("<expr>=?") &&
+                        detail.Contains("kind=?")), "Canonical issue lookup seeks the complete pair/key/kind expression index without statistics.");
+                }
+                Check.Require(store.Issues(PairId).Count == count, "Cost probe leaves the unrelated issue count unchanged.");
+                previous = measured;
+                Console.WriteLine($"closure-cost populated={populated} issues={count} pathkey={measured}");
+            }
+        }
+        return Task.CompletedTask;
     }
 
     private static async Task PostCommitCases(string path)

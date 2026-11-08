@@ -35,6 +35,7 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
         Action<Issue>? retainUnfinished, object opportunity, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(opportunity);
+        var reacquired = false;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -51,17 +52,6 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
             var current = group.Where(candidate => synced.PathOn(candidate.Side) != candidate.Moved.Path)
                 .Select(candidate => candidate with { Synced = synced }).ToArray();
             if (current.Length == 0) return Renames.None();
-            var paths = Paths(current).ToArray();
-            if (!heldPaths.SequenceEqual(paths))
-            {
-                var required = LockKeys.ForPaths(context.Pair, LockPaths(paths, localById)).ToArray();
-                if (execution is not null) execution.Require(context.Pair.PairId, context.ExpectedGeneration, required);
-                else if (required.Any(key => !keys.Contains(key, PathLocks.KeyComparer)))
-                {
-                    group = current;
-                    continue;
-                }
-            }
             var localSubject = Renames.FirstOn(current, Side.Local)?.Moved ?? localById;
             var subjectItems = current.Where(candidate => candidate.Side == Side.Dropbox)
                 .Select(candidate => new IssueItem(Side.Dropbox, candidate.Moved.Path, candidate.Moved.Id)).ToList();
@@ -75,14 +65,48 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
             var retryPath = localSubject?.Path ?? (synced.LocalId.Length != 0 ? synced.LocalPath : null);
             var expected = retryPath is null ? null : context.Store.ReadItemRetryForSubject(
                 context.Pair.PairId, context.ExpectedGeneration, retryPath, subject);
-            return await context.ItemAttempts.ExecuteAsync(opportunity, expected, subject,
-                (attempt, token) => RunCurrentAsync(selection, current, synced, localById, paths, retainUnfinished, attempt, expected, subject, token), ct);
+            var paths = Paths(current).ToArray();
+            if (!heldPaths.SequenceEqual(paths))
+            {
+                var required = LockKeys.ForPaths(context.Pair, LockPaths(paths, localById)).ToArray();
+                if (execution is not null)
+                {
+                    execution.Require(context.Pair.PairId, context.ExpectedGeneration, required);
+                    keys = required;
+                }
+                else if (required.Any(key => !keys.Contains(key, PathLocks.KeyComparer)))
+                {
+                    if (IssuePolicy.StaleRetryFailed(reacquired, false, false))
+                    {
+                        return await context.ItemAttempts.ExecuteAsync(opportunity, expected, subject,
+                            (attempt, _) => Task.FromResult(Failure(current, null, new ChangedUnderneathException(synced.LocalPath),
+                                retainUnfinished, attempt, expected, subject, selection)), ct);
+                    }
+                    group = current;
+                    reacquired = true;
+                    continue;
+                }
+            }
+            var result = await context.ItemAttempts.ExecuteAsync(opportunity, expected, subject,
+                (attempt, token) => RunCurrentAsync(execution, selection, current, synced, localById, paths, keys,
+                    (refreshed, hint) =>
+                    {
+                        if (IssuePolicy.StaleRetryFailed(reacquired, false, false))
+                            throw new ChangedUnderneathException(synced.LocalPath);
+                        group = refreshed;
+                        localById = hint;
+                        reacquired = true;
+                    }, retainUnfinished, attempt, expected, subject, token), ct);
+            if (!completedScan && result.Kind == RenameKind.NeedsFresh) continue;
+            return result;
         }
     }
 
     // Observation, decision, provider effect and clash or retry settlement share one set of locals and one item-attempt lifetime.
-    private async Task<RenameDecision> RunCurrentAsync(WorkSelection? selection, IReadOnlyList<RenameCandidate> current, SyncedEntry synced,
-        Entry? localById, IReadOnlyList<(Side Side, string Path, bool Destination)> paths,
+    private async Task<RenameDecision> RunCurrentAsync(IAdmittedExecution? execution, WorkSelection? selection,
+        IReadOnlyList<RenameCandidate> current, SyncedEntry synced,
+        Entry? localById, IReadOnlyList<(Side Side, string Path, bool Destination)> paths, IReadOnlyList<string> heldKeys,
+        Action<IReadOnlyList<RenameCandidate>, Entry?> reacquire,
         Action<Issue>? retainUnfinished, Guid attempt, ItemRetryCandidate? expected,
         IssueSubject registeredSubject, CancellationToken ct)
     {
@@ -106,7 +130,26 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
             ActionExecutor.RequireReadable(context.Store, context.Pair.PairId, synced.LocalPath, roots, synced.IsFolder, ct);
             var listed = ListedAdoption(current, synced, localById, paths);
             if (completedScan && listed is null) return new RenameDecision(RenameKind.NeedsFresh);
-            observations = listed?.Observations ?? await ObserveAsync(current, synced, paths, ct);
+            if (listed is not null) observations = listed.Value.Observations;
+            else
+            {
+                var refreshed = await ObserveAsync(current, synced, localById, ct);
+                current = refreshed.Group;
+                localById = refreshed.LocalById;
+                if (current.Count == 0) return Renames.None();
+                paths = Paths(current).ToArray();
+                observations = Observe(current, synced, paths, refreshed.Local, refreshed.Dropbox);
+                var required = LockKeys.ForPaths(context.Pair, LockPaths(paths, localById)).ToArray();
+                if (required.Any(key => !heldKeys.Contains(key, PathLocks.KeyComparer)))
+                {
+                    if (execution is not null) execution.Require(context.Pair.PairId, context.ExpectedGeneration, required);
+                    else
+                    {
+                        reacquire(current, localById);
+                        return new RenameDecision(RenameKind.NeedsFresh);
+                    }
+                }
+            }
             var evidence = listed is null && observations.LocalAtSynced is { IsFolder: false } observed
                 ? context.Evidence.Read(observed, synced) : default;
             decision = listed?.Decision ?? Renames.For(current, localById, observations,
@@ -174,9 +217,7 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
             local is null ? synced.LocalKey : PathNames.KeyFor(Side.Local, local.Path));
         dropbox = context.Store.ScanEntry(context.Pair.PairId, context.ScanId, Side.Dropbox,
             dropbox is null ? synced.DropboxKey : PathNames.KeyFor(Side.Dropbox, dropbox.Path));
-        if (local is null || dropbox is null || local.Id.Length == 0 || dropbox.Id.Length == 0 ||
-            local.Id != synced.LocalId || dropbox.Id != synced.DropboxId ||
-            local.IsFolder != synced.IsFolder || dropbox.IsFolder != synced.IsFolder ||
+        if (!Matches(local, synced, Side.Local) || !Matches(dropbox, synced, Side.Dropbox) ||
             group.Any(candidate => candidate.Moved != (candidate.Side == Side.Local ? local : dropbox))) return null;
         var observations = Observe(group, synced, paths, local, dropbox);
         // Listing evidence may relink history, but never authorizes a provider effect.
@@ -185,13 +226,38 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
         return decision.Kind == RenameKind.Adopt ? (observations, decision) : null;
     }
 
-    private async Task<Observations> ObserveAsync(IReadOnlyList<RenameCandidate> group, SyncedEntry synced,
-        IReadOnlyList<(Side Side, string Path, bool Destination)> paths, CancellationToken ct)
+    private async Task<(IReadOnlyList<RenameCandidate> Group, Entry? LocalById, Entry? Local, Entry? Dropbox)> ObserveAsync(
+        IReadOnlyList<RenameCandidate> group, SyncedEntry synced, Entry? localById, CancellationToken ct)
     {
         var local = await context.Local.ReadOneAsync(synced.LocalPath, ct);
         var dropbox = await context.Dropbox.ReadOneAsync(synced.DropboxPath, ct);
-        return Observe(group, synced, paths, local, dropbox);
+        var current = new List<RenameCandidate>(group.Count);
+        foreach (var candidate in group)
+        {
+            var saved = candidate.Side == Side.Local ? local : dropbox;
+            // Point reads preserve requested ancestor case; the saved address owns that spelling.
+            var moved = PathNames.Same(candidate.Moved.Path, synced.PathOn(candidate.Side)) ? saved
+                : await context.For(candidate.Side).ReadOneAsync(candidate.Moved.Path, ct);
+            if (!Matches(moved, synced, candidate.Side))
+            {
+                if (Matches(saved, synced, candidate.Side)) continue;
+                throw new ChangedUnderneathException(candidate.Moved.Path);
+            }
+            if (Renames.Candidate(candidate.Side, moved, synced) is { } refreshed) current.Add(refreshed);
+        }
+        if (current.Count != 0 && localById is not null)
+        {
+            var moved = Renames.FirstOn(current, Side.Local)?.Moved;
+            localById = moved ?? (Matches(local, synced, Side.Local) ? local
+                : await context.Local.ReadOneAsync(localById.Path, ct));
+            if (!Matches(localById, synced, Side.Local))
+                throw new ChangedUnderneathException(synced.LocalPath);
+        }
+        return (current, localById, local, dropbox);
     }
+
+    private static bool Matches(Entry? entry, SyncedEntry synced, Side side) =>
+        entry is not null && entry.Id.Length != 0 && entry.Id == synced.IdOn(side) && entry.IsFolder == synced.IsFolder;
 
     private Observations Observe(IReadOnlyList<RenameCandidate> group, SyncedEntry synced,
         IReadOnlyList<(Side Side, string Path, bool Destination)> paths, Entry? local, Entry? dropbox)
