@@ -1,0 +1,15 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "store",
+    "repair",
+    "syncer"
+  ],
+  "core": [
+    "--ntfs-usn-page-checks"
+  ],
+  "ui": []
+}
