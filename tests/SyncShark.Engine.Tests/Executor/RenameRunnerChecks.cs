@@ -9,7 +9,7 @@ using Massdex.SyncShark.V2;
 namespace Massdex.SyncShark.Engine.Tests.Executor;
 
 /// <summary>Checks for RenameRunner (`--engine-checks syncer`), written by RenameRunner's writer.</summary>
-public static class RenameRunnerChecks
+public static partial class RenameRunnerChecks
 {
     private const int DefaultLogBufferCharacters = 262144;
     private static readonly FailureRetryOwner.BackoffSettings AdoptedBackoff = new(1, 1.6, 0, 120);

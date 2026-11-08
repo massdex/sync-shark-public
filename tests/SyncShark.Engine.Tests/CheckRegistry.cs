@@ -120,7 +120,7 @@ public static class CheckRegistry
         ["budget-3"] = BudgetShard(3),
         ["budget-4"] = BudgetShard(4),
         ["b12-meas"] = [Run.CallBudgetChecks.RunB12Scan, Executor.RenameRunnerChecks.RunB12RenameAllocation,
-            Storage.ChangeTableChecks.RunB12LiveCoverageAllocation],
+            Executor.RenameRunnerChecks.RunB12RenameMatrix, Storage.ChangeTableChecks.RunB12LiveCoverageAllocation],
         ["speed"] = [Run.CallBudgetChecks.RunSpeed],
         ["storage-history"] = [Storage.DeletedHistoryChecks.Run],
         ["history-restore-speed"] = [Storage.DeletedHistoryChecks.RunRestoreSpeed],
