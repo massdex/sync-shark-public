@@ -1,7 +1,10 @@
 {
   "build": [
     "engine-tests",
-    "core-tests"
+    "core-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
   ],
   "engine": [
     "cli",
@@ -11,5 +14,7 @@
     "--cli-checks",
     "--cli-surface-checks"
   ],
-  "ui": []
+  "ui": [
+    "cli-settings-checks"
+  ]
 }
