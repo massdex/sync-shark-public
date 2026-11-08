@@ -93,7 +93,7 @@ public sealed partial class V2CliRuntime
         {
             instanceLock = PilotInstanceLock.Acquire(lockPath);
         }
-        catch (IOException error) when (SyncCliRuntime.IsLockContention(error))
+        catch (IOException error) when (CliProductLock.IsContention(error))
         {
             throw new SyncCliBusyException(
                 "The isolated data folder named by --data-root is already in use by another Sync Shark process, " +

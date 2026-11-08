@@ -47,15 +47,15 @@ public sealed class EngineCliRuntime : ISyncCliRuntime, IEngineCliAccess, IEngin
             var authority = _hostAuthority;
             if (authority is null)
             {
-                _ownLock = SyncCliRuntime.AcquireProductLock(SyncSharkRuntimePaths.InstanceLockFile);
+                _ownLock = CliProductLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
                 authority = _ownLock.StateAuthority;
                 // The standalone path admits its own acquisition once, after the lock and before any client or
                 // account access; the hosted path already holds the host's admitted lifetime.
                 _ = EngineStartupAdmission.Require(SyncSharkRuntimePaths.ProductRoot);
             }
-            var http = SyncCliRuntime.CreateDropboxCliClient(DropboxHandlerFactory);
+            var http = DropboxCliClients.Create(DropboxHandlerFactory);
             _dropboxHttp = http;
-            _dropboxAccounts = SyncCliRuntime.ComposeDropboxClients(
+            _dropboxAccounts = DropboxCliClients.Compose(
                 authority, http, DropboxCredentialsFactory(), _dropboxLimiter);
             return _dropboxAccounts;
         }
