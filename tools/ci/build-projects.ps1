@@ -14,13 +14,15 @@ $targetKeys = switch -CaseSensitive ($Target) {
 }
 $selected = @($Keys | ConvertFrom-Json)
 if ($selected.Count -eq 0) { throw 'The select job reported no build projects.' }
-$keys = @($selected | Where-Object { $targetKeys -ccontains $_ })
-if ($keys.Count -eq 0) {
+# Not $keys: PowerShell shares the [string]$Keys parameter's variable case-insensitively,
+# which would coerce this array to one space-joined string.
+$groupKeys = @($selected | Where-Object { $targetKeys -ccontains $_ })
+if ($groupKeys.Count -eq 0) {
     Write-Host "No selected project belongs to build target '$Target'."
     exit 0
 }
 $buildRoot = Join-Path $env:GITHUB_WORKSPACE 'build\ci'
-foreach ($key in $keys) {
+foreach ($key in $groupKeys) {
     Write-Host "::group::BUILD $key"
     $code = 1
     switch -CaseSensitive ($key) {
