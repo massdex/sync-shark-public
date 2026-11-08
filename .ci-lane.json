@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "store",
+    "work-lifecycle",
+    "renames"
+  ],
+  "core": [],
+  "ui": []
+}
