@@ -1,0 +1,21 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "work-lifecycle",
+    "store",
+    "syncer",
+    "stale-freshness",
+    "peer",
+    "live-admission",
+    "repair-claims",
+    "dependencies",
+    "literals"
+  ],
+  "core": [
+    "--engine-layout-checks"
+  ],
+  "ui": []
+}
