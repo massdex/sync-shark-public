@@ -1,0 +1,17 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "syncer",
+    "store",
+    "literals",
+    "dependencies",
+    "issues",
+    "decide",
+    "resolutions",
+    "peer"
+  ],
+  "core": [],
+  "ui": []
+}
