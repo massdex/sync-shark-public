@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "local",
+    "stale-freshness"
+  ],
+  "core": [
+    "--engine-layout-checks"
+  ],
+  "ui": []
+}
