@@ -70,7 +70,7 @@ internal static partial class RunChecks
         fx.WriterA.OnContentRead = fx.WriterB.OnContentRead = _ => throw new InvalidOperationException("Rehearsal opened real content.");
         var effects = new List<RehearsalEffect>();
         using var overlay = new SqliteRehearsalOverlay(Path.Combine(LocalChecks.FreshRoot("rehearsal"), "overlay.db"));
-        var endpoints = new RehearsalEndpoints(fx.Provider, overlay, effect => { lock (effects) effects.Add(effect); });
+        var endpoints = new RehearsalEndpoints(fx.Provider, overlay, effect => { lock (effects) effects.Add(effect); }, V2Settings.Default);
         var capture = new PlanCaptureExecutor(fx.Executor);
         var run = new SyncRun(fx.Store, capture, endpoints, Settings, TimeProvider.System);
         var first = await run.IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);

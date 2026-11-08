@@ -55,7 +55,7 @@ public static class StateStoreChecks
         {
             foreach (var test in new Func<string, Task>[]
             {
-                DisposedRecordCases, IssueRollbackCase, IssueUpgradeCases, BusyReaderCases, BasicCases, MappingCases, ScanCases, DeletedHistoryCases, DeletedHistoryBatchCases, DeletedHistoryUpgradeCases, LocalPublishedUpgradeCases, ScanRecordCases, SkipCases, ProtectingMemberCases, MemberlessUpgradeCases, UnreadableCases, RecordCases, GroupedRecordCases, GroupedAdoptionCases, MarkerCases,
+                DisposedRecordCases, IssueRollbackCase, IssueUpgradeCases, PersistedImportNoticeCase, BusyReaderCases, BasicCases, MappingCases, ScanCases, DeletedHistoryCases, DeletedHistoryBatchCases, DeletedHistoryUpgradeCases, LocalPublishedUpgradeCases, ScanRecordCases, SkipCases, ProtectingMemberCases, MemberlessUpgradeCases, UnreadableCases, RecordCases, GroupedRecordCases, GroupedAdoptionCases, MarkerCases,
                 PendingCases, PageCases, JournalCases, PageWaitCases, CompletionCases, ClaimedRepairCases, DropboxBookmarkCases, DropboxResetRetryCases, ConfigurationCases,
                 ItemCases, FolderCases, CounterpartPagesCases, CounterpartSiblingAnchorCases, UpgradeCases, PhaseIndexUpgradeCases, CodecCases, LegacyPendingCases, KeepRulesCases,
                 PendingAcknowledgmentCases, UnsavedPendingBindingRaces, CrossedPendingReplacement, SelectedPendingSettlement, RootContextCases, FolderMemberOrdinalCases, FolderSettlementCases, FolderBatchSettlementCases, InvalidJobCases, FolderRefusalTypeCases, BeginFolderRemovalCancellationCase, BeginFolderRemovalMidCancellationCase, DecoratedCases, PostCommitCases
@@ -359,6 +359,22 @@ public static class StateStoreChecks
         }
         using var restarted = StateStore.Open(path);
         Check.Require(restarted.Issues(PairId).Count == 1, "restart upgrades the repaired source once");
+        return Task.CompletedTask;
+    }
+
+    private static Task PersistedImportNoticeCase(string path)
+    {
+        using (var store = StateStore.Open(path))
+        {
+            store.SavePair(Pair());
+            store.Commit(PairId, StateChange.Empty with
+                { Raise = [(IssueKind.Info, TextKey.FailChanged, string.Empty, new IssueSubject([], null))] });
+        }
+        using (var connection = Inspect(path))
+            Execute(connection, "UPDATE issue SET cause='InfoPairPausedInOldApp';");
+        using var reopened = StateStore.OpenReadOnly(path)!;
+        Check.Require(reopened.Issues(PairId).Single().Cause == TextKey.InfoPairPausedInOldApp,
+            nameof(PersistedImportNoticeCase));
         return Task.CompletedTask;
     }
 
@@ -2145,15 +2161,7 @@ public static class StateStoreChecks
     private static Task ConfigurationCases(string path)
     {
         using var store = StateStore.Open(path);
-        var imported = Pair() with { Enabled = false };
-        foreach (var boundary in new[] { "INSERT ON pair", "INSERT ON source_state", "INSERT ON issue" })
-            RollbackAt(path, boundary, () => store.SaveImportedPair(imported, true));
-        store.SaveImportedPair(imported, true);
-        Check.Require(store.Issues(PairId).Single().Cause == TextKey.InfoPairPausedInOldApp &&
-            !store.Pair(PairId)!.Enabled, nameof(ConfigurationCases));
-        Refuses<SqliteException>(() => store.SaveImportedPair(imported, true));
-        store.SaveImportedPair(Pair(OtherPair) with { Enabled = false }, false);
-        Check.Require(store.Issues(OtherPair).Count == 0, nameof(ConfigurationCases));
+        store.SavePair(Pair() with { Enabled = false });
         var generation = Generation(store);
         var source = store.ReadSource(PairId, Side.Local);
         var drive = new DriveEvidence(uint.MaxValue, ulong.MaxValue, long.MaxValue);

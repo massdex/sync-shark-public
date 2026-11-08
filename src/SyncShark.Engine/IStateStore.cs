@@ -15,7 +15,6 @@ public interface IStateStore : IDisposable
     ItemRetryCandidate? ReadItemRetryForSubject(string pairId, long expectedGeneration,
         string path, IssueSubject subject);
     long ReadWorkWatermark();
-    void SaveImportedPair(PairConfig pair, bool legacyPaused, IEnumerable<SyncedEntry>? baselines = null);
     void MergeDriveEvidence(string pairId, long expectedGeneration, DriveEvidence acquired);
     void ReconcileRootIdentity(string pairId, long expectedGeneration, RootBinding? expectedBinding,
         Issue? expectedIssue, StateChange issueOnlyChange);

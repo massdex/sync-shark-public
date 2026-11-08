@@ -15,7 +15,8 @@ public static class SettingsParserChecks
           "WhenRecycleBinUnavailable": "Fail", "LogRetentionDays": 3,
           "DefaultFirstRunPolicy": "NewestWins", "InitialLimiterLevel": 1,
           "DefaultIgnoreRules": "FileName:desktop.ini",
-          "LogBufferCharacters": 262144, "InitialBackoffSeconds": 1, "BackoffMultiplier": 1.6,
+          "LogBufferCharacters": 262144, "LogReadBufferBytes": 4096, "JournalPageBufferBytes": 1048576,
+          "InitialBackoffSeconds": 1, "BackoffMultiplier": 1.6,
           "BackoffJitter": 0.2, "MaximumBackoffSeconds": 120,
           "BatchPollIntervalSeconds": 0.1, "FolderDeleteMinimumPollSeconds": 1, "StoragePageSize": 100,
           "StoreBatchRows": 20000, "AtomicReplaceAttempts": 5,
@@ -35,6 +36,8 @@ public static class SettingsParserChecks
             StoragePageSize = storagePageSize,
             AtomicReplaceAttempts = 5,
             AtomicReplaceInitialDelayMilliseconds = 50,
+            LogReadBufferBytes = 4096,
+            JournalPageBufferBytes = 1048576,
         };
         Check.Require(SettingsParser.Parse(DefaultsJson, null) == expected, "the defaults alone");
 
@@ -88,12 +91,12 @@ public static class SettingsParserChecks
         Check.Require(SettingsParser.Parse(duplicateDefaults, null).CaseRenameSuffix == "second-case",
             "a repeated default takes its last value");
         var duplicateRows = SettingsParser.List(duplicateDefaults, null);
-        Check.Require(duplicateRows.Count == 22 && duplicateRows[4].Value == "first-case"
+        Check.Require(duplicateRows.Count == 24 && duplicateRows[4].Value == "first-case"
             && duplicateRows[5].Value == "second-case"
             && !duplicateRows[4].Overridden && !duplicateRows[5].Overridden,
             "list keeps every duplicate default in order");
         var duplicateOverrideRows = SettingsParser.List(duplicateDefaults, """{ "CaseRenameSuffix": "mine" }""");
-        Check.Require(duplicateOverrideRows.Count == 22 && duplicateOverrideRows[4].Value == "mine"
+        Check.Require(duplicateOverrideRows.Count == 24 && duplicateOverrideRows[4].Value == "mine"
             && duplicateOverrideRows[5].Value == "mine"
             && duplicateOverrideRows[4].Overridden && duplicateOverrideRows[5].Overridden,
             "a user override applies to every duplicate default row");
@@ -323,7 +326,7 @@ public static class SettingsParserChecks
         using var embedded = CliCatalogResource.Load(typeof(SettingsParser).Assembly, ResourceNames.Settings);
         var embeddedJson = embedded.RootElement.GetRawText();
         SettingsParser.Parse(embeddedJson, null);
-        Check.Require(SettingsParser.List(embeddedJson, null).Count == 21, "the embedded defaults name every setting");
+        Check.Require(SettingsParser.List(embeddedJson, null).Count == 23, "the embedded defaults name every setting");
         Check.Require(SettingsParser.Parse(embeddedJson, null).StoragePageSize == storagePageSize,
             "the shipped page-size default loads");
         Check.Require(SettingsParser.Parse(embeddedJson, null).StoreBatchRows == 20_000,
@@ -371,11 +374,11 @@ public static class SettingsParserChecks
             "a bad override enum");
 
         var rows = SettingsParser.List(DefaultsJson, numberJson);
-        Check.Require(rows.Count == 21, "list names every setting once");
+        Check.Require(rows.Count == 23, "list names every setting once");
         RequireRow(rows, nameof(EngineSettings.LogRetentionDays), "7", true, "an overridden value");
         RequireRow(rows, nameof(EngineSettings.CaseRenameSuffix), "default-case", false, "a default value");
         RequireRow(rows, nameof(EngineSettings.WhenRecycleBinUnavailable), "Fail", false, "an enum default");
-        Check.Require(SettingsParser.List(DefaultsJson, null).Count == 21, "list works with no user settings");
+        Check.Require(SettingsParser.List(DefaultsJson, null).Count == 23, "list works with no user settings");
 
         try
         {

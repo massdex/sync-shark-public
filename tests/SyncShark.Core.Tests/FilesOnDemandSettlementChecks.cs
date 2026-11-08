@@ -95,7 +95,7 @@ internal static class FilesOnDemandSettlementChecks
         Require(staleCallbacks == 0, "stale completion never invokes callback");
 
         store.QueueStorageSettlement(localRoot.RootId, local.ObjectId, remoteRoot.RootId, remote);
-        using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("paused settlement opened provider"), _ => false, store))
+        using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("paused settlement opened provider"), _ => false, V2Settings.Default, store))
         {
             store.SavePair(pair with { Enabled = false });
             await using (var service = new StorageSettlementService(store, connections))
@@ -168,7 +168,7 @@ internal static class FilesOnDemandSettlementChecks
             "ordinary conversion enqueue preserves typed acknowledgment identity");
         var acknowledgments = 0;
         var ackTarget = metadata with { Scope = StorageNotices.ReceiptScope(movedReceipt.Id, movedReceipt.Revision, movedReceipt.ContentHash) };
-        using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("managed ack opened native provider"), _ => false, store))
+        using (var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("managed ack opened native provider"), _ => false, V2Settings.Default, store))
         {
             StorageObserved Acknowledge(StorageSettlement pending, Action revalidate)
             {

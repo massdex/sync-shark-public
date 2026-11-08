@@ -90,7 +90,7 @@ public sealed partial class ProductionEndpoints : IEndpointProvider, IChangeWatc
         if (store.SupportsIndexPlanning && store is ILocalGapStore gaps)
         {
             _gapIo = new LocalGapIo(store, settings, paths.ProductOwnedPaths(paths.RecoveryRoot), contentPausedForTest, time);
-            _gapWorker = new LocalGapWorker(gaps, _gapIo, StorageFailureClassifier.IsStateDamage);
+            _gapWorker = new LocalGapWorker(gaps, _gapIo, StorageFailureClassifier.IsStateDamage, settings);
             Indexing = new LocalIndexingRuns(store, (root, ct) => new LocalInventory(root, Side.A, store,
                 paths.ProductOwnedPaths(paths.RecoveryRoot),
                 settings, time, isStateDamage: StorageFailureClassifier.IsStateDamage, new DefenderHistory()) { GapIo = _gapIo }.VerifyIndexingPassAsync(ct), _gapWorker, _gapIo);

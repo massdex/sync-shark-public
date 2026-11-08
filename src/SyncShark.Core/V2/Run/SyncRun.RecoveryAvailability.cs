@@ -21,7 +21,7 @@ public sealed partial class SyncRun
         {
             var retry = prior ?? new SyncRetry(path, "recovery", 0, unavailable, DateTimeOffset.MinValue);
             if (retry.RetryAfter > _time.GetUtcNow()) return retry;
-            var failure = FailureRetryOwner.Failed(retry.Attempts, _time.GetUtcNow());
+            var failure = FailureRetryOwner.Failed(_settings, retry.Attempts, _time.GetUtcNow());
             return retry with { Attempts = failure.Attempts, RetryAfter = failure.RetryAfter };
         }
         foreach (var group in held.GroupBy(action => action.Path, StringComparer.OrdinalIgnoreCase))

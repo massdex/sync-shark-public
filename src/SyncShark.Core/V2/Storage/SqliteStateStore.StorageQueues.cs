@@ -40,7 +40,7 @@ public sealed partial class SqliteStateStore
         using var tx = _connection.BeginTransaction();
         var attempts = Convert.ToInt32(StoreSchema.Scalar(_connection, tx,
             "SELECT failure_attempts FROM storage_root_backoff WHERE root_id=$r;", ("$r", rootId)) ?? 0);
-        var state = FailureRetryOwner.Failed(attempts, DateTimeOffset.FromUnixTimeMilliseconds(NowMs()));
+        var state = FailureRetryOwner.Failed(_settings, attempts, DateTimeOffset.FromUnixTimeMilliseconds(NowMs()));
         StoreSchema.Execute(_connection, tx,
             "INSERT INTO storage_root_backoff(root_id,due,failure_attempts) VALUES($r,$due,$attempts) " +
             "ON CONFLICT(root_id) DO UPDATE SET due=excluded.due,failure_attempts=excluded.failure_attempts;",
@@ -145,7 +145,7 @@ public sealed partial class SqliteStateStore
         read.Parameters.AddWithValue("$id", jobId); read.Parameters.AddWithValue("$r", rootId); read.Parameters.AddWithValue("$o", objectId);
         if (binding is not null) read.Parameters.AddWithValue("$b", binding);
         if (read.ExecuteScalar() is not long attempts) return;
-        var state = FailureRetryOwner.Failed((int)Math.Min(int.MaxValue, attempts), DateTimeOffset.FromUnixTimeMilliseconds(NowMs()));
+        var state = FailureRetryOwner.Failed(_settings, (int)Math.Min(int.MaxValue, attempts), DateTimeOffset.FromUnixTimeMilliseconds(NowMs()));
         using var update = StoreSchema.Command(_connection, tx, $"UPDATE {table} SET due=$due,failure_attempts=$attempts WHERE {where};");
         update.Parameters.AddWithValue("$id", jobId); update.Parameters.AddWithValue("$r", rootId); update.Parameters.AddWithValue("$o", objectId);
         if (binding is not null) update.Parameters.AddWithValue("$b", binding);

@@ -31,6 +31,9 @@ public sealed partial class V2CliRuntime : ISyncCliOperations
     // The one composition this runtime may reach: owned in a direct process, borrowed inside the host.
     private EngineComposition? IndexComposition => _composition ?? _borrowedComposition;
 
+    // A runtime opened without a composition (state-free commands) still reports the one settings record.
+    private V2Settings Settings => IndexComposition?.Settings ?? V2Settings.Default;
+
     // The Dropbox endpoints' client: one per process, like the v1 CLI, built by the one guarded factory so each read
     // and write slice is bounded by its progress allowance, never by the transport's implicit 100-second default.
     private static readonly HttpClient SharedHttp = EngineComposition.CreateDropboxHttpClient(

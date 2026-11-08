@@ -8,21 +8,21 @@ internal static partial class LocalJournalChecks
     {
         VerificationTruthTable();
         var elapsed = TimeSpan.Zero;
-        var budget = new VerificationBudget(() => elapsed);
+        var budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => elapsed);
         LocalChecks.Require(budget.Admit(VerificationBudget.MaximumBytes + 1) && !budget.CanStart,
             "one oversized file can progress independently, then pass yields");
-        budget = new VerificationBudget(() => elapsed);
+        budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => elapsed);
         LocalChecks.Require(budget.Admit(1), "first file admitted");
         elapsed = VerificationBudget.MaximumTime;
         LocalChecks.Require(!budget.Admit(1), "elapsed budget prevents another file, never abandons a reader");
         elapsed = TimeSpan.Zero;
-        budget = new VerificationBudget(() => elapsed);
+        budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => elapsed);
         LocalChecks.Require(budget.Admit(VerificationBudget.MaximumBytes - 1) && !budget.Admit(2),
             "remaining byte admission cannot overshoot except first file");
-        budget = new VerificationBudget(() => TimeSpan.Zero);
+        budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => TimeSpan.Zero);
         for (var i = 0; i < 512; i++) LocalChecks.Require(budget.Admit(0), "512 item admission boundary");
         LocalChecks.Require(!budget.CanStart && !budget.Admit(0), "513th item is refused");
-        budget = new VerificationBudget(() => TimeSpan.Zero);
+        budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => TimeSpan.Zero);
         LocalChecks.Require(budget.Admit(long.MaxValue) && !budget.Admit(long.MaxValue) && !budget.CanStart,
             "maximum-sized first item saturates without overflow or another admission");
         LocalChecks.Require(NtfsUsnJournal.CanProveContents(FileAttributes.ReparsePoint, 0x9000001a) &&
@@ -60,7 +60,7 @@ internal static partial class LocalJournalChecks
             var gaps = (ILocalGapStore)cloudStore;
             gaps.BeginGap(cloudRoot.RootId, "0000000000000001:200", 100, true);
             var io = new GapCheckIo(stamp, "0000000000000001:200") { RequiresHash = true, UsnOverride = 99 };
-            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             worker.Discover(cloudRoot, gaps.GapEpoch(cloudRoot.RootId)!, default);
             gaps.PromoteGapDiscovery(cloudRoot.RootId);
             LocalChecks.Require(gaps.GapHashPage(cloudRoot.RootId, gaps.GapEpoch(cloudRoot.RootId)!, 10).Count == 1 &&

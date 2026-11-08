@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.V2;
 /// <summary>Host-owned connections, never run-owned. Native registration is the durable reconnect record.</summary>
 internal sealed class CloudFilesLifetime(
     Func<PairDef, WindowsCloudFilesBinding, SyncDirectoryStorage, ICloudFilesConnection> createConnection,
-    Func<PairDef, bool> hasRegistration, SqliteStateStore? noticeStore = null,
+    Func<PairDef, bool> hasRegistration, V2Settings settings, SqliteStateStore? noticeStore = null,
     Func<PairDef, string, CancellationToken, Task<PilotRemoteEntry?>>? observeRemote = null) : IDisposable
 {
     internal Func<PairDef, string, CancellationToken, Task<PilotRemoteEntry?>>? ObserveRemote { get; } = observeRemote;
@@ -89,7 +89,7 @@ internal sealed class CloudFilesLifetime(
             {
                 // Everything that opens the placeholder or touches SQLite runs on the writer's thread. The native
                 // callback thread only enqueues (and only after Windows I/O has been completed).
-                var writer = _notices ??= new HydrationNoticeWriter(noticeStore);
+                var writer = _notices ??= new HydrationNoticeWriter(noticeStore, settings);
                 writer.Register(pair);
                 StorageNotice? Item(string path)
                 {

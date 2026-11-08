@@ -71,6 +71,13 @@ internal static partial class Program
 
     private static int RunFixtureMain(string[] args)
     {
+        // The route fixture's trusted peer: run the real CLI routing over an isolated product root.
+        if (args.Length >= 3 && args[0] == CliDropboxRouteChecks.ChildFlag)
+        {
+            using var productRoot = Massdex.SyncShark.SyncSharkRuntimePaths.OverrideProductRootForTest(
+                Path.GetFullPath(args[1]));
+            return CliEntry.Execute(args[2..]);
+        }
         if (args is ["--core", "v2", var startupMode] &&
             Environment.GetEnvironmentVariable(EngineStartupReadinessChecks.RendezvousVariable) is { } rendezvous)
             return EngineStartupReadinessChecks.ChildAsync(rendezvous, startupMode).GetAwaiter().GetResult();
@@ -167,6 +174,8 @@ internal static partial class Program
             return RunTrayTooltipContract();
         if (args.Length == 2 && args[0] == "--cli-settings-checks")
             return CliSettingsChecks.Run(Path.GetFullPath(args[1]));
+        if (args.Length == 2 && args[0] == "--cli-dropbox-route-checks")
+            return CliDropboxRouteChecks.Run(Path.GetFullPath(args[1]));
         if (args.Length == 1 && args[0] == "--release-setup-checks")
             return ReleaseSetupChecks.Run();
         if (args.Length == 2 && args[0] == "--provider-package-checks")

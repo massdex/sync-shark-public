@@ -88,7 +88,19 @@ public sealed record V2Settings(
     public long LocalGapBytesPerSecond { get; init; } = 30_000_000;
     /// <summary>User-input quiet time required for background gap IO; battery operation also pauses it.</summary>
     public TimeSpan LocalGapIdleTime { get; init; } = TimeSpan.FromSeconds(30);
+    private readonly V2Tunables _tunables = V2Tunables.Default;
+    private readonly TimeSpan _minSafetyPoll = V2Tunables.SchedulingDelay(MinSafetyPoll, nameof(MinSafetyPoll));
+    /// <summary>Domain-validated tunables; completed settings are checked at composition.</summary>
+    public V2Tunables Tunables { get => _tunables; init => _tunables = value.Validated(); }
+    /// <summary>Floor for the edge's safety-poll interval and every deferred wake; at most the retry ceiling.</summary>
+    public TimeSpan MinSafetyPoll { get => _minSafetyPoll; init => _minSafetyPoll = V2Tunables.SchedulingDelay(value, nameof(MinSafetyPoll)); }
 
+    /// <summary>Checks relationships only after initialization, so equivalent final records have the same result.</summary>
+    internal V2Settings Validated()
+    {
+        _tunables.Ceiling(_minSafetyPoll);
+        return this;
+    }
     /// <summary>The single place every v2 default is defined.</summary>
     public static V2Settings Default { get; } = new(
         StoreBatchRows: 20_000,

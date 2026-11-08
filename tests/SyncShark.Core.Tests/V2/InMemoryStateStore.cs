@@ -276,7 +276,7 @@ internal sealed partial class InMemoryStateStore : IStateStore
         lock (_gate)
         {
             var prior = _indexRootRetry.TryGetValue(rootId, out var old) ? old.Attempts : 0;
-            _indexRootRetry[rootId] = FailureRetryOwner.Failed(prior, DateTimeOffset.UtcNow);
+            _indexRootRetry[rootId] = FailureRetryOwner.Failed(V2Settings.Default, prior, DateTimeOffset.UtcNow);
             _indexFailures[rootId] = reason;
             IndexingWorkSignal.Publish(this);
         }
@@ -288,7 +288,7 @@ internal sealed partial class InMemoryStateStore : IStateStore
         {
             if (revision == 0 || RehashRevision(rootId, item.ObjectId) != revision) return false;
             var prior = _indexItemRetry.TryGetValue((rootId, item.ObjectId), out var old) ? old.Attempts : 0;
-            _indexItemRetry[(rootId, item.ObjectId)] = FailureRetryOwner.Failed(prior, DateTimeOffset.UtcNow);
+            _indexItemRetry[(rootId, item.ObjectId)] = FailureRetryOwner.Failed(V2Settings.Default, prior, DateTimeOffset.UtcNow);
             _rehash[(rootId, item.ObjectId)] = (++_rehashAttempt, reason);
             IndexingWorkSignal.Publish(this);
             return true;

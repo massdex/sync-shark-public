@@ -973,36 +973,20 @@ public static class LocalSideChecks
     private static string? Resolve(string root, DirectoryIdentity identity, ulong id) =>
         NtfsIdentityPaths.ResolvePathById(root, identity, id, CancellationToken.None);
 
-    // Same descriptor, volume handle and flags as NtfsIdentityPaths.OpenById, so the observed code is the one
-    // the production call receives.
+    // Observe the native result through the production identity-opening owner.
     private static int NativeOpenByIdError(string root, ulong id)
     {
         var volumeRoot = Path.GetPathRoot(Path.GetFullPath(root))!;
         using var volume = CreateFileW(volumeRoot, FileReadAttributes, FileShare.Read | FileShare.Write | FileShare.Delete,
             IntPtr.Zero, OpenExisting, FileFlagBackupSemantics | FileFlagOpenReparsePoint, IntPtr.Zero);
         if (volume.IsInvalid) throw new InvalidOperationException("The fixture volume could not be opened.");
-        var descriptor = new FileIdDescriptor { Size = 24, Type = 0, Id = id };
-        using var handle = OpenFileByIdNative(volume, ref descriptor, FileReadAttributes,
-            FileShare.Read | FileShare.Write | FileShare.Delete, IntPtr.Zero,
-            FileFlagBackupSemantics | FileFlagOpenReparsePoint);
+        using var handle = NtfsIdentityPaths.OpenById(volume, id);
         return handle.IsInvalid ? Marshal.GetLastWin32Error() : 0;
-    }
-
-    [StructLayout(LayoutKind.Explicit, Size = 24)]
-    private struct FileIdDescriptor
-    {
-        [FieldOffset(0)] public uint Size;
-        [FieldOffset(4)] public uint Type;
-        [FieldOffset(8)] public ulong Id;
     }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern SafeFileHandle CreateFileW(string fileName, uint desiredAccess, FileShare shareMode,
         IntPtr securityAttributes, uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
-
-    [DllImport("kernel32.dll", EntryPoint = "OpenFileById", SetLastError = true)]
-    private static extern SafeFileHandle OpenFileByIdNative(SafeFileHandle volumeHint, ref FileIdDescriptor fileId,
-        uint access, FileShare shareMode, IntPtr security, uint flags);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CreateHardLinkW(string newFileName, string existingFileName, IntPtr securityAttributes);

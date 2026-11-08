@@ -250,16 +250,16 @@ internal static partial class AutoSyncChecks
             var now = new ManualClock().GetUtcNow();
             if (priorFailure)
             {
-                FailureRetryOwner.RecordRunFailure(store, "p1", new IOException("earlier failure"), now,
+                FailureRetryOwner.RecordRunFailure(V2Settings.Default, store, "p1", new IOException("earlier failure"), now,
                     StorageFailureClassifier.IsStateDamage);
                 store.CloseNotice(FailureRetryOwner.RunNoticeId("p1"), "resolved");
             }
-            FailureRetryOwner.RecordDeferredRetry(store, "p1", 1, FailureRetryOwner.Failed(5, now));
+            FailureRetryOwner.RecordDeferredRetry(store, "p1", 1, FailureRetryOwner.Failed(V2Settings.Default, 5, now));
             Require(FailureRetryOwner.RunFailureState(store, "p1") is null,
                 "deferred state is not a real failure episode");
-            var failure = FailureRetryOwner.RecordRunFailure(store, "p1", new IOException("new failure"), now,
+            var failure = FailureRetryOwner.RecordRunFailure(V2Settings.Default, store, "p1", new IOException("new failure"), now,
                 StorageFailureClassifier.IsStateDamage);
-            Require(failure == FailureRetryOwner.Failed(0, now) &&
+            Require(failure == FailureRetryOwner.Failed(V2Settings.Default, 0, now) &&
                 FailureRetryOwner.RunFailureState(store, "p1") == failure &&
                 FailureRetryOwner.DeferredRetryState(store, "p1") is null,
                 "deferred-to-failure and failure-to-deferred-to-failure start at the first shared tier");
@@ -276,14 +276,14 @@ internal static partial class AutoSyncChecks
         await rig.StartAsync();
         await rig.ParkedAsync(AutoStatus.Waiting);
         var first = rig.State("p1").RetryAt - rig.Clock.GetUtcNow();
-        var firstTier = FailureRetryOwner.Failed(0, rig.Clock.GetUtcNow()).RetryAfter - rig.Clock.GetUtcNow();
+        var firstTier = FailureRetryOwner.Failed(V2Settings.Default, 0, rig.Clock.GetUtcNow()).RetryAfter - rig.Clock.GetUtcNow();
         Require(first == firstTier, "a failed run retries after the shared first tier");
         rig.Clock.Advance(firstTier);
         await rig.ParkedAsync(AutoStatus.Waiting);
         var second = rig.State("p1").RetryAt - rig.Clock.GetUtcNow();
         var measuredDebt = FailureRetryOwner.RunFailureState(rig._store, "p1");
         Console.WriteLine($"RETRY MEASUREMENT first={first}; second={second}; ownerAttempts={measuredDebt?.Attempts}; ownerDue={measuredDebt?.RetryAfter}; runs={rig.Run.Runs("p1")}");
-        Require(second == FailureRetryOwner.Failed(1, rig.Clock.GetUtcNow()).RetryAfter - rig.Clock.GetUtcNow(), "the retry delay doubles");
+        Require(second == FailureRetryOwner.Failed(V2Settings.Default, 1, rig.Clock.GetUtcNow()).RetryAfter - rig.Clock.GetUtcNow(), "the retry delay doubles");
         rig.Clock.Advance(second!.Value);
         await rig.ParkedAsync(AutoStatus.Idle);
         rig.Run.Then(failed);
@@ -329,7 +329,7 @@ internal static partial class AutoSyncChecks
         await rig.ParkedAsync(AutoStatus.Waiting);
         // The first report has no previous count, so it opens the shared tier: the due item retry is below the
         // safety floor, and the shared first tier is later than that floor.
-        var first = FailureRetryOwner.Failed(0, rig.Clock.GetUtcNow()).RetryAfter - rig.Clock.GetUtcNow();
+        var first = FailureRetryOwner.Failed(V2Settings.Default, 0, rig.Clock.GetUtcNow()).RetryAfter - rig.Clock.GetUtcNow();
         Require(rig.State("p1").RetryAt - rig.Clock.GetUtcNow() == first &&
             FailureRetryOwner.DeferredRetryState(rig._store, "p1") is { Attempts: 1 },
             "the first non-shrinking deferred report opens the shared tier and its counter");
@@ -353,10 +353,10 @@ internal static partial class AutoSyncChecks
         foreach (var side in new[] { Side.A, Side.B })
         {
             await using var rig = new Rig(["p1"]);
-            var due = rig.Clock.GetUtcNow() + TimeSpan.FromSeconds(FailureRetryOwner.MaximumRetrySeconds);
+            var due = rig.Clock.GetUtcNow() + V2Tunables.Default.RetryMaximumDelay;
             rig._store.SaveSyncRetry("p1", new SyncRetry("sleeping.txt", "sync", 6, "Content proof is unavailable", due));
             FailureRetryOwner.RecordDeferredRetry(rig._store, "p1", 1,
-                FailureRetryOwner.Failed(5, rig.Clock.GetUtcNow()));
+                FailureRetryOwner.Failed(V2Settings.Default, 5, rig.Clock.GetUtcNow()));
             var partial = FakeSyncRun.Report("p1", RunOutcomes.Partial) with { Deferred = 1 };
             rig.Run.Then(partial);
             rig.Run.Then(partial);
@@ -391,13 +391,13 @@ internal static partial class AutoSyncChecks
         var tuned = Settings with { MinSafetyPoll = TimeSpan.FromSeconds(2) };
         await using var rig = new Rig(["p1"], settings: tuned);
         FailureRetryOwner.RecordDeferredRetry(rig._store, "p1", 1,
-            FailureRetryOwner.Failed(5, rig.Clock.GetUtcNow()));
+            FailureRetryOwner.Failed(V2Settings.Default, 5, rig.Clock.GetUtcNow()));
         rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Partial) with { Deferred = 1 });
         await rig.StartAsync();
         await Until(() => rig.Run.Runs("p1") == 1 && rig.State("p1").RetryAt is not null &&
             rig.WatchA.Parked && rig.WatchB.Parked && rig.Clock.ActiveTimers == 1, "high-tier wait before outer failure");
         var deferredDeadline = rig.State("p1").RetryAt!.Value;
-        var expected = FailureRetryOwner.Failed(0, rig.Clock.GetUtcNow());
+        var expected = FailureRetryOwner.Failed(V2Settings.Default, 0, rig.Clock.GetUtcNow());
         rig.ThrowEligibility = true;
         // A watch fault returns to the outer eligibility check; its failure must install a real cooldown.
         rig.WatchA.Fail(new IOException("one-shot watch fault"));

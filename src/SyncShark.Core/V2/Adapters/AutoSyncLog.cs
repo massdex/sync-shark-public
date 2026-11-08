@@ -60,6 +60,11 @@ public static class AutoSyncLog
             MessageCatalog.Default.Message("autosync-lifecycle-failure"),
             error.GetType().FullName, error.HResult, error.TargetSite?.Name));
 
+    /// <summary>Records only the typed admission reason and metadata location, never arbitrary exception text.</summary>
+    public static void StartupRefused(string productRoot, EngineStartupRefusedException refusal) =>
+        Append(productRoot, string.Format(CultureInfo.InvariantCulture,
+            MessageCatalog.Default.Message("startup-admission-log"), refusal.ReasonKey, refusal.Location));
+
     private static void Rotate(FileStream current, string path)
     {
         // Keep the current handle throughout rotation so another process cannot append between

@@ -860,7 +860,7 @@ public static class ParentsChecks
         var pair = new PairConfig("pair-a", "Pair A", "C:\\PairA", "/PairA", "connection-a", [], [],
             FirstRunPolicy.NewestWins, true, null, null, keepRules);
         var settings = new EngineSettings("", "", "", "", "", RecycleFallback.Fail, 1,
-            FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows);
+            FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
         return new ExecutorContext(
             Local: local, Dropbox: dropbox, Recovery: new FakeRecovery(), Store: store, Pair: pair,
             Scope: new PathScope(pair, [pair], settings.DefaultIgnoreRules), Settings: settings,

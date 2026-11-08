@@ -11,7 +11,7 @@ internal static partial class ExecutorChecks
         using var store = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "throttle-" + Guid.NewGuid().ToString("N")),
             StorageChecks.Fast, clock, LocalItems.CaptureOptionalHash);
         store.SavePair(Pair());
-        var retry = FailureRetryOwner.SaveFailedRetry(store, Pair().PairId, "first", "Provider cooldown", null,
+        var retry = FailureRetryOwner.SaveFailedRetry(V2Settings.Default, store, Pair().PairId, "first", "Provider cooldown", null,
             clock.GetUtcNow(), FailureRetryOwner.FailureKind.ProviderThrottle, clock.GetUtcNow().AddMinutes(1));
         var notice = FailureRetryOwner.RetryNotice(Pair().PairId, "first", retry.LastError, retry.Attempts);
         store.AddNotices([notice, notice]);
@@ -51,7 +51,7 @@ internal static partial class ExecutorChecks
         var failed = (await Apply(executor, Plan(failedAction), a, writer)).Single();
         Require(failed.Outcome == Outcome.Failed && failed.FailureKind == FailureRetryOwner.FailureKind.ProviderThrottle &&
             failed.RetryNotBefore == deadline, "executor retains typed throttle cause and retry deadline without marking the item synced");
-        var durable = FailureRetryOwner.SaveFailedRetry(store, Pair().PairId, "third", failed.Reason, null,
+        var durable = FailureRetryOwner.SaveFailedRetry(V2Settings.Default, store, Pair().PairId, "third", failed.Reason, null,
             clock.GetUtcNow(), failed.FailureKind, failed.RetryNotBefore);
         Require(durable.RetryAfter >= deadline && durable.FailureKind == FailureRetryOwner.FailureKind.ProviderThrottle,
             "executor failure reaches durable shared retry state unchanged");

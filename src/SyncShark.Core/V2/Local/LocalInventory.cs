@@ -76,7 +76,7 @@ public sealed partial class LocalInventory : IInventorySource
         IProgress<string>? progress = null)
     {
         using var lease = PilotDirectoryLease.Open(_root.RootPath, _rootIdentity);
-        var budget = new VerificationBudget(VerificationElapsedForTest);
+        var budget = new VerificationBudget(_settings.Tunables.UrgentHashCap, VerificationElapsedForTest);
         long done = 0, reused = 0;
         if (path.Length == 0)
         {
@@ -274,7 +274,7 @@ public sealed partial class LocalInventory : IInventorySource
 
     internal async Task<int> VerifyIndexingPassAsync(Func<string, bool> include, CancellationToken ct)
     {
-        var budget = new VerificationBudget(VerificationElapsedForTest);
+        var budget = new VerificationBudget(_settings.Tunables.UrgentHashCap, VerificationElapsedForTest);
         var backlog = _known.RehashPendingCount(_root.RootId);
         VerificationProgress?.Invoke(0, backlog);
         var through = _known.RehashWatermark(_root.RootId);
@@ -367,7 +367,7 @@ public sealed partial class LocalInventory : IInventorySource
     public async Task<IReadOnlyDictionary<string, string>> HashAsync(IReadOnlyList<string> paths, CancellationToken ct)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        await HashProofsAsync(_known.Live(_root.RootId, paths), new VerificationBudget(), result, ct).ConfigureAwait(false);
+        await HashProofsAsync(_known.Live(_root.RootId, paths), new VerificationBudget(_settings.Tunables.UrgentHashCap), result, ct).ConfigureAwait(false);
         return result;
     }
 

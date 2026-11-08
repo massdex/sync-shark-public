@@ -414,7 +414,7 @@ internal static class StorageExplicitRetryChecks
                 Store.WriteDelta(new(remote.RootId, Side.B, generation, "remote", "changed", changes, false, []));
             }
             _connections = new CloudFilesLifetime((_, _, _) =>
-                throw new InvalidOperationException("Explicit Retry fixture must never open a native provider."), _ => false, Store);
+                throw new InvalidOperationException("Explicit Retry fixture must never open a native provider."), _ => false, V2Settings.Default, Store);
             for (var i = 0; i < Files.Length; i++)
             {
                 Require(Pending(i), queue + ": fixture queued each entity");

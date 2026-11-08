@@ -31,7 +31,7 @@ internal static partial class DropboxThrottleBudgetChecks
             var deferred = failure ?? throw new InvalidOperationException("Missing typed throttle cause");
             Require(deferred.Cause == (hint > TimeSpan.FromSeconds(60) ? "backoff-bound" : "retry-bound"), "the bound exit retains its cause");
             var store = new V2.InMemoryStateStore();
-            var retry = V2.FailureRetryOwner.SaveFailedRetry(store, "pair", "item", deferred.Message, null,
+            var retry = V2.FailureRetryOwner.SaveFailedRetry(V2.V2Settings.Default, store, "pair", "item", deferred.Message, null,
                 clock.GetUtcNow(), V2.FailureRetryOwner.FailureKind.ProviderThrottle, deferred.RetryAt);
             Require(retry.FailureKind == V2.FailureRetryOwner.FailureKind.ProviderThrottle && retry.RetryAfter >= deferred.RetryAt,
                 "durable retry retains typed cause and provider deadline");

@@ -18,7 +18,6 @@ public sealed class EngineCommands(EngineOperations operations)
         {
             EngineCommandKey.PairsList => PairsList(),
             EngineCommandKey.PairsAdd => await PairsAddAsync(invocation, ct),
-            EngineCommandKey.PairsImport => await PairsImportAsync(invocation, ct),
             EngineCommandKey.PairsRemove => await PairsRemoveAsync(invocation, ct),
             EngineCommandKey.PairsEnable => await PairsEnableAsync(invocation, ct),
             EngineCommandKey.PairsDisable => await PairsDisableAsync(invocation, ct),
@@ -55,12 +54,6 @@ public sealed class EngineCommands(EngineOperations operations)
         new(View(await _operations.AddPairAsync(Value(invocation, EngineOptionKey.Name),
             Value(invocation, EngineOptionKey.Local), Value(invocation, EngineOptionKey.Path),
             Value(invocation, EngineOptionKey.Account), FirstRun(invocation), ct)));
-
-    private async Task<PairImportResult> PairsImportAsync(SyncCliInvocation invocation, CancellationToken ct)
-    {
-        var imported = await _operations.ImportPairAsync(Value(invocation, EngineOptionKey.Pair), ct);
-        return new(View(imported.Pair), imported.Counts);
-    }
 
     private async Task<DoneResult> PairsRemoveAsync(SyncCliInvocation invocation, CancellationToken ct)
     {

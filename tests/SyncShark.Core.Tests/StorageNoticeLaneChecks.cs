@@ -115,7 +115,7 @@ internal static class StorageNoticeLaneChecks
         // N6/N11 through the writer: a renamed item closes by callback identity; a prior-process pair cause closes on
         // the first successful hydration of a new writer.
         var objectId = "id:local:00000001:00000000000000ae";
-        using (var writer = new HydrationNoticeWriter(store, startWorker: false))
+        using (var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             writer.Register(pair);
             writer.Prime("pair");
@@ -139,7 +139,7 @@ internal static class StorageNoticeLaneChecks
             new StoragePairException("network", "prior process offline"));
         HydrationNoticeWriterChecks.Require(StorageStorage(store, pair).Count == 1,
             "the prior-process pair cause is open before recovery");
-        using (var writer = new HydrationNoticeWriter(store, startWorker: false))
+        using (var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             writer.Register(pair);
             writer.Succeeded("pair", "Folder/recovered.bin", null, objectId);
@@ -152,7 +152,7 @@ internal static class StorageNoticeLaneChecks
         // The writer's overflow/backlog pair cause is the same family and closes on the next successful read.
         // A local notice backlog is not connectivity evidence: it must not root-backoff the other lanes.
         store.ClearStorageRootBackoff(pair.A.RootId);
-        using (var writer = new HydrationNoticeWriter(store, startWorker: false))
+        using (var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             writer.Register(pair);
             writer.Prime("pair");
@@ -217,7 +217,7 @@ internal static class StorageNoticeLaneChecks
             "a range mismatch stays item-specific");
 
         // Transport failures for ten different files coalesce to one queued pair cause and one durable notice.
-        using (var writer = new HydrationNoticeWriter(store, startWorker: false))
+        using (var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             writer.Register(pair);
             writer.Prime("pair");

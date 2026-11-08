@@ -26,7 +26,7 @@ public static class CheckRegistry
         ["store"] = [Storage.DeletedHistoryChecks.Run, Storage.IssueFactsChecks.Run, Storage.StateStoreChecks.Run, Storage.ScanWriterChecks.Run, Storage.ScanReaderChecks.Run, Storage.StateCommitterChecks.Run, Storage.IssueTableChecks.Run,
             Storage.IssueTableChecks.VisibilityCases, Storage.IssueTableChecks.ReviewedRetryReads,
             Storage.IssueTableChecks.ReviewedRootIdentity, Storage.IssueTableChecks.ReviewedPairDecision,
-            Storage.PairImportChecks.Run, Storage.StoredFolderPlanChecks.Run, Storage.ChangeTableChecks.Run, Storage.CompactStorageChecks.Run, Storage.QueryPlanChecks.Run],
+            Storage.StoredFolderPlanChecks.Run, Storage.ChangeTableChecks.Run, Storage.CompactStorageChecks.Run, Storage.QueryPlanChecks.Run],
         ["local"] = [Local.LocalSideChecks.Run, Local.LocalListingChecks.Run, Local.LocalWriterChecks.Run, Local.LocalStagedChecks.Run, Local.LocalBinChecks.Run, Local.LocalPathsChecks.Run, Local.PendingResolverChecks.Run, Local.StageNamesChecks.Run, Local.LogFilesChecks.Run, Local.SettingsFileChecks.Run, Local.DownloadSpaceChecks.Run, Local.VolumeSpaceChecks.Run, Local.JournalSourceChecks.Run, Local.PendingNotesChecks.Run],
         ["dropbox"] = [Dropbox.DropboxApiChecks.Run, Dropbox.DropboxSideChecks.Run, Dropbox.DropboxPathsChecks.Run, Dropbox.DropboxListingChecks.Run, Dropbox.DropboxWriterChecks.Run, Dropbox.DropboxStagedChecks.Run, Dropbox.DropboxEntriesChecks.Run, Dropbox.DropboxErrorsChecks.Run, Dropbox.UploadSliceChecks.Run, Dropbox.ResponseStreamChecks.Run, Dropbox.DropboxFeedChecks.Run],
         ["limiter"] = [Dropbox.AdaptiveLimiterChecks.Run],

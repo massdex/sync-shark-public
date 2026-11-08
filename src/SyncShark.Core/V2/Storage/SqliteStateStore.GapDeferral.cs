@@ -7,7 +7,7 @@ public sealed partial class SqliteStateStore
     {
         var root = RootNo(rootId);
         if (root is null) return;
-        var retry = FailureRetryOwner.ReportedFailure(null, _clock.GetUtcNow(), retainSleeping: false, countAttempt: false);
+        var retry = FailureRetryOwner.ReportedFailure(_settings, null, _clock.GetUtcNow(), retainSleeping: false, countAttempt: false);
         StoreSchema.Execute(_connection, null,
             "UPDATE local_gap_item SET defer_count=defer_count+1,defer_reason=$why,retry_after=$due " +
             "WHERE root_no=$r AND object_id=$o AND epoch=$e AND hash IS NULL AND expected_json=$item;",

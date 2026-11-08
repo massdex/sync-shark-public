@@ -83,25 +83,6 @@ public sealed class InMemoryStateStore : IStateStore
         lock (_gate) return _nextWorkId;
     }
 
-    public void SaveImportedPair(PairConfig pair, bool legacyPaused, IEnumerable<SyncedEntry>? baselines = null)
-    {
-        lock (_gate)
-        {
-            if (_pairs.ContainsKey(pair.PairId) || pair.Roots is not null || legacyPaused && pair.Enabled)
-                throw new ArgumentException(null, nameof(pair));
-            var rows = baselines?.ToList() ?? [];
-            if (rows.Select(row => row.LocalKey).Distinct().Count() != rows.Count ||
-                rows.Select(row => row.DropboxKey).Distinct().Count() != rows.Count)
-                throw new ArgumentException(null, nameof(baselines));
-            _synced[pair.PairId] = rows;
-            _pairs[pair.PairId] = pair;
-            SeedSources(pair.PairId);
-            if (legacyPaused)
-                Raise(pair.PairId, IssueRows(pair.PairId), IssueKind.Info, TextKey.InfoPairPausedInOldApp,
-                    string.Empty, new IssueSubject([], null), DateTimeOffset.UtcNow);
-        }
-    }
-
     public void MergeDriveEvidence(string pairId, long expectedGeneration, DriveEvidence acquired)
     {
         ArgumentNullException.ThrowIfNull(acquired);

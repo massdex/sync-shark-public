@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Massdex.SyncShark;
+using Massdex.SyncShark.Engine;
 using Massdex.SyncShark.Engine.Local;
 using RunLog = Massdex.SyncShark.Engine.Run.RunLog;
 using EngineHost = Massdex.SyncShark.Engine.Run.EngineHost;
@@ -18,6 +19,9 @@ namespace Massdex.SyncShark.Engine.Tests.Local;
 /// file is not split.</summary>
 public static class JournalSourceChecks
 {
+    // The engine's shipped journal page: the embedded defaults alone, with no user overlay.
+    private static readonly EngineSettings Settings = SettingsParser.Parse(EngineHost.DefaultsJson(), null);
+
     public static void Run() => RunAsync().GetAwaiter().GetResult();
 
     /// <summary>Work committed by another source after the last journal publish is inside both catch-up watermarks.
@@ -372,7 +376,7 @@ public static class JournalSourceChecks
         scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, bogus, Fences(scenario), []);
         var before = Revision(scenario, "A");
         var source = new JournalSource(scenario.VolumeKey, scenario.Root, scenario.Store, bogus,
-            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh);
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
         var position = await source.CatchUpAsync(default);
         var now = NtfsUsnJournal.ReadCheckpoint(scenario.Root);
         Check.Require(position is not null && position.JournalId == (ulong)now.JournalId &&
@@ -391,7 +395,7 @@ public static class JournalSourceChecks
         scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, bogus, Fences(scenario), []);
         var frozen = scenario.Host.Snapshot().ToList();
         var source = new JournalSource(scenario.VolumeKey, scenario.Root, scenario.Store, bogus,
-            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh);
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
         var position = await source.CheckpointAfterRepairAsync(frozen, default);
         Check.Require(position is null && scenario.Store.ReadJournal(scenario.VolumeKey) == bogus,
             "A frozen history loss refuses and installs no fresh base or replacement responsibility.");
@@ -898,7 +902,7 @@ public static class JournalSourceChecks
         Check.Require(scenario.Store.AcquireJournalPage(scenario.VolumeKey, current, bogus, Fences(scenario), [])
             is not null, "The fixture rewrites the journal identity to force a reset.");
         var source = new JournalSource(scenario.VolumeKey, scenario.Root, scenario.Store, bogus,
-            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh);
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
         var position = await source.CatchUpAsync(default);
         Check.Require(position is not null && position.JournalId != bogus.JournalId,
             "History loss installs one fresh base at the journal's current identity.");
@@ -1120,7 +1124,7 @@ public static class JournalSourceChecks
         using var scenario = new Scenario(baseRoot, "unavailable-page", "A");
         // A UNC path is rejected before native I/O, deterministically producing an unavailable page.
         var source = new JournalSource(scenario.VolumeKey, @"\\fixture\share", scenario.Store, scenario.Start,
-            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh);
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
         try
         {
             await source.RunAsync(default);
@@ -1514,7 +1518,7 @@ public static class JournalSourceChecks
             Start = new JournalPosition((ulong)checkpoint.JournalId, (ulong)checkpoint.NextUsn);
             Store.AcquireJournalPage(VolumeKey, null, Start, Fences(this), []);
             Host.Install(Snapshot());
-            Source = new JournalSource(VolumeKey, Root, Store, Start, Host.Gate, Host.Read, Host.Refresh);
+            Source = new JournalSource(VolumeKey, Root, Store, Start, Host.Gate, Host.Read, Host.Refresh, Settings.JournalPageBufferBytes);
             // The host always supplies the item-failure reporter; this double raises the same typed Failure
             // issue the production reporter records, so the page's other notices still publish.
             Source.ReportItemFailureAsync = (member, failed, _) =>

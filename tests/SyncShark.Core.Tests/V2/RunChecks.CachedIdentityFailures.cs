@@ -8,7 +8,7 @@ internal static partial class RunChecks
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap(root.RootId, store.Cursor(root.RootId)!, 100, true);
         var io = new CachedOpenFailureIo(store);
-        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         worker.Discover(root, gaps.GapEpoch(root.RootId)!, default);
         await worker.HashPage(root, gaps.GapEpoch(root.RootId)!, default);
         Require(io.HashCalls == 1 && CachedIdentityRefresh.Pending(store.SyncRetryAt(pair.PairId, original.Path)!),

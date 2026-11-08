@@ -20,7 +20,7 @@ internal static partial class LocalJournalChecks
         var damage = new IOException("injected classified damage");
         bool IsDamage(Exception error) => ReferenceEquals(error, damage);
         var io = new GapCheckIo(item.Mtime, start.Cursor) { OnProbe = (_, _) => throw damage };
-        await using var worker = new LocalGapWorker(gaps, io, IsDamage);
+        await using var worker = new LocalGapWorker(gaps, io, IsDamage, V2Settings.Default);
         try { worker.Discover(root, epoch, default); throw new InvalidOperationException("damage swallowed"); }
         catch (IOException error) when (ReferenceEquals(error, damage)) { }
         LocalChecks.Require(gaps.GapEpoch(root.RootId)!.AfterObject == "" && store.NextIndexRetry(root.RootId) is null,

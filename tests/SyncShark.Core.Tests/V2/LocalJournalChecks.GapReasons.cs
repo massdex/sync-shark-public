@@ -26,7 +26,7 @@ internal static partial class LocalJournalChecks
             gaps.BeginGap(root.RootId, cursor, 100, true);
             var epoch = gaps.GapEpoch(root.RootId)!;
             var io = new ReasonGapIo();
-            await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage)) worker.Discover(root, epoch, default);
+            await using (var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default)) worker.Discover(root, epoch, default);
             LocalChecks.Require(store.ProtectionBatch(root.RootId, ItemFlags.NeedsRehash, [rows[0].Path])[0].Covered,
                 "diagnostic unchanged proof remains protected until next run");
             gaps.PromoteGapDiscovery(root.RootId);
@@ -76,7 +76,7 @@ internal static partial class LocalJournalChecks
         // Test-owned fault: only the optional diagnostic write fails, not durable work/accounting.
         StoreSchema.Execute(db, null, "CREATE TRIGGER fail_gap_reason BEFORE UPDATE OF discovery_reason ON local_gap_item " +
             "BEGIN SELECT RAISE(ABORT,'synthetic diagnostic write failure'); END;");
-        await using (var worker = new LocalGapWorker(gaps, new ReasonGapIo(), StorageFailureClassifier.IsStateDamage))
+        await using (var worker = new LocalGapWorker(gaps, new ReasonGapIo(), StorageFailureClassifier.IsStateDamage, V2Settings.Default))
             LocalChecks.Require(worker.Discover(root, gaps.GapEpoch(root.RootId)!, default),
                 "optional diagnostic failure does not escape discovery");
         LocalChecks.Require(Convert.ToInt64(StoreSchema.Scalar(db, null,
@@ -100,7 +100,7 @@ internal static partial class LocalJournalChecks
         gaps.BeginGap(root.RootId, cursor, 100, true);
         var epoch = gaps.GapEpoch(root.RootId)!;
         var io = new NullGapIo();
-        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         worker.Discover(root, epoch, default);
         gaps.PromoteGapDiscovery(root.RootId);
         LocalChecks.Require(gaps.GapHashPage(root.RootId, epoch, 16).Count == 1,
@@ -157,7 +157,7 @@ internal static partial class LocalJournalChecks
             var gaps = (ILocalGapStore)store;
             gaps.BeginGap(root.RootId, cursor, 100, true);
             using var io = new ShutdownGapIo();
-            var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+            var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             worker.Start(root);
             try
             {
@@ -179,7 +179,7 @@ internal static partial class LocalJournalChecks
                 ItemFlags.NeedsRehash, [rows[7].Path, rows[^1].Path]).All(x => x.Covered),
                 "reopen and promotion preserve protection for the whole unvisited suffix");
             using var io = new ShutdownGapIo { Block = false };
-            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             while (!gaps.GapEpoch(root.RootId)!.DiscoveryDone)
                 worker.Discover(root, gaps.GapEpoch(root.RootId)!, default);
             LocalChecks.Require(io.Seen.SequenceEqual(rows.Skip(7).Select(x => x.ObjectId)),

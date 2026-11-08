@@ -1033,21 +1033,28 @@ public sealed partial class DropboxPilotClient(
         return await FindEntryInVerifiedRootAsync(relativePath, cancellationToken);
     }
 
-    // Read-only bounded-page API: account/root checked once, exact item identity/path still checked per response.
-    internal async Task<IReadOnlyDictionary<string, PilotRemoteEntry?>> ReadMetadataPageAsync(
-        IReadOnlyList<string> paths, CancellationToken cancellationToken, Action<string, Exception>? onFailure = null)
+    // Read-only bounded-page API: the one producer of metadata pages, so every caller's page is the same pageLimit.
+    // Account/root are checked once per page; exact item identity/path is still checked per response.
+    internal async Task<IReadOnlyDictionary<string, T>> ReadMetadataPagesAsync<T>(
+        IReadOnlyList<string> paths, int pageLimit, Func<PilotRemoteEntry?, T> convert, CancellationToken cancellationToken,
+        Action<string, Exception>? onFailure = null)
     {
-        if (paths.Count > MetadataPageLimit) throw new ArgumentOutOfRangeException(nameof(paths));
-        await using var verification = SyncProviderAccountVerificationScope.Begin(cancellationToken);
-        await VerifyRootIdentityAsync(cancellationToken);
-        var result = new System.Collections.Concurrent.ConcurrentDictionary<string, PilotRemoteEntry?>();
-        await Parallel.ForEachAsync(paths.Distinct(), new ParallelOptions
-            { MaxDegreeOfParallelism = 4, CancellationToken = cancellationToken }, async (path, token) =>
-            {
-                try { result[path] = await FindEntryInVerifiedRootAsync(path, token); }
-                catch (Exception error) when (onFailure is not null && error is not OperationCanceledException and not OutOfMemoryException)
-                { onFailure(path, error); }
-            });
+        var result = new System.Collections.Concurrent.ConcurrentDictionary<string, T>();
+        foreach (var page in paths.Distinct().Chunk(pageLimit))
+        {
+            await using var verification = SyncProviderAccountVerificationScope.Begin(cancellationToken);
+            await VerifyRootIdentityAsync(cancellationToken);
+            await Parallel.ForEachAsync(page, new ParallelOptions
+                { MaxDegreeOfParallelism = 4, CancellationToken = cancellationToken }, async (path, token) =>
+                {
+                    PilotRemoteEntry? entry;
+                    try { entry = await FindEntryInVerifiedRootAsync(path, token); }
+                    catch (Exception error) when (onFailure is not null && error is not OperationCanceledException and not OutOfMemoryException)
+                    { onFailure(path, error); return; }
+                    // Convert before the next page; raw metadata is not retained beside the caller's result.
+                    result[path] = convert(entry);
+                });
+        }
         return result;
     }
 

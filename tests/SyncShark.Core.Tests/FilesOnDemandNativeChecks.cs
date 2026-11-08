@@ -142,7 +142,7 @@ internal static class FilesOnDemandNativeChecks
             provider.Dispose();
             using (var restarted = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             using (var lifetime = new CloudFilesLifetime((_, _, _) => provider = new WindowsCloudFilesProvider(
-                binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, restarted,
+                binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, V2Settings.Default, restarted,
                 (_, _, _) => Task.FromResult<PilotRemoteEntry?>(source.Current)))
             {
                 await using var service = new StorageSettlementService(restarted, lifetime);
@@ -254,7 +254,7 @@ internal static class FilesOnDemandNativeChecks
             provider.Dispose();
             using (var restarted = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash))
             using (var lifetime = new CloudFilesLifetime((_, _, _) => provider = new WindowsCloudFilesProvider(
-                binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, restarted,
+                binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, V2Settings.Default, restarted,
                 (_, _, _) => Task.FromResult<PilotRemoteEntry?>(source.Current)))
             {
                 // Direct native calls above do not publish store observations. Re-settle through
@@ -281,7 +281,7 @@ internal static class FilesOnDemandNativeChecks
             }
             using var verifyStore = SqliteStateStore.Open(database, V2Settings.Default, TimeProvider.System, LocalItems.CaptureOptionalHash);
             using var verifyLifetime = new CloudFilesLifetime((_, _, _) => new WindowsCloudFilesProvider(
-                binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, verifyStore);
+                binding, source, root, SyncDirectoryStorage.CloudOnly), _ => true, V2Settings.Default, verifyStore);
             provider = verifyLifetime.RequireProvider(pair, CancellationToken.None);
             if (!WindowsCloudFilesProvider.TryReadOwnedPlaceholder(path, out var updatedPointer) || updatedPointer is null ||
                 updatedPointer.State.Availability != SyncCloudFileAvailability.OnlineOnly ||

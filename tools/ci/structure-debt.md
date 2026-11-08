@@ -26,10 +26,25 @@ they are audit references, not freshness inputs. The three fresh split verdicts 
 were reviewed by DeepSeek at source 1ba4297d3; original anchors remain at 3f6745416.
 An XML summary satisfies the mechanical nonempty-comment check; semantic review still verifies its reason.
 
-Literals (§2.1/§2.4) are tracked as two open items, not per row: 32 undeclared tunables and magic values move to the
-settings data file (lane R3), and 112 unowned user-facing strings move to their owner with the CLI consolidation.
+Literals (§2.1/§2.4) are tracked as open items, not per row: 112 unowned user-facing strings move to their owner with
+the CLI consolidation. The tunables item is not cleared. The final adjudication counted 30 violations (one double
+count removed; AdaptiveLimiter's cited policy accepted). Lane R3 moved the application tunables to their settings
+data files (`src/SyncShark.Core/V2/v2-tunables.json`, owned by `V2Tunables`; `src/SyncShark.Engine/engine-settings.json`,
+owned by `EngineSettings`). Each adjudicated site R3 did not move keeps the status below; none is moved into user
+settings to meet a count.
 
-Totals: 207 rows in 90 files. Planned own lane: src/SyncShark.Engine/Storage/StateStore.cs (0.3.78).
+| Site | Status | Reason |
+|---|---|---|
+| `src/SyncShark.Core/SyncDiscoveryClient.cs:59` 20 s wait | OPEN | Owner decision pending: retain the current bounded manual wait, return busy immediately, or wait for release/cancellation? Immediate refusal reduces latency but changes manual-check behavior; indefinite waiting can hang behind a stuck discovery. No timing choice is inferred from planned v1 retirement. |
+| `src/SyncShark.Core/V2/Adapters/EngineComposition.cs:12` write slice | RETAINED | Transport bound adopted from Okio's 64 KiB slice (READING 8.4); a transport fact, not a user tunable. |
+| `src/SyncShark.Core/V2/ContentBlockHasher.cs:8` block size | RETAINED | Dropbox content-hash format (4 MiB blocks); a provider format fact owned by the hasher. |
+| `src/SyncShark.Core/NtfsUsnJournal.cs:22-27` record layouts | RETAINED | Native USN structure sizes, now cited to the Windows SDK layouts at :22-23; R3 derives `MinimumPageBufferBytes` from them for the Engine settings parser. |
+| `src/SyncShark.Core/NtfsIdentityPaths.cs` FILE_ID_DESCRIPTOR | RETAINED | Windows SDK native layout has one owner: `NtfsIdentityPaths.OpenById`; absence verification, both journal gap opens and the native Engine fixture now call it. Descriptor Size is derived from its explicit layout. |
+| `src/SyncShark.Core/V2/NtfsRecordLayout.cs` name/USN bounds | RETAINED | NTFS maximum name component (255 UTF-16 units) and aligned V2 record size have one dependency-safe fact owner with SDK citations. Logical replay requires a whole record; the native buffer separately adds its continuation prefix. |
+| `src/SyncShark.Engine/SettingsParser.cs:168-169` atomic-replace ceilings | OPEN | Owner decision pending: retain the current 10-attempt/60-second-input ceilings or select a documented total retry budget. Current combined maximum waits sum to 511 minutes; the Win32 wait range does not derive these two independent limits. Removing them can overflow the exponential schedule or prolong a synchronous publication hold. |
+| `src/SyncShark.Engine/Storage/StateSchema.cs:821-822` deleted-history batch | OPEN | Owner decision pending: retain the 5,000-key persisted block limit and current batching pending measured lock-hold evidence, or commission a separately compatible batch-policy change? StateEncoding validates both encoded and decoded counts against this bound. Lowering it can reject saved history; changing batching without measurements can worsen lock holds. The unsupported measurement claim is removed; stored rows and numeric behavior are unchanged. |
+
+Totals: 208 rows in 90 files. Planned own lane: src/SyncShark.Engine/Storage/StateStore.cs (0.3.78).
 
 ## Tooling review reasons
 
@@ -45,7 +60,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/StateStore.cs
 
-<!-- spec-source: 3314bbcca51b~6729e956352c~44da9f7b2458~678769adb7f5~bb9c0e1ccc92~9e80 -->
+<!-- spec-source: d9d3f7f66d83~5cb9871dc367~d853a81ba699~1298b197d438~52f6be1ad15a~ed5a -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -68,7 +83,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Run/EngineHost.cs
 
-<!-- spec-source: 9ecda25a1f60~3089964a281a~7820aae26e10~a315b25bc874~7378b2fb375b~a306 -->
+<!-- spec-source: da4c20e7d809~ba16c9f8e601~95f4636e9c5f~1f9aa7df44cc~83588dfef4b2~552c -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -185,13 +200,13 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Core/NtfsUsnJournal.cs
 
-<!-- spec-source: 1f797629144c~610fdb36ad40~bb401da22c86~1c8f1e347d29~b48c11003f11~bf74 -->
+<!-- spec-source: d18a0485ef66~6cd95eb74bb3~88e3c3cca824~6305c88d7489~fc22fb02b33e~b048 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
 | 15 | class-size | class-size | Split by job | NtfsUsnJournal.File.cs:11-154 per-file USN evidence/gap-handle opening is a job distinct from volume journal reading; partials do not answer 1.3 |
 | 308 | long-member | static TryDeviceIoControlPage(SafeFileHandle,uint,byte[],byte[],out in | Reason recorded | The comment at :306 binds pinned buffers, completion, cancellation drain and release to one overlapped request; the event low bit keeps manual completion out of a FileStream completion port. |
-| 15 | file-size | file-size | Split by job | File holds journal-state query, page read with record walk/parse, and native overlapped I/O plus P/Invoke; header :10-14 descriptive |
+| 15 | file-size | file-size | Split by job | File holds journal-state query, page read with record walk/parse, and native overlapped I/O plus P/Invoke; header :10-14 descriptive. The record-size correction shares pure layout facts only; separating native request lifetimes is outside this correction and remains open. |
 
 ## src/SyncShark.Core/SyncCliOperations.cs
 
@@ -247,13 +262,13 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Run/EngineOperations.cs
 
-<!-- spec-source: 211749994887~a11cfafec4e3~b132c6bb52d2~d73abcb6f2b7~bde0b64256ca~cb2d -->
+<!-- spec-source: 81fa8e5d455e~bc4cd5a4e627~092203ff9bea~daca26ef8ca7~a58f088c02dc~6946 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
 | 12 | class-size | class-size | Split by job | Action facade also implements configuration mutation, recovery workflows and historical logs. B-13 adds the reviewed-notice token check and expected-notice routing: 582 to 593 lines. |
 | 239 | long-member | ResolveAsync(string,long?,ResolutionChoice,string?,FirstRunPolicy?,boo | Split by job | Configuration/root choices, bulk retry aggregation and individual recovery dispatch are distinct implementations. B-13 adds the reviewed parameter and its check (113 to 116). |
-| 12 | file-size | file-size | Split by job | Action facade embeds configuration, resolution/recovery and historical-log implementations. |
+| 12 | file-size | file-size | Split by job | Action facade embeds configuration, resolution/recovery and historical-log implementations. This correction removes the stale direct-operation cache without relocating action authority; the larger facade split remains open rather than being coupled to the settings-lifetime fix. |
 
 ## src/SyncShark.Engine/Executor/ActionExecutor.cs
 
@@ -280,7 +295,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Run/PairSession.cs
 
-<!-- spec-source: 68020ecc0437~8b5ab894ad5b~c65b456c6464~3de16bcc8d2d~4211f4106b84~a29d -->
+<!-- spec-source: d6d5a7baa22f~1478d71ff458~18bf436b0abd~bd713202c780~66da16219fd7~8fbc -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -349,12 +364,21 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Core/V2/FailureRetryOwner.cs
 
-<!-- spec-source: 3498079cbbf7~8245694cc256~b08ba630baf2~0ef76d499e25~229431cf81a1~63b0 -->
+<!-- spec-source: 679a12673d2f~374367f7a8eb~2499f36e6942~7ed10d9893c7~d7b069fba8a3~3504 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
 | 10 | class-size | class-size | Split by job | Retry state/scheduling and notice wording/construction are distinct jobs; retain shared retry state. |
 | 90 | file-size | file-size | Split by job | Retry state/scheduling differs from user-facing notice construction. |
+
+## src/SyncShark.Core/V2/Adapters/HydrationNoticeWriter.cs
+
+<!-- spec-source: b446585c807e~66eed7f7848c~5f6c42743961~d64a6ed71d18~d3b3b5bda049~5a02 -->
+
+| Line | Check | Unit | Action | Finding |
+|---|---|---|---|---|
+| 16 | class-size | class-size | Split by job | Newly discovered pre-existing debt: 621 lines before R3, 623 after. Queue scheduling/cache bookkeeping and notice persistence are distinct jobs. R3 adds settings wiring, not a new job; the existing split debt is retained because splitting those pre-existing responsibilities is outside this tunables change. Planned retirement is not a reason the class cannot be split. A change that edits this listed file clears its rows in the same change or records in its review why they cannot be cleared yet. |
+| 16 | file-size | file-size | Split by job | Newly discovered pre-existing debt: 636 lines before R3, 638 after. Queue scheduling/cache bookkeeping and notice persistence are distinct jobs. R3 adds settings wiring, not a new job; the existing split debt is retained because splitting those pre-existing responsibilities is outside this tunables change. Planned retirement is not a reason the file cannot be split. A change that edits this listed file clears its rows in the same change or records in its review why they cannot be cleared yet. |
 
 ## src/SyncShark.Core/WindowsCloudFiles.cs
 
@@ -509,7 +533,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Core/V2/Adapters/EngineComposition.cs
 
-<!-- spec-source: e86e137657ab~7fbb59eaa9f9~2777488a1b09~ee4e8ef62d1c~e505e3a4abb1~51ea -->
+<!-- spec-source: 35a981718a2d~94150f3c65aa~edae1f8ca822~e5f4166f8e94~25415e0af044~1070 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -654,11 +678,11 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Local/LogFiles.cs
 
-<!-- spec-source: 4f15781c3c4a~e4de0f589e2d~6b63eff189fd~265b2bf95bb6~df6e26ba6c97~ce37 -->
+<!-- spec-source: d573967f7532~254517a644b8~02c6a7d602f9~61b54dae1fac~855210bfe811~69e9 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 39 | long-member | static Read(string,Action<string, bool>,CancellationToken,out bool) 57 | Split by job | Filesystem open/read/error ownership differs from incremental BOM/newline record framing. |
+| 39 | long-member | static Read(string,Action<string, bool>,int,CancellationToken,out bool) 57 | Split by job | Filesystem open/read/error ownership differs from incremental BOM/newline record framing. |
 
 ## src/SyncShark.Engine/Local/UsnPaths.cs
 
@@ -694,7 +718,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/SettingsParser.cs
 
-<!-- spec-source: 264dee9b1f17~b49b295a853c~4c51edafacb4~41b7a65f044f~bc92533b92d4~7e3b -->
+<!-- spec-source: 63e99df7b759~e06c0f2ce00a~d159873ac635~b54d00cd1156~51a4e27f77c4~b2da -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -726,7 +750,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Core/DropboxProvider.cs
 
-<!-- spec-source: e35d9c6d18ef~248689840641~b9cf79b01084~d34a31da7aec~81aabccd924e~e5a6 -->
+<!-- spec-source: cc2e940b0825~b3a872e29a61~1530099e5c47~3e2529ccd9fd~d75c6923100f~01f9 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -766,7 +790,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/IStateStore.cs
 
-<!-- spec-source: 76520675b10e~7bfc234cabb4~d7f70e3b9fc1~962970956ae4~939c94881ba5~ed34 -->
+<!-- spec-source: 3dff3d1eeefb~3ea1af248742~715e46e7a500~e93220373d70~fd31b72776fb~bd76 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -799,7 +823,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/StateSchema.cs
 
-<!-- spec-source: 94df0f09a842~6491c36311e7~03f03a03672f~87781dccb583~69c36eda5bdb~7261 -->
+<!-- spec-source: f3de29912c5d~1b028cd87824~670cdd93062c~e9acefe6dff6~c0db84503e58~4b1a -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -807,7 +831,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/TextKey.cs
 
-<!-- spec-source: 8e97812d9e09~a8413d9a3714~7ca5008b5406~e1a9009a8bdd~7c7bc2249fa0~8519 -->
+<!-- spec-source: 389010c4f26a~f75d8c9815c8~7527171bd268~f93027c50e31~a50a1820fa73~c2ad -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -823,7 +847,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Local/JournalSource.cs
 
-<!-- spec-source: 617a67b78e7c~9531eb649e2b~a74134f3e0b8~1a46b4378401~97ab37166180~6eab -->
+<!-- spec-source: b6f2919ac599~a76a32a40f59~39416a77630a~5e67b3574161~0b89103c1bb2~8c8a -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -831,14 +855,6 @@ Line ranges describe this correction; named units remain the identity if subsequ
 | 333 | long-member | ReadPageAsync(bool,CancellationToken,List<Member>?,ulong?) | Verify existing reason (R2) | Confirm or move the existing constraint comment directly above the unit, then record REASON-RECORDED; source row 111. |
 | 479 | long-member | TryPublish(JournalPosition,IReadOnlyList<Member>,IEnumerable<(string PairId, ChangeNotice Notice)>,IReadOnlySet<string>?,List<Member>?,out bool) | Verify existing reason (R2) | Confirm or move the existing constraint comment directly above the unit, then record REASON-RECORDED; source row 112. |
 | 3 | file-size | file-size | Verify existing reason (R2) | Confirm or move the existing constraint comment directly above the unit, then record REASON-RECORDED; source row 208. |
-
-## src/SyncShark.Engine/Storage/PairImport.cs
-
-<!-- spec-source: ee5bef18fba8~48b2a667480c~e9335a027cfc~9c9b807002a8~75b038290452~1e87 -->
-
-| Line | Check | Unit | Action | Finding |
-|---|---|---|---|---|
-| 19 | long-member | static Open(string,string,EngineSettings,IStateStore) | Verify existing reason (R2) | Confirm or move the existing constraint comment directly above the unit, then record REASON-RECORDED; source row 147. |
 
 ## src/SyncShark.Core/ProviderActivityStream.cs
 

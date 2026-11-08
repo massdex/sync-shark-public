@@ -24,6 +24,7 @@ internal static partial class RunChecks
         DeferredIntakeMillion();
         DeferredIntakeFairnessChecks();
         DeferredIntakeAliasCapChecks();
+        DeferredIntakeSmallestCapChecks();
         await DeferredIntakePreviewAsync();
         await DeferredIntakeProductionRunAsync();
         Console.WriteLine("PASS DeferredIntakeBound");
@@ -263,6 +264,59 @@ internal static partial class RunChecks
                 $"elapsed={watch.ElapsedMilliseconds}ms full-scans=0");
         }
         finally { DeleteFixture(folder); }
+    }
+
+    // R3-06: the urgent half and the bulk rest each admit work at the smallest cap the settings owner accepts, so
+    // repeated intakes reach every queued urgent and bulk entity; a cap of one is refused instead of starving urgent work.
+    private static void DeferredIntakeSmallestCapChecks()
+    {
+        foreach (var (entities, paths) in new[] { (1, 8192), (2048, 1), (1, 1) })
+        {
+            var refused = false;
+            try { _ = Settings with { Tunables = Settings.Tunables with { DeferredIntakeEntityCap = entities, DeferredIntakePathCap = paths } }; }
+            catch (ArgumentOutOfRangeException) { refused = true; }
+            Require(refused, $"an intake cap of one is refused (entities={entities}, paths={paths})");
+        }
+        foreach (var pathCap in new[] { 2, 3 })
+        {
+            var folder = FixtureFolder("deferred-intake-smallest");
+            try
+            {
+                var pair = IntakePair();
+                var smallest = Settings with { Tunables = Settings.Tunables with
+                    { DeferredIntakeEntityCap = 2, DeferredIntakePathCap = pathCap } };
+                using var store = SqliteStateStore.Open(folder, smallest, TimeProvider.System, LocalItems.CaptureOptionalHash);
+                store.SavePair(pair);
+                var queued = IntakeBacklog(pair, 0, 6).ToArray();
+                var aliases = queued.SelectMany(row => new[]
+                {
+                    row.Item with { Path = "First/" + row.Item.ObjectId },
+                    row.Item with { Path = "Second/" + row.Item.ObjectId }
+                }).ToArray();
+                SeedRoot(store, pair.B, Side.B, aliases);
+                store.DeferPlanning(pair.PairId, queued.Take(3), urgent: true);
+                store.DeferPlanning(pair.PairId, queued.Skip(3));
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                var retired = new HashSet<string>(StringComparer.Ordinal);
+                // Each entity needs at most its queued spelling plus its two aliases; each admission
+                // must advance at least one of those paths, including the one-slot urgent half.
+                var maximumAdmissions = queued.Length + aliases.Length;
+                for (var pass = 0; pass < maximumAdmissions && store.CountDeferredPlanning(pair.PairId) > 0; pass++)
+                {
+                    var page = store.AdmitDeferredPlanning(pair.PairId, DeferredVersions(folder).Values.Max() + 1);
+                    Require(page.Count > 0 && page.Sum(row => row.Paths.Count) <= pathCap,
+                        "small accepted caps admit work without exceeding the path budget");
+                    foreach (var row in page) seen.UnionWith(row.Paths);
+                    store.AcknowledgeDeferredPlanning(pair.PairId, page, _ => true,
+                        acknowledged: row => retired.Add(row.ObjectId));
+                }
+                Require(store.CountDeferredPlanning(pair.PairId) == 0 && retired.Count == queued.Length,
+                    "repeated settled admissions retire all urgent and bulk identities with live aliases");
+                Require(seen.SetEquals(queued.Select(row => row.Item.Path).Concat(aliases.Select(item => item.Path))),
+                    "retirement covers every queued spelling and every live alias");
+            }
+            finally { DeleteFixture(folder); }
+        }
     }
 
     private static PairDef IntakePair() => new("pair", "Pair A",

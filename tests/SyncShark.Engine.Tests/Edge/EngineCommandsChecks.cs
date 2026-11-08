@@ -58,15 +58,6 @@ public static class EngineCommandsChecks
         WithProductRoot(UnboundPreferencesRefuse);
         WithProductRoot(PreferenceResultAndMerge);
         RootBindingResultShape();
-        var imported = new PairImportResult(new PairView("pair", "Pair A", "X:/Parent", "/Parent", "account",
-            FirstRunPolicy.LocalWins, false, [], false), new BaselineImportCounts(7, 4, 3));
-        Check.Require(imported.RenderHuman().Contains("Source 7 baseline rows; imported 4; discarded 3 stale folder rows.",
-            StringComparison.Ordinal), "import reports stale-folder discards rather than silently dropping them");
-        using (var json = JsonDocument.Parse(JsonSerializer.Serialize(imported, JsonOptions)))
-            Check.Require(json.RootElement.GetProperty("baselines").GetProperty("sourceRows").GetInt64() == 7 &&
-                json.RootElement.GetProperty("baselines").GetProperty("importedRows").GetInt64() == 4 &&
-                json.RootElement.GetProperty("baselines").GetProperty("discardedFolderRows").GetInt64() == 3,
-                "structured import output accounts for every source row");
         RetryViews();
         WithProductRoot(RetryViewsThroughCommands);
         CapacityAndNoticeRendering();
@@ -144,7 +135,6 @@ public static class EngineCommandsChecks
             (EngineCommandKey.PairsList, "engine pairs list", ["engine", "pairs", "list"]),
             (EngineCommandKey.PairsAdd, "engine pairs add", ["engine", "pairs", "add", "--name", "n", "--local", local,
                 "--path", "/d", "--account", "a", "--first-run", "dropbox-wins", "--yes"]),
-            (EngineCommandKey.PairsImport, "engine pairs import", ["engine", "pairs", "import", "--pair", "p", "--yes"]),
             (EngineCommandKey.PairsRemove, "engine pairs remove", ["engine", "pairs", "remove", "--pair", "p", "--yes"]),
             (EngineCommandKey.PairsEnable, "engine pairs enable", ["engine", "pairs", "enable", "--pair", "p", "--yes"]),
             (EngineCommandKey.PairsDisable, "engine pairs disable", ["engine", "pairs", "disable", "--pair", "p", "--yes"]),
@@ -237,7 +227,6 @@ public static class EngineCommandsChecks
         [
             (EngineCommandKey.PairsList, false, false, false),
             (EngineCommandKey.PairsAdd, true, true, false),
-            (EngineCommandKey.PairsImport, true, true, true),
             (EngineCommandKey.PairsRemove, true, true, true),
             (EngineCommandKey.PairsEnable, true, true, true),
             (EngineCommandKey.PairsDisable, true, true, true),
@@ -1096,6 +1085,33 @@ public static class EngineCommandsChecks
         }
         Check.Require(File.ReadAllBytes(settingsPath).SequenceEqual(settingsBytes),
             "refusing the removed stage suffix leaves the settings file unchanged");
+
+        // R3-09: both R3 buffers round-trip through the shared settings route at their smallest accepted value,
+        // and the value just below it is refused without rewriting the file.
+        foreach (var (name, smallest) in new[] { (nameof(EngineSettings.LogReadBufferBytes), 1),
+            (nameof(EngineSettings.JournalPageBufferBytes), NtfsUsnJournal.MinimumPageBufferBytes) })
+        {
+            var value = smallest.ToString(CultureInfo.InvariantCulture);
+            var setBuffer = SyncCliRegistry.Parse(["--cli", "engine", "settings", "set", "--name", name, "--value", value, "--yes"]);
+            Check.Require(((SettingsResult)Await(commands.RunAsync(setBuffer, CancellationToken.None))).Settings
+                .Any(setting => setting.Name == name && setting.Value == value && setting.Overridden), name + " is set");
+            Check.Require(((SettingsResult)Await(commands.RunAsync(settings, CancellationToken.None))).Settings
+                .Any(setting => setting.Name == name && setting.Value == value && setting.Overridden), name + " is listed");
+            var bufferBytes = File.ReadAllBytes(settingsPath);
+            var below = (smallest - 1).ToString(CultureInfo.InvariantCulture);
+            var refusedBuffer = false;
+            try
+            {
+                Await(commands.RunAsync(SyncCliRegistry.Parse(["--cli", "engine", "settings", "set", "--name", name,
+                    "--value", below, "--yes"]), CancellationToken.None));
+            }
+            catch (InvalidDataException error)
+            {
+                refusedBuffer = error.Message == Text.Get(TextKey.SettingsInvalid, (TextArg.Name, name), (TextArg.Value, below));
+            }
+            Check.Require(refusedBuffer && File.ReadAllBytes(settingsPath).SequenceEqual(bufferBytes),
+                name + " below its smallest value is refused and changes nothing");
+        }
 
         // Default ignore rules validate like pair rules: a valid list and an empty list persist, an invalid one
         // is refused without rewriting the settings file.

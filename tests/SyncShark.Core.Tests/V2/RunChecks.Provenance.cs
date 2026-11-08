@@ -90,7 +90,7 @@ internal static partial class RunChecks
                 counts.Any(line => line.Contains("both-hidden=1", StringComparison.Ordinal)),
                 "provenance counts actual frozen production Hide decisions");
             provenance.BeginRun(2);
-            var endpoints = new RehearsalEndpoints(fx.Provider, overlay, _ => { });
+            var endpoints = new RehearsalEndpoints(fx.Provider, overlay, _ => { }, V2Settings.Default);
             await fx.Run().Rehearsal(endpoints).IncrementalAsync(fx.Pair.PairId, new RecordingProgress(), default);
             var text = csv.ToString();
             Require(text.Contains("CopyNew", StringComparison.Ordinal) && text.Contains("incoming.txt", StringComparison.Ordinal) &&

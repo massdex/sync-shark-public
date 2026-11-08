@@ -32,7 +32,7 @@ internal static class FailureBoundaryChecks
             () => { _ = new LocalInventory(null!, default, null!, null!, null!, null!, null!); },
             () => { _ = new DropboxWriter(null!, default, null!, "", null!); },
             () => { _ = new AdmissionAbsenceBatch(null!); },
-            () => { _ = new LocalGapWorker(null!, null!, null!); },
+            () => { _ = new LocalGapWorker(null!, null!, null!, V2Settings.Default); },
             () => { _ = new ActionRunner(null!, null!, null!, "", null!, null!, [], new(), null!); }
         })
         {
@@ -78,7 +78,7 @@ internal static class FailureBoundaryChecks
         foreach (var code in new[] { 11, 26, 5 })
         {
             var store = new GapStore(new IOException("wrapped", new Microsoft.Data.Sqlite.SqliteException("synthetic", code)));
-            await using var worker = new LocalGapWorker(store, new GapIo(), StorageFailureClassifier.IsStateDamage);
+            await using var worker = new LocalGapWorker(store, new GapIo(), StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             Exception? observed = null;
             try { worker.Discover(root, store.Epoch, default); }
             catch (Exception error) { observed = error; }
@@ -87,7 +87,7 @@ internal static class FailureBoundaryChecks
                 "diagnostic corruption forbids completion write; non-damage keeps completion");
             if (code == 5) continue;
             var loopStore = new GapStore(store.Error);
-            await using var loopWorker = new LocalGapWorker(loopStore, new GapIo(), StorageFailureClassifier.IsStateDamage);
+            await using var loopWorker = new LocalGapWorker(loopStore, new GapIo(), StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             loopWorker.Start(root);
             await loopStore.Faulted.Task.WaitAsync(TimeSpan.FromSeconds(10));
             try { await loopWorker.StopAsync(root.RootId); } catch (Exception error)

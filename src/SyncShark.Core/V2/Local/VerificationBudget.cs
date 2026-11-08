@@ -22,15 +22,17 @@ internal sealed class VerificationBudget
     private long _bytes;
     internal int Items { get; private set; }
     private int _urgentItems;
+    private readonly int _urgentHashCap;
     internal bool AdmitUrgent(bool userChange)
     {
-        if (!userChange || _urgentItems >= VerificationPolicy.UrgentHashCap) return false;
+        if (!userChange || _urgentItems >= _urgentHashCap) return false;
         _urgentItems++;
         return true;
     }
 
-    internal VerificationBudget(Func<TimeSpan>? elapsed = null)
+    internal VerificationBudget(int urgentHashCap, Func<TimeSpan>? elapsed = null)
     {
+        _urgentHashCap = urgentHashCap;
         var start = Stopwatch.GetTimestamp();
         _elapsed = elapsed ?? (() => Stopwatch.GetElapsedTime(start));
     }

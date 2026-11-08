@@ -31,8 +31,7 @@ internal sealed class LocalFileAbsence : IFileAbsenceVerifier
         {
             var (volume, id) = LocalItems.ParseObjectId(item.ObjectId);
             if (volume != _root.Identity.VolumeSerialNumber || id == 0) return FileAbsence.Unknown;
-            var descriptor = new FileIdDescriptor { Size = 24, Type = 0, FileId = id };
-            using var file = OpenFileById(_root.Handle, ref descriptor, 0x80, 7, IntPtr.Zero, 0x02200000);
+            using var file = NtfsIdentityPaths.OpenById(_root.Handle, id);
             if (!file.IsInvalid)
             {
                 var path = FinalPath(file);
@@ -50,8 +49,7 @@ internal sealed class LocalFileAbsence : IFileAbsenceVerifier
             // NTFS uses INVALID_PARAMETER for retired references. Prove API support first.
             if (error == 87)
             {
-                descriptor.FileId = _root.Identity.FileId;
-                using var probe = OpenFileById(_root.Handle, ref descriptor, 0x80, 7, IntPtr.Zero, 0x02200000);
+                using var probe = NtfsIdentityPaths.OpenById(_root.Handle, _root.Identity.FileId);
                 if (!probe.IsInvalid) return FileAbsence.Gone;
             }
             return FileAbsence.Unknown;
@@ -69,18 +67,6 @@ internal sealed class LocalFileAbsence : IFileAbsenceVerifier
     }
 
     public void Dispose() => _root?.Dispose();
-
-    [StructLayout(LayoutKind.Explicit, Size = 24)]
-    private struct FileIdDescriptor
-    {
-        [FieldOffset(0)] public uint Size;
-        [FieldOffset(4)] public uint Type;
-        [FieldOffset(8)] public ulong FileId;
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern SafeFileHandle OpenFileById(SafeFileHandle volume, ref FileIdDescriptor id,
-        uint access, uint share, IntPtr security, uint flags);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetFinalPathNameByHandle(SafeFileHandle file, char[] path, uint length, uint flags);

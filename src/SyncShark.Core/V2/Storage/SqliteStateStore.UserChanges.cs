@@ -7,8 +7,6 @@ public sealed partial class SqliteStateStore
     internal const string VerificationWaitReason = "Waiting for content verification";
     // Persisted in partial-index predicates: changing this literal requires an index migration.
     internal const string UserChangeReason = "Waiting for verification of a recent change";
-    internal const int UrgentHashCap = VerificationPolicy.UrgentHashCap;
-    internal const int UrgentCandidateCap = 1024;
     internal const string UserChangeIndexes =
         "CREATE INDEX IF NOT EXISTS planning_deferred_user_pv ON planning_deferred(pair_no,version,root_no,object_id) WHERE reason='" + UserChangeReason + "';" +
         "CREATE INDEX IF NOT EXISTS planning_deferred_user_rv ON planning_deferred(root_no,version,object_id) WHERE reason='" + UserChangeReason + "';";
@@ -33,8 +31,8 @@ public sealed partial class SqliteStateStore
         using (var cmd = StoreSchema.Command(_connection, null, UrgentGapSql))
         {
             cmd.Parameters.AddWithValue("$r", root); cmd.Parameters.AddWithValue("$e", epoch.Epoch);
-            cmd.Parameters.AddWithValue("$candidates", UrgentCandidateCap);
-            cmd.Parameters.AddWithValue("$limit", Math.Min(limit, UrgentHashCap));
+            cmd.Parameters.AddWithValue("$candidates", _settings.Tunables.UrgentCandidateCap);
+            cmd.Parameters.AddWithValue("$limit", Math.Min(limit, _settings.Tunables.UrgentHashCap));
             cmd.Parameters.AddWithValue("$now", NowMs());
             using var reader = cmd.ExecuteReader();
             while (reader.Read()) ids.Add(reader.GetString(0));
@@ -74,9 +72,9 @@ public sealed partial class SqliteStateStore
     private List<DeferredPlanning> ReadPlanningIntake(SqliteTransaction tx, long pair, long before, bool userOnly)
     {
         var admitted = new List<DeferredPlanning>();
-        AddPage(UrgentPlanningIntakeSql, DeferredIntakeEntityCap / 2, DeferredIntakePathCap / 2);
-        if (!userOnly) AddPage(BulkPlanningIntakeSql, DeferredIntakeEntityCap - admitted.Count,
-            DeferredIntakePathCap - admitted.Sum(row => row.Paths.Count));
+        AddPage(UrgentPlanningIntakeSql, _settings.Tunables.DeferredIntakeEntityCap / 2, _settings.Tunables.DeferredIntakePathCap / 2);
+        if (!userOnly) AddPage(BulkPlanningIntakeSql, _settings.Tunables.DeferredIntakeEntityCap - admitted.Count,
+            _settings.Tunables.DeferredIntakePathCap - admitted.Sum(row => row.Paths.Count));
         return admitted;
 
         void AddPage(string sql, int limit, int paths)
@@ -134,8 +132,8 @@ public sealed partial class SqliteStateStore
         cmd.Parameters.AddWithValue("$r", root.Value);
         cmd.Parameters.AddWithValue("$through", through);
         cmd.Parameters.AddWithValue("$now", NowMs());
-        cmd.Parameters.AddWithValue("$candidates", UrgentCandidateCap);
-        cmd.Parameters.AddWithValue("$limit", Math.Min(limit, UrgentHashCap));
+        cmd.Parameters.AddWithValue("$candidates", _settings.Tunables.UrgentCandidateCap);
+        cmd.Parameters.AddWithValue("$limit", Math.Min(limit, _settings.Tunables.UrgentHashCap));
         var ids = new List<string>();
         using (var reader = cmd.ExecuteReader())
             while (reader.Read()) ids.Add(reader.GetString(0));

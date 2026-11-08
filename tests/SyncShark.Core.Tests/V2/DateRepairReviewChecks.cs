@@ -158,5 +158,6 @@ internal static class DateRepairReviewChecks
                 "rollback failure never masks the original failure");
         }
         await DropboxChecks.DateRepairMetadataPageAsync();
+        await DropboxChecks.DateRepairMetadataOutcomesAsync(Path.Combine(root, "metadata-outcomes"));
     }
 }

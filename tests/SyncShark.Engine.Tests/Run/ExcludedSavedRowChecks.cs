@@ -19,7 +19,7 @@ public static class ExcludedSavedRowChecks
     private const int LogBufferCharacters = 262144;
 
     private static readonly EngineSettings Settings = new("{name} ({side} {time}){ext}", "yyyyMMddHHmmss",
-        "Local", "Dropbox", ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", LogBufferCharacters, ScanTestSettings.BatchRows);
+        "Local", "Dropbox", ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", LogBufferCharacters, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
 
     // Registered separately so the runner reports each verdict even when an earlier one fails.
     public static void KeptEdit() => KeptLocalEditIsNotUploadedAsync().GetAwaiter().GetResult();

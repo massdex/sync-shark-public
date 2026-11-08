@@ -189,16 +189,16 @@ internal static partial class StorageChecks
         using var store = SqliteStateStore.Open(folder, Fast, TimeProvider.System, LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
         var now = DateTimeOffset.UtcNow;
-        FailureRetryOwner.RecordRunFailure(store, "p1", new IOException("attempt one", 1), now, _ => false);
+        FailureRetryOwner.RecordRunFailure(V2Settings.Default, store, "p1", new IOException("attempt one", 1), now, _ => false);
         var id = FailureRetryOwner.RunNoticeId("p1");
         store.CloseNotice(id, NoticeChoices.Ignore);
-        FailureRetryOwner.RecordRunFailure(store, "p1", new IOException("attempt two", 1), now.AddMinutes(1), _ => false);
+        FailureRetryOwner.RecordRunFailure(V2Settings.Default, store, "p1", new IOException("attempt two", 1), now.AddMinutes(1), _ => false);
         Require(store.OpenNotices("p1").Count == 0 &&
             store.NoticeById("p1", id)?.Notice.FailureRetry?.Attempts == 2 &&
             store.NoticeById("p1", id)?.Notice.CauseKey == "attempt two" &&
             store.NoticeById("p1", id)?.Notice.Detail.Contains("attempt two", StringComparison.Ordinal) == true,
             "run suppression survives variable display text while durable attempts advance");
-        FailureRetryOwner.RecordRunFailure(store, "p1", new IOException("attempt three", 2), now.AddMinutes(2), _ => false);
+        FailureRetryOwner.RecordRunFailure(V2Settings.Default, store, "p1", new IOException("attempt three", 2), now.AddMinutes(2), _ => false);
         Require(store.OpenNotices("p1").Single().NoticeId == id, "changed stable error code resurfaces the same run notice");
         Require(FailureCauseIdentity.Of(new StoragePairException("network", "one")) ==
                 FailureCauseIdentity.Of(new StoragePairException("network", "two")) &&

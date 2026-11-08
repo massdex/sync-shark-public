@@ -27,6 +27,7 @@ public sealed class JournalSource
     private IReadOnlyList<Member>? _classified;
     private JournalPosition? _position;
     private JournalPosition? _read;
+    private readonly int _pageBufferBytes;
     private ulong? _retentionSpan;
     private CancellationTokenSource? _stop;
     private Task? _run;
@@ -69,7 +70,7 @@ public sealed class JournalSource
     /// it supports reentrant use under the same gate and never drains or performs native I/O.</summary>
     public JournalSource(string volumeKey, string rootPath, IStateStore store, JournalPosition? position,
         object membershipGate, Func<IReadOnlyList<Member>?> members,
-        Action<IReadOnlyList<Member>, IReadOnlyList<string>?> refreshMembers)
+        Action<IReadOnlyList<Member>, IReadOnlyList<string>?> refreshMembers, int pageBufferBytes)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(volumeKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
@@ -85,6 +86,7 @@ public sealed class JournalSource
         _membershipGate = membershipGate;
         _members = members;
         _refreshMembers = refreshMembers;
+        _pageBufferBytes = pageBufferBytes;
     }
 
     /// <summary>The last durably committed journal boundary; acquisition resumes here after a restart.</summary>
@@ -362,7 +364,7 @@ public sealed class JournalSource
                 ++_entryObservations;
                 foreach (var member in classified)
                     member.Paths.Observe(fileId, parentFileId, usn, timestamp, reason, attributes);
-            }, ct).ConfigureAwait(false);
+            }, _pageBufferBytes, ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         switch (page.Status)
         {

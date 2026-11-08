@@ -43,7 +43,7 @@ public static class WindowsDirectoryListing
     private const int EaSizeOffset = 64;
     private const int FileIdOffset = 96;
     private const int FileNameOffset = 104;
-    private const int MaxNameCharacters = 255;
+    private const int MaxNameCharacters = V2.NtfsRecordLayout.MaximumNameCharacters;
     private const int NamedBufferSize = FileNameOffset + MaxNameCharacters * sizeof(char);
 
     public static IEnumerable<DirectoryEntryInfo> List(string directoryPath) =>

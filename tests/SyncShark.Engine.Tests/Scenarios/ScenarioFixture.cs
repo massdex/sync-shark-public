@@ -66,6 +66,8 @@ internal sealed class Scenario : IDisposable
     {
         // The production defaults from engine-settings.json, so hosts and adapters receive loaded values.
         StoragePageSize = 100,
+        LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes,
+        JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes,
         Backoff = new Massdex.SyncShark.V2.FailureRetryOwner.BackoffSettings(1, 1.6, 0.2, 120),
         BatchPollIntervalSeconds = 0.1,
         FolderDeleteMinimumPollSeconds = 1,

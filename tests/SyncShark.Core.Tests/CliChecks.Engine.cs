@@ -14,7 +14,6 @@ internal static partial class CliChecks
             ["engine", "pairs", "list"],
             ["engine", "pairs", "add", "--name", "n", "--local", @"C:\fixture", "--path", "/fixture", "--account", "a",
                 "--first-run", "local-wins", "--yes"],
-            ["engine", "pairs", "import", "--pair", "p", "--yes"],
             ["engine", "pairs", "remove", "--pair", "p", "--yes"],
             ["engine", "pairs", "enable", "--pair", "p", "--yes"],
             ["engine", "pairs", "disable", "--pair", "p", "--yes"],
@@ -95,7 +94,6 @@ internal static partial class CliChecks
         (string Command, EngineCommandKey Key, string Mode, string Approval, bool Mutating, bool RequiresYes,
             bool RequiresPair)[] engineRows =
         [
-            ("engine pairs import", EngineCommandKey.PairsImport, "direct", "yes", true, true, true),
             ("engine pairs bind", EngineCommandKey.PairsBind, "direct", "yes", true, true, true),
             ("engine host start", EngineCommandKey.HostStart, "direct", "yes", true, true, false),
             ("engine host status", EngineCommandKey.HostStatus, "direct", "none", false, false, false),
@@ -191,6 +189,14 @@ internal static partial class CliChecks
             }
         }
 
+        RejectsAtParse("the retired import command is rejected before acquisition", "engine", "pairs", "import", "--pair", "p", "--yes");
+        var importExit = SyncCli.ExecuteAsync(["engine", "pairs", "import", "--pair", "p", "--yes"],
+            TextWriter.Null, TextWriter.Null, () => throw new InvalidOperationException("retired import created runtime"),
+            CancellationToken.None).GetAwaiter().GetResult();
+        Require(importExit == (int)SyncCliExitCode.Usage &&
+            !SyncCliRegistry.Rows.Any(row => row.Command == "engine pairs import") &&
+            !SyncCliRegistry.Capabilities().Commands.Any(row => row.Command == "engine pairs import"),
+            "retired import is absent from registry/capabilities and never constructs a runtime");
         RejectsAtParse("a word after an engine command is a usage error", "engine", "pairs", "list", "extra");
         RejectsAtParse("engine repair without --yes is a usage error", "engine", "repair", "--pair", "p");
         RejectsAtParse("a --choice value outside the catalog is a usage error", "engine", "resolve", "--pair", "p",

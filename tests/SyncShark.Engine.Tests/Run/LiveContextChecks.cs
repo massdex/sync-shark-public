@@ -38,7 +38,7 @@ public static class LiveContextChecks
     private static readonly string LocalRoot =
         Path.Combine(Path.GetTempPath(), "syncshark-live-context", "local");
     private static readonly EngineSettings Settings = new("{name} ({side} {time}){ext}", "yyyyMMddHHmmss",
-        "Local", "Dropbox", ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", LogBufferCharacters, ScanTestSettings.BatchRows);
+        "Local", "Dropbox", ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", LogBufferCharacters, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
     private static readonly RowContext Neutral = new(false, false, false, null, false, false, false, false);
 
     private static string VolumeKey => Volume.ToString(CultureInfo.InvariantCulture);
