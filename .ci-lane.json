@@ -1,0 +1,17 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "syncer",
+    "scope",
+    "live-wake",
+    "live-admission",
+    "store",
+    "paths",
+    "budget",
+    "scenarios-offline"
+  ],
+  "core": [],
+  "ui": []
+}
