@@ -52,7 +52,6 @@ public static class NtfsIdentityPaths
         Resolve(rootPath, expectedRoot, fileId, true, forceEnumeration, cancellationToken,
             beforeQuery, afterQuery, parentObservation);
 
-    // The verified volume and opened identity stay held through path and optional link resolution.
     private static (string? Path, IReadOnlyList<string>? Links) Resolve(string rootPath,
         DirectoryIdentity expectedRoot, ulong fileId, bool enumerateLinks, bool forceEnumeration,
         CancellationToken cancellationToken, Action? beforeQuery = null, Action? afterQuery = null,

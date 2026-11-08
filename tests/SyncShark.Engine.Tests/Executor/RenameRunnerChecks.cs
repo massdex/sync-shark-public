@@ -77,7 +77,6 @@ public static class RenameRunnerChecks
         await DuplicateFolderDestinationAsync();
         await SavedCollisionSidesAsync();
         await MultipleDestinationOwnersAsync();
-        await SelectedDestinationIdentityAsync();
         await FailuresAsync();
     }
 
@@ -1354,56 +1353,6 @@ public static class RenameRunnerChecks
         }
     }
 
-    private static async Task SelectedDestinationIdentityAsync()
-    {
-        foreach (var realStore in new[] { false, true })
-        foreach (var identity in new[] { DestinationIdentity.Here, DestinationIdentity.Moving, DestinationIdentity.Gone })
-        {
-            using var f = new Fixture(realStore: realStore);
-            var moved = await f.MoveAsync(Side.Local, "New");
-            var ownerLocal = f.LocalOld with { Path = "New", Id = "owner-local" };
-            var ownerDropbox = f.DropboxOld with { Path = "New", Id = "owner-cloud" };
-            var owner = SyncedEntries.From(ownerLocal, ownerDropbox);
-            f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Record = [owner] });
-            f.Dropbox.Seed(ownerDropbox, Fixture.Content);
-            var source = f.Store.ReadSource(f.Pair.PairId, Side.Local)!.Value;
-            var acquired = f.Store.AcquireJournalPage("1", new JournalPosition(1, 1), new JournalPosition(1, 2),
-                [(f.Pair.PairId, Fixture.Generation, source.Epoch, source.Revision, false)],
-                [(f.Pair.PairId, new ChangeNotice(Side.Local, ChangeKind.Renamed, "New", "Old", moved.Moved.Id,
-                    moved.Moved, false, false))])!.Value;
-            var selection = new WorkSelection(f.Pair.PairId, Fixture.Generation, source.Epoch, Side.Local,
-                "1", moved.Moved.Id, PathNames.Key("New"), acquired, acquired);
-            Check.Require(f.Store.BeginSelection(selection), "The focused rename owns acquired work.");
-            var reads = 0;
-            var local = new IdentitySide(f.Local, (id, ct) =>
-            {
-                ct.ThrowIfCancellationRequested();
-                Check.Require(id == owner.LocalId, "Identity lookup targets the single destination owner, not the incoming item.");
-                reads++;
-                return Task.FromResult<(IdentityLocation Location, bool InScope)?>(identity == DestinationIdentity.Gone
-                    ? null : (new IdentityLocation("1", "native", ownerLocal with
-                        { Path = identity == DestinationIdentity.Here ? "New" : "Elsewhere" }), true));
-            });
-            var context = f.Context with { Local = local };
-            var items = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(), RefusingExecutionBoundary.Instance,
-                RefusingExecutionBoundary.Instance, 0)).Items;
-            await using var lease = await AdmitAsync(f, [moved], moved.Moved, Fixture.Generation);
-            var result = await items.RenameAdmittedAsync(lease, selection, context.Opportunity, [moved], moved.Moved, default);
-            Check.Require(reads == 1 && (identity == DestinationIdentity.Here
-                ? result.Kind == RenameKind.Hold && f.Store.Issues(f.Pair.PairId).Single().Kind == IssueKind.NameClash
-                : result.Kind == (identity == DestinationIdentity.Gone ? RenameKind.Vacate : RenameKind.Hold) &&
-                    result.Destination is { } destination && destination.Identity == identity && destination.Binding == owner),
-                "Selected single-owner rename classifies Here, Moving and Gone through its public execution path.");
-            Check.Require(await f.Dropbox.ReadOneAsync("Old", default) == f.DropboxOld &&
-                await f.Dropbox.ReadOneAsync("New", default) == ownerDropbox &&
-                f.Store.SyncedByKey(f.Pair.PairId, Side.Local, f.Saved.LocalKey) == f.Saved &&
-                f.Store.SyncedByKey(f.Pair.PairId, Side.Local, owner.LocalKey) == owner &&
-                f.Events.All(item => item.Kind != RunEventKind.Effect),
-                "Classification and an occupied Here target preserve both bindings and provider entries without effects.");
-            f.Store.EndSelection(selection);
-        }
-    }
-
     private static async Task SavedCollisionSidesAsync()
     {
         foreach (var realStore in new[] { false, true })
@@ -1969,29 +1918,6 @@ public static class RenameRunnerChecks
 
     private static Task<bool> RefuseCompleteDownloadAttempt(RequestAttempt attempt, CancellationToken ct) =>
         throw new InvalidOperationException("Rename never completes a download attempt.");
-
-    private sealed class IdentitySide(ISide inner,
-        Func<string, CancellationToken, Task<(IdentityLocation Location, bool InScope)?>> identity) : ISide, IIdentitySide
-    {
-        public Side Side => inner.Side;
-        public Task<(IdentityLocation Location, bool InScope)?> ReadByIdAsync(string id, CancellationToken ct) => identity(id, ct);
-        public IAsyncEnumerable<Listed> ReadAllAsync(string under, ListOptions options, CancellationToken ct) =>
-            inner.ReadAllAsync(under, options, ct);
-        public Task<Entry?> ReadOneAsync(string path, CancellationToken ct) => inner.ReadOneAsync(path, ct);
-        public Task<Stream> OpenReadAsync(Entry entry, RequestAttempt? attempt, CancellationToken ct) => inner.OpenReadAsync(entry, attempt, ct);
-        public Task<string> ContentHashAsync(Entry entry, CancellationToken ct) => inner.ContentHashAsync(entry, ct);
-        public Task<IStaged> StageAsync(string path, Stream content, Entry source, CancellationToken ct) => inner.StageAsync(path, content, source, ct);
-        public Task<RemovalResult> PublishAsync(IStaged staged, Entry? expected, RemovalSelection? selection, CancellationToken ct) =>
-            inner.PublishAsync(staged, expected, selection, ct);
-        public Task<Entry> EnsureFolderAsync(string path, CancellationToken ct) => inner.EnsureFolderAsync(path, ct);
-        public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct) => inner.DeleteAsync(expected, selection, ct);
-        public Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct) => inner.MoveAsync(expected, newPath, ct);
-        public Task<FolderSubmitResult> SubmitFolderRemovalAsync(FolderSubmission submission,
-            IReadOnlyList<FolderRemovalEffect> effects, RequestAttempt attempt, CancellationToken ct) =>
-            inner.SubmitFolderRemovalAsync(submission, effects, attempt, ct);
-        public Task<FolderJobResult> ReadFolderRemovalAsync(string jobId, int expectedCount, RequestAttempt attempt, CancellationToken ct) =>
-            inner.ReadFolderRemovalAsync(jobId, expectedCount, attempt, ct);
-    }
 
     private sealed class ChangingRenameStore(IStateStore inner, SyncedEntry saved) : ForwardingStateStore(inner)
     {

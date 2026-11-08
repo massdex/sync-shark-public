@@ -2028,7 +2028,6 @@ public sealed class StateStore : IStateStore
                 (StateSchema.ParamPairRow, RequirePairRow(null, pairId)), (StateSchema.ParamOperation, operationId));
     }
 
-    // Header, frozen members and the rename-work link publish together in this one transaction.
     private string BeginFolderRemovalCore(string pairId, FolderPlan plan, int pageSize, CancellationToken ct,
         WorkSelection? renameWork) => Ordered(() =>
     {
@@ -2109,45 +2108,37 @@ public sealed class StateStore : IStateStore
             foreach (var row in rows)
             {
                 ct.ThrowIfCancellationRequested();
-                CaptureCounterpartRow(transaction, pairId, pair, operation, plan, root, rootSaved,
-                    other, otherKey, rootKey, row, ref previousAnchor, ref previous);
+                // Planned members already cover bindings under the deleting root.
+                if (PathNames.IsSelfOrUnderKey(row.KeyOn(plan.DeletingFrom), rootKey)) continue;
+                var anchor = rootSaved;
+                var anchorPath = root.Path;
+                var parent = plan.DeleteWhole ? null : PathNames.Parent(row.KeyOn(other));
+                if (!plan.DeleteWhole && parent == previousAnchor.Parent)
+                {
+                    anchor = previousAnchor.Saved;
+                    anchorPath = previousAnchor.Path;
+                }
+                else if (!plan.DeleteWhole)
+                {
+                    (anchor, anchorPath) = CounterpartAnchor(transaction, pairId, pair, operation,
+                        plan.DeletingFrom, other, otherKey, row, rootSaved, root.Path);
+                    previousAnchor = (parent, anchor, anchorPath);
+                }
+                var relative = other == Side.Dropbox
+                    ? PathNames.RelativeUnderDropboxRoot(anchor.PathOn(other), row.PathOn(other))
+                    : PathNames.RelativeUnderLocalRoot(anchor.PathOn(other), row.PathOn(other));
+                if (relative is null) continue;
+                var path = PathNames.Child(anchorPath, relative);
+                // Distinct saved-only identities need distinct in-scope paths, never physical effects.
+                while (ReadOne(transaction, StateSchema.FolderItemNative,
+                    reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
+                    (StateSchema.ParamPairRow, pair), (StateSchema.ParamOperation, operation),
+                    (StateSchema.ParamTargetKey, PathNames.Key(path))))
+                    path = PathNames.Child(path, row.LocalKey);
+                AddFolderRemovalItem(transaction, pair, operation, ++previous, PathNames.Key(path), path,
+                    null, row, FolderVerdict.Removed, false, false);
             }
         }
-    }
-
-    private void CaptureCounterpartRow(SqliteTransaction transaction, string pairId, long pair, string operation,
-        FolderPlan plan, Entry root, SyncedEntry rootSaved, Side other, string otherKey, string rootKey,
-        SyncedEntry row, ref (string? Parent, SyncedEntry Saved, string Path) previousAnchor, ref long previous)
-    {
-        // Planned members already cover bindings under the deleting root.
-        if (PathNames.IsSelfOrUnderKey(row.KeyOn(plan.DeletingFrom), rootKey)) return;
-        var anchor = rootSaved;
-        var anchorPath = root.Path;
-        var parent = plan.DeleteWhole ? null : PathNames.Parent(row.KeyOn(other));
-        if (!plan.DeleteWhole && parent == previousAnchor.Parent)
-        {
-            anchor = previousAnchor.Saved;
-            anchorPath = previousAnchor.Path;
-        }
-        else if (!plan.DeleteWhole)
-        {
-            (anchor, anchorPath) = CounterpartAnchor(transaction, pairId, pair, operation,
-                plan.DeletingFrom, other, otherKey, row, rootSaved, root.Path);
-            previousAnchor = (parent, anchor, anchorPath);
-        }
-        var relative = other == Side.Dropbox
-            ? PathNames.RelativeUnderDropboxRoot(anchor.PathOn(other), row.PathOn(other))
-            : PathNames.RelativeUnderLocalRoot(anchor.PathOn(other), row.PathOn(other));
-        if (relative is null) return;
-        var path = PathNames.Child(anchorPath, relative);
-        // Distinct saved-only identities need distinct in-scope paths, never physical effects.
-        while (ReadOne(transaction, StateSchema.FolderItemNative,
-            reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
-            (StateSchema.ParamPairRow, pair), (StateSchema.ParamOperation, operation),
-            (StateSchema.ParamTargetKey, PathNames.Key(path))))
-            path = PathNames.Child(path, row.LocalKey);
-        AddFolderRemovalItem(transaction, pair, operation, ++previous, PathNames.Key(path), path,
-            null, row, FolderVerdict.Removed, false, false);
     }
 
     private (SyncedEntry Saved, string Path) CounterpartAnchor(SqliteTransaction transaction, string pairId,
@@ -3478,7 +3469,6 @@ public sealed class StateStore : IStateStore
         }
     }
 
-    // Admission keeps both commands and the reference connection alive until the chosen open path completes.
     private static bool InitializeSchema(SqliteConnection connection, bool writable)
     {
         using var version = StorageCommand.Create(connection, null, StateSchema.ReadVersion);

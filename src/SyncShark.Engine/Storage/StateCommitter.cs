@@ -8,7 +8,6 @@ public static class StateCommitter
 {
     /// <summary>Applies the change; the caller states whether first-run Record writes keep the in-place update path,
     /// and raised collects each raised issue for the caller to report once its transaction has committed.</summary>
-    // Each stage reads what the previous stage wrote within the caller's transaction.
     internal static void Commit(SqliteConnection connection, SqliteTransaction transaction, ChangeTable changes, string pairId,
         StateChange change, DateTimeOffset now, bool narrowRecordUpdates, ICollection<Issue>? raised, IReadOnlyList<ScanPartition> scans)
     {
@@ -192,8 +191,16 @@ public static class StateCommitter
         TouchRenamedScans(scans, change, before, after, hasCounterpart, counterpartSide, counterpartOldPath, counterpartNewPath);
         if (before is null)
         {
-            InsertUnrecordedRename(connection, transaction, pairId, after, hasCounterpart,
-                counterpartSide, counterpartOldPath, counterpartNewPath);
+            Insert(connection, transaction, pairId, after, null);
+            // A folder move with no saved record still rebases the descendants already saved under it.
+            if (after.IsFolder && hasCounterpart &&
+                !string.Equals(counterpartOldPath, counterpartNewPath, StringComparison.Ordinal))
+                Execute(connection, transaction,
+                    counterpartSide == Side.Local ? StateSchema.RebaseDescendantsLocal : StateSchema.RebaseDescendantsDropbox,
+                    (StateSchema.ParamPair, pairId),
+                    (StateSchema.ParamOldKey, PathNames.KeyFor(counterpartSide, counterpartOldPath)),
+                    (StateSchema.ParamNewKey, PathNames.KeyFor(counterpartSide, counterpartNewPath)),
+                    (StateSchema.ParamOldPath, counterpartOldPath), (StateSchema.ParamNewPath, counterpartNewPath));
         }
         else
         {
@@ -218,39 +225,17 @@ public static class StateCommitter
                 (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, after.DropboxKey));
 
         if (hasCounterpart)
-            MoveCounterpartScans(connection, transaction, pairId, scans, counterpartSide,
-                counterpartOldPath, counterpartNewPath);
-    }
-
-    private static void InsertUnrecordedRename(SqliteConnection connection, SqliteTransaction transaction,
-        string pairId, SyncedEntry after, bool hasCounterpart, Side counterpartSide,
-        string counterpartOldPath, string counterpartNewPath)
-    {
-        Insert(connection, transaction, pairId, after, null);
-        // A folder move with no saved record still rebases the descendants already saved under it.
-        if (after.IsFolder && hasCounterpart &&
-            !string.Equals(counterpartOldPath, counterpartNewPath, StringComparison.Ordinal))
-            Execute(connection, transaction,
-                counterpartSide == Side.Local ? StateSchema.RebaseDescendantsLocal : StateSchema.RebaseDescendantsDropbox,
-                (StateSchema.ParamPair, pairId),
-                (StateSchema.ParamOldKey, PathNames.KeyFor(counterpartSide, counterpartOldPath)),
-                (StateSchema.ParamNewKey, PathNames.KeyFor(counterpartSide, counterpartNewPath)),
+        {
+            var oldOwnKey = PathNames.Key(counterpartOldPath);
+            var newOwnKey = PathNames.Key(counterpartNewPath);
+            foreach (var scan in scans)
+                Execute(connection, transaction, StateSchema.MoveScanSubtree,
+                (StateSchema.ParamScan, scan.Key), (StateSchema.ParamPair, pairId), (StateSchema.ParamSide, (int)counterpartSide),
+                (StateSchema.ParamOldOwnKey, oldOwnKey), (StateSchema.ParamNewOwnKey, newOwnKey),
+                (StateSchema.ParamOldKey, PathNames.KeyFor(counterpartSide, counterpartOldPath, oldOwnKey)),
+                (StateSchema.ParamNewKey, PathNames.KeyFor(counterpartSide, counterpartNewPath, newOwnKey)),
                 (StateSchema.ParamOldPath, counterpartOldPath), (StateSchema.ParamNewPath, counterpartNewPath));
-    }
-
-    private static void MoveCounterpartScans(SqliteConnection connection, SqliteTransaction transaction,
-        string pairId, IReadOnlyList<ScanPartition> scans, Side counterpartSide,
-        string counterpartOldPath, string counterpartNewPath)
-    {
-        var oldOwnKey = PathNames.Key(counterpartOldPath);
-        var newOwnKey = PathNames.Key(counterpartNewPath);
-        foreach (var scan in scans)
-            Execute(connection, transaction, StateSchema.MoveScanSubtree,
-            (StateSchema.ParamScan, scan.Key), (StateSchema.ParamPair, pairId), (StateSchema.ParamSide, (int)counterpartSide),
-            (StateSchema.ParamOldOwnKey, oldOwnKey), (StateSchema.ParamNewOwnKey, newOwnKey),
-            (StateSchema.ParamOldKey, PathNames.KeyFor(counterpartSide, counterpartOldPath, oldOwnKey)),
-            (StateSchema.ParamNewKey, PathNames.KeyFor(counterpartSide, counterpartNewPath, newOwnKey)),
-            (StateSchema.ParamOldPath, counterpartOldPath), (StateSchema.ParamNewPath, counterpartNewPath));
+        }
     }
 
     private static void TouchRenamedScans(IReadOnlyList<ScanPartition> scans, StateChange change,

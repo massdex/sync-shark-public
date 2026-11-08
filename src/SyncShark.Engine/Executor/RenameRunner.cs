@@ -43,7 +43,6 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
         return decision;
     }
 
-    // Reacquisition mutates this attempt's inputs only after its path hold is released by the loop iteration.
     private async Task<RenameDecision> RunUnrecordedAsync(IAdmittedExecution? execution, WorkSelection? selection,
         IReadOnlyList<RenameCandidate> group, Entry? localById,
         Action<Issue>? retainUnfinished, object opportunity, CancellationToken ct)
@@ -123,7 +122,6 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
         return (subject, expected);
     }
 
-    // Observation, decision and application share one item-attempt lifetime and callback-aware failure boundary.
     private async Task<RenameDecision> RunCurrentAsync(IAdmittedExecution? execution, WorkSelection? selection,
         IReadOnlyList<RenameCandidate> current, SyncedEntry synced,
         Entry? localById, IReadOnlyList<(Side Side, string Path, bool Destination)> paths, IReadOnlyList<string> heldKeys,
@@ -233,7 +231,10 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
         var moved = current[0];
         var counterpartSide = PathNames.Other(moved.Side);
         var counterpart = observations.AtSynced(counterpartSide)!;
-        var owners = DestinationOwners(synced, counterpart, moved.Moved, counterpartSide, decision.Target!, out _);
+        var proposed = counterpartSide == Side.Local
+            ? SyncedEntries.Relink(synced, counterpart with { Path = decision.Target! }, moved.Moved)
+            : SyncedEntries.Relink(synced, moved.Moved, counterpart with { Path = decision.Target! });
+        var owners = context.Store.RenameDestinationOwners(context.Pair.PairId, synced, proposed);
         return owners.Count == 1 ? (identities, moved, owners[0].Binding) : null;
     }
 
@@ -342,7 +343,6 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
             localDestination, dropboxDestination);
     }
 
-    // All outcomes share the success flag consumed exactly once by Dropbox admission's finally boundary.
     private async Task ApplyAsync(WorkSelection? selection, RenameDecision decision, IReadOnlyList<RenameCandidate> group, SyncedEntry synced,
         Observations observations, Action<Issue>? retainUnfinished, Guid attempt,
         ItemRetryCandidate? expected, CancellationToken ct)
@@ -442,21 +442,15 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
 
     private void RequireUnblockedDestination(SyncedEntry synced, Entry counterpart, Entry moved, Side written, string path)
     {
-        var blockers = DestinationOwners(synced, counterpart, moved, written, path, out var proposed);
+        var proposed = written == Side.Local
+            ? SyncedEntries.Relink(synced, counterpart with { Path = path }, moved!)
+            : SyncedEntries.Relink(synced, moved!, counterpart with { Path = path });
+        var blockers = context.Store.RenameDestinationOwners(context.Pair.PairId, synced, proposed);
         if (blockers.Count > 1)
         {
             var blockedSide = blockers[0].LocalKeyMatched ? Side.Local : Side.Dropbox;
             throw new PathOccupiedException(proposed.PathOn(blockedSide), blockedSide);
         }
-    }
-
-    private IReadOnlyList<(SyncedEntry Binding, bool LocalKeyMatched, bool DropboxKeyMatched)> DestinationOwners(
-        SyncedEntry synced, Entry counterpart, Entry moved, Side written, string path, out SyncedEntry proposed)
-    {
-        proposed = written == Side.Local
-            ? SyncedEntries.Relink(synced, counterpart with { Path = path }, moved)
-            : SyncedEntries.Relink(synced, moved, counterpart with { Path = path });
-        return context.Store.RenameDestinationOwners(context.Pair.PairId, synced, proposed);
     }
 
     private async Task SaveAsync(WorkSelection? selection, RenameDecision decision, SyncedEntry synced,
