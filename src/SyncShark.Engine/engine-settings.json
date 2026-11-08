@@ -1,0 +1,23 @@
+{
+  "ConflictLabelFormat": "{name} [{side} version {time}]{ext}",
+  "ConflictLabelTimeFormat": "d MMM HH.mm",
+  "ConflictLabelLocalName": "Local",
+  "ConflictLabelDropboxName": "Dropbox",
+  "CaseRenameSuffix": ".syncshark-case",
+  "WhenRecycleBinUnavailable": "Fail",
+  "LogRetentionDays": 30,
+  "LogBufferCharacters": 262144,
+  "DefaultFirstRunPolicy": "NewestWins",
+  "InitialLimiterLevel": 1,
+  "DefaultIgnoreRules": "FileName:.ds_store;FileName:.dropbox;FileName:.dropbox.attr;FileName:desktop.ini;FileName:thumbs.db;FileNamePrefix:~$;FileNamePrefix:.~",
+  "InitialBackoffSeconds": 1,
+  "BackoffMultiplier": 1.6,
+  "BackoffJitter": 0.2,
+  "MaximumBackoffSeconds": 120,
+  "BatchPollIntervalSeconds": 0.1,
+  "FolderDeleteMinimumPollSeconds": 1,
+  "StoragePageSize": 100,
+  "StoreBatchRows": 20000,
+  "AtomicReplaceAttempts": 5,
+  "AtomicReplaceInitialDelayMilliseconds": 50
+}
