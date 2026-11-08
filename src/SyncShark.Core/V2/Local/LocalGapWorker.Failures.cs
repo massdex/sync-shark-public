@@ -17,7 +17,7 @@ internal sealed partial class LocalGapWorker
             try
             {
                 foreach (var pair in state.Pairs().Where(pair => pair.A.RootId == root.RootId || pair.B.RootId == root.RootId))
-                    FailureRetryOwner.RecordRunFailure(state, pair.PairId, recordingError, DateTimeOffset.UtcNow, _isStateDamage);
+                    FailureRetryOwner.RecordRunFailure(settings, state, pair.PairId, recordingError, DateTimeOffset.UtcNow, _isStateDamage);
             }
             catch (Exception reportingError) when (!IsStateDamage(reportingError)) { RunOutput.Observe(reportingError); }
         }

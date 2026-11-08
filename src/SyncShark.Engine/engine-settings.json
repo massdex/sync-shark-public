@@ -7,6 +7,8 @@
   "WhenRecycleBinUnavailable": "Fail",
   "LogRetentionDays": 30,
   "LogBufferCharacters": 262144,
+  "LogReadBufferBytes": 4096,
+  "JournalPageBufferBytes": 1048576,
   "DefaultFirstRunPolicy": "NewestWins",
   "InitialLimiterLevel": 1,
   "DefaultIgnoreRules": "FileName:.ds_store;FileName:.dropbox;FileName:.dropbox.attr;FileName:desktop.ini;FileName:thumbs.db;FileNamePrefix:~$;FileNamePrefix:.~",

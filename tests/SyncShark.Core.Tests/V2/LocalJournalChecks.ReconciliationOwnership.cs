@@ -16,7 +16,7 @@ internal static partial class LocalJournalChecks
         gaps.GapDiscoveredBatch(root.RootId, epoch, [(item, true)]);
         var before = gaps.GapEpoch(root.RootId);
         var io = new ForbiddenGapIo();
-        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         var passes = 0;
         await using var indexing = new LocalIndexingRuns(store, (_, ct) =>
         {

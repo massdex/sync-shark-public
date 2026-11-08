@@ -31,7 +31,7 @@ public sealed partial class SqliteStateStore
         IReadOnlyCollection<string> objectIds)
     {
         var result = new List<DeferredPlanning>();
-        var remaining = DeferredIntakePathCap;
+        var remaining = _settings.Tunables.DeferredIntakePathCap;
         foreach (var ids in objectIds.Distinct().Chunk(ReconciliationPageRows)) result.AddRange(InStore(() =>
         {
             if (PairNo(pairId) is not { } pair || RootNo(rootId) is not { } root) return [];

@@ -9,7 +9,7 @@ public sealed partial class SyncRun
         try
         {
             var delta = RehearsalEndpoints.Apply(inventory,
-                await dropbox.ReadExactAsync(scopes, cursor, gen, include, ct), include);
+                await dropbox.ReadExactAsync(scopes, _settings.Tunables.MetadataPagePaths, cursor, gen, include, ct), include);
             PublishScopeDelta(delta with { ChangedObject = changed });
             return CompleteScopeRead(delta.Changes.Select(change => change.Path), scopes, include,
                 delta.IncompleteSubtrees, delta.IncompleteReasons);

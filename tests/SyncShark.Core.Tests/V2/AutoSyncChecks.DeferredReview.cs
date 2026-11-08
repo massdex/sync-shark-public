@@ -15,7 +15,7 @@ internal static partial class AutoSyncChecks
     {
         await using var rig = new Rig(["p1"]);
         FailureRetryOwner.RecordDeferredRetry(rig._store, "p1", 1,
-            FailureRetryOwner.Failed(5, rig.Clock.GetUtcNow()));
+            FailureRetryOwner.Failed(V2Settings.Default, 5, rig.Clock.GetUtcNow()));
         rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Partial) with { Deferred = 1 });
         await rig.StartAsync();
         await rig.ParkedAsync(AutoStatus.Waiting);
@@ -39,7 +39,7 @@ internal static partial class AutoSyncChecks
     {
         await using var rig = new Rig(["p1"]);
         FailureRetryOwner.RecordDeferredRetry(rig._store, "p1", 1,
-            FailureRetryOwner.Failed(5, rig.Clock.GetUtcNow()));
+            FailureRetryOwner.Failed(V2Settings.Default, 5, rig.Clock.GetUtcNow()));
         rig.Run.Then(FakeSyncRun.Report("p1", RunOutcomes.Partial) with { Deferred = 1 });
         await rig.StartAsync();
         await rig.ParkedAsync(AutoStatus.Waiting);
@@ -84,14 +84,14 @@ internal static partial class AutoSyncChecks
         rig.Run.Then(pending with { DeletionEvidencePending = new[] { "pending.txt" } });
         await rig.StartAsync();
         await rig.ParkedAsync(AutoStatus.Waiting);
-        var first = FailureRetryOwner.Failed(0, rig.Clock.GetUtcNow());
+        var first = FailureRetryOwner.Failed(V2Settings.Default, 0, rig.Clock.GetUtcNow());
         Require(rig.State("p1").RetryAt == first.RetryAfter &&
             FailureRetryOwner.DeferredRetryState(rig._store, "p1")?.Attempts == 1,
             "evidence-only debt opens the shared tier without a real failure episode");
         rig.Clock.Advance(first.RetryAfter - rig.Clock.GetUtcNow());
         await Until(() => rig.Run.Runs("p1") == 2 && rig.State("p1").RetryAt > rig.Clock.GetUtcNow() &&
             rig.Clock.ActiveTimers == 1, "unchanged evidence completes and re-arms");
-        var second = FailureRetryOwner.Failed(1, rig.Clock.GetUtcNow());
+        var second = FailureRetryOwner.Failed(V2Settings.Default, 1, rig.Clock.GetUtcNow());
         Require(rig.State("p1").RetryAt == second.RetryAfter &&
             FailureRetryOwner.DeferredRetryState(rig._store, "p1")?.Attempts == 2,
             "persistent evidence advances the retained shared counter");

@@ -12,7 +12,7 @@ using Microsoft.Data.Sqlite;
 internal static partial class CliChecks
 {
 
-    // F014: the four revised catalog effects are kept in one list so the registry, help, capability and inventory
+    // Revised catalog effects stay in one list so registry, help, capability and inventory
     // projections are asserted against the same receipts.
     private const string RepairEffectReceipt =
         "Windows-invalid Dropbox names are skipped with the existing SkipReservedName notice, without name substitution";
@@ -29,7 +29,11 @@ internal static partial class CliChecks
         ("engine repair", "including periodic listing counts during direct Repair"),
         ("engine issues", IssuesEffectReceipt),
         ("engine settings list", SettingsListEffectReceipt),
-        ("engine settings set", SettingsSetEffectReceipt)
+        ("engine settings set", SettingsSetEffectReceipt),
+        ("engine settings list", "LogReadBufferBytes (log view read chunk, bytes)"),
+        ("engine settings list", "JournalPageBufferBytes (one USN journal page, bytes)"),
+        ("engine settings set", "LogReadBufferBytes as a positive Int32 byte count"),
+        ("engine settings set", "JournalPageBufferBytes as at least one native USN record page")
     ];
 
     internal static int RunNativeBridgeClientProbe(string testCase)
@@ -575,6 +579,7 @@ internal static partial class CliChecks
         PairRemoveRegistryChecks();
         RecoverySelectionRegistryChecks();
         EngineParserChecks();
+        EngineStartupAdmissionChecks.Run();
         Require(SyncCliRegistry.Rows.Single(row => row.Command == "engine pairs include").Effect == IncludeEffectReceipt,
             "include help and capabilities preserve the approved history contract");
         await EngineCatalogProjectionChecksAsync();

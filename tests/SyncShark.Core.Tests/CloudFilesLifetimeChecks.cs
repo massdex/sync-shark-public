@@ -8,7 +8,7 @@ internal static class CloudFilesLifetimeChecks
         var pair = new PairDef("stable-pair", "test", new("local", "local", null, @"F:\offline-fixture", "id:local:00000007:000000000000002a"),
             new("remote", "dropbox", "account", "/test", "id:root"), [], [], true);
         var retained = new FakeConnection { Retained = true };
-        using (var life = new CloudFilesLifetime((_, _, _) => retained, _ => true))
+        using (var life = new CloudFilesLifetime((_, _, _) => retained, _ => true, V2Settings.Default))
         {
             life.Open(pair, false, false, SyncDirectoryStorage.AlwaysAvailable, default);
             life.Open(pair, false, false, SyncDirectoryStorage.AlwaysAvailable, default);
@@ -22,14 +22,14 @@ internal static class CloudFilesLifetimeChecks
         foreach (var dependent in new[] { false, true })
         {
             var failed = new FakeConnection { Retained = wasRetained, Fail = true, Dependent = dependent };
-            using var life = new CloudFilesLifetime((_, _, _) => failed, _ => wasRetained);
+            using var life = new CloudFilesLifetime((_, _, _) => failed, _ => wasRetained, V2Settings.Default);
             try { life.Open(pair, true, false, SyncDirectoryStorage.AlwaysAvailable, default); throw new Exception("connect failure hidden"); }
             catch (IOException) { }
             Require(failed.Disconnects == 1 && failed.Removals == (!wasRetained && !dependent ? 1 : 0), "rollback only newly created empty registration");
         }
         var healthy = new FakeConnection { Retained = true };
         using (var startup = new CloudFilesLifetime((_, _, _) => healthy,
-                   p => p.PairId == "broken" ? throw new IOException("unreadable registration") : p.PairId != "incomplete"))
+                   p => p.PairId == "broken" ? throw new IOException("unreadable registration") : p.PairId != "incomplete", V2Settings.Default))
         {
             var reported = new List<string>();
             var failures = startup.Reconnect(new[] { pair with { PairId = "broken" },
@@ -40,16 +40,16 @@ internal static class CloudFilesLifetimeChecks
                 "startup reports bad registered pairs, skips unregistered incomplete pair and connects healthy pair");
         }
         var rollbackFailure = new FakeConnection { Fail = true, RollbackFails = true };
-        using (var rollback = new CloudFilesLifetime((_, _, _) => rollbackFailure, _ => false))
+        using (var rollback = new CloudFilesLifetime((_, _, _) => rollbackFailure, _ => false, V2Settings.Default))
         {
             try { rollback.Open(pair, true, false, SyncDirectoryStorage.AlwaysAvailable, default); throw new Exception("failure hidden"); }
             catch (AggregateException errors) { Require(errors.InnerExceptions.Count == 2, "both connection and rollback errors retained"); }
             Require(rollbackFailure.Disconnects == 1, "rollback refusal still disconnects");
         }
         using (var preview = new CloudFilesLifetime((_, _, _) => throw new Exception("preview created provider"),
-                   _ => throw new Exception("preview probed registration")))
+                   _ => throw new Exception("preview probed registration"), V2Settings.Default))
             preview.Open(pair, true, true, SyncDirectoryStorage.AlwaysAvailable, default);
-        using (var cancelled = new CloudFilesLifetime((_, _, _) => throw new Exception("cancelled created provider"), _ => true))
+        using (var cancelled = new CloudFilesLifetime((_, _, _) => throw new Exception("cancelled created provider"), _ => true, V2Settings.Default))
         {
             try { cancelled.Open(pair, true, false, SyncDirectoryStorage.AlwaysAvailable, new CancellationToken(true));
                 throw new Exception("cancellation ignored"); }

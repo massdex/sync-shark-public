@@ -61,7 +61,7 @@ internal static partial class RunChecks
             var pending = store.ByObject(root.RootId, item.ObjectId)!;
             gaps.GapDiscovered(root.RootId, epoch, pending, true);
             gaps.GapDiscoveryDone(root.RootId, epoch);
-            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             await worker.HashPage(root, epoch, default);
             gaps.PromoteGapDiscovery(root.RootId);
             Require(reads == 0 && !gaps.GapObligations(root.RootId, [item.ObjectId]).Contains(item.ObjectId) &&

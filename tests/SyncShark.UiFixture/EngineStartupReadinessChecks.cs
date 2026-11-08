@@ -43,6 +43,7 @@ internal static class EngineStartupReadinessChecks
 
     internal static async Task<int> RunAsync()
     {
+        await RefusalCleanupAsync();
         var previous = Environment.GetEnvironmentVariable(RendezvousVariable);
         try
         {
@@ -100,6 +101,34 @@ internal static class EngineStartupReadinessChecks
         }
         finally { Environment.SetEnvironmentVariable(RendezvousVariable, previous); }
         return 0;
+    }
+
+    private static async Task RefusalCleanupAsync()
+    {
+        foreach (var denied in new[] { false, true })
+        {
+            var root = Path.Combine(Path.GetTempPath(), "SyncShark.RefusalProbe." + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(Path.Combine(root, "v2"));
+            try
+            {
+                File.WriteAllText(Path.Combine(root, "v2", "state.db-wal"), "fixture");
+                using var isolated = SyncSharkRuntimePaths.OverrideProductRootForTest(root);
+                var attempts = 0;
+                var result = await EngineHostEntry.RunAsync(CancellationToken.None, () =>
+                {
+                    attempts++;
+                    if (denied) throw new UnauthorizedAccessException("fixture cleanup denied");
+                });
+                Require(result == EngineHostEntry.StartupLegacyFootprintRefused && attempts == 1,
+                    "Admission refusal remains exit 22 after one supervisor cleanup attempt, even when denied");
+                var lines = File.ReadAllLines(AutoSyncLog.FilePath(root));
+                Require(lines.Length == (denied ? 2 : 1) &&
+                    lines.Count(line => line.Contains("reason=startup-legacy-store")) == 1 &&
+                    lines.Count(line => line.Contains(typeof(UnauthorizedAccessException).FullName!)) == (denied ? 1 : 0),
+                    "Admission refusal logs exactly one cleanup failure when denied and none on success");
+            }
+            finally { Directory.Delete(root, recursive: true); }
+        }
     }
 
     private static void Require(bool condition, string message)

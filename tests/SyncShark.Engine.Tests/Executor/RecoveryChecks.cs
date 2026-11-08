@@ -168,7 +168,7 @@ public static class RecoveryChecks
             Store.Items.Add(item with { Ordinal = 9, Provenance = FolderRemovalItem.ProvenanceKind.Unexpected });
             Boundary = new Boundary(proxy, pair.PairId);
             var settings = new EngineSettings("", "", "", "", "", RecycleFallback.Fail, 1,
-                FirstRunPolicy.NewestWins, 1, "", 256, ScanTestSettings.BatchRows) with { StoragePageSize = Store.Items.Count };
+                FirstRunPolicy.NewestWins, 1, "", 256, ScanTestSettings.BatchRows)  { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes }with { StoragePageSize = Store.Items.Count };
             PageSize = settings.StoragePageSize;
             var context = new ExecutorContext(new FakeSide(Side.Local), new FakeSide(Side.Dropbox),
                 Recovery, proxy, pair, new PathScope(pair, [pair]), settings, new ReplaceTurn(),

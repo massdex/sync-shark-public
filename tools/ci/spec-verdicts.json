@@ -6186,21 +6186,6 @@
     },
     {
       "key": [
-        "src/SyncShark.Engine/Storage/PairImport.cs",
-        "long-member",
-        "SyncShark.Engine:Massdex.SyncShark.Engine.Storage.PairImport",
-        "static Open(string,string,EngineSettings,IStateStore)"
-      ],
-      "hash": "dacb54287a22~5349cd46ffc4~ddc8fca979bb~ef7c0ba8a573~94b273814e39~7ebb",
-      "size": 41,
-      "members": [],
-      "verdict": "SPLIT-PENDING",
-      "family": "anthropic",
-      "source_row": 147,
-      "register": "tools/ci/structure-debt.md"
-    },
-    {
-      "key": [
         "src/SyncShark.Engine/Storage/ScanEntries.cs",
         "long-member",
         "SyncShark.Engine:Massdex.SyncShark.Engine.Storage.ScanEntries",

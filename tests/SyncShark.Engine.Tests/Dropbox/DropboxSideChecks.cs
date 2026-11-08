@@ -14,7 +14,7 @@ public static class DropboxSideChecks
     private static readonly string Hash = new string('a', 64);
     private static readonly DateTimeOffset DeletedAt = new(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
     private static readonly EngineSettings Settings = new("{name}", "yyyyMMdd", "local", "dropbox", ".case",
-        RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows);
+        RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
 
     // One ordinary request-attempt context per listing read, as the pair session composes it.
     private static ListingReadContext BeginListing() => new(
@@ -24,7 +24,7 @@ public static class DropboxSideChecks
     public static void Run()
     {
         var settings = new EngineSettings("{name}", "yyyyMMdd", "local", "dropbox", ".case",
-            RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows);
+            RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
         foreach (var root in new[] { "/", "/Parent" })
         {
             var pair = new PairConfig("pair", "Pair A", Path.GetTempPath(), root, "connection", [], [],

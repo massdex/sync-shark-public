@@ -11,7 +11,6 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
     Func<bool>? pauseOverride = null, TimeProvider? time = null) : ILocalGapIo
 {
     public TimeProvider Time => time ?? TimeProvider.System;
-    private const int ContentBufferBytes = 64 * 1024;
     private readonly object _rateGate = new();
     private double _nextRead;
 
@@ -197,7 +196,7 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
         guard.Dispose();
         lease.Dispose();
         setStage(stage = ProofStage.Read);
-        using var stream = new FileStream(handle, FileAccess.Read, ContentBufferBytes, isAsync: false);
+        using var stream = new FileStream(handle, FileAccess.Read, settings.Tunables.LocalGapContentBufferBytes, isAsync: false);
         var content = await ReadHashAsync(stream, urgent, ct,
             ReconciliationBudgetContext.Current.Value is null ? null : item.Size).ConfigureAwait(false);
         if (content is null) return new(LocalGapHashOutcome.Paused);
@@ -233,15 +232,15 @@ internal sealed partial class LocalGapIo(IStateStore known, V2Settings settings,
     private async Task<(string Hash, long Bytes)?> ReadHashAsync(FileStream stream, bool urgent, CancellationToken ct,
         long? maximumBytes = null)
     {
-        var buffer = ArrayPool<byte>.Shared.Rent(ContentBufferBytes);
+        var buffer = ArrayPool<byte>.Shared.Rent(settings.Tunables.LocalGapContentBufferBytes);
         var hasher = new ContentBlockHasher();
         try
         {
             while (true)
             {
                 var requested = maximumBytes is { } limit
-                    ? (int)Math.Min(ContentBufferBytes, Math.Max(default(long), limit - hasher.TotalBytes))
-                    : ContentBufferBytes;
+                    ? (int)Math.Min(settings.Tunables.LocalGapContentBufferBytes, Math.Max(default(long), limit - hasher.TotalBytes))
+                    : settings.Tunables.LocalGapContentBufferBytes;
                 if (requested == 0) break; // The post-read identity/size proof rejects concurrent growth.
                 if (!await Budget(requested, ct, urgent).ConfigureAwait(false)) return null;
                 var count = await stream.ReadAsync(buffer.AsMemory(0, requested), ct).ConfigureAwait(false);

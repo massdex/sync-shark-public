@@ -62,7 +62,7 @@ internal static partial class LocalJournalChecks
             settings, TimeProvider.System);
 
         var io = new GapCheckIo(DateTimeOffset.UtcNow, "0000000000000001:200");
-        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var passes = 0;
@@ -135,7 +135,7 @@ internal static partial class LocalJournalChecks
             "both roots start with a durable background backlog");
 
         var io = new GapCheckIo(DateTimeOffset.UtcNow, "0000000000000001:200");
-        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         var gateA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var gateB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var enteredA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -237,7 +237,7 @@ internal static partial class LocalJournalChecks
             "the direct-run fixture starts behind its durable frontier");
 
         var io = new GapCheckIo(DateTimeOffset.UtcNow, "0000000000000001:200");
-        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var cancelled = 0;
         var blocked = new LocalIndexingRuns(store, async (_, ct) =>
@@ -304,7 +304,7 @@ internal static partial class LocalJournalChecks
             ["paused/one.txt"]);
         store.SetPairPaused(pair.PairId, true);
         var io = new GapCheckIo(DateTimeOffset.UtcNow, "0000000000000001:200");
-        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         var passes = 0;
         await using var indexing = new LocalIndexingRuns(store, (_, _) =>
         {
@@ -327,7 +327,7 @@ internal static partial class LocalJournalChecks
         var (root, _) = SaveIndexRoot(store, folder, "index-failure-root", "index-failure-pair",
             ["failure/one.txt"]);
         var io = new GapCheckIo(DateTimeOffset.UtcNow, "0000000000000001:200");
-        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker((ILocalGapStore)store, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var attempted = 0;
         var wakes = new List<string>();

@@ -72,14 +72,16 @@ public static class NtfsIdentityPaths
         return PilotDirectoryLease.FinalPath(handle);
     }
 
-    // FILE_FLAG_BACKUP_SEMANTICS lets the same call resolve a directory; OPEN_REPARSE_POINT returns the reparse
-    // point itself and never follows a link or hydrates a cloud placeholder.
-    private static SafeFileHandle OpenById(SafeFileHandle volume, ulong fileId)
+    /// <summary>Opens a file or directory by identity without following reparse points or hydrating content.
+    /// The caller owns the returned handle and interprets the native error when it is invalid.</summary>
+    public static SafeFileHandle OpenById(SafeFileHandle volume, ulong fileId) =>
+        OpenById(volume, fileId, FileReadAttributes, FileFlagBackupSemantics | FileFlagOpenReparsePoint);
+
+    internal static SafeFileHandle OpenById(SafeFileHandle volume, ulong fileId, uint access, uint flags)
     {
-        var id = new FileIdDescriptor { Size = 24, Type = FileIdType, Id = fileId };
-        return OpenFileByIdNative(volume, ref id, FileReadAttributes,
-            FileShare.Read | FileShare.Write | FileShare.Delete, IntPtr.Zero,
-            FileFlagBackupSemantics | FileFlagOpenReparsePoint);
+        var id = new FileIdDescriptor { Size = (uint)Marshal.SizeOf<FileIdDescriptor>(), Type = FileIdType, Id = fileId };
+        return OpenFileByIdNative(volume, ref id, access,
+            FileShare.Read | FileShare.Write | FileShare.Delete, IntPtr.Zero, flags);
     }
 
     [StructLayout(LayoutKind.Explicit, Size = 24)]

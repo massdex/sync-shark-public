@@ -36,8 +36,8 @@ public static class LogFiles
     /// trailing record without its newline terminator is unfinished and is not delivered; the caller reports it.
     /// An undecodable record is reported as not well formed. One record buffers only until its own newline, so
     /// memory is O(one record) and no product cap is needed; nothing is buffered for the whole file.</summary>
-    public static ReadStatus Read(string path, Action<string, bool> record, CancellationToken ct,
-        out bool unfinishedTrailingRecord)
+    public static ReadStatus Read(string path, Action<string, bool> record, int bufferBytes,
+        CancellationToken ct, out bool unfinishedTrailingRecord)
     {
         unfinishedTrailingRecord = false;
         FileStream stream;
@@ -56,7 +56,7 @@ public static class LogFiles
         try
         {
             using var owned = stream;
-            var bytes = new byte[ResourceNames.LogReadBufferCharacters];
+            var bytes = new byte[bufferBytes];
             var pending = new ArrayBufferWriter<byte>();
             var firstRecord = true;
             ct.ThrowIfCancellationRequested();

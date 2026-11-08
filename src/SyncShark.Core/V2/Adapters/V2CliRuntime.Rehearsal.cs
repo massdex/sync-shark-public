@@ -48,7 +48,7 @@ public sealed partial class V2CliRuntime
                         ledger.Run = current;
                         ledger.Simulated(effect);
                     }
-                }, _store);
+                }, Settings, _store);
                 var run = _run.Rehearsal(endpoints);
                 var summaries = new List<object>();
                 var accepted = true;

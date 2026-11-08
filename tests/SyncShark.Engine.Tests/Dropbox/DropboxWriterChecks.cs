@@ -71,7 +71,7 @@ public static class DropboxWriterChecks
     {
         const string newPath = "Docs/child";
         var settings = new EngineSettings("{name}", "yyyyMMdd", "local", "dropbox", ".case-rename",
-            RecycleFallback.Fail, LogRetentionDays, FirstRunPolicy.NewestWins, InitialConcurrency, "", LogBufferCharacters, ScanTestSettings.BatchRows);
+            RecycleFallback.Fail, LogRetentionDays, FirstRunPolicy.NewestWins, InitialConcurrency, "", LogBufferCharacters, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
         Action<int> baseline = index => Sink(newPath + settings.CaseRenameSuffix);
         Action<int> candidate = index => Sink(PathNames.CaseRenamePath(newPath, settings.CaseRenameSuffix));
 
@@ -1292,6 +1292,8 @@ public static class DropboxWriterChecks
         public readonly EngineSettings Settings = new("{name}", "yyyyMMdd", "local", "dropbox", ".case-rename",
             RecycleFallback.Fail, LogRetentionDays, FirstRunPolicy.NewestWins, InitialConcurrency, "", LogBufferCharacters, ScanTestSettings.BatchRows)
         {
+        JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes,
+        LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes,
             Backoff = new FailureRetryOwner.BackoffSettings(BackoffInitialSeconds, BackoffFactor, 0, BackoffMaximumSeconds),
         };
         public readonly DropboxWriter Writer;

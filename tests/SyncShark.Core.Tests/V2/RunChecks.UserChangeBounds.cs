@@ -34,7 +34,7 @@ internal static partial class RunChecks
             Require(mixed.Count == 128 && mixed.Take(64).All(work => work.Urgent) && mixed.Skip(64).All(work => !work.Urgent) &&
                 mixed[0].Item.Path == "Recent-1099" && mixed[1].Item.Path == "Recent-1098",
                 "unpaused hashing selects oldest urgent versions before bulk, not object-id order");
-            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             for (var pass = 0; pass < 64; pass++)
             {
                 var before = io.Attempts.Count;

@@ -251,7 +251,7 @@ internal sealed partial class PairLoop
         var now = _in.Time.GetUtcNow();
         if (_watchAttempts == 0) _pollAt = now;
         _watchDegraded = true;
-        var retry = FailureRetryOwner.Failed(_watchAttempts, now);
+        var retry = FailureRetryOwner.Failed(_in.Settings, _watchAttempts, now);
         _watchAttempts = retry.Attempts;
         _watchRetryAt = retry.RetryAfter;
         try { _in.Store.AddNotices([WatchNotice(error.Message) with { FailureRetry = retry, CauseKey = error.Message, CauseIdentity = FailureCauseIdentity.Of(error) }]); }
@@ -308,7 +308,7 @@ internal sealed partial class PairLoop
         if (_last?.Outcome == RunOutcomes.StateDamaged) { RunOutput.Observe(error); return; }
         try
         {
-            FailureRetryOwner.RecordRunFailure(_in.Store, _pairId, error, _in.Time.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            FailureRetryOwner.RecordRunFailure(_in.Settings, _in.Store, _pairId, error, _in.Time.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         }
         catch (Exception) { /* A damaged/unavailable notice store cannot terminate another pair or the host. */ }
     }

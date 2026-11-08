@@ -52,7 +52,7 @@ internal static class HydrationNoticeWriterChecks
 
         // The callback path only queues: no placeholder open and no SQLite write before the worker runs. Draining on
         // the calling thread is deterministic; the product worker is the same Process loop, so no timed polling.
-        using (var writer = new HydrationNoticeWriter(store, startWorker: false))
+        using (var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             writer.Register(pair);
             writer.Prime("pair"); // no durable notices
@@ -87,14 +87,14 @@ internal static class HydrationNoticeWriterChecks
         await DeliveryScopeAndDeadline(store, pair, metadata);
 
         // Duplicate failures coalesce per item; the queue is bounded by distinct items, not by the item count.
-        using (var writer = new HydrationNoticeWriter(store, startWorker: false))
+        using (var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             writer.Register(pair);
             writer.Report(pair, "Folder/duplicate.txt", new IOException("first"), _ => metadata);
             writer.Report(pair, "Folder/duplicate.txt", new IOException("second"), _ => metadata);
             Require(writer.PendingEvents == 1, "a repeated failure for one item coalesces before persistence");
         }
-        using (var writer = new HydrationNoticeWriter(store, startWorker: false))
+        using (var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             for (var index = 0; index < HydrationNoticeWriter.MaximumQueuedEvents + 50; index++)
                 writer.Report(pair, "Folder/flood-" + index + ".txt", new IOException("flood"),
@@ -106,7 +106,7 @@ internal static class HydrationNoticeWriterChecks
 
         // The real background worker is covered too: a queued barrier completes only after the Task.Run drain has
         // applied every earlier event, so a stopped or faulted worker fails the check instead of hanging it.
-        using (var worker = new HydrationNoticeWriter(store))
+        using (var worker = new HydrationNoticeWriter(store, V2Settings.Default))
         {
             worker.Register(pair);
             worker.Prime("pair");
@@ -124,7 +124,7 @@ internal static class HydrationNoticeWriterChecks
         // The original regression path: an event is queued while no worker exists, then Start() launches the real
         // Task.Run drain. The barrier makes this deterministic and reports a worker that never ran or a swallowed
         // store failure (PersistenceErrors) instead of a wall-clock poll.
-        using (var queued = new HydrationNoticeWriter(store, startWorker: false))
+        using (var queued = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             queued.Register(pair);
             queued.Prime("pair");
@@ -143,7 +143,7 @@ internal static class HydrationNoticeWriterChecks
         }
 
         // A notice left open by a previous process closes on the next success, without Retry.
-        using (var first = new HydrationNoticeWriter(store, startWorker: false))
+        using (var first = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             first.Register(pair);
             first.Report(pair, "Folder/restart.txt", new IOException("left open"), _ => metadata);
@@ -152,7 +152,7 @@ internal static class HydrationNoticeWriterChecks
         }
         Require(store.OpenNotices("pair").Any(notice => notice.Storage is not null),
             "the notice survives the first writer's disposal");
-        using (var restarted = new HydrationNoticeWriter(store, startWorker: false))
+        using (var restarted = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             restarted.Register(pair);
             Require(restarted.Succeeded("pair", "Folder/restart.txt",
@@ -165,7 +165,7 @@ internal static class HydrationNoticeWriterChecks
         }
 
         // Distinct failures are persisted in bounded worker batches; coalesced successes close each family once.
-        using (var writer = new HydrationNoticeWriter(store, startWorker: false))
+        using (var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             writer.Register(pair);
             writer.Prime("pair");
@@ -199,7 +199,7 @@ internal static class HydrationNoticeWriterChecks
     private static async Task DeliveryRecovery(SqliteStateStore store, PairDef pair, StorageNotice item)
     {
         var now = DateTimeOffset.UtcNow;
-        using var writer = new HydrationNoticeWriter(store, startWorker: false) { DeliveryClock = () => now };
+        using var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false) { DeliveryClock = () => now };
         writer.Register(pair);
         writer.Prime(pair.PairId);
         writer.BeforePersistForTest = () => throw new IOException("fixture persistence unavailable");
@@ -233,7 +233,7 @@ internal static class HydrationNoticeWriterChecks
                 receipt.Size, DateTimeOffset.UnixEpoch, ItemFlags.None)], []));
         store.SetStoragePolicy(pair.A.RootId, pair.A.RootObjectId, "online-only");
         store.QueueStorageSettlement(pair.A.RootId, "pending-object", pair.B.RootId, receipt);
-        using (var lost = new HydrationNoticeWriter(store, startWorker: false))
+        using (var lost = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             lost.Report(pair, receipt.RelativePath, new IOException("lost before delivery"), _ => item);
             // Deliberately abandon the callback, just as abrupt termination before delivery would.
@@ -243,7 +243,7 @@ internal static class HydrationNoticeWriterChecks
             var pending = restarted.StorageSettlementPage().Single(job => job.ObjectId == "pending-object");
             var notice = new StorageNotice(pending.RootId, pending.ObjectId, pair.B.RootId, "settlement");
             var attempts = 0;
-            using var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Native provider must not open"), _ => false);
+            using var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Native provider must not open"), _ => false, V2Settings.Default);
             await using var service = new StorageSettlementService(restarted, connections, convert: (_, _) =>
             {
                 attempts++;
@@ -255,7 +255,7 @@ internal static class HydrationNoticeWriterChecks
                 "a lost callback leaves durable work unsettled and its next attempt re-raises the notice");
             restarted.CloseStorageNoticeBatch(pair.PairId, [notice]);
         }
-        using var unresolved = new HydrationNoticeWriter(store, startWorker: false);
+        using var unresolved = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false);
         unresolved.Register(pair);
         unresolved.Report(pair, "Folder/unreadable.txt", new IOException("identity unavailable"), _ => null);
         unresolved.Drain();
@@ -282,7 +282,7 @@ internal static class HydrationNoticeWriterChecks
             B = new RootDef("removed-remote", SyncProviders.Dropbox, "fixture-account", "/Removed", "removed-remote-object")
         };
         store.SavePair(removed);
-        using (var writer = new HydrationNoticeWriter(store, startWorker: false))
+        using (var writer = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             writer.Register(pair);
             writer.Report(removed, "removed.txt", new IOException("removed"), _ => item);
@@ -296,7 +296,7 @@ internal static class HydrationNoticeWriterChecks
             writer.Succeeded(pair.PairId, "retained.txt", _ => item);
             writer.Drain();
         }
-        using (var stopped = new HydrationNoticeWriter(store, startWorker: false))
+        using (var stopped = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false))
         {
             var calls = 0;
             stopped.BeforePersistForTest = () => { calls++; throw new StateDamagedException("fixture damaged state"); };
@@ -312,7 +312,7 @@ internal static class HydrationNoticeWriterChecks
         var failed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var resumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var attempts = 0;
-        using var worker = new HydrationNoticeWriter(store, startWorker: false);
+        using var worker = new HydrationNoticeWriter(store, V2Settings.Default, startWorker: false);
         worker.Register(pair);
         worker.BeforePersistForTest = () =>
         {

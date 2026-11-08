@@ -9,7 +9,7 @@ public sealed partial class V2SyncHost
         if (Composition is null) return;
         _cloudFiles ??= new CloudFilesLifetime(Composition.Endpoints.CreateCloudFiles,
             pair => CloudFilesLifetime.IsRegisteredPair(pair, _settings),
-            _store as SqliteStateStore, Composition.Endpoints.ObserveStorageRemoteAsync);
+            _settings, _store as SqliteStateStore, Composition.Endpoints.ObserveStorageRemoteAsync);
         Composition.Endpoints.NewPointerProvider = (pair, token) => _cloudFiles.RequireProvider(pair, token);
         // Includes disabled pairs: stopping automatic sync must not destroy retained pointer ownership.
         // Hydration pause policy remains a separate later-slice decision.

@@ -17,7 +17,7 @@ internal static partial class RunChecks
             var io = new UrgentCheckIo(fx.A) { ChangingPath = "Autosave" };
             var gaps = (ILocalGapStore)store;
             var epoch = gaps.GapEpoch(fx.Pair.A.RootId)!;
-            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+            await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             for (var save = 0; save < 3; save++)
             {
                 await worker.HashPage(fx.Pair.A, epoch, default);

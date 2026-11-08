@@ -106,7 +106,7 @@ internal static partial class AutoSyncChecks
                     projection.NotificationDetail.Contains("backup", StringComparison.OrdinalIgnoreCase),
                     "fatal state preserves counted in-memory outcome and recovery guidance without a damaged-store notice");
                 var forbidden = System.Reflection.DispatchProxy.Create<IStateStore, ForbiddenFailureStore>();
-                var state = FailureRetryOwner.RecordRunFailure(forbidden, "p1", error, completion.Clock.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+                var state = FailureRetryOwner.RecordRunFailure(V2Settings.Default, forbidden, "p1", error, completion.Clock.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
                 Require(((ForbiddenFailureStore)(object)forbidden).Calls == 0 && state.RetryAfter == DateTimeOffset.MaxValue,
                     "fatal failure owner performs zero store calls including notice writes");
             }

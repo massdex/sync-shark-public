@@ -129,7 +129,7 @@ public sealed partial class SyncRun
             var previous = _store.SyncRetryAt(pair.PairId, group.Key);
             if (previous is not null && previous.Kind != "planning") continue;
             if (previous?.RetryAfter > _time.GetUtcNow()) continue;
-            var failure = FailureRetryOwner.Failed(previous?.Attempts ?? 0, _time.GetUtcNow());
+            var failure = FailureRetryOwner.Failed(_settings, previous?.Attempts ?? 0, _time.GetUtcNow());
             _store.SaveSyncRetry(pair.PairId, new(group.Key, "planning", failure.Attempts,
                 reason, failure.RetryAfter,
                 ProposedActions: group.ToArray()));
@@ -172,7 +172,7 @@ public sealed partial class SyncRun
                     var prior = _store.SyncRetryAt(notice.PairId, notice.Path);
                     if (prior is null || prior.Kind == "scan" && prior.RetryAfter <= _time.GetUtcNow())
                     {
-                        var state = FailureRetryOwner.Failed(prior?.Attempts ?? 0, _time.GetUtcNow());
+                        var state = FailureRetryOwner.Failed(_settings, prior?.Attempts ?? 0, _time.GetUtcNow());
                         _store.SaveSyncRetry(notice.PairId, new(notice.Path, "scan", state.Attempts,
                             notice.Detail, state.RetryAfter, ReadRoots: [unreadablePair.A.RootId, unreadablePair.B.RootId]));
                     }
@@ -193,7 +193,7 @@ public sealed partial class SyncRun
     private void SavePendingNoticeFailure(Notice notice, Exception error)
     {
         var previous = _store.SyncRetryAt(notice.PairId, notice.Path);
-        var delivery = FailureRetryOwner.Failed(previous?.PendingNotice?.DeliveryRetry?.Attempts ?? 0, _time.GetUtcNow());
+        var delivery = FailureRetryOwner.Failed(_settings, previous?.PendingNotice?.DeliveryRetry?.Attempts ?? 0, _time.GetUtcNow());
         _store.SaveSyncRetry(notice.PairId,
             (previous ?? new SyncRetry(notice.Path, "sync", 0, "Notice: " + error.Message, DateTimeOffset.MinValue)) with
             { PendingNotice = notice with { DeliveryRetry = delivery } });
@@ -224,7 +224,7 @@ public sealed partial class SyncRun
         try
         {
             if (_store.Pair(pairId) is null) return;
-            FailureRetryOwner.RecordRunFailure(_store, pairId, error, _time.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            FailureRetryOwner.RecordRunFailure(_settings, _store, pairId, error, _time.GetUtcNow(), isStateDamage: StorageFailureClassifier.IsStateDamage);
         }
         catch (Exception writeError) when (RunFailure(writeError, CancellationToken.None))
         { RunLog.Trace("Unable to persist run notice; retry on next run: " + writeError.ToString()); }

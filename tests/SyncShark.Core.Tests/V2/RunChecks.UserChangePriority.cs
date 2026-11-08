@@ -95,7 +95,7 @@ internal static partial class RunChecks
     {
         var io = new UrgentCheckIo(fx.A) { FailPath = "Edit" };
         var gaps = (ILocalGapStore)store;
-        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         var epoch = gaps.GapEpoch(fx.Pair.A.RootId)!;
         worker.Discover(fx.Pair.A, epoch, default);
         await worker.HashPage(fx.Pair.A, epoch, default);

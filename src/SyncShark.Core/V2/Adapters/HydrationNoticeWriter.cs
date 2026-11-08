@@ -21,6 +21,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
     internal const int MaximumOpenCache = 16_384;
     private const int MaximumOpenOrder = MaximumOpenCache * 4;
     private readonly SqliteStateStore _store;
+    private readonly V2Settings _settings;
     private readonly object _gate = new();
     private readonly Dictionary<(string PairId, string Key), StorageNotice> _open = new();
     private readonly Queue<(string PairId, string Key)> _openOrder = new();
@@ -48,9 +49,10 @@ internal sealed class HydrationNoticeWriter : IDisposable
     private long _barrierSequence;
     private bool _disposed;
 
-    internal HydrationNoticeWriter(SqliteStateStore store, bool startWorker = true)
+    internal HydrationNoticeWriter(SqliteStateStore store, V2Settings settings, bool startWorker = true)
     {
         _store = store;
+        _settings = settings;
         if (startWorker) _worker = Task.Run(RunAsync);
     }
 
@@ -439,7 +441,7 @@ internal sealed class HydrationNoticeWriter : IDisposable
                     continue;
                 }
                 _retryBatch = batch;
-                _deliveryRetry = FailureRetryOwner.Failed(_deliveryRetry.Attempts, DeliveryClock());
+                _deliveryRetry = FailureRetryOwner.Failed(_settings, _deliveryRetry.Attempts, DeliveryClock());
                 return;
             }
         }

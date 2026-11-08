@@ -66,26 +66,25 @@ public static class FailureRetryOwner
         };
     }
 
-    /// <summary>The backoff ceiling. One named limit shared by every retry tier.</summary>
-    public const int MaximumRetrySeconds = 300;
-
     /// <summary>The deferred-backlog schedule shares the run notice row but never a failure episode.</summary>
     public const string DeferredBacklogCause = "deferred-backlog";
 
-    /// <summary>Ten-second exponential backoff, capped at five minutes, with a saturating counter.</summary>
-    public static State Failed(int attempts, DateTimeOffset now, bool countAttempt = true)
+    /// <summary>The configured exponential backoff, capped, with a saturating counter.</summary>
+    public static State Failed(V2Settings settings, int attempts, DateTimeOffset now, bool countAttempt = true)
     {
         var next = countAttempt ? (attempts >= int.MaxValue ? int.MaxValue : Math.Max(0, attempts) + 1)
             : Math.Max(0, attempts);
-        var delay = Math.Min(MaximumRetrySeconds, 10 * Math.Pow(2, Math.Clamp(next - 1, 0, 5)));
+        var delay = Math.Min(settings.Tunables.RetryMaximumDelay.TotalSeconds,
+            settings.Tunables.RetryInitialDelay.TotalSeconds *
+            Math.Pow(settings.Tunables.RetryDelayMultiplier, Math.Clamp(next - 1, 0, settings.Tunables.RetryMaximumDoublings)));
         return new(next, now.AddSeconds(delay));
     }
 
     /// <summary>Attaching evidence to sleeping debt is not another attempt. Due failures advance normally.</summary>
-    public static State ReportedFailure(SyncRetry? prior, DateTimeOffset now, bool retainSleeping,
+    public static State ReportedFailure(V2Settings settings, SyncRetry? prior, DateTimeOffset now, bool retainSleeping,
         bool countAttempt = true) => retainSleeping && prior is not null && !IsDue(prior.RetryAfter, now)
             ? new(prior.Attempts, prior.RetryAfter)
-            : Failed(prior?.Attempts ?? 0, now, countAttempt);
+            : Failed(settings, prior?.Attempts ?? 0, now, countAttempt);
 
     /// <summary>One generic failure explanation, with a cause independent of changing attempt text.</summary>
     public static Notice RetryNotice(string pairId, string path, string cause, int attempts = 0,
@@ -98,8 +97,8 @@ public static class FailureRetryOwner
     public static string RunNoticeId(string pairId) => ShortId.Make("n", pairId, "40", "", "run-unavailable");
 
     /// <summary>Run debt belongs to a pair/run notice, never the root path's item or decision row.</summary>
-    public static State RecordRunFailure(IStateStore store, string pairId, Exception error, DateTimeOffset now,
-        Func<Exception, bool> isStateDamage)
+    public static State RecordRunFailure(V2Settings settings, IStateStore store, string pairId, Exception error,
+        DateTimeOffset now, Func<Exception, bool> isStateDamage)
     {
         if (ScopeOf(error, CancellationToken.None, isStateDamage) == FailureScope.State)
         {
@@ -108,7 +107,7 @@ public static class FailureRetryOwner
             return new State(0, DateTimeOffset.MaxValue);
         }
         var id = RunNoticeId(pairId);
-        var state = Failed(RunFailureState(store, pairId)?.Attempts ?? 0, now);
+        var state = Failed(settings, RunFailureState(store, pairId)?.Attempts ?? 0, now);
         var fix = error is EndpointAccessException ? "Reconnect the account, then Retry." :
             error is StateDamagedException or StateNeedsFreshDatabaseException ?
                 "Restore a verified state backup before retrying; no further effects are safe." :
@@ -157,14 +156,14 @@ public static class FailureRetryOwner
         store.NoticeById(pairId, RunNoticeId(pairId)) is { Closed: false } row ? row : null;
 
     /// <summary>Persist a pair/path failure using the existing durable retry adapter.</summary>
-    public static SyncRetry SaveFailedRetry(IStateStore store, string pairId, string path,
+    public static SyncRetry SaveFailedRetry(V2Settings settings, IStateStore store, string pairId, string path,
         string? reason, SyncRetry? old, DateTimeOffset now,
         FailureKind? failureKind = null, DateTimeOffset? retryNotBefore = null, bool countAttempt = true)
     {
         var cause = reason ?? (old?.LastError is { Length: > 0 } previous
             ? previous : "The item could not be confirmed or applied.");
         var kind = failureKind ?? (reason is null && old is not null ? KindOf(old) : ClassifyCause(cause));
-        var state = ReportedFailure(old, now,
+        var state = ReportedFailure(settings, old, now,
             retainSleeping: kind == FailureKind.ContentProof && old is not null && KindOf(old) == FailureKind.ContentProof,
             countAttempt: countAttempt && old is not { ReprobeEvidence: true });
         var retry = (old ?? new SyncRetry(path, "sync", 0, "", DateTimeOffset.MinValue)) with

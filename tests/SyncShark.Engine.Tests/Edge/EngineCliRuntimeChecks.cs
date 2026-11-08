@@ -39,6 +39,30 @@ public static class EngineCliRuntimeChecks
         WithProductRoot(HeldAuthorityIsBusy);
         WithProductRoot(FailedConstructionReleasesOwnedResources);
         WithProductRoot(HostBoundBorrowsAuthority);
+        WithProductRoot(ObsoleteLegacyStoreRefusesBeforeAnyProviderCall);
+    }
+
+    // 1A's admission owner refuses an obsolete legacy store on the standalone path, before any provider call.
+    private static void ObsoleteLegacyStoreRefusesBeforeAnyProviderCall(string root)
+    {
+        Directory.CreateDirectory(Path.Combine(root, "v2"));
+        File.WriteAllText(Path.Combine(root, "v2", "state.db"), string.Empty);
+        using var wire = RouteWire();
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exit = SyncCli.ExecuteAsync(
+            ["--cli", "dropbox", "ls", "--account", AccountId, "--path", "/", "--json"],
+            output, error, () => new EngineCliRuntime
+            {
+                DropboxHandlerFactory = () => wire,
+                DropboxCredentialsFactory = () => new SyntheticCredentials()
+            }).GetAwaiter().GetResult();
+        Check.Require(exit == (int)SyncCliExitCode.NeedsReview,
+            "an obsolete legacy store refuses the standalone Dropbox path: " + error);
+        Check.Require(error.ToString().Contains(EngineStartupAdmission.RefusalMessage, StringComparison.Ordinal),
+            "the refusal is the typed admission message, not a provider failure");
+        Check.Require(wire.Requests.Count == 0, "the typed refusal precedes every provider call");
+        Check.Require(!LockHeld(), "the refused standalone access releases the product authority");
     }
 
     private static void NativeAccessNeedsNoHost(string root)

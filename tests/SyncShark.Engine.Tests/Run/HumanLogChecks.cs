@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using Massdex.SyncShark.Engine.Local;
 using Massdex.SyncShark.Engine.Run;
+using EngineHost = Massdex.SyncShark.Engine.Run.EngineHost;
 
 namespace Massdex.SyncShark.Engine.Tests.Run;
 
@@ -10,6 +11,10 @@ namespace Massdex.SyncShark.Engine.Tests.Run;
 /// historical file view, malformed/unfinished records, width and hostile control characters.</summary>
 public static class HumanLogChecks
 {
+    // The engine's shipped read chunk: the embedded defaults alone, with no user overlay.
+    private static readonly int LogReadBufferBytes =
+        SettingsParser.Parse(EngineHost.DefaultsJson(), null).LogReadBufferBytes;
+
     private static readonly DateTimeOffset Started =
         DateTimeOffset.Parse("2026-11-05T00:40:39Z", CultureInfo.InvariantCulture);
 
@@ -184,7 +189,7 @@ public static class HumanLogChecks
                 number++;
                 var block = human.AcceptFileLine(number, record, wellFormed);
                 if (block is not null) text.Append(block).Append(Environment.NewLine);
-            }, CancellationToken.None, out var unfinished);
+            }, LogReadBufferBytes, CancellationToken.None, out var unfinished);
             var tail = human.FinishFile(unfinished);
             if (tail is not null) text.Append(tail).Append(Environment.NewLine);
             var rendered = text.ToString();
@@ -217,7 +222,7 @@ public static class HumanLogChecks
                 partialNumber++;
                 var block = partial.AcceptFileLine(partialNumber, record, wellFormed);
                 if (block is not null) partialText.Append(block).Append(Environment.NewLine);
-            }, CancellationToken.None, out var partialUnfinished);
+            }, LogReadBufferBytes, CancellationToken.None, out var partialUnfinished);
             var partialTail = partial.FinishFile(partialUnfinished);
             if (partialTail is not null) partialText.Append(partialTail);
             var partialRendered = partialText.ToString();
@@ -312,7 +317,7 @@ public static class HumanLogChecks
             byte[] bad = [0x41, 0x42, 0xFF, 0xFE, (byte)'\n'];
             File.WriteAllBytes(path, Encoding.UTF8.GetBytes(first).Concat(bad).ToArray());
             var records = new List<(string Text, bool WellFormed)>();
-            var status = LogFiles.Read(path, (text, ok) => records.Add((text, ok)), CancellationToken.None,
+            var status = LogFiles.Read(path, (text, ok) => records.Add((text, ok)), LogReadBufferBytes, CancellationToken.None,
                 out var unfinished);
             Check.Require(status == LogFiles.ReadStatus.Found && !unfinished,
                 "the reader delivers only complete records");
@@ -322,7 +327,7 @@ public static class HumanLogChecks
             using var cancelled = new CancellationTokenSource();
             cancelled.Cancel();
             var threw = false;
-            try { LogFiles.Read(path, (_, _) => { }, cancelled.Token, out _); }
+            try { LogFiles.Read(path, (_, _) => { }, LogReadBufferBytes, cancelled.Token, out _); }
             catch (OperationCanceledException) { threw = true; }
             Check.Require(threw, "a cancelled log view stops reading instead of running to the end");
 
@@ -338,7 +343,7 @@ public static class HumanLogChecks
                 if (!ok) return;
                 wellFormed++;
                 longest = Math.Max(longest, text.Length);
-            }, CancellationToken.None, out _);
+            }, LogReadBufferBytes, CancellationToken.None, out _);
             Check.Require(count == 2 && wellFormed == 2 && longest == 200_000,
                 "a long record is decoded whole; memory is bounded by one record, not the file");
         }

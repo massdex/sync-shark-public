@@ -25,6 +25,22 @@ internal static class EngineHostEntry
     // Private process-start results (RC05-V5-X); never public CLI exit codes or IPC frame kinds.
     internal const int StartupReleaseRecoveryRequired = 20;
     internal const int StartupInvalidDataLocation = 21;
+    internal const int StartupLegacyFootprintRefused = 22;
+
+    internal static int CheckStartupAdmission(string? userSid = null)
+    {
+        var productRoot = SyncSharkRuntimePaths.ProductRoot;
+        try
+        {
+            _ = EngineStartupAdmission.Require(productRoot, userSid);
+            return (int)SyncCliExitCode.Success;
+        }
+        catch (EngineStartupRefusedException refusal)
+        {
+            AutoSyncLog.StartupRefused(productRoot, refusal);
+            return StartupLegacyFootprintRefused;
+        }
+    }
 
     // Private readiness frame: one marker byte, and a four-byte signed result for the first child's outcome.
     private const byte ReadyFrame = 0;
@@ -57,22 +73,6 @@ internal static class EngineHostEntry
             return (int)SyncCliExitCode.Success;
         }
         ct.ThrowIfCancellationRequested();
-        // A still-owned legacy startup registration is the bounded cutover case: stop the trusted legacy host (its
-        // stop drains and releases), or its backoff supervisor only when the host is authoritatively absent. A busy,
-        // foreign or uncertain owner is never force-stopped.
-        if (AutoSyncProcess.IsEngineStartupInvocation(executable))
-        {
-            try
-            {
-                await BackgroundHostEntry.Client().StopAsync(HostConnectionDeadline,
-                    () => AutoSyncProcess.StopSupervisor(), ct).ConfigureAwait(false);
-            }
-            catch (AutoSyncHostUncertainException)
-            {
-                return (int)SyncCliExitCode.Busy;
-            }
-            ct.ThrowIfCancellationRequested();
-        }
         using var readiness = new AnonymousPipeServerStream(PipeDirection.In, HandleInheritability.Inheritable);
         using var child = AutoSyncProcess.StartEngineDetached(executable, supervisor: true,
             warning: Console.Error.WriteLine, readiness: readiness.ClientSafePipeHandle);
@@ -81,9 +81,9 @@ internal static class EngineHostEntry
     }
 
     /// <summary>Runs the Engine host process: claims the launcher's readiness pipe once, takes the one product
-    /// authority, repairs the startup registration under it, then composes one host, one wake source and the
+    /// authority, admits its metadata footprint, then composes one host, one wake source and the
     /// one-command pipe until an admitted stop drains them. Only this method owns those resources.</summary>
-    internal static async Task<int> RunAsync(CancellationToken ct)
+    internal static async Task<int> RunAsync(CancellationToken ct, Action? stopSupervisor = null)
     {
         using var readiness = AutoSyncProcess.TakeReadinessPipe();
         string productRoot;
@@ -120,12 +120,19 @@ internal static class EngineHostEntry
         }
         try
         {
+            var admission = EngineStartupAdmission.Require(productRoot);
             // One clear attempt per acquired host lifetime; a failed write leaves the host healthy and logged.
             try { AutoSyncProcess.ClearExistingOwnerNotice(AutoSyncProcess.ExistingOwnerNoticePath); }
             catch (Exception noticeError) { AutoSyncLog.Failure(productRoot, noticeError); }
-            // Under the authority: the one-time Engine startup-registration migration.
-            AutoSyncProcess.RepairStartup(Executable(), Console.Error.WriteLine);
-            return await RunOwnedAsync(productRoot, authority.StateAuthority, readiness, ct).ConfigureAwait(false);
+            return await RunOwnedAsync(productRoot, authority.StateAuthority, admission, readiness, ct).ConfigureAwait(false);
+        }
+        catch (EngineStartupRefusedException refusal)
+        {
+            AutoSyncLog.StartupRefused(productRoot, refusal);
+            stopSupervisor ??= () => AutoSyncProcess.StopSupervisor(engine: true);
+            try { stopSupervisor(); }
+            catch (Exception cleanupError) { AutoSyncLog.Failure(productRoot, cleanupError); }
+            return StartupLegacyFootprintRefused;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -163,6 +170,21 @@ internal static class EngineHostEntry
         try { invocation = SyncCliRegistry.Parse(args); }
         catch (SyncCliException) { return null; }
         if (invocation.Kind != SyncCliRequestKind.State) return null;
+        // 1A: the legacy AutoSync start/stop commands run on the current Engine host surface.
+        if (invocation.Command is "autosync start" or "autosync stop")
+        {
+            var start = invocation.Command == "autosync start";
+            string[] currentArgs = invocation.Json
+                ? ["engine", "host", start ? "start" : "stop", "--yes", "--json"]
+                : ["engine", "host", start ? "start" : "stop", "--yes"];
+            var current = await ExecuteOnHostResultAsync(currentArgs, stdout, stderr, ct).ConfigureAwait(false);
+            if (current.ExitCode is { } currentExit) return currentExit;
+            if (start) return await StartHostCommandAsync(currentArgs, stdout, stderr, ct).ConfigureAwait(false);
+            // Only an authoritatively absent Engine permits ending its owned relaunch backoff.
+            AutoSyncProcess.StopSupervisor(engine: true);
+            return (int)SyncCliExitCode.Success;
+        }
+        // #115: the native Dropbox group uses the same verified-host surface.
         var dropbox = DropboxCliCatalog.Owns(invocation.Command);
         if (!dropbox && !EngineCliCatalog.Owns(invocation.Command)) return null;
         var key = dropbox ? (EngineCommandKey?)null : EngineCliCatalog.CommandKey(invocation.Command);
@@ -298,12 +320,12 @@ internal static class EngineHostEntry
         exitCode == (int)SyncCliExitCode.Success ? (int)SyncCliExitCode.Failed : exitCode;
 
     private static async Task<int> RunOwnedAsync(string productRoot, PilotStateAuthority stateAuthority,
-        Stream? readiness, CancellationToken ct)
+        EngineStartupAdmission admission, Stream? readiness, CancellationToken ct)
     {
         // The platform wake source registers its signals in its constructor, before any current-state inspection.
         using var wake = new SystemWakeSource();
         await using var host = EngineHost.Compose(productRoot, IgnoreProgress, stateAuthority,
-            EngineHost.Mode.Persistent);
+            EngineHost.Mode.Persistent, admission);
         using var acceptStop = CancellationTokenSource.CreateLinkedTokenSource(ct, host.Stopping);
         host.BindStopSupervision(() =>
         {
@@ -353,7 +375,12 @@ internal static class EngineHostEntry
         CancellationToken ct)
     {
         var exit = await StartAsync(ct).ConfigureAwait(false);
-        if (exit != (int)SyncCliExitCode.Success) return TranslateStartExit(exit);
+        if (exit != (int)SyncCliExitCode.Success)
+        {
+            if (exit == StartupLegacyFootprintRefused)
+                stderr.WriteLine(EngineStartupAdmission.RefusalMessage);
+            return TranslateStartExit(exit);
+        }
         // The approved start command reports the host it just made ready through the shared renderer.
         return await ExecuteOnHostAsync(args, stdout, stderr, ct).ConfigureAwait(false) ??
             (int)SyncCliExitCode.Failed;
@@ -361,7 +388,7 @@ internal static class EngineHostEntry
 
     private static int TranslateStartExit(int exit) => exit switch
     {
-        StartupReleaseRecoveryRequired => (int)SyncCliExitCode.NeedsReview,
+        StartupReleaseRecoveryRequired or StartupLegacyFootprintRefused => (int)SyncCliExitCode.NeedsReview,
         StartupInvalidDataLocation => (int)SyncCliExitCode.Failed,
         _ => exit,
     };

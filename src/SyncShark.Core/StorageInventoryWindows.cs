@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Security;
 using System.Security.Principal;
 using Microsoft.Win32;
@@ -15,6 +16,58 @@ public sealed record StorageLocalObservation(string Path, bool Directory, string
 // enumeration. Unsupported no-recall enumeration is an incomplete observation, not a retry without flags.
 public static class StorageInventoryWindows
 {
+    internal const string SyncRootManagerPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager";
+
+    internal static string RegistrationProvider(string id) =>
+        id.Contains("dropbox", StringComparison.OrdinalIgnoreCase) ? "Dropbox" :
+        id.Contains('!') && SyncRootRegistrationIdentity.IsProductRegistration(id) ? "Sync Shark" : id.Split('!')[0];
+
+    /// <summary>Strict admission inventory: absent manager is empty, failed observation is never clearance.</summary>
+    public static IReadOnlyList<StorageRootRegistration> ReadOwnedRegistrationsForUser(string userSid)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+        return ReadOwnedRegistrationsForUserWindows(userSid);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static IReadOnlyList<StorageRootRegistration> ReadOwnedRegistrationsForUserWindows(string userSid)
+    {
+        using var manager = Registry.LocalMachine.OpenSubKey(SyncRootManagerPath);
+        return ReadOwnedRegistrationsForUser(userSid, manager?.GetSubKeyNames(), id =>
+        {
+            using var root = manager!.OpenSubKey(id);
+            using var paths = root?.OpenSubKey("UserSyncRoots");
+            return paths?.GetValue(userSid, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+        });
+    }
+
+    internal static IReadOnlyList<StorageRootRegistration> ReadOwnedRegistrationsForUser(string userSid,
+        IEnumerable<string>? registrationIds, Func<string, object?> readMapping)
+    {
+        if (!SyncRootRegistrationIdentity.ValidSid(userSid))
+            throw new EngineStartupRefusedException("startup-user-unavailable", SyncRootManagerPath);
+        var result = new List<StorageRootRegistration>();
+        foreach (var id in registrationIds ?? [])
+        {
+            try
+            {
+                // SID applicability precedes mapping access, including inaccessible other-user keys.
+                if (!SyncRootRegistrationIdentity.IsForUser(id, userSid)) continue;
+                if (readMapping(id) is not string path || !Path.IsPathFullyQualified(path))
+                    throw new EngineStartupRefusedException("startup-registration-invalid", SyncRootManagerPath + "\\" + id);
+                result.Add(new(Path.GetFullPath(path), SyncRootRegistrationIdentity.ProviderId,
+                    nameof(ReadOwnedRegistrationsForUser), id));
+            }
+            catch (EngineStartupRefusedException) { throw; }
+            catch (Exception error) when (error is SecurityException or UnauthorizedAccessException or IOException or
+                InvalidDataException or ArgumentException or NotSupportedException)
+            {
+                throw new EngineStartupRefusedException("startup-registration-invalid", SyncRootManagerPath + "\\" + id, error);
+            }
+        }
+        return result;
+    }
+
     /// <summary>
     /// Reads every SyncRootManager registration for the current user. False means the registry or user identity could
     /// not be inspected (fail closed); an empty true result means there really are no registrations. RegistrationId is
@@ -26,8 +79,7 @@ public static class StorageInventoryWindows
         if (!OperatingSystem.IsWindows()) return false;
         try
         {
-            using var manager = Registry.LocalMachine.OpenSubKey(
-                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager");
+            using var manager = Registry.LocalMachine.OpenSubKey(SyncRootManagerPath);
             var sid = WindowsIdentity.GetCurrent().User?.Value;
             if (manager is null || sid is null) return false;
             var result = new List<StorageRootRegistration>();
@@ -36,8 +88,7 @@ public static class StorageInventoryWindows
                 using var root = manager.OpenSubKey(id); using var paths = root?.OpenSubKey("UserSyncRoots");
                 if (paths?.GetValue(sid, null, RegistryValueOptions.DoNotExpandEnvironmentNames) is not string path ||
                     !Path.IsPathFullyQualified(path)) continue;
-                result.Add(new(Path.GetFullPath(path).TrimEnd('\\'), id.Contains("dropbox", StringComparison.OrdinalIgnoreCase)
-                    ? "Dropbox" : id.StartsWith("Massdex.SyncShark!", StringComparison.Ordinal) ? "Sync Shark" : id.Split('!')[0],
+                result.Add(new(Path.GetFullPath(path).TrimEnd('\\'), RegistrationProvider(id),
                     "Windows SyncRootManager registration; may remain after the provider stops", id));
             }
             roots = result;

@@ -19,13 +19,16 @@ public static partial class NtfsUsnJournal
     private const uint FsctlQueryUsnJournal = 0x000900f4;
     private const uint FileFlagOverlapped = 0x40000000;
     private const uint FileFlagBackupSemantics = 0x02000000;
+    // Windows SDK winioctl.h layouts: USN_JOURNAL_DATA_V2 is 80 bytes (V0 is its first 56), READ_USN_JOURNAL_DATA_V0
+    // is 40 bytes, and USN_RECORD_V2's FileName starts at offset 60.
     private const int JournalStateBufferBytes = 80;
     private const int JournalStateBytes = 56;
     private const int ReadJournalDataBytes = 40;
-    // The existing aggregate-reader window; a full page resumes from the kernel continuation.
-    private const int JournalPageBufferBytes = 1024 * 1024;
-    private const int UsnRecordHeaderBytes = 60;
+    private const int UsnRecordHeaderBytes = V2.NtfsRecordLayout.UsnHeaderBytes;
     private const ushort UsnRecordVersion2 = 2;
+    /// <summary>The smallest page buffer that holds one record: the native continuation USN, then the largest
+    /// USN_RECORD_V2 (its fixed header and a maximum-length NTFS name, padded to the 64-bit record alignment).</summary>
+    public const int MinimumPageBufferBytes = sizeof(ulong) + V2.NtfsRecordLayout.MaximumUsnRecordBytes;
     private const int ErrorInvalidFunction = 1;
     private const int ErrorAccessDenied = 5;
     private const int ErrorInvalidParameter = 87;
@@ -119,7 +122,7 @@ public static partial class NtfsUsnJournal
     /// <returns>The classified page. A nonempty response is <see cref="NtfsUsnPageStatus.More"/> so the caller continues from the consumed boundary; an empty immediate response is <see cref="NtfsUsnPageStatus.Complete"/> so the caller waits instead of re-reading.</returns>
     public static Task<NtfsUsnPage> ReadChangePageAsync(string rootPath, ulong journalId, ulong fromNextUsn,
         ulong? throughNextUsn, bool waitForChange,
-        Action<ulong, ulong, ulong, long, uint, FileAttributes> record, CancellationToken ct)
+        Action<ulong, ulong, ulong, long, uint, FileAttributes> record, int pageBufferBytes, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
         ArgumentNullException.ThrowIfNull(record);
@@ -128,12 +131,12 @@ public static partial class NtfsUsnJournal
         if (waitForChange && throughNextUsn is not null)
             throw new ArgumentException("A finite page does not wait for new records.", nameof(waitForChange));
         if (ct.IsCancellationRequested) return Task.FromCanceled<NtfsUsnPage>(ct);
-        return Task.Run(() => ReadChangePage(rootPath, journalId, fromNextUsn, throughNextUsn, waitForChange, record, ct), ct);
+        return Task.Run(() => ReadChangePage(rootPath, journalId, fromNextUsn, throughNextUsn, waitForChange, record, pageBufferBytes, ct), ct);
     }
 
     private static NtfsUsnPage ReadChangePage(string rootPath, ulong journalId, ulong fromNextUsn,
         ulong? throughNextUsn, bool waitForChange,
-        Action<ulong, ulong, ulong, long, uint, FileAttributes> record, CancellationToken ct)
+        Action<ulong, ulong, ulong, long, uint, FileAttributes> record, int pageBufferBytes, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         if (!OperatingSystem.IsWindows())
@@ -143,7 +146,7 @@ public static partial class NtfsUsnJournal
         using var handle = OpenReadOnlyVolume(volumePath, overlapped: true);
         if (handle.IsInvalid)
             return new NtfsUsnPage(NtfsUsnPageStatus.Unavailable, fromNextUsn, Marshal.GetLastWin32Error());
-        var buffer = ArrayPool<byte>.Shared.Rent(JournalPageBufferBytes);
+        var buffer = ArrayPool<byte>.Shared.Rent(pageBufferBytes);
         try
         {
             var error = ReadPageNative(handle, journalId, fromNextUsn, waitForChange, buffer, out var returned, ct);

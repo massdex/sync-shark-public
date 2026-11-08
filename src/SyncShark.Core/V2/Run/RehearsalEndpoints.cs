@@ -6,7 +6,7 @@ namespace Massdex.SyncShark.V2;
 
 /// <summary>Run-scoped virtual effects over write-denying, read-through endpoints. Only changed paths are retained.</summary>
 internal sealed partial class RehearsalEndpoints(IEndpointProvider real, RehearsalOverlay storage, Action<RehearsalEffect> record,
-    IStateStore? store = null) : IEndpointProvider, IAsyncDisposable
+    V2Settings settings, IStateStore? store = null) : IEndpointProvider, IAsyncDisposable
 {
     private readonly PlanOnlyEndpoints _reads = new(real);
     private readonly ConcurrentDictionary<string, Overlay> _roots = new(StringComparer.Ordinal);
@@ -27,9 +27,9 @@ internal sealed partial class RehearsalEndpoints(IEndpointProvider real, Rehears
     {
         var overlay = _roots.GetOrAdd(root.RootId, _ => root.Provider switch
         {
-            SyncProviders.Local => new LocalOverlay(root, side, storage, record),
-            SyncProviders.Dropbox => new CloudOverlay(root, side, storage, record),
-            _ => new Overlay(root, side, storage, record)
+            SyncProviders.Local => new LocalOverlay(root, side, storage, record, settings.Tunables.RehearsalPageRows),
+            SyncProviders.Dropbox => new CloudOverlay(root, side, storage, record, settings.Tunables.RehearsalPageRows),
+            _ => new Overlay(root, side, storage, record, settings.Tunables.RehearsalPageRows)
         });
         overlay.Reader = _reads.Writer(root);
         overlay.Inventory = _reads.Inventory(root);
@@ -38,7 +38,7 @@ internal sealed partial class RehearsalEndpoints(IEndpointProvider real, Rehears
             var io = new RehearsalGapIo(realGap, storage, store);
             local.GapIo = io;
             if (!_workers.TryGetValue("indexing", out var worker))
-                _workers["indexing"] = worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+                _workers["indexing"] = worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, settings);
             local.GapWorker = worker;
             _indexing ??= new LocalIndexingRuns(store, (target, token) =>
                 _roots[target.RootId].Inventory is LocalInventory inventory
@@ -59,7 +59,7 @@ internal sealed partial class RehearsalEndpoints(IEndpointProvider real, Rehears
     internal static Delta Apply(IInventorySource inventory, Delta delta, Func<string, bool> include, bool echo = false) =>
         inventory is Overlay overlay ? echo ? overlay.Echo(overlay.Apply(delta, include), include) : overlay.Apply(delta, include) : delta;
 
-    private class Overlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record) : IEndpointWriter, IInventorySource, ISourceAbsenceProbe, IRecoveryRecordReader, IRecoveryAvailability
+    private class Overlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record, int pageRows) : IEndpointWriter, IInventorySource, ISourceAbsenceProbe, IRecoveryRecordReader, IRecoveryAvailability
     {
         // A null value is an explicit tombstone, never a cache miss. Keyed to the root entity, not the run/pair.
         private long _acknowledged, _observed;
@@ -243,13 +243,13 @@ internal sealed partial class RehearsalEndpoints(IEndpointProvider real, Rehears
             if (Try(path, out var simulated) && simulated is null) return;
             if (!Try(path, out _) || await Reader.ObserveAsync(path, ct) is not null)
                 await Inventory.ReadSubtreeAsync(path, page => accept(page.Where(item => !Try(item.Path, out _)).ToArray()), ct, progress, reviewedRemoval);
-            foreach (var page in storage.Items(root.RootId, path).Chunk(RehearsalPageRows)) await accept(page);
+            foreach (var page in storage.Items(root.RootId, path).Chunk(pageRows)) await accept(page);
         }
     }
     // Only final endpoint effects are virtual. Capability selection, admission, intent checkpoints,
     // preserve-after-verification and whole-folder result bookkeeping stay in the ordinary Executor.
-    private sealed class LocalOverlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record)
-        : Overlay(root, side, storage, record), ILocalFreeSpaceAdmission, ISyncDirectDownloadTarget
+    private sealed class LocalOverlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record, int pageRows)
+        : Overlay(root, side, storage, record, pageRows), ILocalFreeSpaceAdmission, ISyncDirectDownloadTarget
     {
         public Task<FreeSpaceAdmission> AdmitFreeSpaceAsync(SyncAction action, CancellationToken ct) =>
             ((ILocalFreeSpaceAdmission)Reader).AdmitFreeSpaceAsync(action, ct);
@@ -274,8 +274,8 @@ internal sealed partial class RehearsalEndpoints(IEndpointProvider real, Rehears
                 null, null, null, "not simulated: retained direct-download checkpoint reconciliation"));
     }
 
-    private sealed class CloudOverlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record)
-        : Overlay(root, side, storage, record), ISyncDirectDownloadSource, IFolderTreeDeleter
+    private sealed class CloudOverlay(RootDef root, Side side, RehearsalOverlay storage, Action<RehearsalEffect> record, int pageRows)
+        : Overlay(root, side, storage, record, pageRows), ISyncDirectDownloadSource, IFolderTreeDeleter
     {
         public async Task<SyncDownloadResult> DownloadToAsync(ItemState item, Stream destination, CancellationToken ct)
         {

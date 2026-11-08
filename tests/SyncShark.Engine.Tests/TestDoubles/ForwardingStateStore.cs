@@ -22,8 +22,6 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
         string path, IssueSubject subject) =>
         Inner.ReadItemRetryForSubject(pairId, expectedGeneration, path, subject);
     public virtual long ReadWorkWatermark() => Inner.ReadWorkWatermark();
-    public virtual void SaveImportedPair(PairConfig pair, bool legacyPaused, IEnumerable<SyncedEntry>? baselines = null) =>
-        Inner.SaveImportedPair(pair, legacyPaused, baselines);
     public virtual void MergeDriveEvidence(string pairId, long expectedGeneration, DriveEvidence acquired) =>
         Inner.MergeDriveEvidence(pairId, expectedGeneration, acquired);
     public virtual void ReconcileRootIdentity(string pairId, long expectedGeneration, RootBinding? expectedBinding,

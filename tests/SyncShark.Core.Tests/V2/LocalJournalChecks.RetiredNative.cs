@@ -34,7 +34,7 @@ internal static partial class LocalJournalChecks
                 "production metadata adapter reports the exact retired-ID cause");
         var gaps = (ILocalGapStore)store;
         gaps.BeginGap(root.RootId, checkpoint.Cursor, 100, true);
-        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage);
+        await using var worker = new LocalGapWorker(gaps, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         worker.Discover(root, gaps.GapEpoch(root.RootId)!, default);
         LocalChecks.Require((await io.HashAsync(root, original, default)).Outcome == LocalGapHashOutcome.IdentityChanged,
             "production content adapter classifies cached-ID 87 without a proof");

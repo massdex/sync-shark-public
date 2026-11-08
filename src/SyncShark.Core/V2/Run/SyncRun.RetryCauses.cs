@@ -14,7 +14,7 @@ public sealed partial class SyncRun
     }
 
     private FailureRetryOwner.State ParkedFailureState(SyncRetry? prior, ActionResult? reason, bool suppressAttempt) =>
-        FailureRetryOwner.NotBefore(FailureRetryOwner.ReportedFailure(prior, _time.GetUtcNow(), retainSleeping: true,
+        FailureRetryOwner.NotBefore(FailureRetryOwner.ReportedFailure(_settings, prior, _time.GetUtcNow(), retainSleeping: true,
             countAttempt: !suppressAttempt), reason?.RetryNotBefore);
     internal sealed partial class Tally
     {

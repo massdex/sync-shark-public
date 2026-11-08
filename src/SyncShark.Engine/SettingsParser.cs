@@ -63,8 +63,19 @@ public static class SettingsParser
                 ReadDouble(root, overlay, nameof(EngineSettings.FolderDeleteMinimumPollSeconds)),
             AtomicReplaceAttempts = ReadInt(root, overlay, nameof(EngineSettings.AtomicReplaceAttempts)),
             AtomicReplaceInitialDelayMilliseconds =
-                ReadInt(root, overlay, nameof(EngineSettings.AtomicReplaceInitialDelayMilliseconds))
+                ReadInt(root, overlay, nameof(EngineSettings.AtomicReplaceInitialDelayMilliseconds)),
+            LogReadBufferBytes = ReadInt(root, overlay, nameof(EngineSettings.LogReadBufferBytes)),
+            JournalPageBufferBytes = ReadInt(root, overlay, nameof(EngineSettings.JournalPageBufferBytes))
         };
+    }
+
+    /// <summary>One validated integer setting from the defaults and the user's overrides. Only that name's value
+    /// is parsed, so a read-only view does not depend on unrelated settings being valid.</summary>
+    public static int ReadInt(string defaultsJson, string? userJson, string name)
+    {
+        using var defaults = JsonDocument.Parse(defaultsJson);
+        using var user = UserDocument(userJson);
+        return ReadInt(defaults.RootElement, user?.RootElement, name);
     }
 
     /// <summary>Validates name and value and returns the new user JSON.</summary>
@@ -163,7 +174,9 @@ public static class SettingsParser
     {
         nameof(EngineSettings.AtomicReplaceAttempts) => number > 0 && number <= MaximumAtomicReplaceAttempts,
         nameof(EngineSettings.AtomicReplaceInitialDelayMilliseconds) => number >= 0 && number <= MaximumAtomicReplaceInitialDelayMilliseconds,
+        nameof(EngineSettings.JournalPageBufferBytes) => number >= NtfsUsnJournal.MinimumPageBufferBytes,
         nameof(EngineSettings.InitialLimiterLevel) or nameof(EngineSettings.LogBufferCharacters) or
+            nameof(EngineSettings.LogReadBufferBytes) or
             nameof(EngineSettings.StoragePageSize) or nameof(EngineSettings.StoreBatchRows) => number > 0,
         _ => true
     };

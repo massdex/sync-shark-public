@@ -166,16 +166,9 @@ public sealed partial class DropboxWriter : IEndpointWriter, ISyncTransferResour
         }
     }
 
-    public async Task<IReadOnlyDictionary<string, ItemState?>> ObservePageAsync(IReadOnlyList<string> paths, CancellationToken ct)
-    {
-        var result = new Dictionary<string, ItemState?>(StringComparer.Ordinal);
-        foreach (var page in paths.Chunk(128))
-        {
-            var entries = await _client.ReadMetadataPageAsync(page, ct).ConfigureAwait(false);
-            foreach (var entry in entries) result[entry.Key] = entry.Value is null ? null : DropboxItems.ToItem(entry.Value);
-        }
-        return result;
-    }
+    public Task<IReadOnlyDictionary<string, ItemState?>> ObservePageAsync(IReadOnlyList<string> paths, CancellationToken ct) =>
+        _client.ReadMetadataPagesAsync(paths, _settings.Tunables.MetadataPagePaths,
+            entry => entry is null ? null : DropboxItems.ToItem(entry), ct);
 
     /// <summary>Downloads exactly the requested revision into a delete-on-close spool and returns it positioned at zero.</summary>
     public async Task<Stream> OpenReadAsync(ItemState s, CancellationToken ct)

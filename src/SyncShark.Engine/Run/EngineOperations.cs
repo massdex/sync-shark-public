@@ -13,7 +13,6 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
     int renderWidth = RunLog.HumanWidth)
 {
     private readonly EngineHost? _host;
-    private EngineSettings? _loadedSettings;
 
     internal EngineOperations(string productRoot, Action<string> progress, EngineHost host)
         : this(productRoot, progress) => _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -48,8 +47,10 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
         return store.LastRepair(pairId);
     }, null);
 
-    public int PageTake => (_host?.Settings ?? (_loadedSettings ??= EngineHost.LoadSettings(productRoot)))
-        .StoragePageSize;
+    // Hosted settings have host lifetime; direct operations capture their own current snapshot.
+    private EngineSettings CurrentSettings => _host?.Settings ?? EngineHost.LoadSettings(productRoot);
+
+    public int PageTake => CurrentSettings.StoragePageSize;
     public static IReadOnlyList<string> IgnoreRules(PairConfig pair, bool folderKeep) =>
         folderKeep ? pair.IgnoredFolderKeepRules ?? [] : pair.IgnoreRules;
 
@@ -80,18 +81,6 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
             }, ct).ConfigureAwait(false);
         }, false, ct);
     }
-
-    public Task<(PairConfig Pair, BaselineImportCounts Counts)> ImportPairAsync(string v2PairId, CancellationToken ct) => WithHostAsync(async host =>
-    {
-        using var imported = PairImport.Open(productRoot, v2PairId, host.Settings, host.Store);
-        return await host.ChangeGenerationAsync(imported.Pair, async (transition, store, current, token) =>
-        {
-            token.ThrowIfCancellationRequested();
-            if (current.ContainsKey(imported.Pair.PairId)) throw new EngineRequestException(TextKey.ImportExists);
-            await imported.ImportAsync(store, ct => host.ReadImportRootsAsync(imported.Pair, ct), token).ConfigureAwait(false);
-            return (imported.Pair, imported.Count);
-        }, ct).ConfigureAwait(false);
-    }, false, ct);
 
     public async Task RemovePairAsync(string pairId, CancellationToken ct) =>
         await WithPairHostAsync(pairId, (host, pair) => host.ChangeGenerationAsync(pair,
@@ -175,14 +164,14 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
         var lookupStarted = TimeProvider.System.GetTimestamp();
         progress(RunLog.StageDetail(TextKey.StagePairLookup));
         var pair = ExistingPair(pairId);
-        using var log = OpenLog(pair.PairId,
-            (_host?.Settings ?? EngineHost.LoadSettings(productRoot)).LogBufferCharacters, perFileDetail);
+        var settings = CurrentSettings;
+        using var log = OpenLog(pair.PairId, settings.LogBufferCharacters, perFileDetail);
         log.Event(new RunEvent(RunEventKind.Stage, nameof(TextKey.StagePairLookup), string.Empty,
             RunLog.StageDetail(TextKey.StagePairLookup, ended: true, count: RunLog.CompletedOperation,
                 elapsed: TimeProvider.System.GetElapsedTime(lookupStarted)), nameof(RunEvent.Ended)));
         try
         {
-            return await WithHostAsync(host => RepairCoreAsync(host, pairId, null, ct, log, perFileDetail), false, ct, log)
+            return await WithHostAsync(host => RepairCoreAsync(host, pairId, null, ct, log, perFileDetail), false, ct, log, settings)
                 .ConfigureAwait(false);
         }
         catch (Exception error) { log.Failed(error); throw; }
@@ -373,7 +362,7 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
         {
             CurrentPending current when current.Value.OperationId == operationId => PendingView(current),
             LegacyPending legacy when legacy.RawToken == operationId => PendingView(legacy),
-            _ => FolderView(store, pairId, store.FolderRemoval(pairId, operationId))
+            _ => FolderView(store, pairId, store.FolderRemoval(pairId, operationId), PageTake)
         };
     }, null as RecoveryView) ?? throw Unknown(pairId);
 
@@ -393,15 +382,16 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
                         break;
                 }
             }
+            var pageSize = PageTake;
             var pending = Pending().ToDictionary(value => value.OperationId, StringComparer.Ordinal);
             var folders = store.ActiveFolderRemovals(pairId, CancellationToken.None)
                 .Where(value => afterOperationId is null || string.CompareOrdinal(value.OperationId, afterOperationId) > 0)
-                .OrderBy(value => value.OperationId, StringComparer.Ordinal).Take(PageTake).ToArray();
+                .OrderBy(value => value.OperationId, StringComparer.Ordinal).Take(pageSize).ToArray();
             return pending.Keys.Concat(folders.Select(value => value.OperationId))
                 .Where(id => afterOperationId is null || string.CompareOrdinal(id, afterOperationId) > 0)
-                .OrderBy(id => id, StringComparer.Ordinal).Take(PageTake)
+                .OrderBy(id => id, StringComparer.Ordinal).Take(pageSize)
                 .Select(id => pending.TryGetValue(id, out var value) ? value :
-                    FolderView(store, pairId, folders.First(operation => operation.OperationId == id))).ToArray();
+                    FolderView(store, pairId, folders.First(operation => operation.OperationId == id), pageSize)).ToArray();
         }, []);
 
     private static readonly RecoveryChoice[] PendingChoices =
@@ -415,11 +405,11 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
         _ => throw new InvalidDataException()
     };
 
-    private RecoveryView FolderView(IStateStore store, string pairId, FolderRemovalState operation) => new(operation.OperationId,
+    private static RecoveryView FolderView(IStateStore store, string pairId, FolderRemovalState operation, int pageSize) => new(operation.OperationId,
         operation.Generation, operation.RootEntry.Path, operation.Phase,
         Executor.FolderDeleteRunner.Status(operation.Phase),
         operation.Cause, operation.RetirementDisposition,
-        operation.Active && FolderRetirement.CanAcknowledge(Executor.Recovery.Members(store, pairId, operation.OperationId, PageTake))
+        operation.Active && FolderRetirement.CanAcknowledge(Executor.Recovery.Members(store, pairId, operation.OperationId, pageSize))
             ? [RecoveryChoice.Check, RecoveryChoice.AcceptCurrent] : [RecoveryChoice.Check]);
 
     public RecoveryItemsView RecoveryItems(string pairId, string operationId, long afterOrdinal, int pageSize) =>
@@ -492,6 +482,7 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
     private T Read<T>(Func<IStateStore, T> read, T absent)
     {
         if (_host is not null) return read(_host.Store);
+        _ = EngineStartupAdmission.Require(productRoot);
         using var store = StateStore.OpenReadOnly(DatabasePath);
         return store is null ? absent : read(store);
     }
@@ -505,15 +496,21 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
     }
     private PairConfig ExistingPair(string pairId)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pairId);
         if (_host is not null) return RequirePair(_host.Store, pairId);
+        _ = EngineStartupAdmission.Require(productRoot);
         using var probe = StateStore.OpenReadOnly(DatabasePath) ?? throw Unknown(pairId);
         return probe.Pair(pairId) ?? throw Unknown(pairId);
     }
     private async Task<T> WithHostAsync<T>(Func<EngineHost, Task<T>> operation, bool preview, CancellationToken ct,
-        RunLog? startupLog = null)
+        RunLog? startupLog = null, EngineSettings? settings = null)
     {
         ct.ThrowIfCancellationRequested();
         if (_host is not null) return await operation(_host).ConfigureAwait(false);
+        startupLog?.Event(RunEvent.Stage(TextKey.StageInstanceLock));
+        using var instanceLock = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
+        startupLog?.Event(RunEvent.Stage(TextKey.StageInstanceLock, ended: true, count: RunLog.CompletedOperation));
+        var admission = EngineStartupAdmission.Require(productRoot);
         await using var monitor = preview ? null : new Monitor(TimeProvider.System);
         if (monitor is not null)
         {
@@ -521,11 +518,8 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
                 Text.Get(TextKey.StatusStillQuiet)) == true);
             monitor.Start(quietOnly: true);
         }
-        startupLog?.Event(RunEvent.Stage(TextKey.StageInstanceLock));
-        using var instanceLock = PilotInstanceLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
-        startupLog?.Event(RunEvent.Stage(TextKey.StageInstanceLock, ended: true, count: RunLog.CompletedOperation));
         await using var host = EngineHost.Compose(productRoot, progress, instanceLock.StateAuthority,
-            preview ? EngineHost.Mode.Preview : EngineHost.Mode.Direct, startupLog, monitor);
+            preview ? EngineHost.Mode.Preview : EngineHost.Mode.Direct, admission, startupLog, monitor, settings);
         return await operation(host).ConfigureAwait(false);
     }
     private static (PairConfig Pair, long Generation) Required(
@@ -591,7 +585,8 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
             }
             var block = human.AcceptFileLine(lineNumber, line, wellFormed);
             if (block is not null) progress(block);
-        }, ct, out var unfinished);
+        }, _host?.Settings.LogReadBufferBytes ?? SettingsParser.ReadInt(EngineHost.DefaultsJson(),
+            SettingsFile.Read(productRoot), nameof(EngineSettings.LogReadBufferBytes)), ct, out var unfinished);
         if (status == LogFiles.ReadStatus.NotFound) return new LogView(LogViewStatus.NotFound);
         if (status == LogFiles.ReadStatus.Unreadable) return new LogView(LogViewStatus.Unreadable);
         if (records is null)
