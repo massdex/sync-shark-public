@@ -1,0 +1,12 @@
+{
+  "build": [
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [],
+  "core": [],
+  "ui": [
+    "folder-browser-pagination-contract-all"
+  ]
+}
