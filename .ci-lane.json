@@ -1,0 +1,34 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "syncer",
+    "repair",
+    "resolutions",
+    "dependencies",
+    "strings",
+    "vocabulary",
+    "containment",
+    "containment-move-out",
+    "repair-held",
+    "repair-claims",
+    "released-history",
+    "stale-freshness",
+    "mapped-holds",
+    "safety",
+    "repair-direct",
+    "repair-forgotten",
+    "engine-host",
+    "peer",
+    "live-admission",
+    "engine-operations",
+    "cli"
+  ],
+  "core": [
+    "--cli-checks",
+    "--engine-layout-checks"
+  ],
+  "ui": []
+}
