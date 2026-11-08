@@ -1,0 +1,16 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "renames",
+    "state-store",
+    "local-side",
+    "journal-source"
+  ],
+  "core": [
+    "--ntfs-usn-page-checks"
+  ],
+  "ui": []
+}
