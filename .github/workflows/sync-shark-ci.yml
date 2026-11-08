@@ -26,7 +26,7 @@ env:
   # suite that also needs trailing arguments declares them in SUITE_EXTRA_ARGS.
   SUITE_ROOT_ARGS: >-
     --v2-dropbox-checks --excluded-nested-pair-partition-checks --v2-local-journal-checks
-    --cli-checks --v2-store-gate-checks --v2-root-relist-scoped-checks
+    --cli-checks --cli-surface-checks --v2-store-gate-checks --v2-root-relist-scoped-checks
     --corresponding-included-overlap-checks --quarantine-checks --v2-resumelist-checks
     --v2-planning-protection-checks --v2-interrupted-delete-checks --v2-gap-checks
     --v2-snapshot-million-memory-checks --v2-storage-checks --fod-storage-checks
