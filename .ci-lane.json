@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "syncer",
+    "stale-freshness",
+    "local"
+  ],
+  "core": [],
+  "ui": []
+}
