@@ -139,7 +139,7 @@ public sealed partial class SyncRun
     {
         if (old?.Kind == "decision") return;
         // The evidence probe owns restored-row counting; the shared owner preserves that counter.
-        var retry = FailureRetryOwner.SaveFailedRetry(_store, pair.PairId, path, reason, old, _time.GetUtcNow(),
+        var retry = FailureRetryOwner.SaveFailedRetry(_settings, _store, pair.PairId, path, reason, old, _time.GetUtcNow(),
             failure?.FailureKind, failure?.RetryNotBefore, countAttempt);
         var attempts = retry.Attempts;
         // A frozen conflict successor owns its dedicated Retry-only explanation from its first failure, however

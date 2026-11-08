@@ -122,7 +122,7 @@ internal static class FilesOnDemandNativePointerChecks
         var refreshBefore = store.StoragePointerFor(pair.A.RootId, objectId, pair.B.RootId);
         var target = new StorageNotice(pair.A.RootId, objectId, pair.B.RootId, "settlement",
             StorageNotices.ReceiptScope(queued!.Remote.Id, queued!.Remote.Revision, queued!.Remote.ContentHash));
-        using (var lifetime = new CloudFilesLifetime((_, _, _) => createProvider(), _ => true, store,
+        using (var lifetime = new CloudFilesLifetime((_, _, _) => createProvider(), _ => true, V2Settings.Default, store,
                    (_, _, _) => Task.FromResult<PilotRemoteEntry?>(current)))
         {
             await using (var service = new StorageSettlementService(store, lifetime, target: target))
@@ -210,7 +210,7 @@ internal static class FilesOnDemandNativePointerChecks
             var refreshBefore = store.StoragePointerFor(pair.A.RootId, pointer.ObjectId, pair.B.RootId);
             var target = new StorageNotice(pair.A.RootId, pointer.ObjectId, pair.B.RootId, "settlement",
                 StorageNotices.ReceiptScope(acknowledgment!.Remote.Id, acknowledgment!.Remote.Revision, acknowledgment!.Remote.ContentHash));
-            using (var lifetime = new CloudFilesLifetime((_, _, _) => createProvider(), _ => true, store,
+            using (var lifetime = new CloudFilesLifetime((_, _, _) => createProvider(), _ => true, V2Settings.Default, store,
                        (_, _, _) => Task.FromResult<PilotRemoteEntry?>(movedReceipt)))
             {
                 await using (var service = new StorageSettlementService(store, lifetime, target: target))

@@ -22,6 +22,7 @@ if (-not $Arguments) {
         'window-close-contract' { 'none' }
         'pair-failure-presentation-checks' { 'none' }
         'tray-client-checks' { 'none' }
+        'engine-startup-readiness-checks' { 'none' }
         'mixed-file-retry-ui-checks' { 'assembly' }
         default { 'root' }
     }

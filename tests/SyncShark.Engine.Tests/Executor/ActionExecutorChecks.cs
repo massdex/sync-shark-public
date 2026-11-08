@@ -2246,7 +2246,6 @@ public static class ActionExecutorChecks
         public void CompleteRecomposition(string pairId, long expectedGeneration, long localEpoch, long dropboxEpoch,
             long localRevision, long dropboxRevision, Massdex.SyncShark.V2.FailureRetryOwner.State expected) =>
             throw new NotSupportedException();
-        public void SaveImportedPair(PairConfig pair, bool legacyPaused, IEnumerable<SyncedEntry>? baselines = null) => throw new NotSupportedException();
         public void MergeDriveEvidence(string pairId, long expectedGeneration, DriveEvidence acquired) =>
             throw new NotSupportedException();
         public void ReconcileRootIdentity(string pairId, long expectedGeneration, RootBinding? expectedBinding,
@@ -2498,7 +2497,7 @@ public static class ActionExecutorChecks
             Store.SavePair(Pair);
             Recovery.Hash = Local.ContentHashAsync;
             var settings = new EngineSettings("{name} ({side} {time}){ext}", "yyyyMMddHHmmss", "Local", "Dropbox",
-                ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows);
+                ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
             Context = new ExecutorContext(
                 Local: Local, Dropbox: Dropbox, Recovery: Recovery, Store: Store, Pair: Pair,
                 Scope: new PathScope(Pair, [Pair]), Settings: settings, Runtime: new ReplaceTurn(),

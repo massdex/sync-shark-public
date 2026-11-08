@@ -28,7 +28,7 @@ internal static partial class LocalJournalChecks
         var io = new LocalGapIo(store, V2Settings.Default, new HashSet<string>(), () => true, clock);
         inventory.GapIo = io;
         inventory.VerificationElapsedForTest = () => TimeSpan.Zero;
-        await using var gaps = new LocalGapWorker(store, io, StorageFailureClassifier.IsStateDamage);
+        await using var gaps = new LocalGapWorker(store, io, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
         await using var indexing = new LocalIndexingRuns(store, (_, ct) => inventory.VerifyIndexingPassAsync(ct), gaps, io);
         store.SavePair(pair with { Enabled = false });
         LocalChecks.Require(await indexing.RunAsync(def, default) == "paused" &&
@@ -47,8 +47,8 @@ internal static partial class LocalJournalChecks
         var proofs = await inventory.HashAsync(["bulk.txt", "edited.txt"], default);
         LocalChecks.Require(proofs.ContainsKey("edited.txt") && !proofs.ContainsKey("bulk.txt"),
             "foreground proof shares urgent classification and retains bulk idle gate");
-        var budget = new VerificationBudget(() => TimeSpan.Zero);
-        for (var i = 0; i < SqliteStateStore.UrgentHashCap; i++)
+        var budget = new VerificationBudget(V2Tunables.Default.UrgentHashCap, () => TimeSpan.Zero);
+        for (var i = 0; i < V2Tunables.Default.UrgentHashCap; i++)
             LocalChecks.Require(budget.AdmitUrgent(true), "urgent admission fits existing cap");
         LocalChecks.Require(!budget.AdmitUrgent(true) && !budget.AdmitUrgent(false), "urgent cap cannot be exceeded across proof pages");
     }

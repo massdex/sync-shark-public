@@ -44,16 +44,16 @@ internal sealed partial class PairLoop
 
     // Immediate re-run only on actual drain: the queue fell by at least one admitted page of entities. A partial
     // page, a held page, an admission, or a first report with no previous count waits for the normal schedule.
-    private static bool DrainedPlanning(RunReport report, RunReport? previous) =>
+    private bool DrainedPlanning(RunReport report, RunReport? previous) =>
         report.PlanningBacklog > 0 && previous is { PlanningBacklog: > 0 } prior &&
-        (long)prior.PlanningBacklog - report.PlanningBacklog >= SqliteStateStore.DeferredIntakeEntityCap;
+        (long)prior.PlanningBacklog - report.PlanningBacklog >= _in.Settings.Tunables.DeferredIntakeEntityCap;
 
     private void ScheduleRetry()
     {
         _deferredRetry = false;
         var now = _in.Time.GetUtcNow();
         var state = FailureRetryOwner.RunFailureState(_in.Store, _pairId);
-        _retryAt = state?.RetryAfter ?? FailureRetryOwner.Failed(0, now).RetryAfter;
+        _retryAt = state?.RetryAfter ?? FailureRetryOwner.Failed(_in.Settings, 0, now).RetryAfter;
     }
 
     // A deferred-only report is not a failure: wake when the earliest retained item retry is due, bounded by the
@@ -64,7 +64,7 @@ internal sealed partial class PairLoop
         _deferredRetry = true;
         var now = _in.Time.GetUtcNow();
         var floor = now + _in.Settings.MinSafetyPoll;
-        var ceiling = now + TimeSpan.FromSeconds(FailureRetryOwner.MaximumRetrySeconds);
+        var ceiling = now + _in.Settings.Tunables.RetryMaximumDelay;
         var deadline = _in.Store.EarliestSyncRetryAfter(_pairId) ?? ceiling;
         if (deadline < floor) deadline = floor;
         if (deadline > ceiling) deadline = ceiling;
@@ -75,7 +75,7 @@ internal sealed partial class PairLoop
             RunLog.Trace($"Deferred retry: progress reset; retryAt={deadline:O}; deferred={report.Deferred}; evidence={report.DeletionEvidencePending.Count}");
             return;
         }
-        var state = FailureRetryOwner.Failed(FailureRetryOwner.DeferredRetryState(_in.Store, _pairId)?.Attempts ?? 0, now);
+        var state = FailureRetryOwner.Failed(_in.Settings, FailureRetryOwner.DeferredRetryState(_in.Store, _pairId)?.Attempts ?? 0, now);
         FailureRetryOwner.RecordDeferredRetry(_in.Store, _pairId, Math.Max(report.Deferred, report.DeletionEvidencePending.Count), state);
         // No earlier than the shared tier and never before an item could actually be due.
         if (state.RetryAfter > deadline) deadline = state.RetryAfter;

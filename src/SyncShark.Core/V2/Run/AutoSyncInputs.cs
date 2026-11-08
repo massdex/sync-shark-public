@@ -4,6 +4,9 @@ namespace Massdex.SyncShark.V2;
 internal sealed record AutoSyncInputs(IStateStore Store, ISyncRun Run, IChangeWatchSource Watches, V2Settings Settings,
     Func<PairDef, bool> Paused, Func<TimeSpan> SafetyPoll, TimeProvider Time, Action<PairAutoState> Publish)
 {
+    private readonly V2Settings _settings = Settings.Validated();
+    public V2Settings Settings { get => _settings; init => _settings = value.Validated(); }
+
     internal Func<string, string, IDisposable>? BeginRunLog { get; init; }
 
     /// <summary>Publishes one pair's latest in-memory progress to the status surface.</summary>

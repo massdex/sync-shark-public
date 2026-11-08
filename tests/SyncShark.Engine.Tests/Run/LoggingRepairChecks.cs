@@ -542,7 +542,8 @@ internal static class LoggingRepairChecks
             if (message.Contains(Text.Get(TextKey.StageStore)) && message.Contains("Complete"))
                 throw new IOException("synthetic subscriber failure");
         }, rig.Host.Settings.LogBufferCharacters);
-        await using (var host = EngineHost.Compose(root, _ => { }, rig.Host.Authority, EngineHost.Mode.Direct, log))
+        await using (var host = EngineHost.Compose(root, _ => { }, rig.Host.Authority, EngineHost.Mode.Direct,
+            EngineStartupAdmission.Require(root), log))
             Check.Require(log.HasFailed && !host.Store.Pairs().Any(),
                 "store-complete subscriber failure returns a usable host instead of orphaning it");
         using var database = File.Open(Massdex.SyncShark.Engine.Storage.StateStore.DatabasePath(root), FileMode.Open,

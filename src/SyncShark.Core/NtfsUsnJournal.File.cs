@@ -25,24 +25,8 @@ public static partial class NtfsUsnJournal
         CreateFile(Path.GetPathRoot(Path.GetFullPath(path))!, 0x80,
             FileShare.Read | FileShare.Write | FileShare.Delete, IntPtr.Zero, OpenExisting, 0x02000000, IntPtr.Zero);
 
-    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 24)]
-    private struct GapFileId
-    {
-        [System.Runtime.InteropServices.FieldOffset(0)] public uint Size;
-        [System.Runtime.InteropServices.FieldOffset(4)] public uint Type;
-        [System.Runtime.InteropServices.FieldOffset(8)] public ulong Id;
-    }
-
-    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
-    private static extern SafeFileHandle OpenFileById(SafeFileHandle volume, ref GapFileId id,
-        uint access, FileShare share, IntPtr security, uint flags);
-
-    internal static SafeFileHandle OpenGapMetadata(SafeFileHandle volume, ulong fileId)
-    {
-        var id = new GapFileId { Size = 24, Type = 0, Id = fileId };
-        return OpenFileById(volume, ref id, 0x80, FileShare.Read | FileShare.Write | FileShare.Delete,
-            IntPtr.Zero, 0x00200000);
-    }
+    internal static SafeFileHandle OpenGapMetadata(SafeFileHandle volume, ulong fileId) =>
+        NtfsIdentityPaths.OpenById(volume, fileId, 0x80, 0x00200000);
 
     internal static SafeFileHandle OpenGapMetadata(string path) =>
         CreateFile(path, 0x80, FileShare.Read | FileShare.Write | FileShare.Delete,
@@ -50,9 +34,7 @@ public static partial class NtfsUsnJournal
 
     internal static SafeFileHandle OpenGapContent(SafeFileHandle volume, ulong fileId)
     {
-        var id = new GapFileId { Size = 24, Type = 0, Id = fileId };
-        var handle = OpenFileById(volume, ref id, GenericRead, FileShare.Read | FileShare.Write | FileShare.Delete,
-            IntPtr.Zero, 0x00200000 | 0x08000000);
+        var handle = NtfsIdentityPaths.OpenById(volume, fileId, GenericRead, 0x00200000 | 0x08000000);
         if (!handle.IsInvalid)
         {
             var priority = 0;

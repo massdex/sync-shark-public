@@ -3,7 +3,8 @@ using System.Collections.Concurrent;
 namespace Massdex.SyncShark.V2;
 
 /// <summary>Composition-owned, root-deduplicated background work. Never joined by planning.</summary>
-internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<Exception, bool> isStateDamage) : IAsyncDisposable
+internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo io, Func<Exception, bool> isStateDamage,
+    V2Settings settings) : IAsyncDisposable
 {
     private readonly Func<Exception, bool> _isStateDamage = isStateDamage ?? throw new ArgumentNullException(nameof(isStateDamage));
     private readonly object _gate = new();
@@ -188,7 +189,7 @@ internal sealed partial class LocalGapWorker(ILocalGapStore store, ILocalGapIo i
 
     internal async Task<bool> HashPage(RootDef root, LocalGapEpoch epoch, CancellationToken ct)
     {
-        var page = store.GapHashWorkPage(root.RootId, epoch, 16, includeBulk: !io.Paused);
+        var page = store.GapHashWorkPage(root.RootId, epoch, settings.Tunables.LocalGapHashPageRows, includeBulk: !io.Paused);
         if (page.Count == 0) return false;
         using var proofPass = io.BeginProofPass(root, page.Select(row => row.Item).ToArray());
         using var availability = io.OpenProbes(root);

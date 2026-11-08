@@ -10,6 +10,7 @@ internal static partial class RunChecks
     public static async Task RunAsync()
     {
         var failures = new List<string>();
+        await Group(nameof(TunableSettingsChecks.Run), () => { TunableSettingsChecks.Run(); return Task.CompletedTask; }, failures);
         await Group(nameof(UrgentUndecidableKeepsRetryOwnerAsync), UrgentUndecidableKeepsRetryOwnerAsync, failures);
         await Group(nameof(ReconciliationExactLocalDeletionAsync), ReconciliationExactLocalDeletionAsync, failures);
         await Group(nameof(DropboxChecks.ReconciliationExactFolderRetryAsync), DropboxChecks.ReconciliationExactFolderRetryAsync, failures);

@@ -289,7 +289,7 @@ public sealed partial class SyncRun
             existing = existing with { ConflictOperation = operation with
                 { Completed = operation.Completed.Append("as-copy").Distinct(StringComparer.Ordinal).ToArray() } };
         var protects = existing?.ConflictOperation?.Actions.Any(IsRecoveryRestoreIntent) == true;
-        var failure = FailureRetryOwner.Failed(existing?.FailureRetry?.Attempts ?? 0, _time.GetUtcNow());
+        var failure = FailureRetryOwner.Failed(_settings, existing?.FailureRetry?.Attempts ?? 0, _time.GetUtcNow());
         _store.AddNotices([existing is not null ? existing with { Detail = detail,
                 Kind = protects ? NoticeKind.UserDecision : NoticeKind.Info, FailureRetry = failure, CauseKey = detail } :
             new Notice(record.PairId, 0, NoticeKind.Info, destination ?? record.Path, detail,
@@ -430,7 +430,7 @@ public sealed partial class SyncRun
                 var reason = error.Message.TrimEnd();
                 var separator = reason.EndsWith('.') || reason.EndsWith('!') || reason.EndsWith('?') ? " " : ". ";
                 _store.AddNotices([notice with {
-                    FailureRetry = FailureRetryOwner.Failed(notice.FailureRetry?.Attempts ?? 0, _time.GetUtcNow()),
+                    FailureRetry = FailureRetryOwner.Failed(_settings, notice.FailureRetry?.Attempts ?? 0, _time.GetUtcNow()),
                     CauseKey = reason, Detail = "Restore verification failed: " + reason + separator +
                     (protects ? "Retry or Ignore; the frozen restore remains protected."
                         : "Retry after fixing the cause, or Dismiss. This actionless notice does not protect the path.") }]);

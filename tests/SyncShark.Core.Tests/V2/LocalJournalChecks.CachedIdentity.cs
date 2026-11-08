@@ -26,7 +26,7 @@ internal static partial class LocalJournalChecks
             var gaps = (ILocalGapStore)store;
             gaps.BeginGap(root.RootId, cursor, 100, true);
             var clock = new LocalChecks.FixedClock(DateTimeOffset.UnixEpoch);
-            await using var worker = new LocalGapWorker(gaps, new RetiredIdProbe { Time = clock }, StorageFailureClassifier.IsStateDamage);
+            await using var worker = new LocalGapWorker(gaps, new RetiredIdProbe { Time = clock }, StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             worker.Discover(root, gaps.GapEpoch(root.RootId)!, default);
             LocalChecks.Require(store.OpenNotices(pair.PairId).Count == 0 &&
                 store.SyncRetryAt(pair.PairId, original.Path) is { } retry && CachedIdentityRefresh.Pending(retry),
@@ -35,7 +35,7 @@ internal static partial class LocalJournalChecks
                 "discovery forwards the injected indexing clock to quiet retry admission");
             LocalChecks.Require(gaps.HasGapProtection(root.RootId) && store.ByObject(root.RootId, original.ObjectId) is not null,
                 "error 87 neither verifies nor removes the old entity");
-            await using (var hashWorker = new LocalGapWorker(gaps, new ChangedIdentityHash(), StorageFailureClassifier.IsStateDamage))
+            await using (var hashWorker = new LocalGapWorker(gaps, new ChangedIdentityHash(), StorageFailureClassifier.IsStateDamage, V2Settings.Default))
                 await hashWorker.HashPage(root, gaps.GapEpoch(root.RootId)!, default);
             LocalChecks.Require(store.OpenNotices(pair.PairId).Count == 0 && gaps.HasGapProtection(root.RootId),
                 "content identity change is not a successful proof or an indexing failure");

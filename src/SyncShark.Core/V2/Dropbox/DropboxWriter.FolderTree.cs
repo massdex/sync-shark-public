@@ -214,7 +214,7 @@ public sealed partial class DropboxWriter
                 }, async path =>
                 {
                     started.Remove(path);
-                    var failure = FailureRetryOwner.Failed(attempts.GetValueOrDefault(path), DateTimeOffset.UtcNow);
+                    var failure = FailureRetryOwner.Failed(_settings, attempts.GetValueOrDefault(path), DateTimeOffset.UtcNow);
                     attempts[path] = failure.Attempts;
                     retryAfter[path] = failure.RetryAfter;
                     recovery = recovery with { RestoreStarted = started, RestorePending = null,

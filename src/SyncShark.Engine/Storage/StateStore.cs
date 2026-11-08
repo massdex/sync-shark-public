@@ -61,25 +61,6 @@ public sealed class StateStore : IStateStore
     }
 
     /// <inheritdoc />
-    public void SaveImportedPair(PairConfig pair, bool legacyPaused, IEnumerable<SyncedEntry>? baselines = null) => Write(() =>
-    {
-        ArgumentNullException.ThrowIfNull(pair);
-        if (pair.Roots is not null || legacyPaused && pair.Enabled)
-            throw new ArgumentException(null, nameof(pair));
-        using var transaction = _connection.BeginTransaction();
-        RequireOne(Execute(_connection, transaction, StateSchema.InsertPair,
-            (StateSchema.ParamPair, pair.PairId), (StateSchema.ParamDef, JsonSerializer.Serialize(pair, PairEncoding))));
-        _changes.SeedPairSources(transaction, pair.PairId);
-        if (baselines is not null)
-            foreach (var entry in baselines)
-                StateCommitter.Insert(_connection, transaction, pair.PairId, entry, null);
-        if (legacyPaused)
-            IssueTable.Raise(_connection, transaction, pair.PairId, IssueKind.Info, TextKey.InfoPairPausedInOldApp,
-                string.Empty, new IssueSubject([], null), DateTimeOffset.UtcNow);
-        transaction.Commit();
-    });
-
-    /// <inheritdoc />
     public void MergeDriveEvidence(string pairId, long expectedGeneration, DriveEvidence acquired) => Write(() =>
     {
         ArgumentNullException.ThrowIfNull(acquired);

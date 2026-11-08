@@ -5,4 +5,9 @@ namespace Massdex.SyncShark.Engine.Tests;
 internal static class ScanTestSettings
 {
     public const int BatchRows = 20_000;
+
+    /// <summary>The shipped log-view read chunk and USN journal page, encoded once for checks that build
+    /// EngineSettings directly instead of loading engine-settings.json.</summary>
+    public const int LogReadBufferBytes = 4_096;
+    public const int JournalPageBufferBytes = 1024 * 1024;
 }

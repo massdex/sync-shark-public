@@ -28,6 +28,9 @@ public static class EngineOperationsChecks
             SettingsComposition(root);
             SettingsWriteOrder(root);
             SettingsPublicationOnly(root);
+            SettingsSnapshotFollowsWrites(root);
+            LogViewIgnoresUnrelatedSettings(root);
+            StartupAdmission(root);
             MissingDatabase(root);
             PairLifecycle(root);
             DriveDecisionRepairRefusal(root);
@@ -53,6 +56,56 @@ public static class EngineOperationsChecks
         {
             try { Directory.Delete(root, recursive: true); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    private static void StartupAdmission(string root)
+    {
+        var productRoot = Path.Combine(root, "admission");
+        var legacy = Path.Combine(productRoot, "v2", "state.db-wal");
+        Directory.CreateDirectory(Path.GetDirectoryName(legacy)!);
+        File.WriteAllText(legacy, "fixture");
+        var operations = new EngineOperations(productRoot, _ => { });
+        Action[] acquisitions =
+        [
+            () => operations.ListPairs(),
+            () => operations.RepairAsync("pair-a", CancellationToken.None).GetAwaiter().GetResult(),
+            () => operations.RemovePairAsync("pair-a", CancellationToken.None).GetAwaiter().GetResult(),
+            () => operations.AddPairAsync("Pair A", productRoot, "/Pair", "account", null,
+                CancellationToken.None).GetAwaiter().GetResult()
+        ];
+        foreach (var acquire in acquisitions)
+        {
+            try { acquire(); throw new InvalidOperationException("legacy footprint was admitted"); }
+            catch (EngineStartupRefusedException refusal)
+            {
+                Check.Require(refusal.ReasonKey == "startup-legacy-store", "each acquisition uses the typed gate");
+            }
+            Check.Require(!File.Exists(StateStore.DatabasePath(productRoot)),
+                "refusal precedes current state creation, including missing-state reads");
+        }
+        File.Delete(legacy);
+        Check.Require(operations.ListPairs().Count == 0, "a fresh read retries admission after remediation");
+        using var instance = AcquireIsolated(productRoot);
+        var admission = EngineStartupAdmission.Require(productRoot);
+        var wrongRoot = Path.Combine(productRoot, "other");
+        try
+        {
+            _ = EngineHost.Compose(wrongRoot, _ => { }, instance.StateAuthority, EngineHost.Mode.Direct, admission);
+            throw new InvalidOperationException("cross-root admission accepted");
+        }
+        catch (EngineStartupRefusedException) { }
+        Check.Require(!Directory.Exists(wrongRoot), "Compose rejects the wrong root before creating resources");
+        var host = EngineHost.Compose(productRoot, _ => { }, instance.StateAuthority, EngineHost.Mode.Direct, admission);
+        try
+        {
+            File.WriteAllText(legacy, "fixture");
+            Check.Require(host.Operations.ListPairs().Count == 0, "host-bound reads reuse their admitted lifetime");
+        }
+        finally
+        {
+            File.Delete(legacy);
+            host.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }
 
@@ -153,7 +206,7 @@ public static class EngineOperationsChecks
     {
         var operations = new EngineOperations(root, _ => { });
         var settings = operations.Settings();
-        Check.Require(settings.Count == 21, "the settings list holds every EngineSettings value");
+        Check.Require(settings.Count == 23, "the settings list holds every EngineSettings value");
         Check.Require(Value(settings, "DefaultFirstRunPolicy") == FirstRunPolicy.NewestWins.ToString(),
             "the embedded defaults are listed");
         Check.Require(!Overridden(settings, "DefaultFirstRunPolicy"), "an untouched value is not overridden");
@@ -219,6 +272,42 @@ public static class EngineOperationsChecks
             "a settings edit neither opens nor creates the engine database");
         Check.Require(!Directory.Exists(Path.Combine(productRoot, ResourceNames.EngineFolder, ResourceNames.LogsFolder)),
             "a settings edit opens no run log");
+    }
+
+    // Direct operations see the next published snapshot, including other writers; refused writes change nothing.
+    private static void SettingsSnapshotFollowsWrites(string root)
+    {
+        var productRoot = Path.Combine(root, "settings-snapshot");
+        var operations = new EngineOperations(productRoot, _ => { });
+        var shipped = operations.PageTake;
+        var next = (shipped + 1).ToString(CultureInfo.InvariantCulture);
+        operations.SetSetting(nameof(EngineSettings.StoragePageSize), next);
+        Check.Require(operations.PageTake == shipped + 1, "the next operation sees the written setting");
+        var refused = false;
+        try { operations.SetSetting(nameof(EngineSettings.StoragePageSize), "0"); }
+        catch (InvalidDataException) { refused = true; }
+        Check.Require(refused && operations.PageTake == shipped + 1, "a refused write installs no uncommitted value");
+        new EngineOperations(productRoot, _ => { }).SetSetting(nameof(EngineSettings.StoragePageSize),
+            (shipped + 2).ToString(CultureInfo.InvariantCulture));
+        Check.Require(operations.PageTake == shipped + 2,
+            "the next direct operation sees settings published by another operations object");
+        SettingsFile.Write(productRoot, "{\"StoragePageSize\":" + (shipped + 3).ToString(CultureInfo.InvariantCulture) + "}", ImmediatePolicy);
+        Check.Require(operations.PageTake == shipped + 3, "an external edit is visible at the next operation boundary");
+    }
+
+    // R3-05: an invalid value for an unrelated setting does not stop a stored log, or its absence, being inspected.
+    private static void LogViewIgnoresUnrelatedSettings(string root)
+    {
+        var productRoot = Path.Combine(root, "log-view-settings");
+        SettingsFile.Write(productRoot, "{ \"LogRetentionDays\": \"many\" }", ImmediatePolicy);
+        var logs = Path.Combine(productRoot, ResourceNames.EngineFolder, ResourceNames.LogsFolder);
+        Directory.CreateDirectory(logs);
+        File.WriteAllText(Path.Combine(logs, "pair" + ResourceNames.LogNameSeparator + "run" + ResourceNames.LogExtension), "line\n");
+        var operations = new EngineOperations(productRoot, _ => { });
+        Check.Require(operations.ReadLogView("pair", "run", false, true, CancellationToken.None).Status == LogViewStatus.Found,
+            "an existing log is read despite an unrelated invalid setting");
+        Check.Require(operations.ReadLogView("pair", "absent", false, true, CancellationToken.None).Status == LogViewStatus.NotFound,
+            "an absent log is reported despite an unrelated invalid setting");
     }
 
     private static void MissingDatabase(string root)
@@ -362,8 +451,6 @@ public static class EngineOperationsChecks
             "a backslash Dropbox root is refused");
         Check.Require(operations.ListPairs().Count == 1, "a refused add saves nothing");
 
-        Check.Require(Refused(() => operations.ImportPairAsync("v2-missing", CancellationToken.None)
-            .GetAwaiter().GetResult()), "a missing v2 pair is refused");
         Check.Require(Refused(() => operations.RepairAsync("other", CancellationToken.None).GetAwaiter().GetResult()),
             "repairing an unknown pair is refused");
         Check.Require(Refused(() => operations.ResolveAsync("other", 1, ResolutionChoice.Dismiss, null,
@@ -885,7 +972,8 @@ public static class EngineOperationsChecks
         var productRoot = Path.Combine(root, "transport-construction");
         using var instanceLock = AcquireIsolated(productRoot);
         var authority = instanceLock.StateAuthority;
-        var production = EngineHost.Compose(productRoot, _ => { }, authority, EngineHost.Mode.Direct);
+        var production = EngineHost.Compose(productRoot, _ => { }, authority, EngineHost.Mode.Direct,
+            EngineStartupAdmission.Require(productRoot));
         try
         {
             var ordinary = production.Http;

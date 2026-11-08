@@ -128,13 +128,13 @@ internal static partial class RunChecks
         var expected = new[] { 10, 20, 40, 80, 160, 300, 300 };
         for (var attempt = 0; attempt < expected.Length; attempt++)
         {
-            var state = FailureRetryOwner.Failed(attempt, now);
+            var state = FailureRetryOwner.Failed(V2Settings.Default, attempt, now);
             Require(state.Attempts == attempt + 1 && state.RetryAfter == now.AddSeconds(expected[attempt]),
                 "shared failure owner preserves the ten-second exponential policy capped at five minutes");
         }
-        Require(FailureRetryOwner.Failed(int.MaxValue, now) == new FailureRetryOwner.State(int.MaxValue, now.AddSeconds(300)),
+        Require(FailureRetryOwner.Failed(V2Settings.Default, int.MaxValue, now) == new FailureRetryOwner.State(int.MaxValue, now.AddSeconds(300)),
             "long-lived failures saturate their durable count rather than overflowing into immediate retries");
-        Require(FailureRetryOwner.Failed(2, now, countAttempt: false).Attempts == 2,
+        Require(FailureRetryOwner.Failed(V2Settings.Default, 2, now, countAttempt: false).Attempts == 2,
             "restored evidence has one attempt owner, never a second counter increment");
         var root = Path.Combine(Path.GetTempPath(), "failure-owner-" + Guid.NewGuid().ToString("N"));
         string pairId;
@@ -151,7 +151,7 @@ internal static partial class RunChecks
             }
             Require(store.SyncRetryAt(pairId, "failures/299.txt") is { Attempts: 0, LastError: "cause-299" },
                 "every result retains its own cause beyond bounded display samples without counting twice");
-            var retry = FailureRetryOwner.SaveFailedRetry(store, pairId, "item.txt", "locked", null, now);
+            var retry = FailureRetryOwner.SaveFailedRetry(V2Settings.Default, store, pairId, "item.txt", "locked", null, now);
             Require(retry.Attempts == 1, "first failure belongs to the entity's durable row");
             var pending = FailureRetryOwner.RetryNotice(pairId, "item.txt", "locked");
             typeof(SyncRun).GetMethod("SavePendingNoticeFailure", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
@@ -161,8 +161,8 @@ internal static partial class RunChecks
                 "failed notice delivery advances only its nested attempt, preserving file deadline and count");
             var decision = new SyncRetry("", "decision", 7, "review required", DateTimeOffset.MaxValue);
             store.SaveSyncRetry(pairId, decision);
-            FailureRetryOwner.RecordRunFailure(store, pairId, new IOException("run bookkeeping unavailable"), now, isStateDamage: StorageFailureClassifier.IsStateDamage);
-            FailureRetryOwner.RecordRunFailure(store, pairId, new IOException("run bookkeeping unavailable"), now.AddMinutes(1), isStateDamage: StorageFailureClassifier.IsStateDamage);
+            FailureRetryOwner.RecordRunFailure(V2Settings.Default, store, pairId, new IOException("run bookkeeping unavailable"), now, isStateDamage: StorageFailureClassifier.IsStateDamage);
+            FailureRetryOwner.RecordRunFailure(V2Settings.Default, store, pairId, new IOException("run bookkeeping unavailable"), now.AddMinutes(1), isStateDamage: StorageFailureClassifier.IsStateDamage);
             Require(store.SyncRetryAt(pairId, "") == decision &&
                 store.OpenNotices(pairId).Count(notice => notice.ReasonKey == "run-unavailable") == 1 &&
                 FailureRetryOwner.RunFailureState(store, pairId) is { Attempts: 2 },
@@ -181,7 +181,7 @@ internal static partial class RunChecks
             var old = store.SyncRetryAt(pairId, "item.txt");
             Require(old is { Attempts: 1, PendingNotice: { DeliveryRetry: { Attempts: 1 } } } && old.RetryAfter == now.AddSeconds(10),
                 "file failure count/deadline and independent pending-notice delivery debt survive cold reopen");
-            var retry = FailureRetryOwner.SaveFailedRetry(store, pairId, "item.txt", "still locked", old, now);
+            var retry = FailureRetryOwner.SaveFailedRetry(V2Settings.Default, store, pairId, "item.txt", "still locked", old, now);
             Require(retry.Attempts == 2 && retry.RetryAfter == now.AddSeconds(20),
                 "cold retry advances the same entity counter");
             store.ClearSyncRetry(pairId, ""); // End this fixture's independent decision before protection assertions.
@@ -251,8 +251,8 @@ internal static partial class RunChecks
         Require(Same(Wait(0, 0.5), 1),
             "operation-local wait stays independent of the pair episode");
         // Legacy entry points keep their ten-second/300-second schedule for their existing consumers.
-        Require(FailureRetryOwner.Failed(0, now) == new FailureRetryOwner.State(1, now.AddSeconds(10)) &&
-            FailureRetryOwner.MaximumRetrySeconds == 300,
+        Require(FailureRetryOwner.Failed(V2Settings.Default, 0, now) == new FailureRetryOwner.State(1, now.AddSeconds(10)) &&
+            V2Tunables.Default.RetryMaximumDelay == TimeSpan.FromMinutes(5),
             "legacy failure entry points retain their ten-second/300-second schedule");
         Console.WriteLine("PASS Completion_AdoptedBackoffSchedule");
     }

@@ -64,8 +64,8 @@ public sealed partial class LocalInventory
             return Invalid(gen, rootId, cursor,
                 journalId != through.JournalId ? "journal replaced" : next > through.NextUsn ? "cursor ahead of journal" : "journal gap: cursor precedes retained range");
         }
-        var window = new JournalReplayWindow(_known.JournalWindowSize(_volume, rootId));
-        var budget = Math.Clamp(_settings.LocalReplayWindowsPerRun, 1, 64);
+        var window = new JournalReplayWindow(_settings, _known.JournalWindowSize(_volume, rootId));
+        var budget = Math.Clamp(_settings.LocalReplayWindowsPerRun, 1, _settings.Tunables.MaximumLocalReplayWindowsPerRun);
         for (var index = 1; ; index++)
         {
             ct.ThrowIfCancellationRequested();

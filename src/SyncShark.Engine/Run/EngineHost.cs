@@ -173,8 +173,9 @@ internal sealed class EngineHost : IAsyncDisposable
     /// <summary>The one production composition: the caller supplies its product root, progress sink and the
     /// already-owned authority, and Run wires settings, transport, store, logs and the clock once.</summary>
     internal static EngineHost Compose(string productRoot, Action<string> progress, PilotStateAuthority authority,
-        Mode mode, RunLog? startupLog = null, Monitor? startupMonitor = null)
+        Mode mode, EngineStartupAdmission admission, RunLog? startupLog = null, Monitor? startupMonitor = null, EngineSettings? runSettings = null)
     {
+        admission.RequireRoot(productRoot);
         RunLog? ownedLog = null;
         HttpClient? http = null;
         EngineHost? host = null;
@@ -194,7 +195,8 @@ internal sealed class EngineHost : IAsyncDisposable
                 else startupLog.ReportProgress(message);
                 return true;
             });
-            var settings = LoadSettings(productRoot);
+            // A caller that already read its run's settings passes them, so one run uses one snapshot.
+            var settings = runSettings ?? LoadSettings(productRoot);
             ownedLog = startupLog is null && mode == Mode.Persistent
                 ? RunLog.Open(Path.Combine(productRoot, ResourceNames.EngineFolder, ResourceNames.LogsFolder),
                     nameof(EngineHost), ResourceNames.NewId(), progress, settings.LogBufferCharacters) : null;
@@ -708,12 +710,6 @@ internal sealed class EngineHost : IAsyncDisposable
     internal PairSession OpenForRegistration(object registration, PairConfig pair, long generation, RunLog? log) =>
         PairSession.Open(Store, pair, _settings, _http, true, log, _authority, this, registration, generation, _time);
 
-    internal async Task<RootBinding> ReadImportRootsAsync(PairConfig pair, CancellationToken ct)
-    {
-        await using var resources = ComposeResources(pair, Store.Pairs(), 0);
-        return await PairSession.ReadImportRootsAsync(Store, pair, resources, _authority, ct).ConfigureAwait(false);
-    }
-
     private PairGenerationResources ComposeResources(PairConfig pair, IReadOnlyList<PairConfig> scopes, long generation) =>
         PairSession.ComposeGeneration(Store, pair, scopes, generation, _settings, _http, _authority, _time,
             AdmissionForAccount, (identity, delay, reconnect) =>
@@ -787,7 +783,8 @@ internal sealed class EngineHost : IAsyncDisposable
             volume = new Volume();
             var captured = volume;
             volume.Source = new JournalSource(key, pair.LocalRoot, Store, Store.ReadJournal(key), volume.Gate,
-                () => captured.Members, (candidate, changed) => RefreshMembers(captured, candidate, changed));
+                () => captured.Members, (candidate, changed) => RefreshMembers(captured, candidate, changed),
+                _settings.JournalPageBufferBytes);
             volume.Source.WorkCommitted = id => Wake(id);
             volume.Source.ReportItemFailureAsync = ReportJournalItemFailureAsync;
             _volumes.Add(key, volume);

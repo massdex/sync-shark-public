@@ -16,7 +16,7 @@ internal static class FilesOnDemandServiceChecks
             $"object-{i}", null, new string('a', 64), 4, DateTimeOffset.UnixEpoch, ItemFlags.OwnedPointer)).ToArray();
         store.WriteSnapshot(new Snapshot(a.RootId, Side.A, store.BeginGeneration(a.RootId, "snapshot"), "cursor", files, []));
         store.SetStoragePolicy(a.RootId, a.RootObjectId, "offline");
-        using var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Native provider called in offline service test"), _ => false, store);
+        using var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Native provider called in offline service test"), _ => false, V2Settings.Default, store);
         var calls = 0;
         var running = 0;
         var maximum = 0;
@@ -88,7 +88,7 @@ internal static class FilesOnDemandServiceChecks
         store.SavePair(pair);
         store.EnableStorage();
         using var connections = new CloudFilesLifetime(
-            (_, _, _) => throw new InvalidOperationException("native provider must not open"), _ => false, store);
+            (_, _, _) => throw new InvalidOperationException("native provider must not open"), _ => false, V2Settings.Default, store);
         var receipt = new PilotRemoteEntry("Folder/file.bin", PilotEntryKind.File, "id:remote-file", "rev-1", 4, new string('a', 64));
         var item = new StorageNotice(a.RootId, "id:local:00000001:00000000000000ae", b.RootId,
             "remote-update", StorageNotices.ReceiptScope(receipt.Id, receipt.Revision, receipt.ContentHash));
@@ -136,7 +136,7 @@ internal static class FilesOnDemandServiceChecks
         var receipt = new PilotRemoteEntry(item.Path, PilotEntryKind.File, "id:remote-file", "rev-1", 4, hash);
         store.QueueStorageSettlement(a.RootId, item.ObjectId, b.RootId, receipt);
         using var connections = new CloudFilesLifetime(
-            (_, _, _) => throw new InvalidOperationException("native provider must not open"), _ => false, store);
+            (_, _, _) => throw new InvalidOperationException("native provider must not open"), _ => false, V2Settings.Default, store);
         var calls = 0;
         var network = new HttpRequestException("offline", null, System.Net.HttpStatusCode.ServiceUnavailable);
         Task<StorageObserved> FailNetwork(StorageSettlement job, CancellationToken token)
@@ -211,7 +211,7 @@ internal static class FilesOnDemandServiceChecks
         store.WriteSnapshot(new Snapshot(a.RootId, Side.A, store.BeginGeneration(a.RootId, "snapshot"), "cursor", files, []));
         store.SetStoragePolicy(a.RootId, a.RootObjectId, "offline");
         store.EnqueueStoragePolicyPage(128);
-        using var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Native provider called in race test"), _ => false, store);
+        using var connections = new CloudFilesLifetime((_, _, _) => throw new InvalidOperationException("Native provider called in race test"), _ => false, V2Settings.Default, store);
         StorageNotice Target(int i) => new(a.RootId, files[i].ObjectId, b.RootId, "offline", "offline");
         async Task Fail(int i, Exception error)
         {

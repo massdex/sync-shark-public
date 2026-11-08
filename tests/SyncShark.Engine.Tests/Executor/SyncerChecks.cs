@@ -2607,7 +2607,9 @@ public static class SyncerChecks
         store.SavePair(pair);
         SourceFixture.AcquireJournal(store, pair);
         var settings = new EngineSettings("{name} ({side} {time}){ext}", "yyyyMMddHHmmss", "Local", "Dropbox",
-            ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) { StoragePageSize = ShippedPageSize() };
+            ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) {
+        JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes,
+        LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes, StoragePageSize = ShippedPageSize() };
         var local = new FakeSide(Side.Local);
         return new ExecutorContext(Local: local, Dropbox: new FakeSide(Side.Dropbox),
             // FakeRecovery stands in for LocalSide: it proves removal by hashing the checked file when no saved

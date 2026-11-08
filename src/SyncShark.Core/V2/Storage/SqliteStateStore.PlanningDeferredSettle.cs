@@ -140,6 +140,6 @@ public sealed partial class SqliteStateStore
         }
     }
 
-    internal static int SettlePathCapacity(IReadOnlyList<DeferredPlanning> ordinary) =>
-        Math.Max(0, DeferredIntakePathCap - ordinary.Sum(row => row.Paths.Count));
+    internal static int SettlePathCapacity(IReadOnlyList<DeferredPlanning> ordinary, int pathCap) =>
+        Math.Max(0, pathCap - ordinary.Sum(row => row.Paths.Count));
 }

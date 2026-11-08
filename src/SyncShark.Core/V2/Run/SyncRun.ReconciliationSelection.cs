@@ -112,7 +112,8 @@ public sealed partial class SyncRun
                 MessageCatalog.Default.Template("reconciliation-source-trace"),
                 MessageCatalog.Default.Template("source-dropbox-prefix")));
             var failures = await RehearsalEndpoints.HydrateAsync(inventory, dropbox, scope.ReadScopes.ToArray(), rows =>
-                accept(rows.Where(row => row.Entry is not null).Select(row => DropboxItems.ToItem(row.Entry!)).ToArray()), ct, listingBasis);
+                accept(rows.Where(row => row.Entry is not null).Select(row => DropboxItems.ToItem(row.Entry!)).ToArray()),
+                _settings.Tunables.RehearsalPageRows, ct, listingBasis);
             incomplete(failures.Keys.ToArray(), failures);
             return;
         }

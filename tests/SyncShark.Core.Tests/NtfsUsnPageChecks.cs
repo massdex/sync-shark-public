@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using Massdex.SyncShark;
+using Massdex.SyncShark.V2;
 
 // AutoSync design section 7 (M1 / C-M1) requires the compiled Core page reader: one native response
 // becomes a classified finite page without materialising records, a record that crosses a requested
@@ -10,6 +11,9 @@ using Massdex.SyncShark;
 internal static class NtfsUsnPageChecks
 {
     private const int Header = 60;
+    // The engine ships this page size in EngineSettings.JournalPageBufferBytes; the Core reader takes it as an
+    // argument, so this fixture supplies the same one page of the kernel's journal.
+    private const int PageBufferBytes = 1024 * 1024;
     private static int _assertions;
 
     private static readonly Action<ulong, ulong, ulong, long, uint, FileAttributes> Noop =
@@ -27,6 +31,7 @@ internal static class NtfsUsnPageChecks
         FiniteEndReachedExactlyIsComplete();
         FiniteEndBehindTheBoundaryIsMore();
         CrossingRecordIsLeftForTheNextPage();
+        SmallestReplayWindowConsumesMaximumRecord();
         FiniteEndInJournalPagePaddingIsComplete();
         NonAdvancingBoundaryIsNoProgress();
         MalformedAndTruncatedRecordsAreInvalid();
@@ -135,6 +140,36 @@ internal static class NtfsUsnPageChecks
             (record, boundary) => delivered++);
         Require(pair == NtfsUsnPageStatus.NoProgress && second == 160 && delivered == 1,
             "a later non-advancing record stops the page at the last advanced boundary instead of looping");
+    }
+
+    private static void SmallestReplayWindowConsumesMaximumRecord()
+    {
+        var size = NtfsRecordLayout.MaximumUsnRecordBytes;
+        var settings = V2Settings.Default with { Tunables = V2Tunables.Default with
+            { JournalReplayMinimumWindowBytes = size, JournalReplayWindowBytes = size } };
+        var window = new JournalReplayWindow(settings);
+        var data = new byte[size];
+        Page(100).CopyTo(data, 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(data, (uint)size);
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(56), NtfsRecordLayout.MaximumNameCharacters * sizeof(char));
+        BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(58), Header);
+        System.Text.Encoding.Unicode.GetBytes(new string('a', NtfsRecordLayout.MaximumNameCharacters)).CopyTo(data, Header);
+        var target = new NtfsUsnCheckpoint(1, 100, 100 + size, 100);
+        var through = (ulong)window.Through(100, target).NextUsn;
+        var delivered = 0;
+        var status = NtfsUsnJournal.WalkUsnRecords(data, 100, through, through, out var consumed,
+            (record, boundary) => delivered++);
+        Require(status == NtfsUsnPageStatus.Complete && consumed == through && delivered == 1,
+            "the smallest accepted logical window consumes a complete maximum-name record without gap reconciliation");
+        var refused = false;
+        try { _ = settings with { Tunables = settings.Tunables with
+            { JournalReplayMinimumWindowBytes = 1, JournalReplayWindowBytes = 1 } }; }
+        catch (ArgumentOutOfRangeException) { refused = true; }
+        Require(refused, "a one-byte window that would strand the same record is refused before replay");
+        status = NtfsUsnJournal.WalkUsnRecords(data, 100, through, 100, out consumed, (record, boundary) => { });
+        Require(status == NtfsUsnPageStatus.NoProgress && consumed == 100 &&
+            window.RetryNoProgress() && !window.RetryNoProgress(),
+            "a genuinely nonadvancing native response keeps its cursor and has only one retry");
     }
 
     private static void MalformedAndTruncatedRecordsAreInvalid()
@@ -251,16 +286,16 @@ internal static class NtfsUsnPageChecks
     private static void ArgumentValidationIsStateFree()
     {
         Throws<ArgumentNullException>(() =>
-            { _ = NtfsUsnJournal.ReadChangePageAsync(null!, 1, 0, null, false, Noop, default); }, "a null root");
+            { _ = NtfsUsnJournal.ReadChangePageAsync(null!, 1, 0, null, false, Noop, PageBufferBytes, default); }, "a null root");
         Throws<ArgumentException>(() =>
-            { _ = NtfsUsnJournal.ReadChangePageAsync("  ", 1, 0, null, false, Noop, default); }, "a blank root");
+            { _ = NtfsUsnJournal.ReadChangePageAsync("  ", 1, 0, null, false, Noop, PageBufferBytes, default); }, "a blank root");
         Throws<ArgumentNullException>(() =>
-            { _ = NtfsUsnJournal.ReadChangePageAsync("C:\\", 1, 0, null, false, null!, default); }, "a null record sink");
+            { _ = NtfsUsnJournal.ReadChangePageAsync("C:\\", 1, 0, null, false, null!, PageBufferBytes, default); }, "a null record sink");
         Throws<ArgumentOutOfRangeException>(() =>
-            { _ = NtfsUsnJournal.ReadChangePageAsync("C:\\", 1, 10, 9, false, Noop, default); },
+            { _ = NtfsUsnJournal.ReadChangePageAsync("C:\\", 1, 10, 9, false, Noop, PageBufferBytes, default); },
             "a finite end before the start");
         Throws<ArgumentException>(() =>
-            { _ = NtfsUsnJournal.ReadChangePageAsync("C:\\", 1, 0, 9, true, Noop, default); },
+            { _ = NtfsUsnJournal.ReadChangePageAsync("C:\\", 1, 0, 9, true, Noop, PageBufferBytes, default); },
             "a finite page that waits for new records");
     }
 
@@ -268,7 +303,7 @@ internal static class NtfsUsnPageChecks
     {
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
-        var task = NtfsUsnJournal.ReadChangePageAsync("C:\\", 1, 0, null, false, Noop, cancelled.Token);
+        var task = NtfsUsnJournal.ReadChangePageAsync("C:\\", 1, 0, null, false, Noop, PageBufferBytes, cancelled.Token);
         Require(task.IsCanceled, "a cancelled caller receives a cancelled page task instead of a native read");
         try
         {
@@ -283,7 +318,7 @@ internal static class NtfsUsnPageChecks
 
     private static async Task NonDriveRootIsUnavailableAsync()
     {
-        var page = await NtfsUsnJournal.ReadChangePageAsync(@"\\no-such-host\share", 1, 700, 700, false, Noop, default);
+        var page = await NtfsUsnJournal.ReadChangePageAsync(@"\\no-such-host\share", 1, 700, 700, false, Noop, PageBufferBytes, default);
         Require(page.Status == NtfsUsnPageStatus.Unavailable && page.ConsumedNextUsn == 700 &&
             page.NativeError is null,
             "a root that is not a local drive is Unavailable with no consumed progress and no invented native error");
@@ -322,14 +357,14 @@ internal static class NtfsUsnPageChecks
             "the dummy writes advanced the journal inside the captured identity");
 
         var empty = await NtfsUsnJournal.ReadChangePageAsync(folder, journalId, (ulong)before.NextUsn,
-            (ulong)before.NextUsn, false, Noop, default);
+            (ulong)before.NextUsn, false, Noop, PageBufferBytes, default);
         Require(empty.Status == NtfsUsnPageStatus.Complete && empty.ConsumedNextUsn == (ulong)before.NextUsn &&
             empty.NativeError is null,
             "an empty finite range at the current journal position is a valid Complete page");
 
         var observed = new List<(ulong FileId, ulong Usn)>();
         var crossing = await NtfsUsnJournal.ReadChangePageAsync(folder, journalId, (ulong)before.NextUsn,
-            (ulong)before.NextUsn + 1, false, Collect(observed), default);
+            (ulong)before.NextUsn + 1, false, Collect(observed), PageBufferBytes, default);
         Require(crossing.Status == NtfsUsnPageStatus.More && crossing.ConsumedNextUsn == (ulong)before.NextUsn &&
             observed.Count == 0,
             "a real record that crosses a one-byte finite end is left for the next read");
@@ -339,7 +374,7 @@ internal static class NtfsUsnPageChecks
         while (completed.Status == NtfsUsnPageStatus.More)
         {
             var next = await NtfsUsnJournal.ReadChangePageAsync(folder, journalId, position, (ulong)through.NextUsn,
-                false, Collect(observed), default);
+                false, Collect(observed), PageBufferBytes, default);
             Require(next.ConsumedNextUsn > position, "a continuing finite page always advances past its start");
             position = next.ConsumedNextUsn;
             completed = next;
@@ -353,7 +388,7 @@ internal static class NtfsUsnPageChecks
             "every created dummy file appears with its full native identity");
 
         var changed = await NtfsUsnJournal.ReadChangePageAsync(folder, journalId + 1, (ulong)through.NextUsn, null,
-            false, Noop, default);
+            false, Noop, PageBufferBytes, default);
         Require(changed.Status == NtfsUsnPageStatus.JournalChanged && changed.NativeError is not null,
             "a different journal id is classified JournalChanged with the native error, never read as records");
 
@@ -371,7 +406,7 @@ internal static class NtfsUsnPageChecks
             try
             {
                 var page = await NtfsUsnJournal.ReadChangePageAsync(folder, journalId, position, null, true,
-                    Noop, cancelled.Token).WaitAsync(TimeSpan.FromSeconds(30));
+                    Noop, PageBufferBytes, cancelled.Token).WaitAsync(TimeSpan.FromSeconds(30));
                 Require(page.ConsumedNextUsn >= position,
                     "a waiting page that completes before cancellation still advances from its start");
                 position = page.ConsumedNextUsn;

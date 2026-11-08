@@ -31,7 +31,7 @@ internal static partial class RunChecks
         {
             var gaps = (ILocalGapStore)store;
             gaps.BeginGap(root.RootId, checkpoint.Cursor, 100, true);
-            await using var worker = new LocalGapWorker(gaps, new CachedOpenFailureIo(store), StorageFailureClassifier.IsStateDamage);
+            await using var worker = new LocalGapWorker(gaps, new CachedOpenFailureIo(store), StorageFailureClassifier.IsStateDamage, V2Settings.Default);
             worker.Discover(root, gaps.GapEpoch(root.RootId)!, default);
             await worker.HashPage(root, gaps.GapEpoch(root.RootId)!, default);
             Require(store.GapInventoryPending(root.RootId), "replacement control must take full gap recovery");

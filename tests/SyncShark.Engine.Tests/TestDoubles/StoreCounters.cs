@@ -134,12 +134,6 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         return inner.ReadWorkWatermark();
     }
 
-    public void SaveImportedPair(PairConfig pair, bool legacyPaused, IEnumerable<SyncedEntry>? baselines = null)
-    {
-        Command();
-        inner.SaveImportedPair(pair, legacyPaused, baselines);
-    }
-
     public void MergeDriveEvidence(string pairId, long expectedGeneration, DriveEvidence acquired)
     {
         Command();

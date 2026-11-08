@@ -11,7 +11,7 @@ namespace Massdex.SyncShark.Engine.Tests.Local;
 public static class LocalWriterChecks
 {
     private static readonly EngineSettings Settings = new("{name}", "yyyyMMdd", "local", "dropbox",
-        ".case", RecycleFallback.Fail, 30, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows);
+        ".case", RecycleFallback.Fail, 30, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
     private static readonly byte[] Content = Encoding.UTF8.GetBytes("new content");
 
     // SHA-256 of no bytes: the fixed empty-content vector the block composition must also produce.

@@ -28,7 +28,7 @@ public sealed partial class ProductionAutoSyncEngine : IAutoSyncHostEngine
                 V2Settings.Default, TimeProvider.System);
             _cloudFiles = new CloudFilesLifetime(_composition.Endpoints.CreateCloudFiles,
                 pair => CloudFilesLifetime.IsRegisteredPair(pair, V2Settings.Default),
-                (SqliteStateStore)_composition.Store, _composition.Endpoints.ObserveStorageRemoteAsync);
+                V2Settings.Default, (SqliteStateStore)_composition.Store, _composition.Endpoints.ObserveStorageRemoteAsync);
             // Independent of run/pause state: retained pointers still need foreground hydration.
             var pairs = _composition.Store.Pairs();
             // Seed the status cache from the identities just read, so the first contended request still names pairs.

@@ -20,6 +20,8 @@ internal static partial class DropboxChecks
         _root = root;
         await Group(nameof(RemovalReviewDropboxAsync), RemovalReviewDropboxAsync, failures);
         await Group(nameof(FullChecksAsync), FullChecksAsync, failures);
+        await Group(nameof(ExactMetadataPageFollowsSettingsAsync), ExactMetadataPageFollowsSettingsAsync, failures);
+        await Group(nameof(MetadataPagesFollowSettingsAsync), MetadataPagesFollowSettingsAsync, failures);
         await Group(nameof(ProgressCallbackFaultsAsync), ProgressCallbackFaultsAsync, failures);
         await Group(nameof(ExcludedNestedListingAndReplayAsync), ExcludedNestedListingAndReplayAsync, failures);
         await Group(nameof(FullRootChecksAsync), FullRootChecksAsync, failures);

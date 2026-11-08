@@ -88,7 +88,7 @@ public static class RowContextsChecks
         {
             store ??= Store();
             var settings = new EngineSettings("", "", "", "", ".case", RecycleFallback.Fail, 1,
-                FirstRunPolicy.NewestWins, 1, "", 1024, ScanTestSettings.BatchRows);
+                FirstRunPolicy.NewestWins, 1, "", 1024, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
             var context = new ExecutorContext(new FakeSide(Side.Local), new FakeSide(Side.Dropbox),
                 new FakeRecovery(), store, Pair, Scope, settings, new ReplaceTurn(), new FakeAdmission(),
                 false, _ => { }, RefuseReserve, TimeProvider.System, RefuseEvidence, RefuseBegin, RefuseComplete,
@@ -427,7 +427,7 @@ public static class RowContextsChecks
                 new FakeRecovery(), new FakeAdmission(), new PathScope(pair, [pair]));
             await Massdex.SyncShark.Engine.Tests.Executor.ScanPassChecks.RunRepairAsync(rig, log,
                 new EngineSettings("", "", "", "", ".case", RecycleFallback.Fail, 1,
-                    FirstRunPolicy.NewestWins, 1, "", 1024, ScanTestSettings.BatchRows), dropbox: failing,
+                    FirstRunPolicy.NewestWins, 1, "", 1024, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes }, dropbox: failing,
                 retryIssues: new HashSet<long> { original.Id });
             Check.Require(store.IssueById(pair.PairId, original.Id) is not null && attempts == 1,
                 "a selected retry that re-raises its continuing refusal holds later descendants in the same run");

@@ -47,6 +47,14 @@ public sealed record EngineSettings(string ConflictLabelFormat, string ConflictL
     /// under a second; the last failure still reaches the caller's existing failure and notice path.</summary>
     public int AtomicReplaceInitialDelayMilliseconds { get; init; }
 
+    /// <summary>Read chunk of the read-only log view, in bytes. Independent of the writer's
+    /// <see cref="LogBufferCharacters"/>: the view streams records and never buffers a whole file.</summary>
+    public int LogReadBufferBytes { get; init; }
+
+    /// <summary>One kernel USN journal page read per call. The kernel continues from the USN prefix it returns,
+    /// so this bounds one read, not the replay window.</summary>
+    public int JournalPageBufferBytes { get; init; }
+
     /// <summary>The publish retry schedule derived from the two settings: one wait between each pair of attempts,
     /// doubling from the configured first delay. Derived here once; never stored or recomputed by a caller.</summary>
     public AtomicReplacePolicy AtomicReplace

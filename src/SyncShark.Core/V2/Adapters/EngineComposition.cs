@@ -88,6 +88,7 @@ public sealed class EngineComposition : IDisposable
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(time);
+        settings.Validated();
         var transfer = host.StateAuthority is null
             ? new SyncTransferSettings()
             : new SyncTransferSettingsStore(host.StateAuthority).Load();

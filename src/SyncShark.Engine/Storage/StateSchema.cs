@@ -69,42 +69,9 @@ public static class StateSchema
     public const string CountSynced = "SELECT count(*) FROM synced_entry WHERE pair_id = " + PairRow + ";";
     public const string SelectPairs = "SELECT def_json FROM pair ORDER BY pair_id;";
     public const string SelectPair = "SELECT def_json FROM pair WHERE pair_id = $p;";
-    /// <summary>Import creates an absent pair only; an existing identifier is never overwritten.</summary>
-    internal const string InsertPair = "INSERT INTO pair(pair_id,def_json) VALUES($p,$def);";
     /// <summary>Drive evidence changes only the current definition, without advancing execution or source fences.</summary>
     internal const string UpdatePairDefinition = "UPDATE pair SET def_json=$definition WHERE id=$pair AND execution_generation=$generation;";
     public const string PairIdByRow = "SELECT pair_id FROM pair WHERE id = $pair;";
-    /// <summary>The legacy v2 pair query; its own constant because it is an independent schema contract.</summary>
-    public const string SelectV2Pair = "SELECT def_json FROM pair WHERE pair_id = $p;";
-    internal const int V2BaselineLocalPath = 0;
-    internal const int V2BaselineDropboxPath = 1;
-    internal const int V2BaselineKind = 2;
-    internal const int V2BaselineLocalId = 3;
-    internal const int V2BaselineSize = 4;
-    internal const int V2BaselineLocalMtime = 5;
-    internal const int V2BaselineDropboxId = 6;
-    internal const int V2BaselineHash = 7;
-    internal const int V2BaselineGeneration = 8;
-    internal const string ParamLocalSideA = "$local_a";
-    internal const string ParamRoot = "$root";
-    internal const string SelectV2Baselines = """
-        WITH paths AS (
-          SELECT s.*, CASE WHEN da.path='' THEN s.a_name ELSE da.path||'/'||s.a_name END AS ap,
-            CASE WHEN s.b_dir IS NULL THEN
-              CASE WHEN da.path='' THEN s.a_name ELSE da.path||'/'||s.a_name END
-            WHEN db.path='' THEN s.b_name ELSE db.path||'/'||s.b_name END AS bp
-          FROM sync_point s LEFT JOIN dir da ON da.dir_no=s.a_dir LEFT JOIN dir db ON db.dir_no=s.b_dir
-          WHERE s.pair_no=(SELECT pair_no FROM pair WHERE pair_id=$p))
-        SELECT CASE WHEN $local_a THEN ap ELSE bp END AS local_path,
-          CASE WHEN $local_a THEN bp ELSE ap END, kind,
-          CASE WHEN $local_a THEN a_object_id ELSE b_object_id END, size,
-          CASE WHEN $local_a THEN a_mtime ELSE b_mtime END,
-          CASE WHEN $local_a THEN b_object_id ELSE a_object_id END, hash, gen
-        FROM paths ORDER BY
-        """ + " " + KeyOf + "CASE WHEN $local_a THEN ap ELSE bp END), object_key;";
-    internal const string V2LocalIdentityExists = "SELECT EXISTS(SELECT 1 FROM file_state f JOIN dir d ON d.dir_no=f.dir_no WHERE f.root_no=" +
-        "(SELECT root_no FROM root WHERE root_id=$root) AND f.object_id=$identity AND " +
-        KeyOf + "CASE WHEN d.path='' THEN f.name ELSE d.path||'/'||f.name END)=" + KeyOf + "$path));";
     public const string UpsertPair = """
         INSERT INTO pair(pair_id, def_json) VALUES($p, $def)
         ON CONFLICT(pair_id) DO UPDATE SET def_json = excluded.def_json;
@@ -733,9 +700,6 @@ public static class StateSchema
     public const string PlanCreateClassifiedLocalRoots = "CREATE INDEX scan_state.classified_local_root ON classified(coalesce(saved_local_key,policy_key));CREATE INDEX scan_state.classified_dropbox_root ON classified(coalesce(saved_dropbox_delta,saved_local_key));";
     public const string PlanCreateClassifiedDropboxRoots = "CREATE INDEX scan_state.classified_local_root ON classified(saved_local_key);CREATE INDEX scan_state.classified_dropbox_root ON classified(coalesce(saved_dropbox_delta,saved_local_key,policy_key));";
 
-    /// <summary>Whether the legacy store holds a pause for the pair; read-only import connection only.</summary>
-    public const string SelectLegacyPairPaused = "SELECT EXISTS(SELECT 1 FROM pair_pause WHERE pair_id=$p);";
-
     // A same-key re-record updates the one row holding both bindings in place; the NOT EXISTS arms are the clash
     // rules InsertSynced's follow-up applies. Zero rows changed means the caller takes the delete and insert path.
     public const string UpdateSyncedSameKeys = "UPDATE synced_entry SET is_folder = $isFolder, " +
@@ -818,7 +782,8 @@ public static class StateSchema
     private const string ClaimedWork = "SELECT w.work_id FROM change_work w INDEXED BY work_identity WHERE " + IdentitySelection + " UNION ALL SELECT w.work_id FROM change_work w WHERE " + PathSelection + " UNION ALL SELECT w.work_id FROM change_work w WHERE w.parent_anchor=$anchor";
     internal const int EchoSubject = 1;
     internal const int EchoSaved = 2;
-    // shortcut: fixed reclaim/copy batch size, chosen by measurement; make it a setting only if lock-hold targets differ per machine
+    // Persisted deleted-name blocks accept up to this many keys (StateEncoding); lowering it rejects existing history.
+    // The same bound batches copy/reclaim. Its original throughput/lock-hold measurement has not been established.
     internal const int DeletedHistoryBatchSize = 5000;
     internal const int DeletedKeyUtf8BytesPerUnit = 3;
     internal const int DeletedZlibMinimumBytes = 6;

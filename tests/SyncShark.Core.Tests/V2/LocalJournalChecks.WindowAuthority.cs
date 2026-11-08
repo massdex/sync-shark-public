@@ -16,7 +16,7 @@ internal static partial class LocalJournalChecks
             new("cloud", SyncProviders.Dropbox, null, "/cloud", "cloud"), [], [], true);
         store.SavePair(pair);
         var start = new NtfsUsnCheckpoint(1, 0, 128, 0);
-        var target = start with { NextUsn = start.NextUsn + JournalReplayWindow.ReplayWindowBytes * 7 / 2 };
+        var target = start with { NextUsn = start.NextUsn + V2Tunables.Default.JournalReplayWindowBytes * 7 / 2 };
         var inventory = LocalChecks.Inventory(root, store, TimeProvider.System, settings: settings);
         inventory.WalkCheckpointForTest = () => (start, false);
         await SaveFull(inventory, store);
@@ -45,7 +45,7 @@ internal static partial class LocalJournalChecks
             out IReadOnlyList<NtfsUsnChange> changes, out string? failure, out NtfsUsnReadFailure kind, CancellationToken ct) =>
         {
             reads++;
-            var index = (int)((from.NextUsn - start.NextUsn) / JournalReplayWindow.ReplayWindowBytes);
+            var index = (int)((from.NextUsn - start.NextUsn) / V2Tunables.Default.JournalReplayWindowBytes);
             var item = items[index];
             changes = [new(LocalItems.ParseObjectId(item.ObjectId).FileId,
                 LocalItems.ParseObjectId(LocalChecks.ObjectIdOf(Path.GetDirectoryName(Path.Combine(root, item.Path))!)).FileId, from.NextUsn,

@@ -17,6 +17,8 @@ public static class EngineHostChecks
     private static readonly EngineSettings Settings = new("{name} ({side} {time}){ext}", "yyyyMMddHHmmss",
         "Local", "Dropbox", ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", 262144, ScanTestSettings.BatchRows)
     {
+        JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes,
+        LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes,
         Backoff = new FailureRetryOwner.BackoffSettings(1, 1.6, 0.2, 120),
         // The shipped defaults for the paging and folder-poll values these checks exercise.
         StoragePageSize = 100, BatchPollIntervalSeconds = 0.1, FolderDeleteMinimumPollSeconds = 1
@@ -69,7 +71,6 @@ public static class EngineHostChecks
         await PageWaitPreservesIndependentFailedRepairDebtAsync(root).ConfigureAwait(false);
         await PageWaitStoreFailureSurfacesErrorAsync(root).ConfigureAwait(false);
         await FailedRepairRecordsOnePrerequisiteFailureAsync(root).ConfigureAwait(false);
-        await ImportedLegacyPausedPairNotDispatchedUntilEnabledAsync(root).ConfigureAwait(false);
         await ItemAttemptAuthorityAsync(root).ConfigureAwait(false);
         await ReservationWorkAsync(root).ConfigureAwait(false);
         await SelectedOpportunityAuthorityAsync(root).ConfigureAwait(false);
@@ -720,29 +721,6 @@ public static class EngineHostChecks
             store.FolderRemoval(PairId, operation.OperationId) == operation &&
             store.ReadyFolderEffects(PairId, operation.OperationId, -1, Settings.StoragePageSize).SequenceEqual(unfinished),
             "R6-6 repeated failed prerequisites retain unfinished work and exactly one explicit RequiredRepairRetry failure");
-    }
-
-    // CV-CUTOVER: a legacy-paused imported pair stays non-dispatchable until explicit enable, through restart.
-    private static async Task ImportedLegacyPausedPairNotDispatchedUntilEnabledAsync(string root)
-    {
-        using var instance = Lock(root, "imported-paused");
-        const string PairId = "imported-paused";
-        var store = new InMemoryStateStore();
-        store.SaveImportedPair(Pair(PairId, enabled: false), legacyPaused: true);
-        await using (var host = Compose(instance.StateAuthority, store))
-            Check.Require(await host.RunPrerequisiteAsync(PairId, CancellationToken.None).ConfigureAwait(false)
-                    is null,
-                "a legacy-paused imported pair is not dispatched before explicit enable");
-        await using (var host = Compose(instance.StateAuthority, store))
-            Check.Require(await host.RunPrerequisiteAsync(PairId, CancellationToken.None).ConfigureAwait(false)
-                    is null,
-                "the disabled imported pair stays non-dispatchable through a host restart");
-        Check.Require(store.Pair(PairId)?.Enabled == false, "the imported pair remains disabled");
-        Check.Require(store.Issues(PairId, [IssueKind.Info])
-                .Count(issue => issue.Cause == TextKey.InfoPairPausedInOldApp) == 1,
-            "the paused-in-old-app notice remains and no failed-Repair accounting was added");
-        Check.Require(store.ReadPrerequisiteRetry(PairId) is null,
-            "no prerequisite failure is recorded for the disabled pair");
     }
 
     // LOCAL-IN-USE C3/D1: item retry authority belongs to the host's exact registration, not the Store. A real

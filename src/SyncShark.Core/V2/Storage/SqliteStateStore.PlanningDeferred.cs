@@ -43,7 +43,7 @@ public sealed partial class SqliteStateStore
 
     internal void DeferPlanning(string pairId, IEnumerable<(string Root, ItemState Item)> items, bool urgent = false)
     {
-        foreach (var batch in items.Chunk(DeferredIntakeEntityCap))
+        foreach (var batch in items.Chunk(_settings.Tunables.DeferredIntakeEntityCap))
             InStore(() =>
             {
                 var pair = PairNo(pairId);
@@ -101,12 +101,10 @@ public sealed partial class SqliteStateStore
     });
 
     // Hard run bounds: one oldest-first page, never the whole queue.
-    internal const int DeferredIntakeEntityCap = 2048;
-    private const int DeferredIntakePathCap = 8192;
 
     /// <summary>
-    /// One run's bounded intake: oldest first through the pair/version/root/id index, 2048 entities
-    /// and 8192 alias paths at most. Admission rotates the admitted versions behind every unadmitted
+    /// One run's bounded intake: oldest first through the pair/version/root/id index, at most the
+    /// configured entity and alias-path caps. Admission rotates the admitted versions behind every unadmitted
     /// eligible row (below the run cutoff) in the same transaction, so held work cannot starve later
     /// entities across runs or restarts; the returned rotated version matches the existing exact
     /// acknowledgement. Read-only callers pass <c>rotate: false</c> and write nothing.
@@ -154,7 +152,9 @@ public sealed partial class SqliteStateStore
         var paths = new List<string>();
         if (row.AliasDir < 0) paths.Add(row.Path);
         var capacity = remaining - paths.Count;
-        var nextDir = row.AliasDir;
+        // Directory rowids start at one; zero records that the queued spelling was consumed,
+        // even when this slice has no room for a live alias.
+        var nextDir = Math.Max(0, row.AliasDir);
         var nextKey = row.AliasKey;
         var nextName = row.AliasName;
         var all = true;

@@ -25,9 +25,6 @@ public static class ResourceNames
     public const string LogPattern = "*" + LogExtension;
     /// <summary>Separates the pair id from the run id in a run-log file name.</summary>
     public const string LogNameSeparator = "-";
-    /// <summary>Read chunk for the read-only log view; independent of the writer's settings buffer.</summary>
-    public const int LogReadBufferCharacters = 4096;
-
     /// <summary>Guid format of pair and run ids: 32 hex digits (the same form as stage names).</summary>
     public const string IdFormat = "N";
 

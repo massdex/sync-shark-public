@@ -100,7 +100,7 @@ public static class RenameRunnerChecks
             var pair = new PairConfig(nameof(RenameRunnerChecks), nameof(RenameRunnerChecks),
                 Path.GetTempPath(), "/Pair", "Account", [], [], FirstRunPolicy.NewestWins, true, null);
             var settings = new EngineSettings("", "", "", "", ".case",
-                RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", DefaultLogBufferCharacters, ScanTestSettings.BatchRows);
+                RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", DefaultLogBufferCharacters, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
             var local = new FakeSide(Side.Local);
             var dropbox = new FakeSide(Side.Dropbox);
             var events = new List<RunEvent>();
@@ -1653,7 +1653,7 @@ public static class RenameRunnerChecks
             else Store = new InMemoryStateStore();
             Pair = SourceFixture.Bound(new PairConfig(nameof(RenameRunnerChecks), nameof(RenameRunnerChecks),
                 Path.Combine(Path.GetTempPath(), nameof(RenameRunnerChecks)), "/Pair", "Account", [], [], FirstRunPolicy.NewestWins, true, null));
-            var settings = new EngineSettings("", "", "", "", ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", DefaultLogBufferCharacters, ScanTestSettings.BatchRows);
+            var settings = new EngineSettings("", "", "", "", ".case", RecycleFallback.Fail, 1, FirstRunPolicy.NewestWins, 1, "", DefaultLogBufferCharacters, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
             Context = new ExecutorContext(Local, Dropbox, new FakeRecovery(), Store, Pair, new PathScope(Pair, [Pair]),
                 settings, new ReplaceTurn(), Admission, false, Events.Add,
                 ReserveDownloadAsync: RefuseReserveDownload, Time: Clock,

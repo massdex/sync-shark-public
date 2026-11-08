@@ -1983,7 +1983,7 @@ public static class FolderDeleteRunnerChecks
             Pair = new PairConfig(name, name, Path.GetFullPath(nameof(FakeSide)), nameof(Side.Dropbox),
                 nameof(PairConfig.ConnectionId), [], [], FirstRunPolicy.NewestWins, true, null);
             var settings = new EngineSettings("", "", "", "", "", RecycleFallback.Fail, default,
-                FirstRunPolicy.NewestWins, default, "", LogBufferCharacters, ScanTestSettings.BatchRows) with { StoragePageSize = PageSize };
+                FirstRunPolicy.NewestWins, default, "", LogBufferCharacters, ScanTestSettings.BatchRows)  { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes }with { StoragePageSize = PageSize };
             RawStore = StateStore.Open(Path.Combine(folder, Path.GetRandomFileName()));
             Store = new StoreCounters(RawStore);
             Store.SavePair(Pair);

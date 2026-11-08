@@ -31,12 +31,8 @@ public sealed partial class V2CliRuntime
             _productRoot, dryRun, _composition?.Endpoints.ProductOwnedRelative(pair) ?? [], ct, DateRepairInputs.Exclusions(excludeList), DateRepairInputs.Provenance(provenanceSources),
             provenanceSources is { Count: > 0 }, StorageFailureClassifier.IsStateDamage, StorageFailureClassifier.IsDirectStateDamage,
             StorageFailureClassifier.IsBusy, localDate, after, PageLock,
-            async (paths, failed, token) =>
-            {
-                var entries = await client.ReadMetadataPageAsync(paths, token, failed);
-                return entries.ToDictionary(row => row.Key, row => row.Value is { ClientModifiedUtc: not null } entry
-                    ? DropboxItems.ToItem(entry) : null);
-            }, from, to, excludeList, reportMismatch, provenanceSources).ConfigureAwait(false);
+            (paths, failed, token) => client.ReadMetadataPagesAsync(paths, Settings.Tunables.MetadataPagePaths,
+                entry => entry is { ClientModifiedUtc: not null } ? DropboxItems.ToItem(entry) : null, token, failed), from, to, excludeList, reportMismatch, provenanceSources).ConfigureAwait(false);
     }
     internal async Task<DateRepairReport> RestoreDatesAsync(string audit, bool dryRun, CancellationToken ct)
     {

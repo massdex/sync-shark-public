@@ -232,7 +232,32 @@ public static class DependencyChecks
             .Concat(CheckNative(uses, source))
             .Concat(CheckEntrySetters(uses, source))
             .Concat(CheckSubjectSets(uses, source))
-            .Concat(CheckInScan(uses, source));
+            .Concat(CheckInScan(uses, source))
+            .Concat(CheckStartupAcquisition(uses, source));
+
+    private static IEnumerable<string> CheckStartupAcquisition(Uses uses, TypeId source)
+    {
+        var compose = In("Run", "EngineHost", "Run/EngineHost.cs", "Compose");
+        var reads = In("Run", "EngineOperations", "Run/EngineOperations.cs", "Read", "ExistingPair");
+        var direct = In("Run", "EngineOperations", "Run/EngineOperations.cs", "WithHostAsync");
+        var hostedStart = In("Run", "EngineHost", "Run/EngineHost.cs", "StartCoreAsync");
+        // IPC-wait progress owns no product root, authority or store; it is not an Engine acquisition.
+        var clientProgress = In("Edge", "EngineHostClient", "Edge/EngineHostClient.cs", "TryExecuteResultAsync");
+        var monitor = new TypeId(RootNamespace + ".Run", "Monitor");
+        var monitorConstructor = In("Run", "Monitor", "Run/Monitor.cs", ".ctor");
+        foreach (var (method, parent, member) in uses.Calls)
+        {
+            if (parent == StateStoreType && member is "Open" or "OpenReadOnly" &&
+                !OwnerFor(source, method, compose) && !(member == "OpenReadOnly" && OwnerFor(source, method, reads)))
+                yield return $"startup: {Show(source)}.{method} opens current state outside admitted acquisition owners.";
+            // Constructor chaining initializes the same Monitor; it does not acquire another lifetime.
+            if (parent == monitor && member is ".ctor" or "Start" &&
+                !OwnerFor(source, method, compose, direct, clientProgress) &&
+                !(member == "Start" && OwnerFor(source, method, hostedStart)) &&
+                !(member == ".ctor" && source == monitor && OwnerFor(source, method, monitorConstructor)))
+                yield return $"startup: {Show(source)}.{method} starts Monitor outside its exact lifetime owner.";
+        }
+    }
 
     /// <summary>F20/F21: only DropboxApi sends requests or reads response bodies; only the adapter's decoder owners parse one.</summary>
     private static IEnumerable<string> CheckTransport(Uses uses, TypeId source)
@@ -483,6 +508,132 @@ public static class DependencyChecks
         ContractOwnershipFixtures();
         ScanOwnershipFixtures();
         AdapterFenceFixtures();
+        StartupAcquisitionFixtures();
+    }
+
+    private static void StartupAcquisitionFixtures()
+    {
+        var host = new TypeId(RootNamespace + ".Run", "EngineHost");
+        var operations = new TypeId(RootNamespace + ".Run", "EngineOperations");
+        var client = new TypeId(RootNamespace + ".Edge", "EngineHostClient");
+        var uses = UsesOf(typeof(StartupAcquisitionFixture));
+        WithFiles(_ => Engine + "Run/EngineHost.cs", () =>
+        {
+            Check.Require(!CheckStartupAcquisition(uses, host).Any(), "startup: composition owns its acquisitions");
+            Check.Require(CheckStartupAcquisition(uses, operations).Any(), "startup: wrong type cannot borrow composition");
+        });
+        WithFiles(_ => Engine + "Run/Other.cs", () =>
+            Check.Require(CheckStartupAcquisition(uses, host).Any(), "startup: wrong file cannot borrow composition"));
+        var reads = UsesOf(typeof(StartupReadFixture));
+        WithFiles(_ => Engine + "Run/EngineOperations.cs", () =>
+        {
+            Check.Require(!CheckStartupAcquisition(reads, operations).Any(), "startup: exact read owner opens read-only state");
+            Check.Require(CheckStartupAcquisition(UsesOf(typeof(StartupWrongMethodFixture)), operations).Any(),
+                "startup: another method on the same owner cannot open state or start Monitor");
+            Check.Require(CheckStartupAcquisition(UsesOf(typeof(StartupWritableReadFixture)), operations).Any(),
+                "startup: a read owner cannot open writable state");
+            Check.Require(!CheckStartupAcquisition(UsesOf(typeof(StartupDirectFixture)), operations).Any(),
+                "startup: direct acquisition owns Monitor");
+        });
+        WithFiles(_ => Engine + "Edge/EngineHostClient.cs", () =>
+            Check.Require(!CheckStartupAcquisition(UsesOf(typeof(StartupClientFixture)), client).Any(),
+                "startup: exact client progress exception remains legal"));
+        var monitor = new TypeId(RootNamespace + ".Run", "Monitor");
+        var chain = UsesOf(typeof(Massdex.SyncShark.Engine.Run.Monitor));
+        Check.Require(chain.Calls.Any(call => call.Method == ".ctor" && call.Parent == monitor && call.Member == ".ctor"),
+            "startup: own-chain fixture contains the real constructor delegation");
+        WithFiles(_ => Engine + "Run/Monitor.cs", () =>
+        {
+            Check.Require(!CheckStartupAcquisition(chain, monitor).Any(), "startup: Monitor owns its constructor chain");
+            Check.Require(CheckStartupAcquisition(chain, operations).Any(), "startup: wrong type cannot borrow Monitor chaining");
+            Check.Require(CheckStartupAcquisition(UsesOf(typeof(StartupMonitorStartFixture)), monitor).Any(),
+                "startup: Monitor constructor cannot start its lifetime");
+            Check.Require(CheckStartupAcquisition(UsesOf(typeof(StartupMonitorConstructionFixture)), monitor).Any(),
+                "startup: another Monitor method cannot borrow constructor chaining");
+        });
+        WithFiles(_ => Engine + "Run/Other.cs", () =>
+            Check.Require(CheckStartupAcquisition(chain, monitor).Any(), "startup: wrong file cannot borrow Monitor chaining"));
+        var hostedStart = WithNested(typeof(StartupHostedStartFixture)).Select(UsesOf)
+            .Single(candidate => candidate.Calls.Any(call => call.Parent == monitor && call.Member == "Start"));
+        WithFiles(_ => Engine + "Run/EngineHost.cs", () =>
+        {
+            Check.Require(!CheckStartupAcquisition(hostedStart, host).Any(), "startup: hosted startup promotes its owned Monitor");
+            Check.Require(CheckStartupAcquisition(hostedStart, operations).Any(), "startup: wrong type cannot borrow hosted start");
+            Check.Require(CheckStartupAcquisition(UsesOf(typeof(StartupMonitorStartFixture)), host).Any(),
+                "startup: another host method cannot borrow hosted start");
+            Check.Require(CheckStartupAcquisition(UsesOf(typeof(StartupHostedConstructionFixture)), host).Any(),
+                "startup: hosted startup cannot construct a Monitor");
+        });
+        WithFiles(_ => Engine + "Run/Other.cs", () =>
+            Check.Require(CheckStartupAcquisition(hostedStart, host).Any(), "startup: wrong file cannot borrow hosted start"));
+    }
+
+    private static class StartupHostedStartFixture
+    {
+        public static async Task StartCoreAsync(Massdex.SyncShark.Engine.Run.Monitor monitor)
+        {
+            await Task.CompletedTask;
+            monitor.Start();
+        }
+    }
+
+    private static class StartupHostedConstructionFixture
+    {
+        public static Massdex.SyncShark.Engine.Run.Monitor StartCoreAsync() => new(TimeProvider.System);
+    }
+
+    private static class StartupMonitorConstructionFixture
+    {
+        public static Massdex.SyncShark.Engine.Run.Monitor Other() => new(TimeProvider.System);
+    }
+
+    private sealed class StartupMonitorStartFixture
+    {
+        public StartupMonitorStartFixture(Massdex.SyncShark.Engine.Run.Monitor monitor) => monitor.Start(quietOnly: true);
+    }
+
+    private static class StartupAcquisitionFixture
+    {
+        public static void Compose(string path)
+        {
+            using var store = Massdex.SyncShark.Engine.Storage.StateStore.Open(path);
+            using var read = Massdex.SyncShark.Engine.Storage.StateStore.OpenReadOnly(path);
+            var monitor = new Massdex.SyncShark.Engine.Run.Monitor(TimeProvider.System);
+            monitor.Start(quietOnly: true);
+        }
+    }
+    private static class StartupReadFixture
+    {
+        public static void Read(string path) { using var store = Massdex.SyncShark.Engine.Storage.StateStore.OpenReadOnly(path); }
+    }
+    private static class StartupWritableReadFixture
+    {
+        public static void Read(string path) { using var store = Massdex.SyncShark.Engine.Storage.StateStore.Open(path); }
+    }
+    private static class StartupWrongMethodFixture
+    {
+        public static void Other(string path)
+        {
+            using var store = Massdex.SyncShark.Engine.Storage.StateStore.OpenReadOnly(path);
+            var monitor = new Massdex.SyncShark.Engine.Run.Monitor(TimeProvider.System);
+            monitor.Start(quietOnly: true);
+        }
+    }
+    private static class StartupDirectFixture
+    {
+        public static void WithHostAsync()
+        {
+            var monitor = new Massdex.SyncShark.Engine.Run.Monitor(TimeProvider.System);
+            monitor.Start(quietOnly: true);
+        }
+    }
+    private static class StartupClientFixture
+    {
+        public static void TryExecuteResultAsync()
+        {
+            var monitor = new Massdex.SyncShark.Engine.Run.Monitor(TimeProvider.System);
+            monitor.Start(quietOnly: true);
+        }
     }
 
     private static class RowFactsFixture

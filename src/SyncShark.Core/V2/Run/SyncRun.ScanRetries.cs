@@ -188,7 +188,7 @@ public sealed partial class SyncRun
     private void SaveScanFailure(PairDef pair, BothScan scan, string path, SyncRetry? previous,
         DateTimeOffset? floor, string? technical, string reason, string[] roots, bool suppressTransient)
     {
-        var failureState = FailureRetryOwner.Failed(previous?.Attempts ?? 0, _time.GetUtcNow());
+        var failureState = FailureRetryOwner.Failed(_settings, previous?.Attempts ?? 0, _time.GetUtcNow());
         var updated = WithScanFloor((previous ?? new SyncRetry(path, "scan", 0, "", DateTimeOffset.MinValue)) with
         {
             Attempts = failureState.Attempts, LastError = technical ?? reason, ReadRoots = roots,

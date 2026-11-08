@@ -262,15 +262,6 @@ public sealed class PairSession
     internal IItemAttempts ItemAttempts { get; }
     internal bool SessionPaused => Host.IsPaused(Pair.PairId);
 
-    internal static async Task<RootBinding> ReadImportRootsAsync(IStateStore store, PairConfig pair,
-        PairGenerationResources resources, PilotStateAuthority authority, CancellationToken ct)
-    {
-        var local = CreateLocal(store, pair, resources, authority, static (_, _, _, _) => { }, mutation: false);
-        var dropbox = await resources.Dropbox.ReadRootIdentityAsync(ct).ConfigureAwait(false);
-        ct.ThrowIfCancellationRequested();
-        return new RootBinding(pair.LocalRoot, pair.DropboxRoot, pair.ConnectionId, local.ReadRootIdentity(), dropbox);
-    }
-
     internal static async Task<RootBinding> ReadConfigurationRootsAsync(IStateStore store, PairConfig pair,
         EngineSettings settings, HttpClient http, PilotStateAuthority authority, EngineHost host,
         object transition, long expectedGeneration, CancellationToken ct)

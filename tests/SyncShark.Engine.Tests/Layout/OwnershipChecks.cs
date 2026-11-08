@@ -187,7 +187,7 @@ public static class OwnershipChecks
         }
     }
 
-    // F10: persistence decoding rejects null only in StateEncoding; legacy import and other JSON domains are out of scope.
+    // F10: persistence decoding rejects null only in StateEncoding; other JSON domains are out of scope.
     private static IEnumerable<(int Line, string What)> CopiedDecode(CompilationUnitSyntax unit, string relative)
     {
         if (!relative.StartsWith(Engine + "Storage/", StringComparison.Ordinal)) yield break;

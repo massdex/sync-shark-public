@@ -6,22 +6,22 @@ internal static partial class StorageChecks
     {
         using var store = SqliteStateStore.Open(Fresh(root, "content-proof-attempt"), Fast, new TestClock(), LocalItems.CaptureOptionalHash);
         store.SavePair(Pair("p1"));
-        var first = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: side A unavailable", null, T0);
-        var second = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: side B unavailable",
+        var first = FailureRetryOwner.SaveFailedRetry(V2Settings.Default, store, "p1", "item.txt", "Hash: side A unavailable", null, T0);
+        var second = FailureRetryOwner.SaveFailedRetry(V2Settings.Default, store, "p1", "item.txt", "Hash: side B unavailable",
             store.SyncRetryAt("p1", "item.txt"), first.RetryAfter.AddTicks(-1));
-        var parked = FailureRetryOwner.ReportedFailure(second, first.RetryAfter.AddTicks(-1), retainSleeping: true);
+        var parked = FailureRetryOwner.ReportedFailure(V2Settings.Default, second, first.RetryAfter.AddTicks(-1), retainSleeping: true);
         Require(first.Attempts == 1 && second.Attempts == 1 && parked.Attempts == 1 &&
             second.RetryAfter == first.RetryAfter && parked.RetryAfter == first.RetryAfter &&
             second.LastError == "Hash: side B unavailable",
             "both content sides and parking share one attempt and unchanged deadline while refreshing cause");
-        var next = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: unavailable again",
+        var next = FailureRetryOwner.SaveFailedRetry(V2Settings.Default, store, "p1", "item.txt", "Hash: unavailable again",
             store.SyncRetryAt("p1", "item.txt"), first.RetryAfter);
         Require(next.Attempts == 2 && next.RetryAfter == first.RetryAfter.AddSeconds(20),
             "a new content failure at the exact deadline advances once with growing backoff");
-        var nextSide = FailureRetryOwner.SaveFailedRetry(store, "p1", "item.txt", "Hash: second side again", next,
+        var nextSide = FailureRetryOwner.SaveFailedRetry(V2Settings.Default, store, "p1", "item.txt", "Hash: second side again", next,
             first.RetryAfter.AddTicks(1));
         Require(nextSide.Attempts == 2 && nextSide.RetryAfter == next.RetryAfter &&
-            FailureRetryOwner.ReportedFailure(nextSide, first.RetryAfter.AddTicks(1), retainSleeping: true) ==
+            FailureRetryOwner.ReportedFailure(V2Settings.Default, nextSide, first.RetryAfter.AddTicks(1), retainSleeping: true) ==
                 new FailureRetryOwner.State(2, next.RetryAfter),
             "second-side report and parking cannot recount the later scheduled attempt");
     }
@@ -40,7 +40,7 @@ internal static partial class StorageChecks
                 var path = $"bad-{i:D2}.txt";
                 if (i < 25)
                 {
-                    var saved = FailureRetryOwner.SaveFailedRetry(store, "p1", path, causes[i % causes.Length], null, T0);
+                    var saved = FailureRetryOwner.SaveFailedRetry(V2Settings.Default, store, "p1", path, causes[i % causes.Length], null, T0);
                     Require(saved.FailureKind == FailureRetryOwner.FailureKind.ContentProof,
                         "new content-proof failures persist their typed classification");
                 }

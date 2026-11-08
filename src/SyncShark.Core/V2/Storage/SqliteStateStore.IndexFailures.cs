@@ -57,7 +57,7 @@ public sealed partial class SqliteStateStore
         if (root is null) return;
         var previous = Convert.ToInt32(StoreSchema.Scalar(_connection, null,
             "SELECT index_failure_count FROM root WHERE root_no=$r;", ("$r", root.Value)));
-        var retry = FailureRetryOwner.Failed(previous, _clock.GetUtcNow());
+        var retry = FailureRetryOwner.Failed(_settings, previous, _clock.GetUtcNow());
         var owner = IndexNoticeOwner(rootId);
         using var tx = _connection.BeginTransaction();
         StoreSchema.Execute(_connection, tx,
@@ -89,7 +89,7 @@ public sealed partial class SqliteStateStore
             "SELECT failure_count FROM local_gap_item WHERE root_no=$r AND object_id=$o AND epoch=$e;",
             ("$r", root), ("$o", objectId), ("$e", epoch));
         if (count is null) return;
-        var retry = FailureRetryOwner.Failed(Convert.ToInt32(count), _clock.GetUtcNow());
+        var retry = FailureRetryOwner.Failed(_settings, Convert.ToInt32(count), _clock.GetUtcNow());
         StoreSchema.Execute(_connection, tx,
             "UPDATE local_gap_item SET failure_count=$n,failure_reason=$why,retry_after=$due,retry_allowed=1 WHERE root_no=$r AND object_id=$o AND epoch=$e;",
             ("$r", root), ("$o", objectId), ("$e", epoch), ("$n", retry.Attempts),
@@ -111,7 +111,7 @@ public sealed partial class SqliteStateStore
             "SELECT failure_count FROM local_rehash WHERE root_no=$r AND object_id=$o AND evidence_revision=$v;",
             ("$r", root.Value), ("$o", item.ObjectId), ("$v", revision));
         if (count is null) return false;
-        var retry = FailureRetryOwner.Failed(Convert.ToInt32(count), _clock.GetUtcNow());
+        var retry = FailureRetryOwner.Failed(_settings, Convert.ToInt32(count), _clock.GetUtcNow());
         var owner = IndexNoticeOwner(rootId);
         using var tx = _connection.BeginTransaction();
         StoreSchema.Execute(_connection, tx,
