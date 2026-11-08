@@ -1,0 +1,12 @@
+{
+  "build": [
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [],
+  "core": [],
+  "ui": [
+    "activity-account-ui-checks"
+  ]
+}
