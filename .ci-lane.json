@@ -1,0 +1,13 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "dependencies",
+    "literals",
+    "scan-pass",
+    "renames"
+  ],
+  "core": [],
+  "ui": []
+}
