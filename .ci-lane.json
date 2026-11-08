@@ -1,0 +1,28 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [
+    "engine-operations",
+    "engine-host",
+    "local",
+    "cli",
+    "dependencies",
+    "literals",
+    "strings",
+    "human-log",
+    "store",
+    "transport"
+  ],
+  "core": [
+    "--cli-checks",
+    "--engine-layout-checks"
+  ],
+  "ui": [
+    "startup-readiness"
+  ]
+}
