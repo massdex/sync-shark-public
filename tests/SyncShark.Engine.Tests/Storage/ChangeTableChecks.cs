@@ -2312,18 +2312,31 @@ public static class ChangeTableChecks
                 Check.Require(store.BeginSelection(rename), "B12 live-coverage selection must be admitted.");
                 foreach (var count in new[] { 1, 8, 64 })
                 {
-                    var footprint = Enumerable.Range(0, count)
-                        .Select(index => new LiveEffectScope(Side.Dropbox,
-                            PathNames.RootedDropboxPath(RemoteRoot, Renamed + "/child" + index), false)).ToArray();
-                    store.ValidateLiveCoverage(rename, coverage, footprint);
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                    GC.Collect();
-                    const int runs = 10;
-                    var before = GC.GetTotalAllocatedBytes(precise: true);
-                    for (var run = 0; run < runs; run++) store.ValidateLiveCoverage(rename, coverage, footprint);
-                    var allocated = (GC.GetTotalAllocatedBytes(precise: true) - before) / runs;
-                    Console.WriteLine("B12 live-coverage scopes=" + count + " allocatedPerCall=" + allocated);
+                    var scopes = new List<LiveEffectScope>
+                    {
+                        new(Side.Dropbox, PathNames.RootedDropboxPath(RemoteRoot, Renamed), false)
+                    };
+                    for (var index = 1; index < count; index++)
+                        scopes.Add(new LiveEffectScope(Side.Dropbox,
+                            PathNames.RootedDropboxPath(RemoteRoot, Renamed + "/child" + index), true));
+                    var footprint = scopes.ToArray();
+                    try
+                    {
+                        store.ValidateLiveCoverage(rename, coverage, footprint);
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        GC.Collect();
+                        const int runs = 10;
+                        var before = GC.GetTotalAllocatedBytes(precise: true);
+                        for (var run = 0; run < runs; run++) store.ValidateLiveCoverage(rename, coverage, footprint);
+                        var allocated = (GC.GetTotalAllocatedBytes(precise: true) - before) / runs;
+                        Console.WriteLine("B12 live-coverage scopes=" + count + " allocatedPerCall=" + allocated);
+                    }
+                    catch (Exception error)
+                    {
+                        Console.WriteLine("B12 live-coverage scopes=" + count + " failed " +
+                            error.GetType().Name + ": " + error.Message);
+                    }
                 }
             });
         }

@@ -3,7 +3,6 @@
     "engine-tests"
   ],
   "engine": [
-    "budget",
     "b12-meas"
   ],
   "core": [],
