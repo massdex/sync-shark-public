@@ -1,0 +1,10 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--v2-deferred-intake-bound-checks"
+  ],
+  "ui": []
+}
