@@ -398,8 +398,7 @@ internal sealed class SelectionPass
             // One scope answer for this first observation, from the fresh primary only: it gates the batch and walk
             // and settles an unbound Local entry early. PathScope stays the only exclusion owner.
             var excluded = first && current is not null &&
-                _context.Scope.Excludes(notice.Side == Side.Local ? current.Path : null,
-                    notice.Side == Side.Dropbox ? current.Path : null, current.IsFolder);
+                ExcludedForAdmission(_context.Scope, notice.Side, current, notice);
             // An excluded Local root keeps its batch or walk when a recorded member still needs releasing.
             var unreadable = excluded && current is { IsFolder: true } && current.Skip is null && notice.Side == Side.Local
                 ? _context.Store.UnreadableUnder(selection.PairId, PathNames.Key(current.Path)) : null;
@@ -496,6 +495,14 @@ internal sealed class SelectionPass
             }
         }
     }
+
+    // Admission asks scope only where its answer is read: folder admission (the batch and walk gates) and the
+    // unbound Local settle. Every other primary — a Dropbox-origin file, a bound notice, a delete or a rename —
+    // pays no exclusion evaluation, so the in-scope repeat is exactly B-10's accepted Local Changed file.
+    internal static bool ExcludedForAdmission(PathScope scope, Side side, Entry current, ChangeNotice notice) =>
+        (current.IsFolder || notice is { Side: Side.Local, Kind: ChangeKind.Changed, OldPath: null }) &&
+        scope.Excludes(side == Side.Local ? current.Path : null,
+            side == Side.Dropbox ? current.Path : null, current.IsFolder);
 
     // From the current observation: a known folder (same id) that was only touched, or that moved under its own rename,
     // brings no new contents; any other folder is new or replaced and its contents are added.

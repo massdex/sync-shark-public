@@ -3,8 +3,8 @@
     "engine-tests"
   ],
   "engine": [
+    "excluded-admission",
     "syncer",
-    "renames",
     "store",
     "budget",
     "dependencies"

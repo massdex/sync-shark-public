@@ -6098,8 +6098,9 @@ public static class ChangeRunnerChecks
         var failures = new List<Exception>();
         foreach (var check in new Func<Task>[]
         {
-            ExcludedLargeFolderAsync, ExcludedDiscoveryAfterRestartAsync, InScopeFolderStillBatchesAsync,
-            ExcludedFolderBeforeFirstRepairAsync,
+            ScopeAskedOnlyWhereReadAsync,
+            ExcludedLargeFolderAsync, ExcludedFolderByNameAsync, ExcludedDiscoveryAfterRestartAsync,
+            InScopeFolderStillBatchesAsync, ExcludedFolderBeforeFirstRepairAsync,
             ExcludedFileKeepsZeroReadsAsync, FreshKindKeepsSameNamedFileAsync, RenameAcrossBoundaryAsync,
             DropboxExcludedFolderAsync, AbsentPrimaryClosesIssueAsync, ExcludedUnreadableReleasesAsync,
             ExcludedSettlementKeepsLaterArrivalAsync
@@ -6133,6 +6134,44 @@ public static class ChangeRunnerChecks
             dropbox.Reads + "; dropboxListings=" + dropbox.Listings + "; batches=" + batches +
             "; storeCommands=" + store.Commands + "; commits=" + store.CommitCalls + "; rowsRead=" + store.RowsRead);
         return (result, batches, local, dropbox);
+    }
+
+    // P2-1: admission asks scope only where its answer is read. An in-scope Dropbox-origin file makes no Excludes
+    // call, so it allocates nothing through SyncIgnorePolicy; a Local Changed file still evaluates the scope.
+    private static Task ScopeAskedOnlyWhereReadAsync()
+    {
+        AllocProbe.RequireAddsNothing();
+        using var fixture = new Fixture();
+        var pair = fixture.Pair with { IgnoreRules = ["FileExtension:.tmp"] };
+        var scope = new PathScope(pair, [pair]);
+        var file = new Entry("Skip/keep.txt", false, 1, Stamp, "id", "", "", null);
+        var dropbox = new ChangeNotice(Side.Dropbox, ChangeKind.Changed, file.Path, null, file.Id, file, false, false);
+        var local = dropbox with { Side = Side.Local };
+        var skipped = AllocProbe.Measure(index =>
+            { _ = SelectionPass.ExcludedForAdmission(scope, dropbox.Side, file, dropbox); }, 1_000, 100);
+        var asked = AllocProbe.Measure(index =>
+            { _ = SelectionPass.ExcludedForAdmission(scope, local.Side, file, local); }, 1_000, 100);
+        Check.Require(skipped == 0 && asked > 0,
+            "B-99A (P2-1) an in-scope Dropbox-origin file asks no exclusion (skipped=" + skipped +
+            " B); a Local Changed file evaluates it (asked=" + asked + " B)");
+        return Task.CompletedTask;
+    }
+
+    // P3-4: the live incident's shape — a folder excluded by a FolderName rule, matched as an ancestor component.
+    private static async Task ExcludedFolderByNameAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        fixture.Local.Seed(FolderEntry("Parent", "parent-id"), null);
+        var root = FolderEntry("Parent/Skip", LocalId);
+        fixture.Local.Seed(root, null);
+        for (var index = 0; index < 10; index++)
+            fixture.Local.Seed(LocalEntry("Parent/Skip/child" + index, "child-" + index), [1]);
+        var selected = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, root.Path, null, LocalId, root, false, false));
+        var (result, batches, local, dropbox) = await RunExcludedAsync(fixture, selected, ExcludedScope(fixture, folderRule: true));
+        Check.Require(result is true && batches == 0 && local.Reads == 1 && dropbox.Reads == 0 &&
+            dropbox.Listings == 0 && fixture.Hooks.Count(nameof(IStateStore.RequireDiscovery)) == 0,
+            "B-99A (a-name) an excluded folder by FolderName: batches=" + batches + "; localReads=" +
+            local.Reads + "; dropboxReads=" + dropbox.Reads + "; dropboxListings=" + dropbox.Listings);
     }
 
     // (a) A large excluded Local folder yields no Dropbox metadata, listing, batch or discovery flag.
@@ -6194,10 +6233,12 @@ public static class ChangeRunnerChecks
         var selected = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, "Skip", null, LocalId, root, false, false));
         var (result, batches, local, dropbox) = await RunExcludedAsync(fixture, selected,
             ExcludedScope(fixture), repaired: false);
-        Check.Require(result is true && batches == 0 && local.Reads == 1 && dropbox.Reads == 0 &&
-            dropbox.Listings == 0 && await fixture.Dropbox.ReadOneAsync("Skip/child", default) is null,
+        Check.Require(result is true && batches == 0 && local.Reads == 1 && local.Listings == 0 &&
+            dropbox.Reads == 0 && dropbox.Listings == 0 &&
+            await fixture.Dropbox.ReadOneAsync("Skip/child", default) is null,
             "B-99A (walk) an excluded folder before the first Repair: localReads=" + local.Reads +
-            "; dropboxReads=" + dropbox.Reads + "; dropboxListings=" + dropbox.Listings);
+            "; localListings=" + local.Listings + "; dropboxReads=" + dropbox.Reads +
+            "; dropboxListings=" + dropbox.Listings);
     }
 
     // (d) The B-10 file case keeps zero Dropbox reads.
@@ -6313,19 +6354,26 @@ public static class ChangeRunnerChecks
     // (i) P2-3: an excluded Local root still releases a recorded unreadable member.
     private static async Task ExcludedUnreadableReleasesAsync()
     {
-        using var fixture = new Fixture(realStore: true);
-        var root = FolderEntry("Skip", LocalId);
-        fixture.Local.Seed(root, null);
-        fixture.Local.Seed(LocalEntry("Skip/child", "child-id"), [1]);
-        UnreadableMember.Record(fixture.Inner, PairId, "Skip", LocalId);
-        Check.Require(fixture.Inner.UnreadableUnder(PairId, PathNames.Key("Skip")).Count != 0,
-            "B-99A (i) setup records the unreadable member");
-        var selected = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, "Skip", null, LocalId, root, false, false));
-        var (result, batches, _, _) = await RunExcludedAsync(fixture, selected, ExcludedScope(fixture));
-        Check.Require(result is true && batches == 1 &&
-            fixture.Hooks.Count(nameof(IStateStore.ReleaseUnreadable)) == 1 &&
-            fixture.Inner.UnreadableUnder(PairId, PathNames.Key("Skip")).Count == 0,
-            "B-99A (i) an excluded Local root releases its recorded member: batches=" + batches);
+        // P3-1: both the batch path (after the first Repair) and the pre-first-Repair walk release the member.
+        foreach (var repaired in new[] { false, true })
+        {
+            using var fixture = new Fixture(realStore: true);
+            var root = FolderEntry("Skip", LocalId);
+            fixture.Local.Seed(root, null);
+            fixture.Local.Seed(LocalEntry("Skip/child", "child-id"), [1]);
+            UnreadableMember.Record(fixture.Inner, PairId, "Skip", LocalId);
+            Check.Require(fixture.Inner.UnreadableUnder(PairId, PathNames.Key("Skip")).Count != 0,
+                "B-99A (i) setup records the unreadable member");
+            var selected = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, "Skip", null, LocalId, root, false, false));
+            var (result, batches, local, _) = await RunExcludedAsync(fixture, selected,
+                ExcludedScope(fixture), repaired: repaired);
+            Check.Require(result is true && batches == (repaired ? 1 : 0) &&
+                fixture.Hooks.Count(nameof(IStateStore.ReleaseUnreadable)) == 1 &&
+                fixture.Inner.UnreadableUnder(PairId, PathNames.Key("Skip")).Count == 0 &&
+                (repaired || local.Listings > 0),
+                "B-99A (i) an excluded Local root releases its recorded member: repaired=" + repaired +
+                "; batches=" + batches + "; localListings=" + local.Listings);
+        }
     }
 
     // Later arrivals beyond the captured watermark stay pending; an excluded settlement is not a sweep.
