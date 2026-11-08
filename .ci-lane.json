@@ -1,0 +1,15 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "renames",
+    "store",
+    "local"
+  ],
+  "core": [
+    "--ntfs-usn-page-checks"
+  ],
+  "ui": []
+}
