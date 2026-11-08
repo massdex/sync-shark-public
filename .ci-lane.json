@@ -8,8 +8,7 @@
     "engine-host"
   ],
   "core": [
-    "--cli-checks",
-    "--cli-surface-checks"
+    "--cli-checks"
   ],
   "ui": []
 }
