@@ -78,7 +78,9 @@ public sealed class SyncCliRuntime : SyncCliOperationsBase
     /// <summary>The one native Dropbox CLI client policy both CLI runtimes use: the caller's transfer handler and the
     /// native request timeout. The caller records ownership before anything after it can throw.</summary>
     internal static HttpClient CreateDropboxCliClient(Func<HttpMessageHandler> handlerFactory) =>
-        new(handlerFactory()) { Timeout = DropboxCliSettings.HttpTimeout };
+        // Fully qualified with Default: the inherited SyncCliOperationsBase.DropboxCliSettings member shadows
+        // the type name here, and HttpTimeout is an instance member of the settings record.
+        new(handlerFactory()) { Timeout = Massdex.SyncShark.DropboxCliSettings.Default.HttpTimeout };
 
     /// <summary>The one native Dropbox CLI composition (design DESIGN-115-CLI-OUTPUT §2.2): the supplied authority, the
     /// already-owned HTTP client and credentials, and the runtime's own limiter. The two runtimes differ only in the
