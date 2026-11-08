@@ -2469,7 +2469,13 @@ public static class ChangeRunnerChecks
         if (shape == B101Shape.PageSplit) await syncer.SyncWorkAsync(default);
         var completed = await f.Local.ReadOneAsync(moved ? "P/c" : "P/a", default);
         var refusals = events.Count(item => item.Error is LiveAdmissionStaleException);
-        var expectedRefusals = shape is B101Shape.IdentityChain or B101Shape.GenuineDeletion ? 0 : 1;
+        // One refusal per tombstone attempt while the destination is pending; the page split attempts it once per call.
+        var expectedRefusals = shape switch
+        {
+            B101Shape.IdentityChain or B101Shape.GenuineDeletion => 0,
+            B101Shape.PageSplit => 2,
+            _ => 1
+        };
         var diagnosis = "; effects=" + string.Join(" | ", events.Where(item => item.EffectKind is not null)
                 .Select(item => item.EffectKind + ":" + item.Path)) +
             "; refusals=" + refusals + "; byId=" + byId +

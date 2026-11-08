@@ -63,7 +63,8 @@ internal sealed class ChangeTable
             : throw new InvalidOperationException();
 
     /// <summary>Whether either source owes a Repair, from one pair-fence read.</summary>
-    internal bool Obligated(string pairId) => ReadPair(null, pairId) is { } pair && Obligated(pair);
+    internal bool Obligated(string pairId, SqliteTransaction? transaction = null) =>
+        ReadPair(transaction, pairId) is { } pair && Obligated(pair, transaction);
 
     /// <summary>The one live answer for owed Repair (D-1105-5): no live work before the pair's first completed Repair
     /// or without both source rows; Local skipped-coverage or lost-interval debt refuses only effects that write Local,
@@ -1554,9 +1555,9 @@ internal sealed class ChangeTable
             static reader => reader.GetInt64(StateSchema.FirstColumn)).First();
 
     private static bool OwesRepair(SourceRow? source) => source is not { Reason: null };
-    private bool Obligated(PairRow pair) =>
-        OwesRepair(ReadSourceRow(null, pair.Row, Side.Local)) ||
-        OwesRepair(ReadSourceRow(null, pair.Row, Side.Dropbox));
+    private bool Obligated(PairRow pair, SqliteTransaction? transaction = null) =>
+        OwesRepair(ReadSourceRow(transaction, pair.Row, Side.Local)) ||
+        OwesRepair(ReadSourceRow(transaction, pair.Row, Side.Dropbox));
 
     private LiveRefusal ReadLiveRefusal(PairRow pair) => ReadLiveRefusal(pair,
         ReadSourceRow(null, pair.Row, Side.Local), ReadSourceRow(null, pair.Row, Side.Dropbox));
