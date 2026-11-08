@@ -29,7 +29,7 @@ public sealed class SyncCliRuntime : SyncCliOperationsBase
 
     public static SyncCliRuntime Acquire(string lockPath)
     {
-        var instanceLock = AcquireProductLock(lockPath);
+        var instanceLock = CliProductLock.Acquire(lockPath);
         var httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
             { Timeout = TimeSpan.FromMinutes(10) };
         try
@@ -44,51 +44,6 @@ public sealed class SyncCliRuntime : SyncCliOperationsBase
             throw;
         }
     }
-
-    /// <summary>Takes the one exclusive product-state lock every direct runtime uses. Contention is the shared
-    /// Busy refusal; any other failure is a real state problem, never reported as "busy".</summary>
-    internal static PilotInstanceLock AcquireProductLock(string lockPath)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(lockPath);
-        try
-        {
-            return PilotInstanceLock.Acquire(lockPath);
-        }
-        catch (IOException error) when (IsLockContention(error))
-        {
-            throw new SyncCliBusyException(
-                "Sync Shark already holds its exclusive product state lock for this Windows user, so this command " +
-                "cannot read or change product state here. Use the running application: start Sync Shark and run " +
-                "the command again, so it executes inside that process. The CLI never forces the other process, " +
-                "bypasses the lock or starts a second runtime.", error);
-        }
-        catch (Exception error)
-        {
-            throw new SyncCliOperationException(
-                "The Sync Shark product state could not be opened: " + SyncCli.DescribeException(error), error);
-        }
-    }
-
-    // Only sharing violations and lock conflicts mean "another process owns the product"; a missing
-    // volume, a denied path or a damaged state directory must surface as a real failure.
-    internal static bool IsLockContention(IOException error) =>
-        error.InnerException is System.ComponentModel.Win32Exception { NativeErrorCode: 32 or 33 } ||
-        error.Message.Contains("already open in this Windows user account", StringComparison.Ordinal);
-
-    /// <summary>The one native Dropbox CLI client policy both CLI runtimes use: the caller's transfer handler and the
-    /// native request timeout. The caller records ownership before anything after it can throw.</summary>
-    internal static HttpClient CreateDropboxCliClient(Func<HttpMessageHandler> handlerFactory) =>
-        // Fully qualified with Default: the inherited SyncCliOperationsBase.DropboxCliSettings member shadows
-        // the type name here, and HttpTimeout is an instance member of the settings record.
-        new(handlerFactory()) { Timeout = Massdex.SyncShark.DropboxCliSettings.Default.HttpTimeout };
-
-    /// <summary>The one native Dropbox CLI composition (design DESIGN-115-CLI-OUTPUT §2.2): the supplied authority, the
-    /// already-owned HTTP client and credentials, and the runtime's own limiter. The two runtimes differ only in the
-    /// authority they pass, never in this composition.</summary>
-    internal static DropboxAccountClients ComposeDropboxClients(PilotStateAuthority authority, HttpClient http,
-        IDropboxRefreshTokenStore credentials, SyncTransferRateLimiter limiter) =>
-        new(http, new DropboxConnectionStore(authority), credentials,
-            binding => new RefreshingDropboxAccessTokenSource(http, credentials, binding), limiter);
 
     protected override SyncAuthorityRuntimeHost Host => _host;
     protected override PilotStateAuthority StateAuthority => _instanceLock.StateAuthority;
