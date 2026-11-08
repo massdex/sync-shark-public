@@ -1,0 +1,7 @@
+LIBRARY SyncShark.Explorer
+EXPORTS
+    DllGetClassObject
+    DllCanUnloadNow
+    SyncSharkOpenDiscoveryPipe
+    SyncSharkCloseDiscoveryPipe
+    SyncSharkPrepareDiscovery
