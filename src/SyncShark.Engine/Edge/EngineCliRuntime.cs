@@ -13,7 +13,7 @@ public sealed class EngineCliRuntime : ISyncCliRuntime, IEngineCliAccess, IEngin
     private readonly int _width = RunLog.HumanWidth;
     private readonly SyncTransferRateLimiter _dropboxLimiter = new(new SyncTransferSettings());
     private PilotInstanceLock? _ownLock =
-        SyncCliRuntime.AcquireProductLock(SyncSharkRuntimePaths.InstanceLockFile);
+        CliProductLock.Acquire(SyncSharkRuntimePaths.InstanceLockFile);
     private DropboxAccountClients? _dropboxAccounts;
     private HttpClient? _dropboxHttp;
     private int _disposed;
