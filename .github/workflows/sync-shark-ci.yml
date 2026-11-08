@@ -64,8 +64,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Runs the step below against a workspace with no .ci-lane.json, so a full
-      # run can never silently skip the registry's engine groups again.
+      # Runs the step below against full, quick and focused fixtures, so hosted
+      # executable groups cannot be silently omitted or duplicated.
       - name: Check full-run engine selection
         shell: pwsh
         run: ./tools/ci/check-lane-selection.ps1
@@ -76,6 +76,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $knownBuild = @('core', 'core-tests', 'fod-tests', 'engine-tests', 'app', 'ui-fixture')
+          $registry = Get-Content -Raw 'tests/SyncShark.Engine.Tests/CheckRegistry.cs'
+          $groups = @([regex]::Matches($registry, '\["([a-z0-9-]+)"\]\s*=') | ForEach-Object { $_.Groups[1].Value })
+          if ($groups.Count -eq 0) { throw 'No engine groups found in CheckRegistry.' }
           $path = Join-Path $env:GITHUB_WORKSPACE '.ci-lane.json'
           if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             # No selection: today's full matrix. quick/** still skips the UI fixture and engine work.
@@ -85,9 +88,7 @@ jobs:
               $build = @('core', 'core-tests', 'fod-tests', 'app')
             } else {
               # A full run verifies every registered engine group, not only the projects above.
-              $registry = Get-Content -Raw 'tests/SyncShark.Engine.Tests/CheckRegistry.cs'
-              $engine = @([regex]::Matches($registry, '\["([a-z0-9-]+)"\]\s*=') | ForEach-Object { $_.Groups[1].Value })
-              if ($engine.Count -eq 0) { throw 'No engine groups found in CheckRegistry.' }
+              $engine = $groups
               # Hosted runs cannot reach the live route; name those groups instead of scheduling them.
               # One owner for the list: tools/ci/live-groups.txt.
               $liveGroups = @(Get-Content -LiteralPath 'tools/ci/live-groups.txt' |
@@ -139,6 +140,14 @@ jobs:
             }
             $data = [ordered]@{ has_selection = 'true'; build = $build; engine = $engine; core = $core; ui = $ui }
           }
+          $expanded = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+          foreach ($group in $data.engine) {
+            $shards = @($groups | Where-Object { $_ -cmatch ('^' + [regex]::Escape($group) + '-[0-9]+$') })
+            if ($group -ceq 'budget' -and $shards.Count -eq 0) { throw 'No numeric budget shards found in CheckRegistry.' }
+            if ($shards.Count -eq 0) { [void]$expanded.Add($group) }
+            else { foreach ($shard in $shards) { [void]$expanded.Add($shard) } }
+          }
+          $data.engine = @($expanded | Sort-Object -CaseSensitive { if ($_ -cmatch '-[0-9]+$') { 0 } else { 1 } }, { $_ })
           # A matrix must not be empty; the count outputs keep the dummy out of a run.
           $matrix = {
             param($Values, $Sentinel)
@@ -764,9 +773,8 @@ jobs:
           if ($failed.Count -gt 0) { exit 1 }
           exit 0
 
-  # Lane selection jobs: one matrix job per named Engine group, Core switch and
-  # UI selector, so a lane runs just its work in parallel. They run only when
-  # .ci-lane.json selected something; the full matrix above is unchanged.
+  # One matrix job per selected Engine group; full runs select every hosted group.
+  # Core switches and UI selectors below remain focused-lane jobs.
   lane-engine:
     name: engine (${{ matrix.group }})
     needs: [select, build-engine]

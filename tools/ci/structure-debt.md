@@ -114,18 +114,18 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/ChangeTable.cs
 
-<!-- spec-source: 361b73a9bb9e~848e8ca8c806~6e6c976b3ecd~2548f502dd92~00050400f7d0~8349 -->
+<!-- spec-source: d942bb302f51~b5992ec1442a~f68ed2f720e2~50014678978c~6b2168080338~b15f -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 11 | class-size | class-size | Split by job | Source checkpoint acquisition differs from work-selection/issue-custody lifecycle. 0.3.79 adds the live-refusal answer (R6), notice content merging (S2) and own-write USN evidence (#90b): 1473 to 1543 lines. 0.3.80 adds the per-pass attempted answer (WorkAttempted/Attempted :503-508) and the durable discovery-required work flag (RequireDiscovery :510-519, NeedsOwnSelection :1283-1284): 1543 to 1565 lines. Both are work-selection custody; same split. |
+| 11 | class-size | class-size | Split by job | Source checkpoint acquisition differs from work-selection/issue-custody lifecycle. 0.3.79 adds the live-refusal answer (R6), notice content merging (S2) and own-write USN evidence (#90b): 1473 to 1543 lines. 0.3.80 adds the per-pass attempted answer (WorkAttempted/Attempted :503-508) and the durable discovery-required work flag (RequireDiscovery :510-519, NeedsOwnSelection :1283-1284): 1543 to 1565 lines. Both are work-selection custody; same split. 0.3.82 (B-101): one shared UnownedIdentity :575-580 (the probe and admission both use it) and the path-selection identity refusal :1117-1124; #36 plumbing adds an optional transaction to Obligated :66-67, :1557-1559. Work-selection custody; same split. |
 | 91 | long-member | AcquireJournalPage(string,JournalPosition?,JournalPosition,IReadOnlyLi | Record why it cannot be split | Record member/position fences, notices and checkpoint advancement as one atomic acquisition. |
 | 562 | long-member | AdvanceBefore(SqliteTransaction,string,WorkSelection,StateChange) 46 | Record why it cannot be split | Record one selected work item’s replacement baseline derivation and propagation. |
 | 671 | long-member | AttachIssueWork(WorkSelection,Issue,IEnumerable<(ChangeNotice Notice,  | Record why it cannot be split | Record retain/move/create alternatives as one atomic responsibility handoff. |
 | 968 | long-member | EnsureIssueWork(SqliteTransaction,string,long,long,long,string,IssueSu | Record why it cannot be split | Record selected/source-less paths establishing the same exact issue-work custody. |
 | 774 | long-member | ReadLocalDirty(string,long,long,string,string?,string?,string?) 76 | Record why it cannot be split | Record identity/current/recorded-path probes as one consistent dirty-evidence answer. #90b grew it 61 to 76 with the own-write USN fold (local Count) and the OwnWrite check. |
 | 890 | long-member | ValidateLiveCoverage(WorkSelection,LiveCoverage,IReadOnlyList<LiveEffe | Record why it cannot be split | Record all footprint/later-evidence checks as one admitted-selection freshness proof. |
-| 11 | file-size | file-size | Split by job | Source checkpoint acquisition differs from work-selection/issue-custody persistence; 1483 to 1553 lines in 0.3.79, 1575 in 0.3.80 (see class-size). |
+| 11 | file-size | file-size | Split by job | Source checkpoint acquisition differs from work-selection/issue-custody persistence; 1483 to 1553 lines in 0.3.79, 1575 in 0.3.80 (see class-size); 0.3.82 B-101 and #36 plumbing +9 lines (see class-size). |
 
 ## src/SyncShark.Engine/Executor/ItemSync.cs
 
@@ -142,16 +142,16 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Executor/SelectionPass.cs
 
-<!-- spec-source: b0625bf0e529~97f711b13991~97acf4f25dcc~df58589b712e~bd417a3b218f~60ba -->
+<!-- spec-source: 1fcd144eb210~e4fd70c08a1c~413f3c418449~e5ecce9a683d~9138eebac9a2~c3ad -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 6 | class-size | class-size | Split by job | Branch execution/settlement is separable from branch acquisition (walks, folder batches, unreadable release/replay). 0.3.79 grew execution with live upload admission :246-265 and branch progress reporting :58-68, :352-363, :374-375 (aggregated by Syncer); same split. 0.3.80 adds the already-attempted admission skip and Refused flag (:44, :47-63) and durable discovery marking for batch folders (:392-393), both inside the same acquisition/execution sequencing; 549 class lines (555 in 0.3.79), same split. 0.3.80.1 (B-10 F1): the unbound excluded Local file guard :146-150 skips the Dropbox read inside projected observation; 554 class lines. |
-| 366 | long-member | EnumerateBranchesAsync(WorkSelection,CancellationToken) 120 | Split by job | Branch discovery, folder dispatch and unreadable-release/replay are distinct protocols. |
+| 6 | class-size | class-size | Split by job | Branch execution/settlement is separable from branch acquisition (walks, folder batches, unreadable release/replay). 0.3.79 grew execution with live upload admission :246-265 and branch progress reporting :58-68, :352-363, :374-375 (aggregated by Syncer); same split. 0.3.80 adds the already-attempted admission skip and Refused flag (:44, :47-63) and durable discovery marking for batch folders (:392-393), both inside the same acquisition/execution sequencing; 549 class lines (555 in 0.3.79), same split. 0.3.80.1 (B-10 F1): the unbound excluded Local file guard :146-150 skips the Dropbox read inside projected observation; 554 class lines. 0.3.82 (B-101): RelocateAsync :432-451 now owns both absent-primary relocations (Local by id, and Dropbox to the selection's own last member), which is branch acquisition. SPLIT-PENDING with the B-9 acquisition split; +20 lines. |
+| 366 | long-member | EnumerateBranchesAsync(WorkSelection,CancellationToken) 120 | Split by job | Branch discovery, folder dispatch and unreadable-release/replay are distinct protocols. 0.3.82 (B-101): the relocation moved to RelocateAsync, so there is no net growth. |
 | 515 | long-member | ListAsync(PendingChange,string,ListOptions,CancellationToken) 45 | Record why it cannot be split | Record the manual iterator lifetime needed for failure yield, cancellation and exactly-once disposal. |
 | 72 | long-member | RunSelectionAsync(WorkSelection,CancellationToken) 201 | Split by job | Residual projection, branch observation/claiming and prepared-action dispatch are embedded jobs. |
 | 129 | long-member | RunSelectionAsync(WorkSelection,CancellationToken)::ObserveProjectedAs | Record why it cannot be split | Record primary-observation reuse, dirty evidence and peer authority as one projected-row result. |
-| 1 | file-size | file-size | Split by job | Same as row 28: execution separable from acquisition and unreadable release/replay |
+| 1 | file-size | file-size | Split by job | Same as row 28: execution separable from acquisition and unreadable release/replay. 0.3.82 (B-101): +20 lines for RelocateAsync, SPLIT-PENDING with the B-9 split. |
 
 ## src/SyncShark.Core/SyncCliRegistry.cs
 

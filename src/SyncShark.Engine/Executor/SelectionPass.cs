@@ -429,15 +429,24 @@ internal sealed class SelectionPass
         finally { _context.Store.EndSelection(selection); }
     }
 
-    // One membership read and one point read per selection; the later member's own branch reuses that observation.
-    private async Task<(string? Key, Entry? Entry)> ReadLastMemberAsync(WorkSelection selection, string id,
-        string primaryKey, CancellationToken ct)
+    // An absent primary follows its identity: Local by id within scope; Dropbox to the selection's own last member
+    // (B-101, D19), whose membership read and point read happen once per selection and are returned for reuse.
+    private async Task<(Entry? Moved, (string? Key, Entry? Entry)? Later)> RelocateAsync(WorkSelection selection,
+        ChangeNotice notice, string primaryKey, (string? Key, Entry? Entry)? later, CancellationToken ct)
     {
-        var last = _context.Store.ReadWork(selection).LastOrDefault(member =>
-            member.Notice is { Side: Side.Dropbox, IdentityDeleted: false } notice && notice.Id == id)?.Notice;
-        var key = last is null ? null : PathNames.KeyFor(Side.Dropbox, last.Path);
-        return key is null || key == primaryKey ? (null, null)
-            : (key, await _context.For(Side.Dropbox).ReadOneAsync(last!.Path, ct).ConfigureAwait(false));
+        if (notice is not { IdentityDeleted: false, Id: { } id }) return (null, later);
+        if (notice.Side == Side.Local)
+            return (_context.Local is IIdentitySide identities && await identities.ReadByIdAsync(id, ct)
+                .ConfigureAwait(false) is { InScope: true } result ? result.Location.Entry : null, later);
+        if (later is null)
+        {
+            var last = _context.Store.ReadWork(selection).LastOrDefault(member =>
+                member.Notice is { Side: Side.Dropbox, IdentityDeleted: false } other && other.Id == id)?.Notice;
+            var key = last is null ? null : PathNames.KeyFor(Side.Dropbox, last.Path);
+            later = key is null || key == primaryKey ? (null, null)
+                : (key, await _context.Dropbox.ReadOneAsync(last!.Path, ct).ConfigureAwait(false));
+        }
+        return (later.Value.Entry is { } moved && moved.Id == id ? moved : null, later);
     }
 
     // A holder that changed or closed since the lookup refuses exactly; the branch stays unfinished and reachable.
@@ -495,20 +504,10 @@ internal sealed class SelectionPass
                 current = !first || notice.IdentityDeleted ? null
                     : later is { Key: { } seen } && seen == primaryKey ? later.Value.Entry
                     : await _context.For(notice.Side).ReadOneAsync(notice.Path, ct).ConfigureAwait(false);
-                if (first && current is null && notice is { Side: Side.Local, IdentityDeleted: false, Id: not null } &&
-                    _context.Local is IIdentitySide identities &&
-                    await identities.ReadByIdAsync(notice.Id, ct).ConfigureAwait(false) is { InScope: true } result)
+                if (first && current is null)
                 {
-                    current = result.Location.Entry;
-                    notice = notice with { Path = current.Path, Observed = current };
-                }
-                // B-101: an absent Dropbox member follows its identity to the selection's own last member (D19).
-                if (first && current is null && notice is { Side: Side.Dropbox, IdentityDeleted: false, Id: { } id } &&
-                    (later ??= await ReadLastMemberAsync(selection, id, primaryKey, ct).ConfigureAwait(false))
-                        is { Entry: { } moved } && moved.Id == id)
-                {
-                    current = moved;
-                    notice = notice with { Path = moved.Path, Observed = moved };
+                    (var moved, later) = await RelocateAsync(selection, notice, primaryKey, later, ct).ConfigureAwait(false);
+                    if (moved is not null) notice = notice with { Path = (current = moved).Path, Observed = moved };
                 }
             }
             catch (ItemFailedException error) { readFailure = error; }
