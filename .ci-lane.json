@@ -1,0 +1,16 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "syncer",
+    "stale-freshness",
+    "issues",
+    "local",
+    "decide",
+    "exclusions",
+    "live-admission"
+  ],
+  "core": [],
+  "ui": []
+}
