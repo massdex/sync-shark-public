@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "containment",
+    "syncer"
+  ],
+  "core": [],
+  "ui": []
+}
