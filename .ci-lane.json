@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "decide",
+    "dropbox"
+  ],
+  "core": [],
+  "ui": []
+}
