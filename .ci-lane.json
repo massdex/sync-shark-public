@@ -1,0 +1,27 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "row",
+    "containment",
+    "containment-move-out",
+    "repair-held",
+    "repair-claims",
+    "released-history",
+    "stale-freshness",
+    "syncer",
+    "mapped-holds",
+    "safety",
+    "peer",
+    "live-admission",
+    "literals",
+    "dependencies",
+    "exclusions",
+    "issues",
+    "work-lifecycle",
+    "store"
+  ],
+  "core": [],
+  "ui": []
+}
