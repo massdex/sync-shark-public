@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "decide",
+    "dropbox",
+    "local",
+    "dependencies",
+    "literals"
+  ],
+  "core": [],
+  "ui": []
+}
