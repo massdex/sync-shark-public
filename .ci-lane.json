@@ -1,0 +1,22 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [
+    "cli",
+    "engine-host",
+    "transport"
+  ],
+  "core": [
+    "--cli-checks",
+    "--cli-surface-checks"
+  ],
+  "ui": [
+    "cli-settings-checks",
+    "cli-dropbox-route-checks"
+  ]
+}
