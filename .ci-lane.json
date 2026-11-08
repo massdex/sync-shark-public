@@ -1,0 +1,17 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "engine-host",
+    "repair",
+    "store",
+    "syncer",
+    "budget",
+    "dependencies",
+    "strings",
+    "literals"
+  ],
+  "core": [],
+  "ui": []
+}
