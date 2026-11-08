@@ -1,0 +1,10 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--cli-surface-checks"
+  ],
+  "ui": []
+}
