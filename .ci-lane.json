@@ -1,0 +1,10 @@
+{
+  "build": [
+    "core-tests"
+  ],
+  "engine": [],
+  "core": [
+    "--ntfs-usn-page-checks"
+  ],
+  "ui": []
+}
