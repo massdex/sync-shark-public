@@ -1,0 +1,10 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "disk-full"
+  ],
+  "core": [],
+  "ui": []
+}
