@@ -1379,16 +1379,18 @@ public static class ChangeRunnerChecks
         foreach (var origin in new[] { Side.Local, Side.Dropbox })
         foreach (var (name, earlier, unbound) in cases)
         {
-            // The issue variant: a plain notice whose work carries an in-use issue (the WorkIssue clause).
+            // The issue variant: a plain notice whose work carries an in-use issue (the WorkIssue clause). The issue
+            // names an earlier T/x identity so the batch's own T/x create does not adopt its retry episode.
             var attempt = Guid.NewGuid();
             Action<EchoRig, WorkSelection>? issue = name != "issue" ? null : (rig, work) =>
                 rig.Fixture.Inner.RecordInUseFailure(PairId, Generation, work.SourceEpoch, "T/x",
-                    new IssueSubject([new IssueItem(rig.Origin, "T/x", rig.OriginId("T/x"))], null), TextKey.FailLocalInUse,
+                    new IssueSubject([new IssueItem(rig.Origin, "T/x", "earlier-x")], null), TextKey.FailLocalInUse,
                     work, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
             var run = await EchoRootAsync(origin, ["T/x"], files, earlier: ["T/x"], earlierNotice: earlier,
                 attempt: issue is null ? null : attempt, onEarlier: issue, unechoed: unbound ? ["T/x"] : null,
                 afterList: unbound ? rig => { rig.WrittenSide.FailNext("T/x", new ItemFailedException("T/x", TextKey.FailDropboxNoPermission, null)); return Task.CompletedTask; } : null);
             using var fixture = run.Rig.Fixture;
+            // The issue case differs from T2f1's admitted plain notice only by the WorkIssue, so its kept row is that clause.
             Check.Require(run.Stale == 0 && run.Missing.SequenceEqual(["T/x/g0"]),
                 $"T2f2 {name} origin={origin}: the sub-folder's own owner keeps its row; " + run.Describe());
         }
@@ -1798,15 +1800,15 @@ public static class ChangeRunnerChecks
             try { await PeerRetentionAsync(mode); }
             catch (Exception error) { failures.Add(new InvalidOperationException(mode, error)); }
         }
-        foreach (var foreign in new[] { false, true })
+        foreach (var (inject, restates) in new[] { (false, false), (true, false), (true, true) })
         {
-            try { await FolderPeerOnDiskAsync(foreign); }
-            catch (Exception error) { failures.Add(new InvalidOperationException("folder-on-disk " + foreign, error)); }
+            try { await FolderPeerOnDiskAsync(inject, restates); }
+            catch (Exception error) { failures.Add(new InvalidOperationException($"folder-on-disk inject={inject} restates={restates}", error)); }
         }
         if (failures.Count != 0) throw new AggregateException(failures);
     }
 
-    private static async Task FolderPeerOnDiskAsync(bool foreign)
+    private static async Task FolderPeerOnDiskAsync(bool inject, bool restates)
     {
         var root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), Path.GetRandomFileName())).FullName;
         try
@@ -1831,10 +1833,11 @@ public static class ChangeRunnerChecks
             var folder = (await local.ReadOneAsync(Folder, default))!;
             Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Folder, null, folder.Id, folder, false, false));
             // The first selection's add-only batch lists both sides and observes the child in its listing, so the
-            // foreign notice arrives once the listing has yielded the child, before its upload.
-            if (foreign)
+            // injected notice arrives once the listing has yielded the child, before its upload. A notice that restates
+            // the folder's binding is answered Restated and admits the child (D-ECHO-1); a foreign identity refuses.
+            var injected = false;
+            if (inject)
             {
-                var injected = false;
                 fixture.LocalView = new ProxySide(local)
                 {
                     ListingFault = under =>
@@ -1842,10 +1845,13 @@ public static class ChangeRunnerChecks
                         if (under != Folder || injected) return null;
                         injected = true;
                         Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Folder, null,
-                            null, folder, false, false), 2);
+                            null, restates ? folder : folder with { Id = "foreign-folder" }, false, false), 2);
                         return null;
                     }
                 };
+            }
+            if (inject && !restates)
+            {
                 var error = await ThrowsAsync<LiveAdmissionStaleException>(() => RunPeerSelectionAsync(fixture, selected));
                 Check.Require(injected && error.Reason == LiveAdmissionStaleReason.RelevantEvidenceChanged &&
                     await fixture.Dropbox.ReadOneAsync(Plain, default) is null,
@@ -1853,12 +1859,14 @@ public static class ChangeRunnerChecks
                 return;
             }
             await RunPeerSelectionAsync(fixture, selected);
-            var kept = PendingWork.ByIdentity(fixture.Inner, Side.Local, VolumeKey, folder.Id).Single();
-            await RunPeerSelectionAsync(fixture, kept);
-            Check.Require((await fixture.Dropbox.ReadOneAsync(Plain, default))?.ContentHash ==
+            // The restating case may leave its injected notice as its own pending work; all of it must settle.
+            var kept = PendingWork.ByIdentity(fixture.Inner, Side.Local, VolumeKey, folder.Id);
+            foreach (var work in restates ? kept : new[] { kept.Single() }) await RunPeerSelectionAsync(fixture, work);
+            Check.Require(injected == inject && (await fixture.Dropbox.ReadOneAsync(Plain, default))?.ContentHash ==
                 DropboxContentHash.Compute(new byte[] { 2 }) &&
                 !PendingWork.ByIdentity(fixture.Inner, Side.Local, VolumeKey, folder.Id).Any(),
-                "G18-03: Local disk walk uploads an unannounced child and settles without Repair");
+                restates ? "G18: a later notice restating the folder's binding admits the child's upload and settles"
+                    : "G18-03: Local disk walk uploads an unannounced child and settles without Repair");
         }
         finally { Directory.Delete(root, true); }
     }
