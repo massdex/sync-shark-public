@@ -25,6 +25,8 @@ public sealed class ScanWriter : IScanSink
     private readonly IWriteSpace? _space;
     private readonly string? _directory;
     private readonly Task _loop;
+    // Cancels a pending space admission when the scan is abandoned; no timer, so it needs no disposal.
+    private readonly CancellationTokenSource _abort = new();
     private volatile bool _aborted;
 
     /// <summary>Starts one side's queued listing writer; only a fresh Local listing can skip descendant deletion.
@@ -83,10 +85,12 @@ public sealed class ScanWriter : IScanSink
     public Task AbortAsync()
     {
         _aborted = true;
+        _abort.Cancel();
         lock (_writeLock) _abortScan();
         return CompleteAsync();
     }
 
+    // One job: drain up to one store batch, admit its bytes and save it in one transaction under the write lock.
     private async Task SaveLoopAsync(int batchRows)
     {
         try
@@ -100,7 +104,7 @@ public sealed class ScanWriter : IScanSink
                 while (batch.Count < batchRows && reader.TryRead(out var item)) batch.Add(item);
                 // Admitted outside the store lock and held until the transaction is disposed.
                 await using var grant = _space is null ? null
-                    : await _space.ReserveAsync(_directory!, ScanEntries.InputBytes(batch), CancellationToken.None).ConfigureAwait(false);
+                    : await _space.ReserveAsync(_directory!, ScanEntries.InputBytes(batch), _abort.Token).ConfigureAwait(false);
                 lock (_writeLock)
                 {
                     if (_aborted) return;
@@ -112,6 +116,10 @@ public sealed class ScanWriter : IScanSink
                     transaction.Commit();
                 }
             }
+        }
+        catch (OperationCanceledException) when (_aborted)
+        {
+            // An abandoned scan discards its remainder, as the locked abort check in the loop does.
         }
         catch (Exception error)
         {

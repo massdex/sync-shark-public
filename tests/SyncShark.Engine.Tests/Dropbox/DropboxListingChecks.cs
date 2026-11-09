@@ -51,6 +51,7 @@ public static class DropboxListingChecks
         await RepeatedLatePageFailureAsync();
         await PageWaitsAsync();
         await LocalSpoolFailuresAsync();
+        await ChunkedSpoolAsync();
         await SealedPageAsync();
         await SparseReadsAsync();
         await FailuresAsync();
@@ -1045,6 +1046,38 @@ public static class DropboxListingChecks
         catch (AggregateException error) { stopped = error.InnerExceptions.Count == 2; }
         Check.Require(stopped && cleanup.Handler.Requests.Count == 1,
             "A spool that cannot be disposed stops the attempt instead of accumulating retries.");
+    }
+
+    // #36: a page reaches its spool only as whole 131,072-byte chunks and one final tail, each by an awaited write the
+    // spool can admit; no byte is written synchronously.
+    private static async Task ChunkedSpoolAsync()
+    {
+        var spool = new ChunkSpool();
+        var entries = Enumerable.Range(0, 400).Select(index => (object)File("/Parent", new string('n', 300) + index)).ToArray();
+        using var fixture = new Fixture(Pair(), Adopted, () => spool, _ => Page(false, "end", entries));
+        var listed = await CollectAsync(fixture.Listing, "", new ListOptions(true, false));
+        var chunk = SyncContentIdentity.DefaultReadBufferBytes;
+        Check.Require(listed.Count(item => item.Entry is { IsFolder: false }) == entries.Length && spool.Writes.Count > 1 &&
+            spool.Writes.Take(spool.Writes.Count - 1).All(count => count == chunk) &&
+            spool.Writes[^1] is > 0 && spool.Writes[^1] <= chunk && spool.Writes.Sum() == spool.Written,
+            "the spool receives whole chunks and one tail through awaited writes, and replays every entry");
+    }
+
+    private sealed class ChunkSpool : MemoryStream
+    {
+        public List<int> Writes { get; } = [];
+        public long Written;
+        public override void Write(byte[] buffer, int offset, int count) => throw new InvalidOperationException("unadmitted write");
+        public override void Write(ReadOnlySpan<byte> buffer) => throw new InvalidOperationException("unadmitted write");
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+        {
+            Writes.Add(buffer.Length);
+            Written += buffer.Length;
+            base.Write(buffer.Span);
+            return ValueTask.CompletedTask;
+        }
+        // Replay disposes the spool; keep it readable for the assertions.
+        protected override void Dispose(bool disposing) { }
     }
 
     private static async Task SealedPageAsync()

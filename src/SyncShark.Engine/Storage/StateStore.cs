@@ -1377,8 +1377,9 @@ public sealed class StateStore : IStateStore
                     transaction.Commit();
                     // Commit is authoritative even if disposal or publication fails afterwards.
                     committed = true;
+                    // Cleared before disposal so a postcommit disposal failure cannot leave a stale key.
+                    _closureKeys?.Remove(pairId);
                 }
-                _closureKeys?.Remove(pairId);
             });
         }
         catch (Exception error) when (committed) { publication = error; }
@@ -3319,7 +3320,7 @@ public sealed class StateStore : IStateStore
                 }
                 catch (Exception rollback)
                 {
-                    failure = new AggregateException(error, rollback);
+                    failure = new AggregateException(failure, rollback);
                     isolatable = false;
                 }
             }

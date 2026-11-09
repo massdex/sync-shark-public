@@ -168,9 +168,9 @@ public static class Repair
                 throw primary;
             }
             // After the authoritative commit every later failure is secondary; it never revokes completion.
-            if (secondary is not null) log.Failed(secondary, TextKey.RepairCompletedSecondaryFailure);
             try
             {
+                if (secondary is not null) log.Failed(secondary, TextKey.RepairCompletedSecondaryFailure);
                 if (scanId is { } finishedScan)
                 {
                     scanId = null;

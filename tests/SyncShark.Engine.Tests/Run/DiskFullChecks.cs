@@ -29,8 +29,10 @@ public static class DiskFullChecks
             SqliteFullCases(connection);
             AdmissionCases(connection, folder);
         });
+        WithFolder(folder => SpoolCases(folder).GetAwaiter().GetResult());
         WithFolder(folder => ProvisionalFullAsync(folder).GetAwaiter().GetResult());
         WithFolder(folder => EarlierLogFullAsync(folder).GetAwaiter().GetResult());
+        WithFolder(folder => RecordedThenCancelledAsync(folder).GetAwaiter().GetResult());
         WithFolder(folder => SecondaryFailureAsync(folder).GetAwaiter().GetResult());
         WithFolder(folder => OwedHistoryAsync(folder).GetAwaiter().GetResult());
     }
@@ -148,6 +150,27 @@ public static class DiskFullChecks
             "a refused batch writes nothing and stops with the disk-full exception");
     }
 
+    private static async Task SpoolCases(string folder)
+    {
+        var space = new RecordingSpace();
+        await using (var spool = new AdmittedSpool(new FileStream(Path.Combine(folder, "spool"), FileMode.CreateNew,
+            FileAccess.ReadWrite), folder, space))
+        {
+            await spool.WriteAsync(new byte[3000]);
+            Check.Require(space.Grants.SequenceEqual([(folder, 3000L)]) && space.Retired == 1 && spool.Length == 3000,
+                "a spool write is admitted for its bytes, written and its grant retired");
+            var refusedSync = false;
+            try { spool.Write(new byte[1], 0, 1); }
+            catch (NotSupportedException) { refusedSync = true; }
+            Check.Require(refusedSync && spool.Length == 3000, "an unadmitted synchronous write is refused");
+        }
+        await using var blocked = new AdmittedSpool(new FileStream(Path.Combine(folder, "blocked"), FileMode.CreateNew,
+            FileAccess.ReadWrite), folder, new RecordingSpace { Refuse = true });
+        var failure = await Failure(async () => await blocked.WriteAsync(new byte[10]));
+        Check.Require(failure is InsufficientSpaceException && blocked.Length == 0,
+            "a refused spool write writes nothing and stops as disk-full");
+    }
+
     // The provisional write hits a full volume: Repair exits with the disk-full failure and saves no summary.
     private static async Task ProvisionalFullAsync(string folder)
     {
@@ -173,6 +196,27 @@ public static class DiskFullChecks
             "the log keeps its first disk-full failure and Repair reads it at its boundary");
         Check.Require(rig.Store.LastRepair(rig.Pair.PairId) is null && rig.Store.Obligated(rig.Pair.PairId),
             "an earlier log disk-full saves no summary and keeps the obligation");
+    }
+
+    // A result-only route converts a disk-full mid-Repair, then the Repair is cancelled before its next boundary:
+    // the recorded disk-full outranks the cancellation and no completion is saved.
+    private static async Task RecordedThenCancelledAsync(string folder)
+    {
+        await using var rig = await RepairChecks.ComposeRigAsync(folder, decorate: inner => new HookStore(inner)
+        {
+            BeforeOpenScan = side =>
+            {
+                if (side != Side.Local) return;
+                LocalErrors.Cause(Full(), TextKey.RecycleFailed);
+                throw new OperationCanceledException();
+            }
+        });
+        using var log = rig.Log(folder, "recorded-cancelled");
+        Exception? failure;
+        using (RepairScope.Enter()) failure = await Failure(() => rig.RunAsync(log, CancellationToken.None));
+        Check.Require(failure is InsufficientSpaceException, "a recorded disk-full outranks a later cancellation");
+        Check.Require(rig.Store.LastRepair(rig.Pair.PairId) is null && rig.Store.Obligated(rig.Pair.PairId),
+            "a recorded disk-full saves no summary and keeps the obligation");
     }
 
     private static async Task SecondaryFailureAsync(string folder)

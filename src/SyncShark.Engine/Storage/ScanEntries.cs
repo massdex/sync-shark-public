@@ -32,9 +32,12 @@ internal sealed class ScanEntries : IDisposable
         _deletedDeltaPairRow = deletedDeltaPairRow;
     }
 
+    // The fixed-width entry fields DropboxPage.WriteEntry encodes: size, modified ticks, offset ticks, folder flag, skip flag.
+    private const int EntryFixedBytes = sizeof(long) + sizeof(long) + sizeof(long) + sizeof(bool) + sizeof(bool);
+
     /// <summary>The batch's own input bytes: every string's UTF-8 length and every fixed-width field, sized once.
     /// It never sizes descendant deletion or other state-dependent work (#36 section 5.3).</summary>
-    // shortcut: input bytes only, not SQLite page and index growth; use the section 10.3 measured envelope once reviewed.
+    // shortcut: input bytes only, not SQLite page and index growth, upgrade when a live run measures per-batch store growth (#36 section 10.3).
     internal static long InputBytes(List<Listed> batch)
     {
         long bytes = 0;
@@ -43,7 +46,7 @@ internal sealed class ScanEntries : IDisposable
             bytes += Utf8(item.Path) + sizeof(bool);
             if (item.Entry is not { } entry) continue;
             bytes += Utf8(entry.Path) + Utf8(entry.Id) + Utf8(entry.Revision) + Utf8(entry.ContentHash) +
-                Utf8(entry.Skip ?? string.Empty) + 3 * sizeof(long) + 2 * sizeof(bool);
+                Utf8(entry.Skip ?? string.Empty) + EntryFixedBytes;
         }
         return bytes;
 

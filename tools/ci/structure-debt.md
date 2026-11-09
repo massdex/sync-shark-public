@@ -60,18 +60,18 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/StateStore.cs
 
-<!-- spec-source: 00c92aa0f269~ee23f75744df~27a9d89236d5~9692f7292a6d~0b46d89e4080~393b -->
+<!-- spec-source: be7cf0aa16bd~b2678fee3676~0822333381d4~8e364ae9ef88~b84407a9a24a~93f5 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 8 | class-size | class-size | Split by job | Connection lifetime, schema migration, scan/history and folder persistence are distinct jobs. 0.3.79 adds expected-notice fencing for retry reads and visibility (B-13), the live-refusal read (R6), the published-USN migration step (#90b) and block-wise history restore (B-21) to the same class: 3490 to 3588 lines. 0.3.80: the cut-over deletes SaveImportedPair; selection admission now answers instead of throwing (BeginSelection), WorkAttempted, RequireDiscovery and SelectionBaseline forward to ChangeTable, and InitializeSchema gains the version-12 discovery_required step: 3588 to 3595 lines. Same split; no new job. |
+| 8 | class-size | class-size | Split by job | Connection lifetime, schema migration, scan/history and folder persistence are distinct jobs. 0.3.79 adds expected-notice fencing for retry reads and visibility (B-13), the live-refusal read (R6), the published-USN migration step (#90b) and block-wise history restore (B-21) to the same class: 3490 to 3588 lines. 0.3.80: the cut-over deletes SaveImportedPair; selection admission now answers instead of throwing (BeginSelection), WorkAttempted, RequireDiscovery and SelectionBaseline forward to ChangeTable, and InitializeSchema gains the version-12 discovery_required step: 3588 to 3595 lines. Same split; no new job. 0.3.83 (#36): the one owed-history rule RequireForOwedHistory :1551-1556 with its transaction-taking history read :805-808, FinishRepair's committed fact and secondary output :1326-1403, SQLite FULL normalization in Write :3210-3215 and Apply :3312, the unsafe flusher scheduling :442-443 and the scan-batch admission port :176-181, :744-745: 3779 to 3811 lines. Durable completion and queue persistence; same split, no new job. |
 | 2683 | long-member | AdvanceSubmission(SqliteTransaction,long,FolderSubmission,FolderSubmis | Record why it cannot be split | Record submission and unsettled member transitions as one atomic receipt application. |
 | 2578 | long-member | ArmFolderSubmission(string,IReadOnlyList<FolderRemovalEffect>) 43 | Record why it cannot be split | Record exact-effect validation and immutable wire membership as one all-or-none transition. |
 | 1932 | long-member | BeginFolderRemoval(string,FolderPlan,int,CancellationToken) 134 | Split by job | Counterpart saved-only range discovery with ancestor anchoring and path de-duplication is a separable job from operation and member insertion |
 | 1839 | long-member | CompleteItemAttempt(ItemRetryCandidate,Guid,StateChange,PendingEffect? | Record why it cannot be split | Record failure/success outcomes, custody changes and reporting for one claimed attempt. |
-| 3082 | long-member | DrainRecords(out Exception?) 108 | Split by job | Queue take and failure-isolation scheduling are separable from transactional apply with post-commit publication and closure update (local Apply) |
+| 3082 | long-member | DrainRecords(out Exception?) 108 | Split by job | Queue take and failure-isolation scheduling are separable from transactional apply with post-commit publication and closure update (local Apply) #36 normalizes SQLite FULL once in Apply, context-free; no new job. |
 | 712 | long-member | EndScanAsync(string,Guid,int) 46 | Record why it cannot be split | Record whole-file/partition alternatives and failure cleanup as one scan-ending lifetime. |
-| 1287 | long-member | FinishRepair(string,RepairSummary,long,Guid,LocalCatchUp,DropboxCatchU | Record why it cannot be split | Record source/checkpoint fences and retirement of covered work as one durable completion. |
+| 1287 | long-member | FinishRepair(string,RepairSummary,long,Guid,LocalCatchUp,DropboxCatchU | Record why it cannot be split | Record source/checkpoint fences and retirement of covered work as one durable completion. #36: owed history joins the same transaction, committed is set right after Commit, and a publication or maintenance failure after it returns as secondaryFailure (60 to 76 lines); still one durable completion. |
 | 2069 | long-member | InsertFolderMember(string,string,long,FolderRemovalItem.ProvenanceKind | Record why it cannot be split | Record provenance/scope validation and reuse/insertion as one recovery-member admission. |
 | 1765 | long-member | RecordInUseFailure(string,long,long,string,IssueSubject,TextKey,WorkSe | Record why it cannot be split | Record attempt validation, issue/work binding and episode claim as one retry-responsibility installation. |
 | 769 | long-member | RestoreDeletedHistory(string,Guid,Action<long>?) 57 | Record why it cannot be split | Record verified replay and continuation publication as one completed acquisition. B-21 grew it 43 to 57: one block per lock hold with a withdrawn-cursor check and a progress count between blocks; the per-block step is still owed as its own method. |
@@ -79,27 +79,27 @@ Line ranges describe this correction; named units remain the identity if subsequ
 | 2428 | long-member | ValidateFolderChange(SqliteTransaction,long,string,FolderRemovalState, | Split by job | Pure permitted-change-shape validation differs from database evidence traversal and coverage counting. |
 | 1112 | long-member | static ForgetTouchesUnreadable(SqliteConnection,string,IEnumerable<(Si | Record why it cannot be split | Record local/mapped ranges as one deduplicated forget-footprint overlap query. |
 | 3338 | long-member | static InitializeSchema(SqliteConnection,bool) 126 | Split by job | Version admission/reference validation, read-only handling, transactional upgrade and reclaim/checkpoint maintenance are separable; #90b adds the version-10 published-USN step (111 to 119); 0.3.80 adds the version-12 discovery_required step (119 to 126). |
-| 8 | file-size | file-size | Split by job | Connection lifetime, migration, scan/history and folder persistence are distinct jobs; 3497 to 3595 lines in 0.3.79, 3602 in 0.3.80 (see class-size). |
+| 8 | file-size | file-size | Split by job | Connection lifetime, migration, scan/history and folder persistence are distinct jobs; 3497 to 3595 lines in 0.3.79, 3602 in 0.3.80 (see class-size). 3811 lines after #36 (see class-size). |
 
 ## src/SyncShark.Engine/Run/EngineHost.cs
 
-<!-- spec-source: 128e5416edbd~ac0fcdca9250~fbeded1bc720~c70d35d1331a~b647d5db13d3~ed29 -->
+<!-- spec-source: 46ff2ef40261~6479794a5c13~bc4543719ab9~e9ccb3de67eb~15c389b83852~501e -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 12 | class-size | class-size | Split by job | Composition, generation admission, source supervision, attempts and status are distinct jobs. |
+| 12 | class-size | class-size | Split by job | Composition, generation admission, source supervision, attempts and status are distinct jobs. 0.3.83 (#36): journal start through WithoutFlow on the pool :79-82, the scan admission port at composition :241, the Repair scope inside the prerequisite lambda :1088-1094 and accounting that cannot revoke a committed Repair :1119-1129: 1903 to 1917 lines. Source supervision and attempts; same split. |
 | 1161 | long-member | BeginListing(object,AttemptOwner) 52 | Record why it cannot be split | Record creation, completion and disposal as one listing identity/retry episode. |
 | 571 | long-member | ChangeGenerationAsync<1>(PairConfig,Func<object, IStateStore, IReadOnl | Record why it cannot be split | Record drain, caller commit and guaranteed reopen as one configuration transition. |
 | 347 | long-member | ExecuteInGenerationAsync<1>(string,RegistrationKind,bool,Func<object,  | Record why it cannot be split | Record admission, execution and retirement around one registration. |
 | 736 | long-member | InstallCurrentAsync(IReadOnlyList<string>) 44 | Record why it cannot be split | Record resource replacement, membership and reopening as one captured-generation installation. |
-| 1031 | long-member | RunPrerequisiteAsync(string,CancellationToken,RunLog?,Issue?,schedule) 94 | Record why it cannot be split | Admission, caller-stop classification, log disposal and exact completion share one attempt lifetime; selected schedule freshness is checked before registration. |
+| 1031 | long-member | RunPrerequisiteAsync(string,CancellationToken,RunLog?,Issue?,schedule) 94 | Record why it cannot be split | Admission, caller-stop classification, log disposal and exact completion share one attempt lifetime; selected schedule freshness is checked before registration. #36 grew it 94 to 105 with the Repair scope and secondary accounting; the same attempt lifetime. |
 | 103 | long-member | JournalFailed(Volume,Exception?) 41 | Record why it cannot be split | All members publish debt and attribute it before accounting under the same membership/lifecycle boundary; diagnostics follow outside that boundary. |
 | 1147 | long-member | CompletePrerequisiteAsync(Prerequisite,RepairSummary?,Exception?,RunLog?) 55 | Record why it cannot be split | The memoized completion owns one exact registration through accounting, release and deferred callbacks. |
 | 1159 | long-member | CompletePrerequisiteAsync::CompleteAsync() 42 | Record why it cannot be split | Accounting and exact removal stay indivisible to source loss; finally delivers the same attempt's captured opportunities. |
 | 1593 | long-member | PublishQuietStatus() 52 | Record why it cannot be split | One captured eligibility answer accompanies log delivery and synchronous status publication; log callbacks execute outside the host gate, and work they start runs without that flow (WithoutFlow). |
 | 261 | long-member | static Compose(string,Action<string>,PilotStateAuthority,EngineSetting | Record why it cannot be split | Record dependency wiring and failure cleanup as one object-graph ownership transfer. |
 | 175 | long-member | static Compose(string,Action<string>,PilotStateAuthority,Mode,RunLog?, | Record why it cannot be split | Record settings, transport and diagnostics acquisition as one exception-safe composition boundary. |
-| 12 | file-size | file-size | Split by job | Composition, generations, source supervision, attempts and status are distinct jobs. |
+| 12 | file-size | file-size | Split by job | Composition, generations, source supervision, attempts and status are distinct jobs. 1917 lines after #36 (see class-size). |
 
 ## src/SyncShark.Engine/Executor/FolderDeleteRunner.cs
 
@@ -194,14 +194,14 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Run/RunLog.cs
 
-<!-- spec-source: 88e4db5c2c6c~b365a2011806~64c126411a99~e76bb6261cd9~18553663b10b~c673 -->
+<!-- spec-source: 947f88486df0~043a1b3fb2c0~612534a514ad~55081ba62085~90f1f55ad1f7~a399 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 13 | class-size | class-size | Split by job | Canonical codec differs from mutable accounting, flushing and subscriber delivery. S2 adds active-branch tracking (_activeBranches, _branchOrder) to progress reduction: 665 to 685 lines. |
+| 13 | class-size | class-size | Split by job | Canonical codec differs from mutable accounting, flushing and subscriber delivery. S2 adds active-branch tracking (_activeBranches, _branchOrder) to progress reduction: 665 to 685 lines. 0.3.83 (#36): the first file failure is kept as an exception (field :57-58, accessor :200-203, sites :439-441, :567-595) and disk-full rendering :512-513: 707 to 713 lines. Flush lifetime; same split. |
 | 207 | long-member | Event(RunEvent) 87 | Split by job | Progress reduction, canonical accounting and ordered human delivery are distinct jobs. S2 grew the progress-reduction part (branch tracking) 70 to 87. |
 | 80 | long-member | ReportProgress(string?,bool) 48 | Record why it cannot be split | Record one quiet observation’s matching diagnostic and sequenced human snapshots. |
-| 13 | file-size | file-size | Split by job | Canonical codec differs from mutable accounting, flush lifetime and delivery; 677 to 697 lines. |
+| 13 | file-size | file-size | Split by job | Canonical codec differs from mutable accounting, flush lifetime and delivery; 677 to 697 lines. 713 lines after #36. |
 
 ## src/SyncShark.Core/NtfsUsnJournal.cs
 
@@ -267,13 +267,13 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Run/EngineOperations.cs
 
-<!-- spec-source: b2f19d179066~8b97e0801f69~2caaa0fc732c~94a1d4365696~477321a3c658~cbad -->
+<!-- spec-source: 8845c459d5b3~0543e2b83871~b0428e7ce7b7~f2f31ff12150~62e7707131d9~13e9 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 12 | class-size | class-size | Split by job | Action facade also implements configuration mutation, recovery workflows and historical logs. B-13 adds the reviewed-notice token check and expected-notice routing: 582 to 593 lines. 0.3.80: the cut-over deletes ImportPairAsync; B-74 adds the dependency-cycle Retry group RetryCycleGroupAsync :356-372 and the single-issue Retry-runs-Repair route in ResolveAsync (both resolution/recovery implementation, the owed split); 1A moves startup admission into WithHostAsync and R3 routes settings through CurrentSettings :51. 593 to 617 lines. |
+| 12 | class-size | class-size | Split by job | Action facade also implements configuration mutation, recovery workflows and historical logs. B-13 adds the reviewed-notice token check and expected-notice routing: 582 to 593 lines. 0.3.80: the cut-over deletes ImportPairAsync; B-74 adds the dependency-cycle Retry group RetryCycleGroupAsync :356-372 and the single-issue Retry-runs-Repair route in ResolveAsync (both resolution/recovery implementation, the owed split); 1A moves startup admission into WithHostAsync and R3 routes settings through CurrentSettings :51. 593 to 617 lines. 0.3.83 (#36): the Repair scope inside the execute lambda :201-206, +2 lines; no new job. |
 | 239 | long-member | ResolveAsync(string,long?,ResolutionChoice,string?,FirstRunPolicy?,boo | Split by job | Configuration/root choices, bulk retry aggregation and individual recovery dispatch are distinct implementations. B-13 adds the reviewed parameter and its check (113 to 116). B-74 adds the cycle-group and single-issue Repair routes (116 to 127, :228-354). |
-| 12 | file-size | file-size | Split by job | Action facade embeds configuration, resolution/recovery and historical-log implementations. This correction removes the stale direct-operation cache without relocating action authority; the larger facade split remains open rather than being coupled to the settings-lifetime fix. 604 to 628 lines in 0.3.80 (see class-size). |
+| 12 | file-size | file-size | Split by job | Action facade embeds configuration, resolution/recovery and historical-log implementations. This correction removes the stale direct-operation cache without relocating action authority; the larger facade split remains open rather than being coupled to the settings-lifetime fix. 604 to 628 lines in 0.3.80 (see class-size). #36 +2 lines (see class-size). |
 
 ## src/SyncShark.Engine/Executor/ActionExecutor.cs
 
@@ -396,12 +396,12 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Local/LocalSide.cs
 
-<!-- spec-source: f53fcce94827~dac5d11964e9~4a1cc2e37c56~b34bcfef5807~bc508b030d43~b039 -->
+<!-- spec-source: 582f064b11fd~b743393f8b71~6430c37e6a6d~61cfdc781073~7520eaf0516c~69e1 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 14 | class-size | class-size | Split by job | Checked IO, publication/removal, recovery custody and identity/drive observation remain distinct jobs. Held-stage lifetime and publication-boundary helpers extend publication (:74-315); StageAsync keeps the FileStream default buffer through the existing authority (:88-89), so the #90b growth adds no new job. |
-| 14 | file-size | file-size | Split by job | Checked IO (:27-182), pending/publication effects (:184-482), recovery custody (:610-795) and identity/drive observation (:549-607, :852-886) remain distinct jobs; the publication boundary (:268-315) belongs to publication effects. |
+| 14 | class-size | class-size | Split by job | Checked IO, publication/removal, recovery custody and identity/drive observation remain distinct jobs. Held-stage lifetime and publication-boundary helpers extend publication (:74-315); StageAsync keeps the FileStream default buffer through the existing authority (:88-89), so the #90b growth adds no new job. 0.3.83 (#36): the page spool is created as an AdmittedSpool after a creation admission :827-845, +3 lines; checked IO, same split. |
+| 14 | file-size | file-size | Split by job | Checked IO (:27-182), pending/publication effects (:184-482), recovery custody (:610-795) and identity/drive observation (:549-607, :852-886) remain distinct jobs; the publication boundary (:268-315) belongs to publication effects. #36 +3 lines in CreatePageSpoolAsync (see class-size). |
 
 ## src/SyncShark.Engine/Storage/StateEncoding.cs
 
@@ -480,11 +480,11 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Run/PairScan.cs
 
-<!-- spec-source: 673f718e3c10~38a53aeaeac8~039826050853~3e055ee9037b~8b697cadae98~26b9 -->
+<!-- spec-source: 224b8bd46596~a2034b026fb3~8b8cbfaffd60~1cd07f2e3600~9ea4a7e519a4~e37d -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 35 | long-member | RunAsync(TaskSet,RunLog,bool,long,CancellationToken,string?,Action<str | Record why it cannot be split | Record both producers’ shared cancellation/join and incomplete-result bracket. |
+| 35 | long-member | RunAsync(TaskSet,RunLog,bool,long,CancellationToken,string?,Action<str | Record why it cannot be split | Record both producers’ shared cancellation/join and incomplete-result bracket. #36 (43 to 47): a disk-full in the listing or either abort is never reduced to an incomplete inventory :74-78; the same bracket. |
 | 115 | long-member | static ListAsync(ISide,IScanSink,List<(string Path, TextKey Cause, Iss | Record why it cannot be split | Record ingestion, skip capture and complete/abort cleanup as one streamed transfer. |
 
 ## src/SyncShark.Engine/Storage/StateCommitter.cs
@@ -669,11 +669,11 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Local/DownloadSpace.cs
 
-<!-- spec-source: 25dc44b1832f~18e5c86f3462~526402476aac~cbabcd1fe6a6~62dd65d64bae~9f01 -->
+<!-- spec-source: e14bf87a36f9~bc19f6adf8c5~02d5d3ddcf5a~de2fbec56f90~66aa37ce545c~0fe8 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 26 | long-member | ReserveAsync(string,string,long,CancellationToken) 44 | Record why it cannot be split | Record volume observation, free-space admission and lease creation as one reservation transaction. |
+| 26 | long-member | ReserveAsync(string,string,long,CancellationToken) 44 | Record why it cannot be split | Record volume observation, free-space admission and lease creation as one reservation transaction. #36 keeps this body unchanged as ReserveInAsync(string,string,long,CancellationToken) :40-82 behind the download entry :27-28 and the IWriteSpace product-write entry :31-38; one reservation transaction. |
 
 ## src/SyncShark.Engine/Local/LocalListing.cs
 
@@ -717,11 +717,11 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Run/Repair.cs
 
-<!-- spec-source: f0b5cc1f9c39~ffb8d1322306~334d55f54c81~197ff4e40f81~ffd3cda2ff86~604c -->
+<!-- spec-source: 8318b6220d64~063f69729776~b059b202f57b~0f03c82730e8~99f6c9bcbb4d~576b -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 11 | long-member | static RunAsync(PairSession,CancellationToken,IReadOnlySet<long>?) 182 | Split by job | Scan sink/resource setup and summary publication with log pruning and log-failed marking are separable from orchestration; doc comments :7,:10 describe behaviour. B-21 adds the restore progress callback (179 to 182). |
+| 11 | long-member | static RunAsync(PairSession,CancellationToken,IReadOnlySet<long>?) 182 | Split by job | Scan sink/resource setup and summary publication with log pruning and log-failed marking are separable from orchestration; doc comments :7,:10 describe behaviour. B-21 adds the restore progress callback (179 to 182). #36 grew it 175 to 202: disk-full boundary checks (RequireSpace, Primary), committed-versus-secondary reporting and the owed-history handoff only when completion did not commit. Same split; no new job. |
 
 ## src/SyncShark.Engine/SettingsParser.cs
 
@@ -741,11 +741,19 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/ScanEntries.cs
 
-<!-- spec-source: d1d58c65e907~f9e9bfb4ffe8~0d99e57c179b~a8d7c209f302~da891fd0c034~36eb -->
+<!-- spec-source: 276249ff51bc~9fc5d5d7f3bd~50d5bf5301d4~d216b5ff201e~974874b4c5ec~3277 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
 | 56 | long-member | Apply(SqliteTransaction,Listed,string?) 41 | Record why it cannot be split | Record tombstone, override and type-replacement cases as one ordered scan-event application. |
+
+## src/SyncShark.Engine/Storage/ScanWriter.cs
+
+<!-- spec-source: d35afc472867~1994dd14669e~b8ed6112ca46~e5f9a67c2794~669a59c6b310~f912 -->
+
+| Line | Check | Unit | Action | Finding |
+|---|---|---|---|---|
+| 93 | long-member | SaveLoopAsync(int) 45 | Record why it cannot be split | Drain up to one store batch and save it in one transaction under the write lock; #36 admits the batch's input bytes before the lock (:104-106) and holds the grant through the transaction, and an abandoned scan cancels a pending admission (:119-122). Admission is part of saving the batch: one job (#36 implementation and cross-family row reviews, size row 14; reason recorded above the unit :93). |
 
 ## src/SyncShark.Engine/Storage/ScanReader.cs
 
@@ -789,19 +797,19 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Dropbox/DropboxReply.cs
 
-<!-- spec-source: ec501a7920b6~a6752380e217~bf21e63a263c~ba1746afc576~4371a14d69d7~ced1 -->
+<!-- spec-source: 4aebb79b56b9~75f1eec41324~759329c36d88~e532d4155e12~55a9ea3e86a3~a26e -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 312 | file-size | file-size | One type per file / name matches type | DropboxReply.cs holds two top-level types: DropboxReply<T> :10-309 and static DropboxReply :312-659; checker merges them by name |
+| 312 | file-size | file-size | Record why it cannot be split | DropboxReply.cs now holds one type, DropboxReply<T> :10-312; the static DropboxReply moved out of this file. One incremental JSON reply decode; #36 adds the spool drain delegate (:16, :27, :63) inside that job (+3 lines). |
 
 ## src/SyncShark.Engine/IStateStore.cs
 
-<!-- spec-source: d1f8696403a2~a78a2c2f794c~1cd0ada16ef7~3ad538beb7ea~3dd25e3edbaf~c55f -->
+<!-- spec-source: e19fe4433ec2~f55dfd0e8cef~3a49cef103b2~7e2d9c4d3e28~bbec76aefe0c~df53 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 5 | file-size | file-size | Split by job | IStateStore.cs:5-340 spans the same pair/work/pending/retry/folder-removal groups both reviews require StateStore to split along; owner decision 30 (docs/design/owner-decisions.md:101) is the interface-split precedent. 0.3.79 adds ReadLiveRefusal and expected-notice parameters (324 to 334). 0.3.80: the cut-over deletes SaveImportedPair; BeginSelection now answers admission and SelectionBaseline, WorkAttempted and RequireDiscovery are added (334 to 340). |
+| 5 | file-size | file-size | Split by job | IStateStore.cs:5-340 spans the same pair/work/pending/retry/folder-removal groups both reviews require StateStore to split along; owner decision 30 (docs/design/owner-decisions.md:101) is the interface-split precedent. 0.3.79 adds ReadLiveRefusal and expected-notice parameters (324 to 334). 0.3.80: the cut-over deletes SaveImportedPair; BeginSelection now answers admission and SelectionBaseline, WorkAttempted and RequireDiscovery are added (334 to 340). #36: FinishRepair gains its secondary output and owed-history contract, +2 lines. |
 
 ## src/SyncShark.Engine/Local/LocalBin.cs
 
@@ -838,15 +846,15 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/TextKey.cs
 
-<!-- spec-source: 80eee460e787~15eabd413bd1~b865d94149df~61a7d11cbbcc~cb1494090121~2e7f -->
+<!-- spec-source: 8981c192795f~1331dfb74a4d~7fef07f4c601~5a7aab1b8647~ddcc6bd79d99~1a4a -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 3 | file-size | file-size | Record why it cannot be split | Record one strings-catalog identifier enum; arbitrary splitting would fragment that contract (reason :3). 0.3.80: the cut-over removes four import keys; adds the dependency-cycle, changed-retry and Retry-runs-Repair keys and 14 folder-browser/storage keys moved from the app into this catalog (now 441 lines). |
+| 3 | file-size | file-size | Record why it cannot be split | Record one strings-catalog identifier enum; arbitrary splitting would fragment that contract (reason :3). 0.3.80: the cut-over removes four import keys; adds the dependency-cycle, changed-retry and Retry-runs-Repair keys and 14 folder-browser/storage keys moved from the app into this catalog (now 441 lines). 0.3.83 (#36) adds RepairStoppedNoSpace and RepairCompletedSecondaryFailure. |
 
 ## src/SyncShark.Engine/Executor/TaskSet.cs
 
-<!-- spec-source: 1899bffdf5b2~50016fd4438b~d654994762e8~00bb06dcc75d~a08830b5c626~f4e5 -->
+<!-- spec-source: 9cbc0d8b10ec~fc3e422d6df2~53d9ed25659d~27419942deac~d3470eb68481~9535 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

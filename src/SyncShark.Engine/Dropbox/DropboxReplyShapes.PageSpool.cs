@@ -91,7 +91,7 @@ internal static partial class DropboxReplyShapes
         {
             _writer!.Flush();
             var pending = _pending!;
-            var length = (int)pending.Length;
+            var length = checked((int)pending.Length);
             var written = 0;
             while (length - written >= Chunk || tail && length > written)
             {

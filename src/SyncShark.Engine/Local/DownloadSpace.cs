@@ -37,6 +37,7 @@ public sealed class DownloadSpace : IWriteSpace
         }
     }
 
+    // One reservation transaction: volume observation, free-space admission and lease creation under one gate.
     private async ValueTask<IAsyncDisposable> ReserveInAsync(string parent, string target, long bytes, CancellationToken ct)
     {
         if (bytes < 0) throw new ItemFailedException(target, TextKey.FailDownloadSizeInvalid, null);
