@@ -1117,7 +1117,7 @@ internal sealed class ChangeTable
                 footprint[index].ExactEvidence, baseline, heldOverlaps, ref plainDeletion);
         // B-101: a path selection's saved identity acquired elsewhere is a reported move, not a deletion (D19).
         if (LaterIdentityEvidence(pair.Row, selection, anchor) ||
-            selection.Identity is null && baseline?.IdOn(selection.Side) is { } saved && UnownedIdentity(pair.Row,
+            selection.Identity is null && baseline?.IdOn(selection.Side) is { Length: > 0 } saved && UnownedIdentity(pair.Row,
                 selection, anchor, selection.Side, selection.SourceEpoch, selection.Domain, saved) ||
             PendingPath(pair) is { } pending &&
             Covers(scopes, Side.Local, PathNames.Key(pending)))

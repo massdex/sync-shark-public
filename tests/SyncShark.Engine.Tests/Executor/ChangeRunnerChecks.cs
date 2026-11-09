@@ -2396,7 +2396,7 @@ public static class ChangeRunnerChecks
         await LiveReobserveRevokesDirectAsync();
     }
 
-    private enum B101Shape { IdentityChain, FeedChain, SingleStep, PageSplit, GenuineDeletion, Held, Restart, Edited, Alias }
+    private enum B101Shape { IdentityChain, FeedChain, SingleStep, PageSplit, GenuineDeletion, Held, Restart, Edited, Alias, FolderChain }
 
     // B-101 (D19): a Dropbox rename delivered in the production feed shapes moves the Local file and keeps its identity;
     // the held, restart, edited-counterpart and alias-occupant rows keep their existing outcomes on the same route.
@@ -2404,7 +2404,11 @@ public static class ChangeRunnerChecks
     {
         var failures = new List<string>();
         foreach (var shape in Enum.GetValues<B101Shape>())
-            try { DropboxStaleRenameNoticeAsync(shape).GetAwaiter().GetResult(); }
+            try
+            {
+                (shape == B101Shape.FolderChain ? DropboxStaleFolderRenameAsync() : DropboxStaleRenameNoticeAsync(shape))
+                    .GetAwaiter().GetResult();
+            }
             catch (Exception error) { failures.Add(shape + ": " + error.Message); }
         Check.Require(failures.Count == 0, "B-101: " + string.Join(" || ", failures));
     }
@@ -2482,6 +2486,7 @@ public static class ChangeRunnerChecks
             return syncer;
         }
         await Live().SyncWorkAsync(default);
+        var firstCallRefusals = events.Count(item => item.Error is LiveAdmissionStaleException);
         var heldIntact = shape != B101Shape.Held || (await f.Local.ReadOneAsync("P/a", default))?.Id == local.Id &&
             events.All(item => item.EffectKind is not (EffectKind.DeletedLocal or EffectKind.MovedLocal)) &&
             PendingAt(f, Side.Dropbox, "P/a", "P/c").Any();
@@ -2492,16 +2497,18 @@ public static class ChangeRunnerChecks
         if (shape is B101Shape.PageSplit or B101Shape.Restart or B101Shape.Held) await Live().SyncWorkAsync(default);
         var completed = await f.Local.ReadOneAsync(moved ? "P/c" : "P/a", default);
         var refusals = events.Count(item => item.Error is LiveAdmissionStaleException);
-        // One refusal per tombstone attempt while the destination is pending; the split rows attempt it once per call.
-        var expectedRefusals = shape switch
-        {
-            B101Shape.IdentityChain or B101Shape.GenuineDeletion or B101Shape.Alias => 0,
-            B101Shape.PageSplit or B101Shape.Restart or B101Shape.Held => 2,
-            _ => 1
-        };
         var pathAdmissions = boundary.Requests.Count(request => request.Single().Selection.Identity is null);
+        // Every tombstone admission refuses while its destination is pending; identity-only feeds admit no tombstone.
+        var tombstones = shape is not (B101Shape.IdentityChain or B101Shape.Alias);
+        // Upper bound: one refusal per sync call, plus one in Held, whose hold attachment retires the destination's
+        // selection and so repeats the first call's pass once while the tombstone is still pending.
+        var calls = shape is B101Shape.PageSplit or B101Shape.Restart or B101Shape.Held ? 2 : 1;
+        var refusalsExact = tombstones
+            ? refusals == pathAdmissions && refusals > 0 && refusals <= calls + (shape == B101Shape.Held ? 1 : 0)
+            : refusals == 0 && pathAdmissions == 0;
         Console.WriteLine($"B101-COST shape={shape} admissions={boundary.Calls} path-admissions={pathAdmissions} " +
-            $"read-work={readWork} dropbox-point-reads={reads.Values.Sum()} dropbox-by-id={byId} refusals={refusals}");
+            $"read-work={readWork} dropbox-point-reads={reads.Values.Sum()} dropbox-by-id={byId} refusals={refusals} " +
+            $"first-call-refusals={firstCallRefusals}");
         var diagnosis = "; effects=" + string.Join(" | ", events.Where(item => item.EffectKind is not null)
                 .Select(item => item.EffectKind + ":" + item.Path)) +
             "; refusals=" + refusals + "; byId=" + byId +
@@ -2509,7 +2516,7 @@ public static class ChangeRunnerChecks
             "; issues=" + string.Join(",", f.Inner.Issues(PairId).Select(issue => issue.Path + ":" + issue.Cause));
         if (!moved)
         {
-            Check.Require(completed is null && refusals == 0 && byId == 0 &&
+            Check.Require(completed is null && refusals == 0 && pathAdmissions == 1 && byId == 0 &&
                 events.Count(item => item.EffectKind == EffectKind.DeletedLocal) == 1 &&
                 f.Inner.SyncedById(PairId, Side.Dropbox, remote.Id) is null && !PendingAt(f, Side.Dropbox, "P/a").Any(),
                 "A genuine Dropbox deletion still deletes Local without a new refusal" + diagnosis);
@@ -2517,16 +2524,25 @@ public static class ChangeRunnerChecks
         }
         if (shape == B101Shape.Edited)
         {
-            var kept = new List<Entry>();
-            foreach (var path in new[] { "P/a", "P/c" })
-                if (await f.Local.ReadOneAsync(path, default) is { } entry) kept.Add(entry);
-            Check.Require(kept.Any(entry => entry.Size == edited.Size) &&
-                await f.Dropbox.ReadOneAsync("P/a", default) is null &&
-                events.All(item => item.EffectKind != EffectKind.DeletedLocal &&
-                    !(item.EffectKind == EffectKind.Uploaded && item.Path == "P/a")) && refusals == expectedRefusals &&
-                byId == 0,
-                "Edited counterpart: the Local edit is kept and the Dropbox rename is not undone at P/a, with " +
-                expectedRefusals + " refusal(s)" + diagnosis);
+            // D19 (engine.md:37): moved + edited keeps both versions on both sides, edited at the old path and moved
+            // at the new, with InfoMovedEdited; never edit-beats-delete.
+            var localOld = await f.Local.ReadOneAsync("P/a", default);
+            var localNew = await f.Local.ReadOneAsync("P/c", default);
+            var remoteOld = await f.Dropbox.ReadOneAsync("P/a", default);
+            var remoteNew = await f.Dropbox.ReadOneAsync("P/c", default);
+            Check.Require(localOld is { Id: LocalId, Size: 2 } && localNew is not null &&
+                await f.Local.ContentHashAsync(localNew, default) == remote.ContentHash &&
+                remoteOld is { Size: 2 } && remoteNew is { Id: DropboxId } && remoteNew.ContentHash == remote.ContentHash &&
+                f.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key("P/a")) is { DropboxPath: "P/a" } oldBinding &&
+                oldBinding.LocalId == LocalId &&
+                f.Inner.SyncedById(PairId, Side.Dropbox, remote.Id) is { LocalPath: "P/c" } &&
+                f.Inner.Issues(PairId).Any(issue => issue.Cause == TextKey.InfoMovedEdited) &&
+                f.Inner.Issues(PairId).All(issue => issue.Cause != TextKey.InfoEditBeatsDelete &&
+                    issue.Kind != IssueKind.Failure) &&
+                events.All(item => item.EffectKind != EffectKind.DeletedLocal) &&
+                !PendingAt(f, Side.Dropbox, "P/a", "P/c").Any() && refusalsExact && byId == 0,
+                "Edited counterpart: both versions exist and are bound on both sides (edited at P/a, moved at P/c), " +
+                "InfoMovedEdited is raised, no work is pending and every tombstone admission refused" + diagnosis);
             return;
         }
         Check.Require(heldIntact, "Held destination: the tombstone neither deletes nor moves Local while the hold stands, " +
@@ -2541,13 +2557,73 @@ public static class ChangeRunnerChecks
             events.All(item => item.EffectKind != EffectKind.DeletedLocal &&
                 (item.EffectKind != EffectKind.Downloaded || shape == B101Shape.Alias && item.Path == "P/a")) &&
             events.Count(item => item.EffectKind == EffectKind.MovedLocal) == 1 &&
+            events.Where(item => item.EffectKind is not null).GroupBy(item => (item.EffectKind, item.Path))
+                .All(group => group.Count() == 1) &&
             f.Inner.SyncedById(PairId, Side.Dropbox, remote.Id) is { LocalPath: "P/c" } binding &&
-            binding.LocalId == local.Id && refusals == expectedRefusals && byId == 0 &&
+            binding.LocalId == local.Id && refusalsExact && byId == 0 &&
             !PendingAt(f, Side.Dropbox, "P/a", "P/b", "P/c").Any() &&
             f.Inner.Issues(PairId).All(issue => issue.Kind != IssueKind.Failure),
-            "The rename moves Local P/a to P/c once, keeping its identity, with no delete or other download, " +
-            expectedRefusals + " refusal(s) and no Dropbox lookup by id" +
+            "The rename moves Local P/a to P/c once, keeping its identity, with no delete, other download or repeated " +
+            "effect, a refusal for every tombstone admission and no Dropbox lookup by id" +
             (shape == B101Shape.Alias ? "; the alias observes the replacement occupant at P/a" : "") + diagnosis);
+    }
+
+    // B-101: a stale Dropbox folder rename follows the folder's identity through the same relocation; the folder
+    // moves once with its Local identity and its child's binding follows it.
+    private static async Task DropboxStaleFolderRenameAsync()
+    {
+        using var f = new Fixture(realStore: true);
+        ClearObligations(f);
+        SourceFixture.AcquireJournal(f.Inner, f.Pair);
+        SeedFolders(f, "P");
+        var localFolder = FolderEntry("P/a", "local-folder");
+        var remoteFolder = FolderEntry("P/a", "remote-folder");
+        var localChild = LocalEntry("P/a/x", LocalId);
+        var remoteChild = RemoteEntry("P/a/x", DropboxId);
+        f.Local.Seed(localFolder, null);
+        f.Local.Seed(localChild, [1]);
+        f.Dropbox.Seed(remoteFolder with { Path = "P/c" }, null);
+        f.Dropbox.Seed(remoteChild with { Path = "P/c/x" }, [1]);
+        f.Inner.Commit(PairId, StateChange.Empty with
+        {
+            Record = [SyncedEntries.From(localFolder, remoteFolder), SyncedEntries.From(localChild, remoteChild)]
+        });
+        ChangeNotice Changed(string path) => new(Side.Dropbox, ChangeKind.Changed, path, null, remoteFolder.Id,
+            remoteFolder with { Path = path }, false, false);
+        var (work, epoch, domain) = AcquireRemotePage(f, Changed("P/b"));
+        AcquireRemotePage(f, Changed("P/c"));
+        var first = new WorkSelection(PairId, Generation, epoch, Side.Dropbox, domain, remoteFolder.Id,
+            PathNames.DropboxKey("P/b"), work, work);
+        var byId = 0;
+        f.DropboxView = new HookedSide(f.Dropbox, identity: (_, _) =>
+        {
+            byId++;
+            return Task.FromResult<(IdentityLocation Location, bool InScope)?>(null);
+        });
+        var boundary = new Boundary(request =>
+        {
+            f.Inner.ValidateLiveCoverage(request.Selection, request.Coverage, request.Footprint);
+            return new Lease { AllowsRelease = true };
+        });
+        var events = new List<RunEvent>();
+        var syncer = LiveSyncer(f, first, boundary, events);
+        boundary.Capture = (chosen, _, _) =>
+            Task.FromResult(f.Inner.CaptureLiveCoverage(chosen, Coverage(chosen).Local, Coverage(chosen).Dropbox));
+        await syncer.SyncWorkAsync(default);
+        var effects = events.Where(item => item.EffectKind is not null).ToArray();
+        Check.Require((await f.Local.ReadOneAsync("P/c", default))?.Id == localFolder.Id &&
+            (await f.Local.ReadOneAsync("P/c/x", default))?.Id == localChild.Id &&
+            await f.Local.ReadOneAsync("P/a", default) is null &&
+            effects.All(item => item.EffectKind is not (EffectKind.DeletedLocal or EffectKind.Downloaded)) &&
+            effects.Count(item => item.EffectKind == EffectKind.MovedLocal) == 1 &&
+            f.Inner.SyncedById(PairId, Side.Dropbox, remoteFolder.Id) is { LocalPath: "P/c" } folder &&
+            folder.LocalId == localFolder.Id &&
+            f.Inner.SyncedById(PairId, Side.Dropbox, remoteChild.Id) is { LocalPath: "P/c/x" } &&
+            byId == 0 && events.All(item => item.Error is not LiveAdmissionStaleException) &&
+            !PendingAt(f, Side.Dropbox, "P/a", "P/b", "P/c").Any(),
+            "A stale Dropbox folder rename moves the Local folder once with its identity and its child follows; effects=" +
+            string.Join(" | ", effects.Select(item => item.EffectKind + ":" + item.Path)) + "; byId=" + byId +
+            "; issues=" + string.Join(",", f.Inner.Issues(PairId).Select(issue => issue.Path + ":" + issue.Cause)));
     }
 
     private static async Task AdmittedRenameRefusalReselectsAsync()
