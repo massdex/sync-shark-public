@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "scenarios-offline",
+    "syncer",
+    "ancestor-retry"
+  ],
+  "core": [],
+  "ui": []
+}
