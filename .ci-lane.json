@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "dropbox",
+    "issues",
+    "resolutions"
+  ],
+  "core": [],
+  "ui": []
+}
