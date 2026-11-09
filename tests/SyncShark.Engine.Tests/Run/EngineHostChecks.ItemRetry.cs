@@ -964,8 +964,7 @@ public static partial class EngineHostChecks
         rig.Rig.Transport.Respond = async (request, token) =>
         {
             if (!await CommitsUploadAsync(request, target, token).ConfigureAwait(false)) return null;
-            Console.WriteLine($"B131DIAG UPLOAD {what} #{Volatile.Read(ref commits) + 1} {request.RequestUri!.AbsolutePath} refused={rig.Rig.Wire.NameWriteErrors.ContainsKey(target)} dispatches={rig.Dispatches} obligated={rig.Store.Obligated(rig.PairId)}
-{Environment.StackTrace}");
+            Console.WriteLine($"B131DIAG UPLOAD {what} #{Volatile.Read(ref commits) + 1} {request.RequestUri!.AbsolutePath} refused={rig.Rig.Wire.NameWriteErrors.ContainsKey(target)} dispatches={rig.Dispatches} obligated={rig.Store.Obligated(rig.PairId)}\n{Environment.StackTrace}");
             if (Interlocked.Increment(ref commits) == 1)
             {
                 entered.TrySetResult();
@@ -1101,8 +1100,7 @@ public static partial class EngineHostChecks
             {
                 using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 using var reader = new StreamReader(stream);
-                foreach (var line in reader.ReadToEnd().Split('
-').Where(line => line.Contains("Failed") || line.Contains("Issue")))
+                foreach (var line in reader.ReadToEnd().Split('\n').Where(line => line.Contains("Failed") || line.Contains("Issue")))
                     Console.WriteLine($"B131DIAG LOG {Path.GetFileName(path)} {line.Trim()}");
             }
         }
