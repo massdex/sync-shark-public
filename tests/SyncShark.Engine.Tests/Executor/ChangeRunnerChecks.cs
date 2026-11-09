@@ -1239,7 +1239,7 @@ public static class ChangeRunnerChecks
     {
         var failures = new List<Exception>();
         foreach (var check in new Func<Task>[] { EchoOneLevelAsync, EchoDeepTreeAsync, EchoDifferingNoticesAsync,
-            EchoEarlierOwnersAsync, EchoCountsAsync })
+            EchoEarlierOwnersAsync, EchoCountsAsync, EchoFreshTreeAsync })
         {
             try { await check(); }
             catch (Exception error) { failures.Add(new InvalidOperationException(check.Method.Name, error)); }
@@ -1402,6 +1402,41 @@ public static class ChangeRunnerChecks
             string.Join(", ", calls.Select(item => $"{item.Key.Background}/{item.Key.Files}={item.Value}")) + $"; perRow={perRow}");
     }
 
+    private static readonly string[] FreshFolders = ["T/a", "T/a/b", "T/a/b/c"];
+    private static readonly string[] FreshFiles = ["T/f", "T/a/f", "T/a/b/f", "T/a/b/c/f"];
+
+    // B-111 T2f1, T6 and T7: every sub-folder has its own plain notice, acquired before the root's pass watermark. The
+    // root batch creates and binds each sub-folder, so those notices restate its bindings and the batch copies every file.
+    private static async Task EchoFreshTreeAsync()
+    {
+        foreach (var origin in new[] { Side.Local, Side.Dropbox })
+        {
+            // T2f1: one earlier plain new-folder notice at a sub-folder this batch creates.
+            var single = await EchoRootAsync(origin, ["T/x"], ["T/f0", "T/x/g0"], earlier: ["T/x"]);
+            using (single.Rig.Fixture)
+                Check.Require(single.Refused is null && single.Stale == 0 && single.Batches == 1 && single.Missing.Length == 0,
+                    $"T2f1 origin={origin}: the sub-folder's files are copied by T's batch; " + single.Describe());
+            // T6: a four-level fresh tree is one root batch for the whole run.
+            var run = await EchoRootAsync(origin, FreshFolders, FreshFiles, earlier: FreshFolders);
+            using var fixture = run.Rig.Fixture;
+            Check.Require(run.Refused is null && run.Stale == 0 && run.Batches == 1 && run.Missing.Length == 0,
+                $"T6 origin={origin}: the root batch copies every level; " + run.Describe());
+            var drained = await DrainAsync(run, "T6 " + origin);
+            Check.Require(drained == 0 && EchoUnbound(run, FreshFiles).Length == 0 && run.Stale == 0,
+                $"T6 origin={origin}: batches == 1 over the whole run and every file is bound; drainBatches={drained} " +
+                "unbound=" + string.Join(",", EchoUnbound(run, FreshFiles)) + "; " + run.Describe());
+        }
+        // T7: the same tree's fence calls do not grow with unrelated saved state.
+        var calls = new List<int>();
+        foreach (var background in new[] { 5_110, 20_440 })
+        {
+            var run = await EchoRootAsync(Side.Local, FreshFolders, FreshFiles, earlier: FreshFolders, background: background);
+            using var fixture = run.Rig.Fixture;
+            Check.Require(run.Refused is null && run.Missing.Length == 0, "T7 run completes; " + run.Describe());
+            calls.Add(run.FenceCalls);
+        }
+        Check.Require(calls[0] == calls[1], "T7: fence calls are independent of saved-state size; " + string.Join("/", calls));
+    }
     private static ChangeNotice EchoNotice(Side side, Entry entry) =>
         new(side, ChangeKind.Changed, entry.Path, null, entry.Id, entry, false, false);
 
@@ -1470,8 +1505,10 @@ public static class ChangeRunnerChecks
         foreach (var file in files)
             rig.OriginSide.Seed(origin == Side.Local ? LocalEntry(file, "l-" + file) : RemoteEntry(file, "d-" + file), [1]);
         var root = rig.Notify(EchoNotice(origin, rig.OriginEntry("T")));
+        // The pass watermark covers every earlier notice, as SelectWork's would.
         foreach (var folder in earlier ?? [])
-            rig.Notify(earlierNotice?.Invoke(rig) ?? EchoNotice(origin, rig.OriginEntry(folder)));
+            root = root with { ThroughWorkId = rig.Notify(earlierNotice?.Invoke(rig) ??
+                EchoNotice(origin, rig.OriginEntry(folder))).ThroughWorkId };
         var echoes = tree.Except(unechoed ?? [], StringComparer.Ordinal).ToArray();
         var listed = false;
         var view = new HookedSide(rig.WrittenSide,
@@ -1513,7 +1550,9 @@ public static class ChangeRunnerChecks
                 .Prepend(refused?.ToString() ?? ""));
         }
         var where = errors.Contains("BatchAdmits", StringComparison.Ordinal) ? "BatchAdmits"
-            : errors.Contains("AncestorsClear", StringComparison.Ordinal) ? "AncestorsClear" : "none";
+            : errors.Contains("AncestorsClear", StringComparison.Ordinal) ? "AncestorsClear"
+            : System.Text.RegularExpressions.Regex.Match(errors, @"at Massdex\.SyncShark\.Engine\.(?!Tests)[\w.]+") is
+                { Success: true } frame ? frame.Value[3..] : "none";
         var run = new EchoRun(rig, root, events, refused, batches, [], childRows, where, fenceCalls, [.. tree, .. files]);
         return run with { Missing = await EchoMissingAsync(run, files) };
     }
@@ -4984,10 +5023,18 @@ public static class ChangeRunnerChecks
         var folder = FolderEntry(Folder, FolderId);
         using (var fixture = UnreadableFixture(withMemberFolder: false))
         {
+            var later = 0;
+            fixture.Hooks.BeforeCall = method =>
+            {
+                if (method.Name == nameof(IStateStore.LaterAncestorNews)) later++;
+            };
             Check.Require(await RunNoticeAsync(fixture, Folder, folder) && await SyncedAsync(fixture, Plain),
                 "A folder selection's child passes the fence on the selection's own work");
+            fixture.Hooks.BeforeCall = null;
             var queries = fixture.Hooks.AncestorQueries;
-            Check.Require(queries.Any(query => query.Through is not null) && queries.Any(query => query.Count == 0),
+            // A live batch's create answers its own selection's later work through LaterAncestorNews (D-ECHO-1).
+            Check.Require((queries.Any(query => query.Through is not null) || later != 0) &&
+                queries.Any(query => query.Count == 0),
                 "The fixture exercises both own-only and empty ancestor answers.");
             for (var index = 0; index < queries.Count; index++)
                 if (queries[index].Through is not null)

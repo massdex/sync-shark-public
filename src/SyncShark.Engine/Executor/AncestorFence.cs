@@ -156,7 +156,8 @@ internal sealed class AncestorFence(ExecutorContext _context)
     }
 
     /// <summary>A scoped pass leaves a row owned by a pending ancestor to that ancestor's ordinary selection; a create-only
-    /// row's later arrivals are answered at execution.</summary>
+    /// row's later arrivals are answered at execution, and a sub-folder's own notice that only restates the binding this
+    /// batch made does not own it.</summary>
     internal bool BatchAdmits(Row row)
     {
         var paths = Row.Paths(row);
@@ -184,7 +185,8 @@ internal sealed class AncestorFence(ExecutorContext _context)
         {
             if (owner.AnchorWorkId != own.AnchorWorkId)
             {
-                if (restatable && owner.AnchorWorkId > own.ThroughWorkId || IsOwnSelection(owner, own, side, keys)) continue;
+                if (restatable && (owner.AnchorWorkId > own.ThroughWorkId || CreatedByBatch(owner, own, side, keys)) ||
+                    IsOwnSelection(owner, own, side, keys)) continue;
                 return owner;
             }
             fallback ??= owner;
@@ -192,6 +194,14 @@ internal sealed class AncestorFence(ExecutorContext _context)
         return fallback is null || restatable ? null : _context.Store.PendingAncestors(_context.Pair.PairId,
             _context.ExpectedGeneration, side, keys, own.ThroughWorkId).FirstOrDefault();
     }
+
+    // B-111: a sub-folder this batch bound, whose own earlier notice Storage answers as a restatement of that binding,
+    // does not own the batch's create rows under it; any other answer leaves them to it.
+    private bool CreatedByBatch(WorkSelection owner, WorkSelection own, Side side, string[] keys) =>
+        _context.BatchScope is not null && keys.Contains(owner.Key, StringComparer.Ordinal) &&
+        (side == own.Side ? own.Key : own.Peer?.Key) is { } root && PathNames.IsUnderKey(owner.Key, root) &&
+        _context.Store.LaterAncestorNews(_context.Pair.PairId, _context.ExpectedGeneration, side, [owner.Key],
+            owner.AnchorWorkId - 1).News == AncestorNews.Restated;
 
     private bool IsOwnSelection(WorkSelection owner, WorkSelection own, Side side, string[] keys) =>
         owner.AnchorWorkId == own.AnchorWorkId ||
