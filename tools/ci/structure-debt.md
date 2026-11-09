@@ -118,18 +118,18 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/ChangeTable.cs
 
-<!-- spec-source: f1a387812656~7e1ffafccda0~45e6fd015064~929cf094d31d~6528a1e6975b~b242 -->
+<!-- spec-source: 0b839a5202a7~9eb3b4eae42d~b5e90532eabf~5cbc769fb0a0~efef7bb6d0a9~1fcb -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 11 | class-size | class-size | Split by job | Source checkpoint acquisition differs from work-selection/issue-custody lifecycle. 0.3.79 adds the live-refusal answer (R6), notice content merging (S2) and own-write USN evidence (#90b): 1473 to 1543 lines. 0.3.80 adds the per-pass attempted answer (WorkAttempted/Attempted :503-508) and the durable discovery-required work flag (RequireDiscovery :510-519, NeedsOwnSelection :1283-1284): 1543 to 1565 lines. Both are work-selection custody; same split. 0.3.82 (B-101): one shared UnownedIdentity :576-581 (the probe and admission both use it) and the path-selection identity refusal :1118-1124; #36 plumbing adds an optional transaction to Obligated :66-67, :1558-1560. Work-selection custody; same split. B-137: CountWork (:248-260) reads the pair's two source rows and one shared count statement for the pass queue snapshot; work-selection custody, same split (1821 lines). |
+| 11 | class-size | class-size | Split by job | Source checkpoint acquisition differs from work-selection/issue-custody lifecycle. 0.3.79 adds the live-refusal answer (R6), notice content merging (S2) and own-write USN evidence (#90b): 1473 to 1543 lines. 0.3.80 adds the per-pass attempted answer (WorkAttempted/Attempted :503-508) and the durable discovery-required work flag (RequireDiscovery :510-519, NeedsOwnSelection :1283-1284): 1543 to 1565 lines. Both are work-selection custody; same split. 0.3.82 (B-101): one shared UnownedIdentity :576-581 (the probe and admission both use it) and the path-selection identity refusal :1118-1124; #36 plumbing adds an optional transaction to Obligated :66-67, :1558-1560. Work-selection custody; same split. B-137: CountWork (:248-262) reads the pair's two source rows and one shared count statement for the pass queue snapshot, its two count columns named as ordinals; work-selection custody, same split (1822 lines). |
 | 91 | long-member | AcquireJournalPage(string,JournalPosition?,JournalPosition,IReadOnlyLi | Record why it cannot be split | Record member/position fences, notices and checkpoint advancement as one atomic acquisition. |
 | 562 | long-member | AdvanceBefore(SqliteTransaction,string,WorkSelection,StateChange) 46 | Record why it cannot be split | Record one selected work item’s replacement baseline derivation and propagation. |
 | 671 | long-member | AttachIssueWork(WorkSelection,Issue,IEnumerable<(ChangeNotice Notice,  | Record why it cannot be split | Record retain/move/create alternatives as one atomic responsibility handoff. |
 | 968 | long-member | EnsureIssueWork(SqliteTransaction,string,long,long,long,string,IssueSu | Record why it cannot be split | Record selected/source-less paths establishing the same exact issue-work custody. |
 | 774 | long-member | ReadLocalDirty(string,long,long,string,string?,string?,string?) 76 | Record why it cannot be split | Record identity/current/recorded-path probes as one consistent dirty-evidence answer. #90b grew it 61 to 76 with the own-write USN fold (local Count) and the OwnWrite check. |
 | 890 | long-member | ValidateLiveCoverage(WorkSelection,LiveCoverage,IReadOnlyList<LiveEffe | Record why it cannot be split | Record all footprint/later-evidence checks as one admitted-selection freshness proof. |
-| 11 | file-size | file-size | Split by job | Source checkpoint acquisition differs from work-selection/issue-custody persistence; 1483 to 1553 lines in 0.3.79, 1575 in 0.3.80 (see class-size); 0.3.82 B-101 and #36 plumbing +9 lines (see class-size). B-137: CountWork (:248-260) reads the pair's two source rows and one shared count statement for the pass queue snapshot; work-selection custody, same split (1831 lines). |
+| 11 | file-size | file-size | Split by job | Source checkpoint acquisition differs from work-selection/issue-custody persistence; 1483 to 1553 lines in 0.3.79, 1575 in 0.3.80 (see class-size); 0.3.82 B-101 and #36 plumbing +9 lines (see class-size). B-137: CountWork (:248-262) reads the pair's two source rows and one shared count statement for the pass queue snapshot, its two count columns named as ordinals; work-selection custody, same split (1832 lines). |
 
 ## src/SyncShark.Engine/Executor/ItemSync.cs
 
@@ -823,11 +823,11 @@ Category-change split clearing condition: the 0.3.83 structure pass owns and cle
 
 Category-change scope: Public page, count and keyset statements reuse one bound SQL expression. The catalogue still contains declarations only, without execution or transaction policy, so arbitrary catalogue splitting does not separate a runtime job.
 
-<!-- spec-source: f252b9598460~50f57d9ef544~4ed9de4ee368~5badc2cba37d~cd5a789847f8~4891 -->
+<!-- spec-source: 2de42d5e853d~8b38536d3e3f~e3e6dc7f2c76~afd9a811d440~c40b8169705c~6ccf -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
-| 6 | file-size | file-size | Record why it cannot be split | Record one declarative SQL/schema catalogue, without execution or transaction policy (reason :3). #90b adds schema version 11 and the published-USN columns and statements; B-21 adds the batched deleted-name insert (1433 to 1450). 0.3.80: the cut-over deletes the pair-import SQL; schema version 12 adds the discovery_required work column and its two statements (1450 to 1420). 0.3.80.1 (B-93): schema version 13 adds IssuePathKeyIndex :50 and its upgrade version :13, serving the existing SelectIssueByPathKeyKind :264 (1420 to 1424). B-137: SideEligibility/CurrentSourceEpoch (:773-779) is the one predicate SelectWork and CountWork share, and CountWork (:792-796) is one snapshot statement taking $localEpoch/$remoteEpoch for the epochs the caller already read (1474 lines); catalogue entries only. |
+| 6 | file-size | file-size | Record why it cannot be split | Record one declarative SQL/schema catalogue, without execution or transaction policy (reason :3). #90b adds schema version 11 and the published-USN columns and statements; B-21 adds the batched deleted-name insert (1433 to 1450). 0.3.80: the cut-over deletes the pair-import SQL; schema version 12 adds the discovery_required work column and its two statements (1450 to 1420). 0.3.80.1 (B-93): schema version 13 adds IssuePathKeyIndex :50 and its upgrade version :13, serving the existing SelectIssueByPathKeyKind :264 (1420 to 1424). B-137: the queue count is one const statement, CountWork (:793-797), composed from the shared const eligibility and epoch fragments (:774-780) and named count ordinals (:1230-1231), taking $localEpoch/$remoteEpoch for the epochs the caller already read (1479 lines); catalogue entries only. |
 
 ## src/SyncShark.Engine/TextKey.cs
 
