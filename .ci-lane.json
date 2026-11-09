@@ -1,0 +1,34 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "ancestor-retry",
+    "attempt-cost",
+    "budget",
+    "containment",
+    "containment-move-out",
+    "decide",
+    "dependencies",
+    "exclusions",
+    "issues",
+    "literals",
+    "live-admission",
+    "local",
+    "mapped-holds",
+    "peer",
+    "released-history",
+    "repair",
+    "repair-claims",
+    "repair-held",
+    "safety",
+    "scan-owner",
+    "scan-pass",
+    "stale-freshness",
+    "store",
+    "syncer",
+    "work-lifecycle"
+  ],
+  "core": [],
+  "ui": []
+}
