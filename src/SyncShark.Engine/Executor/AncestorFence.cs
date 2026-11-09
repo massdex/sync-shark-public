@@ -12,7 +12,8 @@ internal sealed class AncestorFence(ExecutorContext _context)
     internal void ReportContainedRefusal() => _refused.Value?.Invoke();
 
     /// <summary>The ancestor fence. Outside Repair any pending ancestor but the running selection's own refuses. Repair's coverage omits work its
-    /// listing saw; later work refuses this row. The fence never executes or settles the ancestor selection.</summary>
+    /// listing saw; later work refuses this row. A restatable (create-only) row in a live batch skips work after its
+    /// selection's pass watermark, which the caller answers. The fence never executes or settles the ancestor selection.</summary>
     internal bool AncestorsClear(Row row, string? target, Side? targetSide, bool restatable = false)
     {
         foreach (var side in new[] { Side.Local, Side.Dropbox })
@@ -128,9 +129,8 @@ internal sealed class AncestorFence(ExecutorContext _context)
         if (through is null || !creates)
             return AncestorsClear(action.Row, action.Target, targetSide)
                 ? AncestorNews.None : AncestorNews.Changed;
-        // A live batch's create meets earlier work as today; arrivals after its pass watermark are answered below.
-        if (_listedThrough is null && !AncestorsClear(action.Row, action.Target, targetSide, restatable: true))
-            return AncestorNews.Changed;
+        // A live batch's create meets earlier work as today (a blocker throws Stale); later arrivals are answered below.
+        if (_listedThrough is null) AncestorsClear(action.Row, action.Target, targetSide, restatable: true);
         var news = AncestorNews.None;
         foreach (var side in new[] { Side.Local, Side.Dropbox })
         {

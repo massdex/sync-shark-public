@@ -1239,7 +1239,7 @@ public static class ChangeRunnerChecks
     {
         var failures = new List<Exception>();
         foreach (var check in new Func<Task>[] { EchoOneLevelAsync, EchoDeepTreeAsync, EchoDifferingNoticesAsync,
-            EchoEarlierOwnersAsync, EchoCountsAsync, EchoFreshTreeAsync })
+            EchoEarlierOwnersAsync, EchoCountsAsync, EchoSubFolderAsync, EchoFreshTreeAsync })
         {
             try { await check(); }
             catch (Exception error) { failures.Add(new InvalidOperationException(check.Method.Name, error)); }
@@ -1289,42 +1289,46 @@ public static class ChangeRunnerChecks
     {
         string[] files = ["T/f0", "T/f1"];
         static async Task<Entry> RootAsync(EchoRig rig) => (await rig.WrittenSide.ReadOneAsync("T", default))!;
-        var cases = new (string Name, Func<EchoRig, Task> Arrival)[]
+        // Root: the written side's T after the run; the batch never re-creates or restores it.
+        var cases = new (string Name, Func<EchoRig, Task> Arrival, Func<EchoRig, Entry?, bool> Root)[]
         {
             ("rename", async rig =>
             {
                 var moved = await rig.WrittenSide.MoveAsync(await RootAsync(rig), "T2", default);
                 rig.Notify(new ChangeNotice(rig.Written, ChangeKind.Renamed, "T2", "T", moved.Id, moved, false, false));
-            }),
+            }, (rig, root) => root is null && rig.WrittenSide.ReadOneAsync("T2", default).GetAwaiter().GetResult() is not null),
             ("delete", async rig =>
             {
                 var root = await RootAsync(rig);
                 await rig.WrittenSide.DeleteAsync(root, null, default);
                 rig.Notify(new ChangeNotice(rig.Written, ChangeKind.Deleted, "T", null, root.Id, null, false, true));
-            }),
+            }, (_, root) => root is null),
             ("replace", async rig =>
             {
                 await rig.WrittenSide.DeleteAsync(await RootAsync(rig), null, default);
                 rig.Notify(EchoNotice(rig.Written, await rig.WrittenSide.EnsureFolderAsync("T", default)));
-            }),
+            }, (rig, root) => root is { IsFolder: true } && root.Id != rig.EchoedIds["T"]),
             ("file", async rig =>
             {
                 await rig.WrittenSide.DeleteAsync(await RootAsync(rig), null, default);
                 var file = rig.Written == Side.Local ? LocalEntry("T", "user-file") : RemoteEntry("T", "user-file");
                 rig.WrittenSide.Seed(file, [7]);
                 rig.Notify(EchoNotice(rig.Written, file));
-            }),
-            ("skip", async rig => rig.Notify(EchoNotice(rig.Written, (await RootAsync(rig)) with { Skip = "Skipped" })))
+            }, (_, root) => root is { IsFolder: false, Id: "user-file" }),
+            ("skip", async rig => rig.Notify(EchoNotice(rig.Written, (await RootAsync(rig)) with { Skip = "Skipped" })),
+                (rig, root) => root?.Id == rig.EchoedIds["T"])
         };
         foreach (var origin in new[] { Side.Local, Side.Dropbox })
         {
-            foreach (var (name, arrival) in cases)
+            foreach (var (name, arrival, expectedRoot) in cases)
             {
                 var run = await EchoRootAsync(origin, [], files, afterList: arrival);
                 using var fixture = run.Rig.Fixture;
+                var root = await run.Rig.WrittenSide.ReadOneAsync("T", default);
                 Check.Require(run.Refused is not null && run.Missing.Length == files.Length &&
-                    PendingAt(fixture, origin, "T").Count != 0,
-                    $"T2 {name} origin={origin}: refused with no child effect, and the selection stays pending; " + run.Describe());
+                    PendingAt(fixture, origin, "T").Count != 0 && expectedRoot(run.Rig, root),
+                    $"T2 {name} origin={origin}: refused with no child effect, T not re-created, and the selection stays pending; root=" +
+                    root?.Id + " " + run.Describe());
             }
             // (e) The echo is present but a user file takes the child's target: that row refuses and nothing is overwritten.
             var occupied = await EchoRootAsync(origin, [], files, atRead: (rig, path) =>
@@ -1369,14 +1373,21 @@ public static class ChangeRunnerChecks
             ("replace", rig => EchoNotice(rig.Origin, FolderEntry("T/x", "previous-folder")), false),
             ("file", rig => EchoNotice(rig.Origin, rig.Origin == Side.Local ? LocalEntry("T/x", "x-file") : RemoteEntry("T/x", "x-file")), false),
             ("skip", rig => EchoNotice(rig.Origin, rig.OriginEntry("T/x") with { Skip = "Skipped" }), false),
-            ("unbound", rig => EchoNotice(rig.Origin, rig.OriginEntry("T/x")), true)
+            ("unbound", rig => EchoNotice(rig.Origin, rig.OriginEntry("T/x")), true),
+            ("issue", rig => EchoNotice(rig.Origin, rig.OriginEntry("T/x")), false)
         };
         foreach (var origin in new[] { Side.Local, Side.Dropbox })
         foreach (var (name, earlier, unbound) in cases)
         {
+            // The issue variant: a plain notice whose work carries an in-use issue (the WorkIssue clause).
+            var attempt = Guid.NewGuid();
+            Action<EchoRig, WorkSelection>? issue = name != "issue" ? null : (rig, work) =>
+                rig.Fixture.Inner.RecordInUseFailure(PairId, Generation, work.SourceEpoch, "T/x",
+                    new IssueSubject([new IssueItem(rig.Origin, "T/x", rig.OriginId("T/x"))], null), TextKey.FailLocalInUse,
+                    work, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
             var run = await EchoRootAsync(origin, ["T/x"], files, earlier: ["T/x"], earlierNotice: earlier,
-                unechoed: unbound ? ["T/x"] : null,
-                afterList: unbound ? rig => { rig.WrittenSide.FailNext("T/x", new IOException("create refused")); return Task.CompletedTask; } : null);
+                attempt: issue is null ? null : attempt, onEarlier: issue, unechoed: unbound ? ["T/x"] : null,
+                afterList: unbound ? rig => { rig.WrittenSide.FailNext("T/x", new ItemFailedException("T/x", TextKey.FailDropboxNoPermission, null)); return Task.CompletedTask; } : null);
             using var fixture = run.Rig.Fixture;
             Check.Require(run.Stale == 0 && run.Missing.SequenceEqual(["T/x/g0"]),
                 $"T2f2 {name} origin={origin}: the sub-folder's own owner keeps its row; " + run.Describe());
@@ -1405,17 +1416,23 @@ public static class ChangeRunnerChecks
     private static readonly string[] FreshFolders = ["T/a", "T/a/b", "T/a/b/c"];
     private static readonly string[] FreshFiles = ["T/f", "T/a/f", "T/a/b/f", "T/a/b/c/f"];
 
-    // B-111 T2f1, T6 and T7: every sub-folder has its own plain notice, acquired before the root's pass watermark. The
+    // B-111 T2f1 (EchoSubFolderAsync), T6 and T7: every sub-folder has its own plain notice, acquired before the root's pass watermark. The
     // root batch creates and binds each sub-folder, so those notices restate its bindings and the batch copies every file.
-    private static async Task EchoFreshTreeAsync()
+    private static async Task EchoSubFolderAsync()
     {
         foreach (var origin in new[] { Side.Local, Side.Dropbox })
         {
-            // T2f1: one earlier plain new-folder notice at a sub-folder this batch creates.
             var single = await EchoRootAsync(origin, ["T/x"], ["T/f0", "T/x/g0"], earlier: ["T/x"]);
             using (single.Rig.Fixture)
                 Check.Require(single.Refused is null && single.Stale == 0 && single.Batches == 1 && single.Missing.Length == 0,
                     $"T2f1 origin={origin}: the sub-folder's files are copied by T's batch; " + single.Describe());
+        }
+    }
+
+    private static async Task EchoFreshTreeAsync()
+    {
+        foreach (var origin in new[] { Side.Local, Side.Dropbox })
+        {
             // T6: a four-level fresh tree is one root batch for the whole run.
             var run = await EchoRootAsync(origin, FreshFolders, FreshFiles, earlier: FreshFolders);
             using var fixture = run.Rig.Fixture;
@@ -1426,17 +1443,28 @@ public static class ChangeRunnerChecks
                 $"T6 origin={origin}: batches == 1 over the whole run and every file is bound; drainBatches={drained} " +
                 "unbound=" + string.Join(",", EchoUnbound(run, FreshFiles)) + "; " + run.Describe());
         }
-        // T7: the same tree's fence calls do not grow with unrelated saved state.
+        // T7: the same tree's fence calls do not grow with unrelated saved state, and each skipped sub-folder owner costs
+        // one LaterAncestorNews at admission and one at execution, against the same tree with no sub-folder notices.
+        var skipped = FreshFolders.Concat(FreshFiles).Sum(path =>
+            FreshFolders.Count(folder => PathNames.IsUnderKey(PathNames.Key(path), PathNames.Key(folder))));
         var calls = new List<int>();
+        var extra = new List<int>();
         foreach (var background in new[] { 5_110, 20_440 })
         {
+            var plain = await EchoRootAsync(Side.Local, FreshFolders, FreshFiles, background: background);
+            using (plain.Rig.Fixture)
+                Check.Require(plain.Refused is null && plain.Missing.Length == 0, "T7 plain run completes; " + plain.Describe());
             var run = await EchoRootAsync(Side.Local, FreshFolders, FreshFiles, earlier: FreshFolders, background: background);
             using var fixture = run.Rig.Fixture;
             Check.Require(run.Refused is null && run.Missing.Length == 0, "T7 run completes; " + run.Describe());
             calls.Add(run.FenceCalls);
+            extra.Add(run.LaterCalls - plain.LaterCalls);
         }
-        Check.Require(calls[0] == calls[1], "T7: fence calls are independent of saved-state size; " + string.Join("/", calls));
+        Check.Require(calls[0] == calls[1] && extra.All(value => value == 2 * skipped),
+            "T7: fence calls are independent of saved-state size and each skipped owner adds one LaterAncestorNews per check; " +
+            "calls=" + string.Join("/", calls) + " extra=" + string.Join("/", extra) + " expected=" + 2 * skipped);
     }
+
     private static ChangeNotice EchoNotice(Side side, Entry entry) =>
         new(side, ChangeKind.Changed, entry.Path, null, entry.Id, entry, false, false);
 
@@ -1473,7 +1501,7 @@ public static class ChangeRunnerChecks
 
     private sealed record EchoRun(EchoRig Rig, WorkSelection Root, List<RunEvent> Events,
         LiveAdmissionStaleException? Refused, int Batches, string[] Missing, int ChildRows, string Where, int FenceCalls,
-        string[] Paths)
+        string[] Paths, int LaterCalls)
     {
         public int Stale
         {
@@ -1489,9 +1517,9 @@ public static class ChangeRunnerChecks
     private static async Task<EchoRun> EchoRootAsync(Side origin, string[] folders, string[] files,
         string[]? earlier = null, Func<EchoRig, ChangeNotice>? earlierNotice = null,
         Func<EchoRig, Task>? afterList = null, Action<EchoRig, string>? atRead = null, string[]? unechoed = null,
-        int background = 0)
+        int background = 0, Guid? attempt = null, Action<EchoRig, WorkSelection>? onEarlier = null)
     {
-        var fixture = new Fixture(realStore: true);
+        var fixture = new Fixture(realStore: true, registeredAttempt: attempt);
         var rig = new EchoRig(fixture, origin);
         if (background > 0)
             fixture.Inner.Commit(PairId, StateChange.Empty with
@@ -1507,8 +1535,11 @@ public static class ChangeRunnerChecks
         var root = rig.Notify(EchoNotice(origin, rig.OriginEntry("T")));
         // The pass watermark covers every earlier notice, as SelectWork's would.
         foreach (var folder in earlier ?? [])
-            root = root with { ThroughWorkId = rig.Notify(earlierNotice?.Invoke(rig) ??
-                EchoNotice(origin, rig.OriginEntry(folder))).ThroughWorkId };
+        {
+            var work = rig.Notify(earlierNotice?.Invoke(rig) ?? EchoNotice(origin, rig.OriginEntry(folder)));
+            onEarlier?.Invoke(rig, work);
+            root = root with { ThroughWorkId = work.ThroughWorkId };
+        }
         var echoes = tree.Except(unechoed ?? [], StringComparer.Ordinal).ToArray();
         var listed = false;
         var view = new HookedSide(rig.WrittenSide,
@@ -1530,10 +1561,12 @@ public static class ChangeRunnerChecks
         var context = fixture.Context(root) with { Events = item => { lock (events) events.Add(item); } };
         var batches = 0;
         var fenceCalls = 0;
+        var laterCalls = 0;
         fixture.Hooks.BeforeCall = method =>
         {
             if (method.Name is nameof(IStateStore.PendingAncestors) or nameof(IStateStore.LaterAncestorNews))
                 Interlocked.Increment(ref fenceCalls);
+            if (method.Name == nameof(IStateStore.LaterAncestorNews)) Interlocked.Increment(ref laterCalls);
         };
         LiveAdmissionStaleException? refused = null;
         try { await Counted(fixture, root, () => batches++, context: context).RunAsync(root, default); }
@@ -1553,7 +1586,7 @@ public static class ChangeRunnerChecks
             : errors.Contains("AncestorsClear", StringComparison.Ordinal) ? "AncestorsClear"
             : System.Text.RegularExpressions.Regex.Match(errors, @"at Massdex\.SyncShark\.Engine\.(?!Tests)[\w.]+") is
                 { Success: true } frame ? frame.Value[3..] : "none";
-        var run = new EchoRun(rig, root, events, refused, batches, [], childRows, where, fenceCalls, [.. tree, .. files]);
+        var run = new EchoRun(rig, root, events, refused, batches, [], childRows, where, fenceCalls, [.. tree, .. files], laterCalls);
         return run with { Missing = await EchoMissingAsync(run, files) };
     }
 
@@ -5023,6 +5056,9 @@ public static class ChangeRunnerChecks
         var folder = FolderEntry(Folder, FolderId);
         using (var fixture = UnreadableFixture(withMemberFolder: false))
         {
+            // A row present on both sides is not create-only, so it keeps the own-anchor later-work query.
+            fixture.Local.Seed(LocalEntry(Folder + "/both", "both-local"), [1]);
+            fixture.Dropbox.Seed(RemoteEntry(Folder + "/both", "both-remote"), [1]);
             var later = 0;
             fixture.Hooks.BeforeCall = method =>
             {
@@ -5033,26 +5069,35 @@ public static class ChangeRunnerChecks
             fixture.Hooks.BeforeCall = null;
             var queries = fixture.Hooks.AncestorQueries;
             // A live batch's create answers its own selection's later work through LaterAncestorNews (D-ECHO-1).
-            Check.Require((queries.Any(query => query.Through is not null) || later != 0) &&
+            Check.Require(queries.Any(query => query.Through is not null) && later != 0 &&
                 queries.Any(query => query.Count == 0),
-                "The fixture exercises both own-only and empty ancestor answers.");
+                "The fixture exercises both own-only and empty ancestor answers, and the create's later-arrival answer.");
             for (var index = 0; index < queries.Count; index++)
                 if (queries[index].Through is not null)
                     Check.Require(index > 0 && queries[index - 1].Count > 0 &&
                         queries[index - 1].Side == queries[index].Side,
                         "Only a nonempty own-ancestor answer warrants a later-work query.");
         }
+        // D-ECHO-1: a later notice restating the folder's binding no longer refuses a live batch's create; a differing one does.
         using (var fixture = UnreadableFixture(withMemberFolder: false))
         {
             var selection = Selected(fixture, Folder, folder);
             Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Folder, null, FolderId, folder, false, false), 2);
+            Check.Require(await RunSelectionAsync(fixture, selection) && await SyncedAsync(fixture, Plain),
+                "A later restatement of the folder's binding admits the batch's create-only child");
+        }
+        using (var fixture = UnreadableFixture(withMemberFolder: false))
+        {
+            var selection = Selected(fixture, Folder, folder);
+            var replaced = FolderEntry(Folder, "replaced-folder");
+            Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Folder, null, replaced.Id, replaced, false, false), 2);
             var refused = await ThrowsAsync<LiveAdmissionStaleException>(() => RunSelectionAsync(fixture, selection));
             Check.Require(refused.Reason == LiveAdmissionStaleReason.RelevantEvidenceChanged &&
-                !await SyncedAsync(fixture, Plain), "Work arriving after the selection still refuses its descendants");
+                !await SyncedAsync(fixture, Plain), "Differing work arriving after the selection still refuses its descendants");
             var owners = fixture.Inner.PendingAncestors(PairId, Generation, Side.Local, [selection.Key]).ToArray();
             Check.Require(owners.Any(owner => owner.AnchorWorkId > selection.ThroughWorkId) &&
                 fixture.Hooks.AncestorQueries.Any(query => query.Through is null && query.Count > 0),
-                "After the own Record advances its preimage, the later arrival is a separate owner and the first query refuses it.");
+                "After the own Record advances its preimage, the later arrival is a separate owner the first query sees.");
         }
         using (var fixture = UnreadableFixture(withMemberFolder: false))
         {
