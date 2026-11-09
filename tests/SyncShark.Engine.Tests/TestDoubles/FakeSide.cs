@@ -322,7 +322,7 @@ public sealed class FakeSide : ISide
         var parent = ParentOf(path);
         if (parent.Length > 0)
         {
-            if (true) EnsureFolderLocked(parent);
+            if (CreatesMissingParents || parent.Length > 0) EnsureFolderLocked(parent);
             else if (!(_entries.TryGetValue(PathNames.Key(parent), out var above) && above.IsFolder))
                 throw new ChangedUnderneathException(path);
         }
