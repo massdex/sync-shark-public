@@ -2396,9 +2396,10 @@ public static class ChangeRunnerChecks
         await LiveReobserveRevokesDirectAsync();
     }
 
-    private enum B101Shape { IdentityChain, FeedChain, SingleStep, PageSplit, GenuineDeletion }
+    private enum B101Shape { IdentityChain, FeedChain, SingleStep, PageSplit, GenuineDeletion, Held, Restart, Edited, Alias }
 
-    // B-101 (D19): a Dropbox rename delivered in the production feed shapes moves the Local file and keeps its identity.
+    // B-101 (D19): a Dropbox rename delivered in the production feed shapes moves the Local file and keeps its identity;
+    // the held, restart, edited-counterpart and alias-occupant rows keep their existing outcomes on the same route.
     public static void RunB101RenameIdentity()
     {
         var failures = new List<string>();
@@ -2417,9 +2418,18 @@ public static class ChangeRunnerChecks
         var local = LocalEntry("P/a", LocalId);
         var remote = RemoteEntry("P/a", DropboxId);
         var moved = shape != B101Shape.GenuineDeletion;
-        f.Local.Seed(local, [1]);
+        var edited = local with { Size = 2, Modified = Stamp.AddMinutes(1) };
+        f.Local.Seed(shape == B101Shape.Edited ? edited : local, shape == B101Shape.Edited ? [2, 2] : [1]);
         if (moved) f.Dropbox.Seed(remote with { Path = "P/c" }, [1]);
+        var occupant = RemoteEntry("P/a", OccupantId) with { ContentHash = DropboxContentHash.Compute(new byte[] { 3 }) };
+        if (shape == B101Shape.Alias) f.Dropbox.Seed(occupant, [3]);
         f.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(local, remote)] });
+        if (shape == B101Shape.Held)
+            f.Inner.Commit(PairId, StateChange.Empty with
+            {
+                Raise = [(IssueKind.NameClash, TextKey.ClashNameTaken, "P/c",
+                    new IssueSubject([new IssueItem(Side.Dropbox, "P/c", remote.Id)], null))]
+            });
         // Production feed forms (DropboxFeed.Notices): tombstones carry no id; metadata carries no old path.
         ChangeNotice Deleted(string path) => new(Side.Dropbox, ChangeKind.Deleted, path, null, null, null, false, false);
         ChangeNotice Changed(string path) =>
@@ -2428,7 +2438,8 @@ public static class ChangeRunnerChecks
         {
             B101Shape.IdentityChain => new[] { new[] { Changed("P/b") }, [Changed("P/c")] },
             B101Shape.FeedChain => [[Deleted("P/a"), Changed("P/b")], [Deleted("P/b"), Changed("P/c")]],
-            B101Shape.SingleStep => [[Deleted("P/a"), Changed("P/c")]],
+            B101Shape.SingleStep or B101Shape.Held or B101Shape.Edited => [[Deleted("P/a"), Changed("P/c")]],
+            B101Shape.Alias => [[Changed("P/c")]],
             _ => [[Deleted("P/a")]]
         };
         WorkSelection? first = null;
@@ -2440,6 +2451,8 @@ public static class ChangeRunnerChecks
         }
         var reads = new Dictionary<string, int>(StringComparer.Ordinal);
         var byId = 0;
+        var readWork = 0;
+        f.Hooks.OnReadWork = _ => readWork++;
         f.DropboxView = new HookedSide(f.Dropbox, beforeRead: path => reads[path] = reads.GetValueOrDefault(path) + 1,
             identity: (_, _) =>
             {
@@ -2452,30 +2465,43 @@ public static class ChangeRunnerChecks
             return new Lease { AllowsRelease = true };
         });
         var events = new List<RunEvent>();
-        var syncer = LiveSyncer(f, first!, boundary, events);
-        var split = shape == B101Shape.PageSplit;
-        // The admission drain acquires the destination after the tombstone was selected.
-        boundary.Capture = (chosen, _, _) =>
+        var split = shape is B101Shape.PageSplit or B101Shape.Restart;
+        Syncer Live()
         {
-            if (split)
+            var syncer = LiveSyncer(f, first!, boundary, events);
+            // The admission drain acquires the destination after the tombstone was selected.
+            boundary.Capture = (chosen, _, _) =>
             {
-                split = false;
-                AcquireRemotePage(f, Changed("P/c"));
-            }
-            return Task.FromResult(f.Inner.CaptureLiveCoverage(chosen, Coverage(chosen).Local, Coverage(chosen).Dropbox));
-        };
-        await syncer.SyncWorkAsync(default);
-        // The destination acquisition is the event that brings it to a later pass (WorkCommitted).
-        if (shape == B101Shape.PageSplit) await syncer.SyncWorkAsync(default);
+                if (split)
+                {
+                    split = false;
+                    AcquireRemotePage(f, Changed("P/c"));
+                }
+                return Task.FromResult(f.Inner.CaptureLiveCoverage(chosen, Coverage(chosen).Local, Coverage(chosen).Dropbox));
+            };
+            return syncer;
+        }
+        await Live().SyncWorkAsync(default);
+        var heldIntact = shape != B101Shape.Held || (await f.Local.ReadOneAsync("P/a", default))?.Id == local.Id &&
+            events.All(item => item.EffectKind is not (EffectKind.DeletedLocal or EffectKind.MovedLocal)) &&
+            PendingAt(f, Side.Dropbox, "P/a", "P/c").Any();
+        if (shape == B101Shape.Held)
+            f.Inner.Commit(PairId, StateChange.Empty with { Close = [("P/c", new[] { IssueKind.NameClash })] });
+        if (shape == B101Shape.Restart) f.RestartStore();
+        // The destination acquisition (WorkCommitted), the hold's closure or the restart brings the work to a later pass.
+        if (shape is B101Shape.PageSplit or B101Shape.Restart or B101Shape.Held) await Live().SyncWorkAsync(default);
         var completed = await f.Local.ReadOneAsync(moved ? "P/c" : "P/a", default);
         var refusals = events.Count(item => item.Error is LiveAdmissionStaleException);
-        // One refusal per tombstone attempt while the destination is pending; the page split attempts it once per call.
+        // One refusal per tombstone attempt while the destination is pending; the split rows attempt it once per call.
         var expectedRefusals = shape switch
         {
-            B101Shape.IdentityChain or B101Shape.GenuineDeletion => 0,
-            B101Shape.PageSplit => 2,
+            B101Shape.IdentityChain or B101Shape.GenuineDeletion or B101Shape.Alias => 0,
+            B101Shape.PageSplit or B101Shape.Restart or B101Shape.Held => 2,
             _ => 1
         };
+        var pathAdmissions = boundary.Requests.Count(request => request.Single().Selection.Identity is null);
+        Console.WriteLine($"B101-COST shape={shape} admissions={boundary.Calls} path-admissions={pathAdmissions} " +
+            $"read-work={readWork} dropbox-point-reads={reads.Values.Sum()} dropbox-by-id={byId} refusals={refusals}");
         var diagnosis = "; effects=" + string.Join(" | ", events.Where(item => item.EffectKind is not null)
                 .Select(item => item.EffectKind + ":" + item.Path)) +
             "; refusals=" + refusals + "; byId=" + byId +
@@ -2489,16 +2515,39 @@ public static class ChangeRunnerChecks
                 "A genuine Dropbox deletion still deletes Local without a new refusal" + diagnosis);
             return;
         }
+        if (shape == B101Shape.Edited)
+        {
+            var kept = new List<Entry>();
+            foreach (var path in new[] { "P/a", "P/c" })
+                if (await f.Local.ReadOneAsync(path, default) is { } entry) kept.Add(entry);
+            Check.Require(kept.Any(entry => entry.Size == edited.Size) &&
+                await f.Dropbox.ReadOneAsync("P/a", default) is null &&
+                events.All(item => item.EffectKind != EffectKind.DeletedLocal &&
+                    !(item.EffectKind == EffectKind.Uploaded && item.Path == "P/a")) && refusals == expectedRefusals &&
+                byId == 0,
+                "Edited counterpart: the Local edit is kept and the Dropbox rename is not undone at P/a, with " +
+                expectedRefusals + " refusal(s)" + diagnosis);
+            return;
+        }
+        Check.Require(heldIntact, "Held destination: the tombstone neither deletes nor moves Local while the hold stands, " +
+            "and the work stays reachable" + diagnosis);
         Check.Require(completed?.Id == local.Id &&
             await f.Local.ContentHashAsync(completed, default) == remote.ContentHash &&
-            await f.Local.ReadOneAsync("P/a", default) is null && await f.Local.ReadOneAsync("P/b", default) is null &&
-            events.All(item => item.EffectKind is not (EffectKind.DeletedLocal or EffectKind.Downloaded)) &&
+            await f.Local.ReadOneAsync("P/b", default) is null &&
+            (shape == B101Shape.Alias
+                ? await f.Local.ReadOneAsync("P/a", default) is { } replaced &&
+                  await f.Local.ContentHashAsync(replaced, default) == occupant.ContentHash
+                : await f.Local.ReadOneAsync("P/a", default) is null) &&
+            events.All(item => item.EffectKind != EffectKind.DeletedLocal &&
+                (item.EffectKind != EffectKind.Downloaded || shape == B101Shape.Alias && item.Path == "P/a")) &&
+            events.Count(item => item.EffectKind == EffectKind.MovedLocal) == 1 &&
             f.Inner.SyncedById(PairId, Side.Dropbox, remote.Id) is { LocalPath: "P/c" } binding &&
             binding.LocalId == local.Id && refusals == expectedRefusals && byId == 0 &&
             !PendingAt(f, Side.Dropbox, "P/a", "P/b", "P/c").Any() &&
             f.Inner.Issues(PairId).All(issue => issue.Kind != IssueKind.Failure),
-            "The rename moves Local P/a to P/c keeping its identity, with no delete or download, " +
-            expectedRefusals + " refusal(s) and no Dropbox lookup by id" + diagnosis);
+            "The rename moves Local P/a to P/c once, keeping its identity, with no delete or other download, " +
+            expectedRefusals + " refusal(s) and no Dropbox lookup by id" +
+            (shape == B101Shape.Alias ? "; the alias observes the replacement occupant at P/a" : "") + diagnosis);
     }
 
     private static async Task AdmittedRenameRefusalReselectsAsync()

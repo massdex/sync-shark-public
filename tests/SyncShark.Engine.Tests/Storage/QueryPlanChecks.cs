@@ -51,6 +51,63 @@ public static class QueryPlanChecks
         using var connection = OpenSchema();
         CheckPlans(connection);
         DescendantProbeCost();
+        EvidenceIdentityCost(connection);
+    }
+
+    // B-101 (section 3.7): the admission identity probe (ChangeTable.UnownedIdentity) is one seek on work_identity.
+    // Its VM steps depend on the rows sharing the identity, not on the pair's other pending work: the same probe is
+    // measured over one and two scan batches (ScanTestSettings.BatchRows) of unrelated rows.
+    private static void EvidenceIdentityCost(SqliteConnection connection)
+    {
+        var plan = Plan(connection, StateSchema.EvidenceIdentity);
+        Console.WriteLine("B101-COST plan EvidenceIdentity: " + string.Join("; ", plan));
+        Check.Require(plan.Any(line => line.Contains("work_identity", StringComparison.Ordinal)) &&
+            plan.Where(IsTableAccess).All(line => !line.StartsWith("SCAN ", StringComparison.Ordinal)),
+            "B-101: the admission identity probe seeks work_identity: " + string.Join("; ", plan));
+        var path = Path.Combine(Path.GetTempPath(),
+            "identity-cost-" + Guid.NewGuid().ToString("N") + StateSchema.DatabaseExtension);
+        try
+        {
+            using var probe = new CostProbe(path);
+            probe.CreateSchema();
+            probe.Execute(StateSchema.UpsertPair, (StateSchema.ParamPair, "cost"), (StateSchema.ParamDef, "{}"));
+            const long pairRow = 1; // the first pair row of a fresh schema
+            var next = 0L;
+            void Add(string identity, int count)
+            {
+                probe.Begin();
+                for (var index = 0; index < count; index++)
+                {
+                    next++;
+                    probe.Execute(StateSchema.InsertWork, (StateSchema.ParamId, next), (StateSchema.ParamPairRow, pairRow),
+                        (StateSchema.ParamGeneration, 0L), (StateSchema.ParamEpoch, 0L), (StateSchema.ParamSide, (int)Side.Dropbox),
+                        (StateSchema.ParamDomain, "domain"), (StateSchema.ParamPath, "p/" + next), (StateSchema.ParamOldPath, null),
+                        (StateSchema.ParamIdentity, StateEncoding.IdFor(Side.Dropbox, identity + (count == 1 ? "" : next.ToString()))),
+                        (StateSchema.ParamNotice, "{\"Version\":1}"), (StateSchema.ParamBefore, null),
+                        (StateSchema.ParamAcquisition, next), (StateSchema.ParamParent, null), (StateSchema.ParamObligation, null));
+                }
+                probe.Commit();
+            }
+            StatementCost Measure() => probe.Execute(StateSchema.EvidenceIdentity, (StateSchema.ParamPairRow, pairRow),
+                (StateSchema.ParamGeneration, 0L), (StateSchema.ParamSide, (int)Side.Dropbox), (StateSchema.ParamEpoch, 0L),
+                (StateSchema.ParamDomain, "domain"), (StateSchema.ParamIdentity, StateEncoding.IdFor(Side.Dropbox, "moved")));
+            var none = Measure();
+            Add("moved", 1);
+            var one = Measure();
+            Add("other-", ScanTestSettings.BatchRows);
+            var oneBatch = Measure();
+            Add("other-", ScanTestSettings.BatchRows);
+            var twoBatches = Measure();
+            Console.WriteLine($"B101-COST EvidenceIdentity vm-steps: no-match={none.VmSteps} one-match={one.VmSteps} " +
+                $"one-match+{ScanTestSettings.BatchRows}-unrelated={oneBatch.VmSteps} " +
+                $"one-match+{2 * ScanTestSettings.BatchRows}-unrelated={twoBatches.VmSteps} prepares={one.ProbePrepares}");
+            Check.Require(one.VmSteps > none.VmSteps && oneBatch.VmSteps == one.VmSteps && twoBatches.VmSteps == one.VmSteps,
+                "B-101: the admission identity probe costs the same over any number of unrelated pending rows");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     // A light counted comparison of the #129 probe against the delete it can skip (section 3.7). Limits: CostProbe
