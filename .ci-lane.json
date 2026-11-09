@@ -1,0 +1,10 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "ancestor-retry"
+  ],
+  "core": [],
+  "ui": []
+}
