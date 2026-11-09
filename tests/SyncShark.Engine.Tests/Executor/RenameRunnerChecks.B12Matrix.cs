@@ -13,14 +13,16 @@ namespace Massdex.SyncShark.Engine.Tests.Executor;
 /// failed and cancelled outcomes. Registered only as the <c>b12-meas</c> group.</summary>
 public static partial class RenameRunnerChecks
 {
-    public static void RunB12RenameMatrix()
+    public static void RunB12RenameMatrix() => RunB12RenameMatrixAsync().GetAwaiter().GetResult();
+
+    private static async Task RunB12RenameMatrixAsync()
     {
         foreach (var kind in new[] { "follow", "adopt" })
         foreach (var outcome in new[] { "success", "suspended", "failed", "cancelled" })
             RenameDecisionPath(kind, outcome);
         foreach (var identity in new[] { DestinationIdentity.Here, DestinationIdentity.Moving, DestinationIdentity.Gone })
         foreach (var outcome in new[] { "success", "suspended", "failed", "cancelled" })
-            IdentityPath(identity, outcome);
+            await IdentityPathAsync(identity, outcome);
     }
 
     private static void RenameDecisionPath(string kind, string outcome)
@@ -72,7 +74,7 @@ public static partial class RenameRunnerChecks
         }
     }
 
-    private static void IdentityPath(DestinationIdentity identity, string outcome)
+    private static async Task IdentityPathAsync(DestinationIdentity identity, string outcome)
     {
         try
         {
@@ -105,7 +107,7 @@ public static partial class RenameRunnerChecks
             var context = f.Context with { Local = local };
             var items = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(), RefusingExecutionBoundary.Instance,
                 RefusingExecutionBoundary.Instance, 0)).Items;
-            var lease = AdmitAsync(f, [moved], moved.Moved, Fixture.Generation).GetAwaiter().GetResult();
+            await using var lease = await AdmitAsync(f, [moved], moved.Moved, Fixture.Generation);
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
@@ -114,8 +116,8 @@ public static partial class RenameRunnerChecks
             var threw = false;
             try
             {
-                var result = items.RenameAdmittedAsync(lease, selection, context.Opportunity, [moved], moved.Moved,
-                    cts.Token).GetAwaiter().GetResult();
+                var result = await items.RenameAdmittedAsync(lease, selection, context.Opportunity, [moved], moved.Moved,
+                    cts.Token);
                 decision = result.Kind;
             }
             catch (OperationCanceledException) { threw = true; }
@@ -135,12 +137,8 @@ public static partial class RenameRunnerChecks
     {
         public Side Side => inner.Side;
 
-        public async IAsyncEnumerable<Listed> ReadAllAsync(string under, ListOptions options,
-            [EnumeratorCancellation] CancellationToken ct)
-        {
-            await Task.Yield();
-            await foreach (var item in inner.ReadAllAsync(under, options, ct)) yield return item;
-        }
+        public IAsyncEnumerable<Listed> ReadAllAsync(string under, ListOptions options, CancellationToken ct) =>
+            inner.ReadAllAsync(under, options, ct);
 
         public async Task<Entry?> ReadOneAsync(string path, CancellationToken ct)
         {
