@@ -1702,7 +1702,7 @@ public static class RenameRunnerChecks
                     issues is [var restored] && SameResponsibility(restored, original!) && restored.Subject.Move == descriptor,
                     "A temporary rename inside settlement restores the unknown-move Failure (P2-disp Temporary, R4-row4).");
             else
-                Check.Require(!settled.Kept && settled.Outcome.Raised == IssueKind.Failure &&
+                Check.Require(!settled.Kept && settled.Outcome is { Raised: IssueKind.Failure } &&
                     issues is [{ Kind: IssueKind.Failure, Cause: TextKey.DropboxRefused } replaced] &&
                     replaced.Subject.Move == (disposition == FailureDisposition.UnknownEffect ? descriptor : null),
                     "A committed rename Failure replaces the settled responsibility with its own disposition.");
