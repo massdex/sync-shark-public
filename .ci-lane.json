@@ -4,16 +4,8 @@
   ],
   "engine": [
     "containment",
-    "containment-move-out",
-    "dependencies",
-    "live-admission",
-    "mapped-holds",
     "peer",
-    "released-history",
-    "repair-claims",
-    "repair-held",
-    "safety",
-    "stale-freshness",
+    "live-admission",
     "syncer"
   ],
   "core": [],
