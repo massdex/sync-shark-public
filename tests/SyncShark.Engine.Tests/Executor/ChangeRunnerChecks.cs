@@ -1379,8 +1379,9 @@ public static class ChangeRunnerChecks
         foreach (var origin in new[] { Side.Local, Side.Dropbox })
         foreach (var (name, earlier, unbound) in cases)
         {
-            // The issue variant: a plain notice whose work carries an in-use issue (the WorkIssue clause). In-use is a
-            // Local cause, so it runs from Local only; the batch's own T/x upload adopts the episode and settles it.
+            // The issue variant proves adoption-then-admission, not the WorkIssue refusal (ChangeTableChecks owns that):
+            // the batch's own T/x upload adopts the in-use episode and clears it, so T/x's notice then restates the
+            // batch's binding and T/x/g0 is copied as in T2f1. In-use is a Local cause, so it runs from Local only.
             if (name == "issue" && origin == Side.Dropbox) continue;
             var attempt = Guid.NewGuid();
             Action<EchoRig, WorkSelection>? issue = name != "issue" ? null : (rig, work) =>
@@ -1394,10 +1395,10 @@ public static class ChangeRunnerChecks
                 attempt: issue is null ? null : attempt, onEarlier: issue, unechoed: unbound ? ["T/x"] : null,
                 afterList: unbound ? rig => { rig.WrittenSide.FailNext("T/x", new ItemFailedException("T/x", TextKey.FailDropboxNoPermission, null)); return Task.CompletedTask; } : null);
             using var fixture = run.Rig.Fixture;
-            // The issue case differs from T2f1's admitted plain notice only by the WorkIssue, so its kept row is that clause.
-            Check.Require(run.Stale == 0 && run.Missing.SequenceEqual(["T/x/g0"]) &&
+            Check.Require(run.Stale == 0 && run.Missing.SequenceEqual(issue is null ? ["T/x/g0"] : []) &&
                 fixture.Attempts.Completions == (issue is null ? 0 : 1),
-                $"T2f2 {name} origin={origin}: the sub-folder's own owner keeps its row; completions=" +
+                $"T2f2 {name} origin={origin}: " + (issue is null ? "the sub-folder's own owner keeps its row"
+                    : "the batch adopts and settles the in-use episode, then copies the sub-folder's file") + "; completions=" +
                 fixture.Attempts.Completions + " " + run.Describe());
         }
     }
