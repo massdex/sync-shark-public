@@ -252,7 +252,8 @@ internal sealed partial class ChangeTable
         var dropbox = ReadSourceRow(null, pair.Row, Side.Dropbox);
         if (local is null || dropbox is null || ReadLiveRefusal(pair, local, dropbox) == LiveRefusal.Pair)
             return (0, 0);
-        return Read(null, StateSchema.CountWork, static reader => (reader.GetInt64(0), reader.GetInt64(1)),
+        return Read(null, StateSchema.CountWork, static reader =>
+                (reader.GetInt64(StateSchema.QueueLocalCount), reader.GetInt64(StateSchema.QueueDropboxCount)),
             (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamGeneration, expectedGeneration),
             (StateSchema.ParamThrough, through), (StateSchema.ParamLocalEpoch, local.Epoch),
             (StateSchema.ParamRemoteEpoch, dropbox.Epoch)).First();

@@ -768,20 +768,21 @@ public static partial class StateSchema
     public const string AdvancePair = "UPDATE pair SET def_json=$definition,execution_generation=$nextGeneration WHERE id=$pair AND execution_generation=$generation AND (NOT " + CurrentLocalWork + " OR EXISTS(SELECT 1 FROM source_state WHERE pair_id=$pair AND side=0 AND repair_reason=$gapReason));";
     public const string WorkWatermark = "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='change_work'),0);";
     public const string InsertWork = "INSERT INTO change_work(" + WorkFields + ") VALUES($id,$pair,$generation,$epoch,$side,$domain,$path,$oldPath,$identity,$notice,$before,$acquisition,$parent,$obligation,0);";
-    // The one eligibility selection and counting share for a side: pending Acquired rows of that side's current
-    // source. Selection reads the source's epoch in the statement; counting passes the epochs it has already read.
-    private static string SideEligibility(string side, string epoch) =>
-        "w.pair_id=$pair AND w.pair_generation=$generation AND w.side=" + side +
-        " AND w.work_origin='Acquired' AND w.source_epoch=" + epoch;
+    // The one eligibility rule and epoch lookup that selection and counting share, each declared once and
+    // closed by its side value: pending Acquired rows of that side's current source. Selection reads the
+    // source's epoch in the statement; counting binds the epochs it has already read.
+    private const string EligibilityPrefix = "w.pair_id=$pair AND w.pair_generation=$generation AND w.side=";
+    private const string EligibilitySuffix = " AND w.work_origin='Acquired' AND w.source_epoch=";
+    private const string SourceEpochPrefix = "(SELECT source_epoch FROM source_state WHERE pair_id=$pair AND side=";
+    private const string LocalEligibility = EligibilityPrefix + "0" + EligibilitySuffix;
+    private const string RemoteEligibility = EligibilityPrefix + "1" + EligibilitySuffix;
+    private const string LocalSourceEpoch = SourceEpochPrefix + "0)";
+    private const string RemoteSourceEpoch = SourceEpochPrefix + "1)";
 
-    private static string CurrentSourceEpoch(string side) =>
-        "(SELECT source_epoch FROM source_state WHERE pair_id=$pair AND side=" + side + ")";
-
-    public static readonly string SelectWork = "WITH local_work AS MATERIALIZED (SELECT " + WorkColumns +
-        " FROM change_work w INDEXED BY work_source_order WHERE " + SideEligibility("0", CurrentSourceEpoch("0")) +
+    public const string SelectWork = "WITH local_work AS MATERIALIZED (SELECT " + WorkColumns +
+        " FROM change_work w INDEXED BY work_source_order WHERE " + LocalEligibility + LocalSourceEpoch +
         " AND w.work_id>$after AND w.work_id<=$through AND (w.parent_anchor IS NULL OR NOT EXISTS(SELECT 1 FROM change_work p WHERE p.work_id=w.parent_anchor)) ORDER BY w.work_id LIMIT $take),remote_work AS MATERIALIZED (SELECT " +
-        WorkColumns + " FROM change_work w INDEXED BY work_source_order WHERE " +
-        SideEligibility("1", CurrentSourceEpoch("1")) +
+        WorkColumns + " FROM change_work w INDEXED BY work_source_order WHERE " + RemoteEligibility + RemoteSourceEpoch +
         " AND w.work_id>$after AND w.work_id<=$through AND (w.parent_anchor IS NULL OR NOT EXISTS(SELECT 1 FROM change_work p WHERE p.work_id=w.parent_anchor)) ORDER BY w.work_id LIMIT $take) SELECT " +
         WorkFields + " FROM (SELECT " + WorkFields + " FROM local_work UNION ALL SELECT " + WorkFields +
         " FROM remote_work) ORDER BY work_id LIMIT $take;";
@@ -789,11 +790,11 @@ public static partial class StateSchema
     /// <summary>The queue snapshot: pending Acquired rows for both current sources at or below the pass watermark,
     /// one covering count per side. It reads only index columns, so the parent-anchor term, which only defers a
     /// selection, never changes it.</summary>
-    public static readonly string CountWork =
+    public const string CountWork =
         "SELECT (SELECT count(*) FROM change_work w NOT INDEXED WHERE " +
-        SideEligibility("0", ParamLocalEpoch) + " AND w.work_id<=$through)," +
+        LocalEligibility + ParamLocalEpoch + " AND w.work_id<=$through)," +
         "(SELECT count(*) FROM change_work w NOT INDEXED WHERE " +
-        SideEligibility("1", ParamRemoteEpoch) + " AND w.work_id<=$through);";
+        RemoteEligibility + ParamRemoteEpoch + " AND w.work_id<=$through);";
     public const string Anchor = "SELECT " + WorkColumns + " FROM change_work w WHERE w.work_id=$anchor AND w.pair_id=$pair AND w.pair_generation=$generation AND w.source_epoch=$epoch;";
     public const string ReadPathSelection = "SELECT " + WorkColumns + " FROM change_work w WHERE " + PathSelection + ";";
     private const string NoRenameResponsibility = " AND w.rename_continuation_json IS NULL AND NOT EXISTS(SELECT 1 FROM folder_removal f INDEXED BY folder_rename_work WHERE f.rename_work_id=w.work_id)";
@@ -1225,6 +1226,10 @@ public static partial class StateSchema
 
     // Column ordinals: the only or first column of a single-column SELECT.
     public const int FirstColumn = 0;
+
+    // Column ordinals: CountWork. The queue snapshot returns the Local count first, the Dropbox count second.
+    public const int QueueLocalCount = 0;
+    public const int QueueDropboxCount = 1;
 
     // Column ordinals: SyncedColumns. The Dropbox key is the nullable delta, or the local key when inherited.
     public const int SyncedLocalKey = 0;
