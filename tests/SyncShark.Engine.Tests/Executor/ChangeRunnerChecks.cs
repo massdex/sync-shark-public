@@ -1379,20 +1379,26 @@ public static class ChangeRunnerChecks
         foreach (var origin in new[] { Side.Local, Side.Dropbox })
         foreach (var (name, earlier, unbound) in cases)
         {
-            // The issue variant: a plain notice whose work carries an in-use issue (the WorkIssue clause). The issue
-            // names an earlier T/x identity so the batch's own T/x create does not adopt its retry episode.
+            // The issue variant: a plain notice whose work carries an in-use issue (the WorkIssue clause). In-use is a
+            // Local cause, so it runs from Local only; the batch's own T/x upload adopts the episode and settles it.
+            if (name == "issue" && origin == Side.Dropbox) continue;
             var attempt = Guid.NewGuid();
             Action<EchoRig, WorkSelection>? issue = name != "issue" ? null : (rig, work) =>
+            {
+                rig.Fixture.Attempts.Settles = (rig.Fixture.Inner, attempt);
                 rig.Fixture.Inner.RecordInUseFailure(PairId, Generation, work.SourceEpoch, "T/x",
-                    new IssueSubject([new IssueItem(rig.Origin, "T/x", "earlier-x")], null), TextKey.FailLocalInUse,
+                    new IssueSubject([new IssueItem(rig.Origin, "T/x", rig.OriginId("T/x"))], null), TextKey.FailLocalInUse,
                     work, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+            };
             var run = await EchoRootAsync(origin, ["T/x"], files, earlier: ["T/x"], earlierNotice: earlier,
                 attempt: issue is null ? null : attempt, onEarlier: issue, unechoed: unbound ? ["T/x"] : null,
                 afterList: unbound ? rig => { rig.WrittenSide.FailNext("T/x", new ItemFailedException("T/x", TextKey.FailDropboxNoPermission, null)); return Task.CompletedTask; } : null);
             using var fixture = run.Rig.Fixture;
             // The issue case differs from T2f1's admitted plain notice only by the WorkIssue, so its kept row is that clause.
-            Check.Require(run.Stale == 0 && run.Missing.SequenceEqual(["T/x/g0"]),
-                $"T2f2 {name} origin={origin}: the sub-folder's own owner keeps its row; " + run.Describe());
+            Check.Require(run.Stale == 0 && run.Missing.SequenceEqual(["T/x/g0"]) &&
+                fixture.Attempts.Completions == (issue is null ? 0 : 1),
+                $"T2f2 {name} origin={origin}: the sub-folder's own owner keeps its row; completions=" +
+                fixture.Attempts.Completions + " " + run.Describe());
         }
     }
 
@@ -7160,13 +7166,16 @@ public static class ChangeRunnerChecks
     {
         public object? Opportunity { get; private set; }
         public int Executions { get; private set; }
+        public int Completions { get; private set; }
+        // Opt-in per fixture: run under the store's registered attempt and complete through it, as EngineHost's port does.
+        public (IStateStore Store, Guid Attempt)? Settles { get; set; }
 
         public Task<T> ExecuteAsync<T>(object opportunity, ItemRetryCandidate? expected, IssueSubject subject,
             Func<Guid, CancellationToken, Task<T>> execute, CancellationToken ct)
         {
             Executions++;
             Opportunity = opportunity;
-            return execute(Guid.NewGuid(), ct);
+            return execute(Settles?.Attempt ?? Guid.NewGuid(), ct);
         }
 
         public ItemRetryCandidate ReportFailure(Guid attemptId, long sourceEpoch, string path,
@@ -7174,8 +7183,12 @@ public static class ChangeRunnerChecks
             PendingEffect? expectedPending, ItemRetryToken? expectedEpisode) => throw new NotSupportedException();
 
         public void Complete(Guid attemptId, ItemRetryCandidate expected, StateChange change,
-            PendingEffect? completedPending, WorkSelection? selection, Action<Issue>? committedIssue = null) =>
-            throw new NotSupportedException();
+            PendingEffect? completedPending, WorkSelection? selection, Action<Issue>? committedIssue = null)
+        {
+            if (Settles is not { } settles) throw new NotSupportedException();
+            settles.Store.CompleteItemAttempt(expected, attemptId, change, completedPending, selection, committedIssue);
+            Completions++;
+        }
     }
 
     private sealed class RecoveryBoundary : IRecoveryExecutionBoundary
