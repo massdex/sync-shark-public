@@ -3,7 +3,7 @@
     "engine-tests"
   ],
   "engine": [
-    "repair"
+    "dropbox"
   ],
   "core": [],
   "ui": []
