@@ -81,6 +81,11 @@ public static class ChangeRunnerChecks
                 "R6 Local " + debt + " debt refuses a live Dropbox " + kind + " over the Local item and keeps the work: refused=" +
                 refused?.Reason + "; localEffects=" + LocalWrites(localCounter));
             // Only Repair's matching completion clears skipped coverage; it covers the retained work.
+            // A real Repair acquires and publishes deleted history before it completes (#36: owed history obligates).
+            var history = fixture.Inner.BeginScan(PairId, Generation, true);
+            await fixture.Inner.OpenScan(PairId, Side.Dropbox, ScanTestSettings.BatchRows).CompleteAsync();
+            fixture.Inner.SaveDeletedHistory(PairId, history, Cursor);
+            await fixture.Inner.EndScanAsync(PairId, history, 1);
             var through = fixture.Inner.ReadWorkWatermark();
             var token = fixture.Inner.BeginScan(PairId, Guid.NewGuid(), Generation, false);
             var gap = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;

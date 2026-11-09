@@ -744,6 +744,12 @@ public static class ScanPassChecks
     private static Task HeldSurvivorWakeAsync() => WithFolder("held-survivor-wake", async folder =>
     {
         using var rig = NewRig(Pair());
+        // A real Repair acquires and publishes deleted history before it completes (#36: owed history obligates).
+        var generation = rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation;
+        var history = rig.Store.BeginScan(rig.Pair.PairId, generation, true);
+        await rig.Store.OpenScan(rig.Pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows).CompleteAsync();
+        rig.Store.SaveDeletedHistory(rig.Pair.PairId, history, "history");
+        await rig.Store.EndScanAsync(rig.Pair.PairId, history, Settings.StoragePageSize);
         const string kept = "docs/kept.txt";
         var root = await rig.Local.EnsureFolderAsync("docs", default);
         await PutAsync(rig.Local, kept, [1]);

@@ -21,6 +21,8 @@ internal static partial class DropboxReplyShapes
         {
             ArgumentNullException.ThrowIfNull(spool);
             // Custody moves only once the writer exists: a failed Begin leaves the spool with the exchange alone.
+            // Entries encode into the pending buffer, so the spool's own writability is checked here, as before.
+            if (!spool.CanWrite) throw new ArgumentException(null, nameof(spool));
             _pending = new MemoryStream();
             _writer = new BinaryWriter(_pending, Encoding.UTF8, leaveOpen: true);
             _spool = spool;

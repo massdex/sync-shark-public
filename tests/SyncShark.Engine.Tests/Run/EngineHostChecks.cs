@@ -764,11 +764,13 @@ public static class EngineHostChecks
         var pair = Pair("accounting-release");
         store.SavePair(pair);
         await using var host = Compose(instance.StateAuthority, store);
-        var failed = false;
+        Exception? failure = null;
         try { await host.RunPrerequisiteAsync(pair.PairId, default); }
-        catch (IOException error) { failed = ReferenceEquals(error, store.Failure); }
-        Check.Require(failed && store.Obligated(pair.PairId) && store.ReadPrerequisiteRetry(pair.PairId) is null,
-            "failed durable accounting propagates without clearing debt or inventing a deadline");
+        catch (Exception error) { failure = error; }
+        // #36: accounting never replaces the attempt's earlier genuine primary; it is reported, not rethrown.
+        Check.Require(failure is EngineRequestException && store.Obligated(pair.PairId) &&
+            store.ReadPrerequisiteRetry(pair.PairId) is null,
+            "failed durable accounting keeps the genuine primary without clearing debt or inventing a deadline");
         store.Fail = false;
         Check.Require(await FailsPrerequisiteAsync(host, pair.PairId) &&
             store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 1 },

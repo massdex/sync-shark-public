@@ -18,24 +18,25 @@ public static class DiskFullChecks
     private const int DiskFullHResult = unchecked((int)0x80070070);
     private static readonly object WriteLock = new();
 
-    public static void Run()
-    {
-        ClassifierCases();
-        ScopeCases().GetAwaiter().GetResult();
-        JoinCases().GetAwaiter().GetResult();
-        WithFolder(folder =>
-        {
-            using var connection = OpenScanConnection(Path.Combine(folder, "scan.db"));
-            SqliteFullCases(connection);
-            AdmissionCases(connection, folder);
-        });
-        WithFolder(folder => SpoolCases(folder).GetAwaiter().GetResult());
-        WithFolder(folder => ProvisionalFullAsync(folder).GetAwaiter().GetResult());
-        WithFolder(folder => EarlierLogFullAsync(folder).GetAwaiter().GetResult());
+    // One runner member per case, so each failure is reported under its own name and none hides the next.
+    public static void Classifier() => ClassifierCases();
+    public static void Scope() => ScopeCases().GetAwaiter().GetResult();
+    public static void Join() => JoinCases().GetAwaiter().GetResult();
+    public static void SqliteFullWrite() => WithScanConnection((connection, _) => SqliteFullCases(connection));
+    public static void Admission() => WithScanConnection(AdmissionCases);
+    public static void Spool() => WithFolder(folder => SpoolCases(folder).GetAwaiter().GetResult());
+    public static void ProvisionalFull() => WithFolder(folder => ProvisionalFullAsync(folder).GetAwaiter().GetResult());
+    public static void EarlierLogFull() => WithFolder(folder => EarlierLogFullAsync(folder).GetAwaiter().GetResult());
+    public static void RecordedThenCancelled() =>
         WithFolder(folder => RecordedThenCancelledAsync(folder).GetAwaiter().GetResult());
-        WithFolder(folder => SecondaryFailureAsync(folder).GetAwaiter().GetResult());
-        WithFolder(folder => OwedHistoryAsync(folder).GetAwaiter().GetResult());
-    }
+    public static void SecondaryFailure() => WithFolder(folder => SecondaryFailureAsync(folder).GetAwaiter().GetResult());
+    public static void OwedHistory() => WithFolder(folder => OwedHistoryAsync(folder).GetAwaiter().GetResult());
+
+    private static void WithScanConnection(Action<SqliteConnection, string> body) => WithFolder(folder =>
+    {
+        using var connection = OpenScanConnection(Path.Combine(folder, "scan.db"));
+        body(connection, folder);
+    });
 
     private static IOException Full() => new("full", DiskFullHResult);
 
@@ -225,11 +226,16 @@ public static class DiskFullChecks
         {
             FinishSecondary = new IOException("maintenance")
         });
-        using var log = rig.Log(folder, "secondary");
-        var summary = await rig.RunAsync(log, CancellationToken.None);
+        RepairSummary summary;
+        string path;
+        using (var log = rig.Log(folder, "secondary"))
+        {
+            summary = await rig.RunAsync(log, CancellationToken.None);
+            path = log.Path;
+        }
         Check.Require(summary.Completed && rig.Store.LastRepair(rig.Pair.PairId) is { Completed: true },
             "a postcommit failure never revokes the committed completion");
-        Check.Require(File.ReadLines(log.Path).Any(line => line.Contains(nameof(TextKey.RepairCompletedSecondaryFailure),
+        Check.Require(File.ReadLines(path).Any(line => line.Contains(nameof(TextKey.RepairCompletedSecondaryFailure),
             StringComparison.Ordinal)), "the postcommit failure is reported as secondary");
     }
 

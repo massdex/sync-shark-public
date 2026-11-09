@@ -1067,13 +1067,25 @@ public static class DropboxListingChecks
     {
         public List<int> Writes { get; } = [];
         public long Written;
-        public override void Write(byte[] buffer, int offset, int count) => throw new InvalidOperationException("unadmitted write");
-        public override void Write(ReadOnlySpan<byte> buffer) => throw new InvalidOperationException("unadmitted write");
+        private bool _admitted;
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (!_admitted) throw new InvalidOperationException("unadmitted write");
+            base.Write(buffer, offset, count);
+        }
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            if (!_admitted) throw new InvalidOperationException("unadmitted write");
+            base.Write(buffer);
+        }
         public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
         {
             Writes.Add(buffer.Length);
             Written += buffer.Length;
-            base.Write(buffer.Span);
+            // MemoryStream routes a derived type's span write through the array overload; both are this write.
+            _admitted = true;
+            try { base.Write(buffer.Span); }
+            finally { _admitted = false; }
             return ValueTask.CompletedTask;
         }
         // Replay disposes the spool; keep it readable for the assertions.

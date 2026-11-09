@@ -1076,6 +1076,11 @@ public static class LiveContextChecks
         SeedCompleted(Rig rig)
     {
         var id = rig.Pair.PairId;
+        // A real Repair acquires and publishes deleted history before it completes (#36: owed history obligates).
+        var history = rig.Inner.BeginScan(id, Generation, true);
+        rig.Inner.OpenScan(id, Side.Dropbox, ScanTestSettings.BatchRows).CompleteAsync().GetAwaiter().GetResult();
+        rig.Inner.SaveDeletedHistory(id, history, Cursor);
+        rig.Inner.EndScanAsync(id, history, 1).GetAwaiter().GetResult();
         var local = rig.Inner.ReadSource(id, Side.Local)!.Value;
         var remote = rig.Inner.ReadSource(id, Side.Dropbox)!.Value;
         var position = new JournalPosition(Volume, 0);

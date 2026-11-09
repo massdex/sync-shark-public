@@ -377,7 +377,8 @@ public static class LiteralsChecks
             ("Monitor", "private const int QuietSeconds = 30;"),
             ("EngineSettings", "private const int AtomicReplaceDelayMultiplier = 2;"),
             ("SettingsParser", "private const int MaximumAtomicReplaceAttempts = 10; private const int MaximumAtomicReplaceInitialDelayMilliseconds = 60_000;"),
-            ("DropboxListing", "private const int SpellingQueued = 1; private const int SpellingReleased = -1;")
+            ("DropboxListing", "private const int SpellingQueued = 1; private const int SpellingReleased = -1;"),
+            ("ResourceFailures", "private const int ErrorDiskFull = 112; private const int ErrorHandleDiskFull = 39; private const int DiskFullHResult = unchecked((int)0x80070070); private const int HandleDiskFullHResult = unchecked((int)0x80070027);")
         })
         {
             var source = "class " + owner + " { " + members + " }";
@@ -579,6 +580,7 @@ public static class LiteralsChecks
         ["LocalSide"] = "src/SyncShark.Engine/Local/LocalSide.cs",
         ["LocalListing"] = "src/SyncShark.Engine/Local/LocalListing.cs",
         ["LocalErrors"] = "src/SyncShark.Engine/Local/LocalErrors.cs",
+        ["ResourceFailures"] = "src/SyncShark.Engine/ResourceFailures.cs",
         ["ResourceNames"] = "src/SyncShark.Engine/ResourceNames.cs",
         ["PathNames"] = "src/SyncShark.Engine/PathNames.cs",
         ["PathLocks"] = "src/SyncShark.Engine/PathLocks.cs",
@@ -602,6 +604,8 @@ public static class LiteralsChecks
         ["EngineHost"] = new HashSet<string>(StringComparer.Ordinal)
             { "SingleHolder", "LatestStatusCapacity" },
         ["Monitor"] = new HashSet<string>(StringComparer.Ordinal) { "QuietSeconds" },
+        ["ResourceFailures"] = new HashSet<string>(StringComparer.Ordinal)
+            { "ErrorDiskFull", "ErrorHandleDiskFull", "DiskFullHResult", "HandleDiskFullHResult" },
     };
 
     // The owner class of a const field, or null when the field is not a const, its class is not an owner, the
