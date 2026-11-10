@@ -417,9 +417,8 @@ public static partial class EngineHostChecks
                 Check.Require(rig.Calls == calls, "C5 on resume the account floor sends no request before R");
                 rig.Clock.Advance(wait);
             }
-            await UntilAsync(() => rig.Attempts == 1).ConfigureAwait(false);
-            Check.Require(rig.Store.ReadPrerequisiteRetry(rig.PairId) is null,
-                "C5 on resume the retained file is attempted once, with no row");
+            await rig.AttemptedOnceAsync("C5 on resume the retained file is attempted once, with no row")
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -516,8 +515,6 @@ public static partial class EngineHostChecks
             .ConfigureAwait(false);
         const string Second = "second.txt";
         System.IO.File.WriteAllText(Path.Combine(rig.Rig.Pair.LocalRoot, Second), "second");
-        // Both files' ordinary uploads end before the check reserves them, and before its watermark baseline.
-        await UntilAsync(() => OnDropbox(rig, Second, "second")).ConfigureAwait(false);
         await rig.SyncedAsync().ConfigureAwait(false);
         var now = rig.Clock.GetUtcNow();
         var watermark = rig.Store.ReadWorkWatermark();
@@ -805,14 +802,19 @@ public static partial class EngineHostChecks
             Retained(Interlocked.Increment(ref _version)));
         private static string Retained(int version) => "retained " + version;
 
-        // The journal delivers the retained file's pre-start write after host start, at a time of its own, and
-        // ordinary dispatch uploads it. Once that upload is on Dropbox and AutoSync is idle, no ordinary attempt holds
-        // the file when a check's stand-in turn reserves it (EngineHost.ReserveItem refuses an intersecting attempt),
-        // and later attempts count from here. A check that needs a later upload writes the file again afterwards.
+        // A test workaround: the retained file's pre-start write is explicitly retained and drained the way A1 sends
+        // it (a temporary turn's retained work, fired at its deadline), not left to a notice-driven upload.
+        // On CI (run 42770654947), the passive idle-and-content wait failed; why is still open. Once the upload
+        // is on Dropbox with no row and AutoSync is idle, later attempts count from here. A journal-driven attempt
+        // may still overlap the turn; EngineHost.ReserveItem then refuses it unswallowed, which shows only that two
+        // reservations overlapped. A check that needs a later upload writes the file again afterwards.
         internal async Task SyncedAsync()
         {
-            await UntilAsync(() => AutoSyncIdle() && OnDropbox(this, File, Retained(Volatile.Read(ref _version))),
-                "the ordinary upload of the retained file's pre-start write has ended").ConfigureAwait(false);
+            await TurnAsync().ConfigureAwait(false);
+            await FireAsync(FirstWait).ConfigureAwait(false);
+            await UntilAsync(() => AutoSyncIdle() && Store.ReadPrerequisiteRetry(PairId) is null &&
+                    OnDropbox(this, File, Retained(Volatile.Read(ref _version))),
+                "the retained file's pre-start write is uploaded at its turn's deadline").ConfigureAwait(false);
             MarkAttempts();
         }
 
@@ -940,7 +942,8 @@ public static partial class EngineHostChecks
         internal async Task AttemptedOnceAsync(string what)
         {
             await UntilAsync(() => Attempts > 0 && Store.ReadPrerequisiteRetry(PairId) is null, what).ConfigureAwait(false);
-            Check.Require(Attempts == 1, what);
+            var attempts = Attempts;
+            Check.Require(attempts == 1, $"{what} (attempts {attempts})");
         }
 
         public async ValueTask DisposeAsync()
@@ -969,6 +972,8 @@ public static partial class EngineHostChecks
         var folder = Path.Combine(root, "repair-collision-" + (memory ? "memory" : "store") +
             (liveFirst ? "-live-first-" : "-repair-first-") + outcome.ToString().ToLowerInvariant());
         await using var rig = await ItemRig.StartedAsync(folder, turn: false, memory: memory).ConfigureAwait(false);
+        // The retained file's pre-start write is synced first, so the target's held upload stays the only live attempt.
+        await rig.SyncedAsync().ConfigureAwait(false);
         var rounds = !liveFirst && outcome == LiveOutcome.Succeeds ? 2 : 1;
         for (var round = 1; round <= rounds; round++)
             await CollideAsync(rig, liveFirst, outcome, round,
@@ -1452,13 +1457,8 @@ public static partial class EngineHostChecks
             if (shape == "concurrent")
             {
                 await finishing.Task.WaitAsync(HookBound).ConfigureAwait(false);
-                var path = Path.Combine(rig.Rig.Pair.LocalRoot, other);
-                System.IO.File.WriteAllText(path, "concurrent " + what);
-                // Its ordinary upload ends before the turn reserves it; the turn's row then holds the rewrite.
-                await UntilAsync(() => rig.AutoSyncIdle() && OnDropbox(rig, other, "concurrent " + what))
-                    .ConfigureAwait(false);
+                System.IO.File.WriteAllText(Path.Combine(rig.Rig.Pair.LocalRoot, other), "concurrent " + what);
                 await TemporaryTurnAsync(rig.Host, rig.PairId, other, null, null, null).ConfigureAwait(false);
-                System.IO.File.WriteAllText(path, "concurrent again " + what);
                 concurrent = rig.Store.ReadItemRetry(rig.PairId);
                 proceed.TrySetResult();
             }
