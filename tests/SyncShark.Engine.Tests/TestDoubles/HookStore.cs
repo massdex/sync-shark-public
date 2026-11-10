@@ -17,11 +17,23 @@ internal sealed class HookStore(IStateStore inner) : ForwardingStateStore(inner)
     /// <summary>Returned as a committed completion's secondary failure, as a postcommit maintenance fault is.</summary>
     public Exception? FinishSecondary { get; init; }
     public Action? AfterFinishRepair { get; init; }
+    /// <summary>Sees the store's own FinishRepair failure before it propagates; the host absorbs a failed Repair.</summary>
+    public Action<Exception>? FinishFailed { get; init; }
     public override bool FinishRepair(string pairId, RepairSummary summary, long expectedGeneration, Guid scanToken,
         LocalCatchUp local, DropboxCatchUp dropbox, out Exception? secondaryFailure)
     {
         BeforeFinishRepair?.Invoke();
-        var committed = base.FinishRepair(pairId, summary, expectedGeneration, scanToken, local, dropbox, out secondaryFailure);
+        bool committed;
+        try
+        {
+            committed = base.FinishRepair(pairId, summary, expectedGeneration, scanToken, local, dropbox,
+                out secondaryFailure);
+        }
+        catch (Exception error)
+        {
+            FinishFailed?.Invoke(error);
+            throw;
+        }
         if (committed && FinishSecondary is not null) secondaryFailure = FinishSecondary;
         AfterFinishRepair?.Invoke();
         return committed;

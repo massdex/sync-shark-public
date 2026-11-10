@@ -4,7 +4,11 @@
   ],
   "engine": [
     "engine-host",
-    "repair"
+    "repair",
+    "disk-full",
+    "scan-pass",
+    "repair-held",
+    "unknown-move-repair"
   ],
   "core": [],
   "ui": []

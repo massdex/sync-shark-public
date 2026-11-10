@@ -288,7 +288,7 @@ public static partial class EngineHostChecks
 
     // C1: a Repair with no temporary turn clears a pre-Repair item row, and its success Kick dispatches at once. A first
     // Repair syncs the retained file and its events settle; the row is then written over the synced file, so the second
-    // Repair makes no effect and catches up no journal change, and only its success Kick can dispatch after it.
+    // Repair makes no effect and has no local change to catch up, and only its success Kick can dispatch after it.
     private static async Task RepairWithoutTurnReleasesRowAsync(string root)
     {
         await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "item-repair-no-turn"), turn: false)
@@ -627,7 +627,9 @@ public static partial class EngineHostChecks
     }
 
     // The B-70 §14 host rig: a Persistent host over the composed Repair rig, started so AutoSync and Monitor run on
-    // one fake clock; its journal and feed run as a started host's do. AutoSync reads live refusal once at the start
+    // one fake clock. The pair is composed before host start (RepairChecks.cs:4650), so start's recompose returns
+    // early (EngineHost.cs:725) and no journal or feed is started: a local write alone is never acquired, and a
+    // retained turn fired at its deadline is the only way to an upload. AutoSync reads live refusal once at the start
     // of each opportunity and asks for folder-job progress once after each dispatch that returns; each dispatch it
     // starts opens one log. A file attempt is one upload request for the retained file.
     private sealed class ItemRig : IAsyncDisposable
@@ -657,6 +659,7 @@ public static partial class EngineHostChecks
         internal Action? AfterTemporary;
         internal Action? BeforeFinish;
         internal Action? AfterFinish;
+        internal Action<Exception>? FinishFailed;
         internal Action<StateChange>? BeforeCommit;
         internal Action<string>? BeforeCapture;
         // Every run log the host opened, in order.
@@ -750,6 +753,7 @@ public static partial class EngineHostChecks
                     AfterTemporaryItem = () => rig.AfterTemporary?.Invoke(),
                     BeforeFinishRepair = () => rig.BeforeFinish?.Invoke(),
                     AfterFinishRepair = () => rig.AfterFinish?.Invoke(),
+                    FinishFailed = error => rig.FinishFailed?.Invoke(error),
                     OnCommit = change => rig.BeforeCommit?.Invoke(change),
                     BeforeItemRetryForSubject = path => rig.BeforeCapture?.Invoke(path),
                 }).ConfigureAwait(false);
@@ -802,14 +806,18 @@ public static partial class EngineHostChecks
             Retained(Interlocked.Increment(ref _version)));
         private static string Retained(int version) => "retained " + version;
 
-        // The journal delivers the retained file's pre-start write after host start, at a time of its own, and
-        // ordinary dispatch uploads it. Once that upload is on Dropbox and AutoSync is idle, no ordinary attempt holds
-        // the file when a check's stand-in turn reserves it (EngineHost.ReserveItem refuses an intersecting attempt),
-        // and later attempts count from here. A check that needs a later upload writes the file again afterwards.
+        // This rig starts no journal or feed (the pair is composed before host start, RepairChecks.cs:4650, so
+        // start's recompose returns at EngineHost.cs:725), so the retained file's pre-start write is never acquired.
+        // A temporary turn's retained work fired at its deadline, as A1 sends it, is the only way to its upload. Once
+        // the upload is on Dropbox with no row and AutoSync is idle, later attempts count from here. A check that
+        // needs a later upload writes the file again afterwards.
         internal async Task SyncedAsync()
         {
-            await UntilAsync(() => AutoSyncIdle() && OnDropbox(this, File, Retained(Volatile.Read(ref _version))),
-                "the ordinary upload of the retained file's pre-start write has ended").ConfigureAwait(false);
+            await TurnAsync().ConfigureAwait(false);
+            await FireAsync(FirstWait).ConfigureAwait(false);
+            await UntilAsync(() => AutoSyncIdle() && Store.ReadPrerequisiteRetry(PairId) is null &&
+                    OnDropbox(this, File, Retained(Volatile.Read(ref _version))),
+                "the retained file's pre-start write is uploaded at its turn's deadline").ConfigureAwait(false);
             MarkAttempts();
         }
 
@@ -862,6 +870,8 @@ public static partial class EngineHostChecks
                     rig.Hold(_turned.Task, "the held Repair reaches FinishRepair");
                     if (failure is not null) throw failure;
                 };
+                // A FinishRepair failure ends the window wait with that error, not a timeout.
+                rig.FinishFailed = window ? error => _window.TrySetException(error) : null;
                 rig.AfterFinish = () =>
                 {
                     rig.AfterFinish = null;
@@ -944,6 +954,7 @@ public static partial class EngineHostChecks
         public async ValueTask DisposeAsync()
         {
             BeforeSelect = BeforeBegin = AfterRefresh = BeforeFinish = AfterFinish = AfterTemporary = null;
+            FinishFailed = null;
             BeforeCommit = null;
             BeforeCapture = null;
             try { if (Rig is not null) await Rig.DisposeAsync().ConfigureAwait(false); }
@@ -967,8 +978,7 @@ public static partial class EngineHostChecks
         var folder = Path.Combine(root, "repair-collision-" + (memory ? "memory" : "store") +
             (liveFirst ? "-live-first-" : "-repair-first-") + outcome.ToString().ToLowerInvariant());
         await using var rig = await ItemRig.StartedAsync(folder, turn: false, memory: memory).ConfigureAwait(false);
-        // The retained file's pre-start write is synced first, so its late journal wake cannot start an owed Repair
-        // inside a collision's window; the target's held upload stays the only live attempt.
+        // The retained file's pre-start write is synced first, so the target's held upload stays the only live attempt.
         await rig.SyncedAsync().ConfigureAwait(false);
         var rounds = !liveFirst && outcome == LiveOutcome.Succeeds ? 2 : 1;
         for (var round = 1; round <= rounds; round++)
@@ -1440,7 +1450,8 @@ public static partial class EngineHostChecks
                 rig.Rig.Wire.NameWriteErrors[ItemRig.File] = DropboxProtocol.TooManyWriteOperations;
             }
             // The Repair's own input, written only now that ordinary selection is held (own, older) or the earlier wait
-            // holds ordinary dispatch (settled), so the journal cannot hand it to an ordinary upload first.
+            // holds ordinary dispatch (settled), so no ordinary dispatch can upload it first. This rig starts no
+            // journal (EngineHost.cs:725), so nothing acquires the write; the hold covers a dispatch woken another way.
             if (shape != "concurrent") rig.WriteRetained();
             // Started apart from this thread: the concurrent shape's BeforeFinish hold blocks the Repair synchronously.
             var repair = Task.Run(() => rig.Host.Operations.RepairAsync(rig.PairId, default));
