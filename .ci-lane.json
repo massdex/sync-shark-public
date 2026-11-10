@@ -3,7 +3,8 @@
     "engine-tests"
   ],
   "engine": [
-    "engine-host"
+    "engine-host",
+    "repair"
   ],
   "core": [],
   "ui": []
