@@ -1,0 +1,10 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "refused-folder-retry"
+  ],
+  "core": [],
+  "ui": []
+}
