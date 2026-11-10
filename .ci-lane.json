@@ -1,0 +1,19 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "engine-host",
+    "repair",
+    "disk-full",
+    "scan-pass",
+    "repair-held",
+    "unknown-move-repair",
+    "syncer",
+    "dropbox",
+    "dependencies",
+    "safety"
+  ],
+  "core": [],
+  "ui": []
+}
