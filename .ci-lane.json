@@ -1,0 +1,18 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "late-local-child",
+    "receipt-walk-measure",
+    "issues",
+    "mapped-holds",
+    "store",
+    "local",
+    "syncer",
+    "folder-deletes",
+    "work-lifecycle"
+  ],
+  "core": [],
+  "ui": []
+}
