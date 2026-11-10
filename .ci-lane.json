@@ -3,8 +3,7 @@
     "engine-tests"
   ],
   "engine": [
-    "engine-host",
-    "local"
+    "syncer"
   ],
   "core": [],
   "ui": []
