@@ -774,7 +774,8 @@ public static class ChangeRunnerChecks
                 if (mode != "pre-subject" && !owed && request.Selection.Identity == occupant.Id)
                 {
                     owed = true;
-                    OweLocal(fixture, SourceObligation.LocalSkippedCoverage);
+                    // Lost-interval debt holds Local writes too; skipped coverage would outlive ClearObligations below.
+                    OweLocal(fixture, SourceObligation.NormalRepair);
                 }
                 return new Lease();
             });
