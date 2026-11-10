@@ -3,7 +3,7 @@
     "engine-tests"
   ],
   "engine": [
-    "syncer"
+    "containment"
   ],
   "core": [],
   "ui": []
