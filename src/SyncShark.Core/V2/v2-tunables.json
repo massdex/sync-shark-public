@@ -1,0 +1,18 @@
+{
+  "MetadataPagePaths": 128,
+  "RetryInitialDelay": "00:00:10",
+  "RetryDelayMultiplier": 2,
+  "RetryMaximumDoublings": 5,
+  "RetryMaximumDelay": "00:05:00",
+  "JournalReplayWindowBytes": 67108864,
+  "JournalReplayMinimumWindowBytes": 1048576,
+  "MaximumLocalReplayWindowsPerRun": 64,
+  "LocalGapContentBufferBytes": 65536,
+  "LocalGapHashPageRows": 16,
+  "RehearsalPageRows": 256,
+  "DeferredIntakeEntityCap": 2048,
+  "DeferredIntakePathCap": 8192,
+  "RehashBatchRows": 128,
+  "UrgentCandidateCap": 1024,
+  "UrgentHashCap": 64
+}
