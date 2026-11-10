@@ -45,6 +45,7 @@ public sealed class RunLog : IDisposable, IProgress<RunEvent>
     public const string FalseText = "false";
     private const string CountSeparator = "=";
     private const string CountJoiner = ";";
+    private const char MessageSeparator = ' ';
 
     private readonly SuppressingProgress _progress;
     private readonly object _gate = new();
@@ -385,7 +386,7 @@ public sealed class RunLog : IDisposable, IProgress<RunEvent>
         side is { } rowSide && workId is { } id
             ? Text.Get(TextKey.FailureRow, (TextArg.Name, name),
                 // The separator lives in the message so an absent message leaves no stray space.
-                (TextArg.Message, message.Length == 0 ? string.Empty : " " + message),
+                (TextArg.Message, message.Length == 0 ? string.Empty : MessageSeparator + message),
                 (TextArg.Side, rowSide.ToString()), (TextArg.Id, id.ToString(CultureInfo.InvariantCulture)))
             : Text.Get(TextKey.FailureDetail, (TextArg.Name, name), (TextArg.Message, message));
 

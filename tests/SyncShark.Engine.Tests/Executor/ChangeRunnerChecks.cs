@@ -721,6 +721,9 @@ public static class ChangeRunnerChecks
         {
             using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             using var fixture = new Fixture(realStore: true);
+            // Only after the first Repair does owed Local debt hold just Local writes (engine.md:902); before it the
+            // whole pair is refused and no held refusal is ever raised.
+            RepairDone(fixture);
             ClearObligations(fixture);
             SourceFixture.AcquireJournal(fixture.Inner, fixture.Pair);
             var a = LocalEntry("A", "local-a");

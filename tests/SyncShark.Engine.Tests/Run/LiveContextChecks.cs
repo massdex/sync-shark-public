@@ -521,7 +521,8 @@ public static class LiveContextChecks
                 Events = item =>
                 {
                     session.Context.Events(item);
-                    if (item.Error is LiveAdmissionStaleException && item.Path == initial.Key)
+                    // A failure names its row's path as noticed, so match it by key.
+                    if (item.Error is LiveAdmissionStaleException && PathNames.Key(item.Path) == initial.Key)
                         refused.TrySetResult();
                 }
             };
