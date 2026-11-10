@@ -1,0 +1,14 @@
+[
+  {
+    "version": "0.3.82",
+    "category": "magic-tunables",
+    "accepted_total": 1394,
+    "reason": "accepted for release 0.3.82 pending removal of the underlying items"
+  },
+  {
+    "version": "0.3.82",
+    "category": "user-strings",
+    "accepted_total": 12097,
+    "reason": "accepted for release 0.3.82 pending removal of the underlying items"
+  }
+]
