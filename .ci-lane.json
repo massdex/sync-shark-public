@@ -1,0 +1,10 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "mapped-holds"
+  ],
+  "core": [],
+  "ui": []
+}
