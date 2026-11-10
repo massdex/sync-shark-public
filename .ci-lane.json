@@ -1,0 +1,25 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "work-lifecycle",
+    "store",
+    "repair-claims",
+    "containment",
+    "projection-cost",
+    "scan-owner",
+    "engine-host",
+    "host-reads",
+    "live-admission",
+    "persistent-failure",
+    "live-reservation",
+    "repair",
+    "repair-held",
+    "repair-forgotten",
+    "syncer",
+    "safety"
+  ],
+  "core": [],
+  "ui": []
+}
