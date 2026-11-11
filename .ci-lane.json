@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "gone-identities",
+    "local",
+    "syncer"
+  ],
+  "core": [],
+  "ui": []
+}
