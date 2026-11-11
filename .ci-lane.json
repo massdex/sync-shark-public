@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "pending-recovery",
+    "syncer",
+    "strings",
+    "literals",
+    "repair"
+  ],
+  "core": [],
+  "ui": []
+}
