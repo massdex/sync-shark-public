@@ -1,0 +1,15 @@
+bin/
+obj/
+.vs/
+TestResults/
+*.user
+*.suo
+*.pfx
+*.snk
+*.key
+*.token
+*.secret
+/.export-tooling-checks/
+
+__pycache__/
+*.pyc
