@@ -1,0 +1,257 @@
+{
+  "group": "dropbox",
+  "seeAlso": [
+    "sharing list", "sharing create", "sharing change", "sharing revoke", "sharing revoke-selected",
+    "file-requests list", "file-requests create", "file-requests edit", "file-requests close"
+  ],
+  "options": [
+    { "key": "Account", "flag": "--account", "value": "id", "help": "exact retained Dropbox connection id" },
+    { "key": "Root", "flag": "--root", "value": "namespace", "help": "call inside another namespace, ns:<namespace-id>; default is the account root namespace" },
+    { "key": "Path", "flag": "--path", "value": "dropbox-path", "help": "Dropbox path, rev:<rev> or id:<id>, passed verbatim; / is the root" },
+    { "key": "To", "flag": "--to", "value": "dropbox-path", "help": "destination Dropbox path for mv/cp" },
+    { "key": "Cursor", "flag": "--cursor", "value": "text", "help": "an opaque cursor from a previous page" },
+    { "key": "Recursive", "flag": "--recursive", "value": "flag", "help": "recurse into subfolders" },
+    { "key": "Deleted", "flag": "--deleted", "value": "flag", "help": "include entries in the Dropbox deleted files list" },
+    { "key": "Limit", "flag": "--limit", "value": "int", "help": "the page size sent to Dropbox when given" },
+    { "key": "Seconds", "flag": "--seconds", "value": "int", "help": "long-poll timeout in seconds, 30..480" },
+    { "key": "In", "flag": "--in", "value": "local-file", "help": "absolute local file to upload or stream as the request body" },
+    { "key": "Out", "flag": "--out", "value": "local-file", "help": "absolute local file to write; its folder must exist" },
+    { "key": "Mode", "flag": "--mode", "value": "text", "help": "put commit mode: add, overwrite or update" },
+    { "key": "Rev", "flag": "--rev", "value": "text", "help": "the exact revision for update, rm or restore" },
+    { "key": "Autorename", "flag": "--autorename", "value": "flag", "help": "let Dropbox rename on a name conflict" },
+    { "key": "ClientModified", "flag": "--client-modified", "value": "utc-time", "help": "client modified time, an ISO UTC instant" },
+    { "key": "Mute", "flag": "--mute", "value": "flag", "help": "silence Dropbox notifications for this change" },
+    { "key": "Batch", "flag": "--batch", "value": "json", "help": "the raw Dropbox entries array, inline or @<absolute-file>" },
+    { "key": "Body", "flag": "--body", "value": "json", "help": "the route argument JSON, inline or @<absolute-file>" },
+    { "key": "Route", "flag": "--route", "value": "text", "help": "the user-token route name, ns/route" },
+    { "key": "Size", "flag": "--size", "value": "text", "help": "the thumbnail size, e.g. w64h64" },
+    { "key": "Format", "flag": "--format", "value": "text", "help": "the thumbnail format: jpeg, png or webp" },
+    { "key": "Search", "flag": "--search", "value": "text", "help": "the search query or route-name filter" },
+    { "key": "Yes", "flag": "--yes", "value": "flag", "help": "approve a Dropbox change" }
+  ],
+  "verbs": [
+    {
+      "key": "Whoami", "command": "dropbox whoami", "usage": "dropbox whoami --account <id>",
+      "effect": "prints the account's current identity",
+      "options": ["Account", "Root"], "required": ["Account"], "handler": "Route",
+      "calls": [{ "route": "users/get_current_account", "body": null }],
+      "output": { "kind": "Raw" }
+    },
+    {
+      "key": "Usage", "command": "dropbox usage", "usage": "dropbox usage --account <id>",
+      "effect": "prints the account's space usage",
+      "options": ["Account", "Root"], "required": ["Account"], "handler": "Route",
+      "calls": [{ "route": "users/get_space_usage", "body": null }],
+      "output": { "kind": "Raw" }
+    },
+    {
+      "key": "Ls", "command": "dropbox ls",
+      "usage": "dropbox ls --account <id> (--path <p> [--recursive] [--deleted] [--limit n] | --cursor <c>)",
+      "effect": "lists one page of a folder",
+      "options": ["Account", "Root", "Path", "Cursor", "Recursive", "Deleted", "Limit"],
+      "required": ["Account"], "oneOf": [["Path"], ["Cursor"]], "handler": "Route",
+      "calls": [
+        { "when": "Cursor", "route": "files/list_folder/continue", "body": { "cursor": "$Cursor" } },
+        { "route": "files/list_folder", "body": { "path": "$Path", "recursive": "$Recursive", "include_deleted": "$Deleted", "limit": "$Limit" } }
+      ],
+      "output": { "kind": "Page", "items": "entries" }
+    },
+    {
+      "key": "Stat", "command": "dropbox stat", "usage": "dropbox stat --account <id> --path <p> [--deleted]",
+      "effect": "prints one entry's metadata",
+      "options": ["Account", "Root", "Path", "Deleted"], "required": ["Account", "Path"], "handler": "Route",
+      "calls": [{ "route": "files/get_metadata", "body": { "path": "$Path", "include_deleted": "$Deleted" } }],
+      "output": { "kind": "Entry" }
+    },
+    {
+      "key": "Get", "command": "dropbox get",
+      "usage": "dropbox get --account <id> --path <p|rev:R|id:X> --out <abs-file> [--yes]",
+      "effect": "downloads one file to --out",
+      "options": ["Account", "Root", "Path", "Out", "Yes"], "required": ["Account", "Path", "Out"], "handler": "Route",
+      "calls": [{ "route": "files/download", "body": { "path": "$Path" } }],
+      "output": { "kind": "Download" }
+    },
+    {
+      "key": "Put", "command": "dropbox put",
+      "usage": "dropbox put --account <id> --in <abs-file> --path <p> [--mode add|overwrite|update --rev <r>] [--autorename] [--client-modified <utc>] [--mute] --yes",
+      "effect": "uploads one file, replacing only when told to",
+      "options": ["Account", "Root", "In", "Path", "Mode", "Rev", "Autorename", "ClientModified", "Mute", "Yes"],
+      "required": ["Account", "In", "Path"], "handler": "Put",
+      "calls": [
+        { "key": "Upload", "route": "files/upload" },
+        { "key": "SessionStart", "route": "files/upload_session/start" },
+        { "key": "SessionAppend", "route": "files/upload_session/append_v2" },
+        { "key": "SessionFinish", "route": "files/upload_session/finish" }
+      ],
+      "output": { "kind": "Upload" }
+    },
+    {
+      "key": "Mkdir", "command": "dropbox mkdir", "usage": "dropbox mkdir --account <id> --path <p> [--autorename] --yes",
+      "effect": "creates one folder",
+      "options": ["Account", "Root", "Path", "Autorename", "Yes"], "required": ["Account", "Path"], "handler": "Route",
+      "calls": [{ "route": "files/create_folder_v2", "body": { "path": "$Path", "autorename": "$Autorename" } }],
+      "output": { "kind": "Entry", "at": "metadata" }
+    },
+    {
+      "key": "Rm", "command": "dropbox rm",
+      "usage": "dropbox rm --account <id> (--path <p> [--rev <r>] | --batch <json|@abs-file>) --yes",
+      "effect": "moves one entry or a batch to the Dropbox deleted files list",
+      "options": ["Account", "Root", "Path", "Rev", "Batch", "Yes"], "required": ["Account"],
+      "oneOf": [["Path"], ["Batch"]], "handler": "Route",
+      "calls": [
+        { "when": "Batch", "route": "files/delete_batch", "body": { "entries": "$Batch" },
+          "poll": { "route": "files/delete_batch/check", "jobField": "async_job_id" },
+          "output": { "kind": "Batch" } },
+        { "route": "files/delete_v2", "body": { "path": "$Path", "parent_rev": "$Rev" },
+          "output": { "kind": "Entry", "at": "metadata" } }
+      ]
+    },
+    {
+      "key": "Mv", "command": "dropbox mv",
+      "usage": "dropbox mv --account <id> (--batch <json|@abs-file> | --path <p> --to <p2>) [--autorename] --yes",
+      "effect": "moves one entry or a batch",
+      "options": ["Account", "Root", "Path", "To", "Batch", "Autorename", "Yes"], "required": ["Account"],
+      "oneOf": [["Batch"], ["Path", "To"]], "handler": "Route",
+      "calls": [
+        { "when": "Batch", "route": "files/move_batch_v2", "body": { "entries": "$Batch", "autorename": "$Autorename" },
+          "poll": { "route": "files/move_batch/check_v2", "jobField": "async_job_id" },
+          "output": { "kind": "Batch" } },
+        { "route": "files/move_v2", "body": { "from_path": "$Path", "to_path": "$To", "autorename": "$Autorename" },
+          "output": { "kind": "Entry", "at": "metadata" } }
+      ]
+    },
+    {
+      "key": "Cp", "command": "dropbox cp",
+      "usage": "dropbox cp --account <id> (--batch <json|@abs-file> | --path <p> --to <p2>) [--autorename] --yes",
+      "effect": "copies one entry or a batch",
+      "options": ["Account", "Root", "Path", "To", "Batch", "Autorename", "Yes"], "required": ["Account"],
+      "oneOf": [["Batch"], ["Path", "To"]], "handler": "Route",
+      "calls": [
+        { "when": "Batch", "route": "files/copy_batch_v2", "body": { "entries": "$Batch", "autorename": "$Autorename" },
+          "poll": { "route": "files/copy_batch/check_v2", "jobField": "async_job_id" },
+          "output": { "kind": "Batch" } },
+        { "route": "files/copy_v2", "body": { "from_path": "$Path", "to_path": "$To", "autorename": "$Autorename" },
+          "output": { "kind": "Entry", "at": "metadata" } }
+      ]
+    },
+    {
+      "key": "Search", "command": "dropbox search",
+      "usage": "dropbox search --account <id> (--search <query> [--path <scope>] [--limit n] | --cursor <c>)",
+      "effect": "searches the account",
+      "options": ["Account", "Root", "Search", "Path", "Cursor", "Limit"],
+      "required": ["Account"], "oneOf": [["Search"], ["Cursor"]], "handler": "Route",
+      "calls": [
+        { "when": "Cursor", "route": "files/search/continue_v2", "body": { "cursor": "$Cursor" } },
+        { "route": "files/search_v2", "body": { "query": "$Search", "options": { "path": "$Path", "max_results": "$Limit" } } }
+      ],
+      "output": { "kind": "Page", "items": "matches", "entryPath": "metadata.metadata" }
+    },
+    {
+      "key": "Revisions", "command": "dropbox revisions",
+      "usage": "dropbox revisions --account <id> --path <p> [--limit n]",
+      "effect": "lists one page of a file's revisions",
+      "options": ["Account", "Root", "Path", "Limit"], "required": ["Account", "Path"], "handler": "Route",
+      "calls": [{ "route": "files/list_revisions", "body": { "path": "$Path", "mode": "path", "limit": "$Limit" } }],
+      "output": { "kind": "Page", "items": "entries", "isDeleted": true }
+    },
+    {
+      "key": "Restore", "command": "dropbox restore",
+      "usage": "dropbox restore --account <id> --path <p> --rev <r> --yes",
+      "effect": "restores one revision",
+      "options": ["Account", "Root", "Path", "Rev", "Yes"], "required": ["Account", "Path", "Rev"], "handler": "Route",
+      "calls": [{ "route": "files/restore", "body": { "path": "$Path", "rev": "$Rev" } }],
+      "output": { "kind": "Entry" }
+    },
+    {
+      "key": "Changes", "command": "dropbox changes",
+      "usage": "dropbox changes --account <id> (--path <p> [--recursive] | --cursor <c> [--seconds 30..480])",
+      "effect": "reads the latest cursor, or long-polls then returns one change page",
+      "options": ["Account", "Root", "Path", "Cursor", "Recursive", "Seconds"], "required": ["Account"], "handler": "Changes",
+      "calls": [
+        { "key": "LatestCursor", "route": "files/list_folder/get_latest_cursor" },
+        { "key": "Longpoll", "route": "files/list_folder/longpoll" },
+        { "key": "Continue", "route": "files/list_folder/continue" }
+      ],
+      "output": { "kind": "Changes" }
+    },
+    {
+      "key": "Thumbnail", "command": "dropbox thumbnail",
+      "usage": "dropbox thumbnail --account <id> --path <p> --out <abs-file> [--size <w64h64..>] [--format jpeg|png|webp] [--yes]",
+      "effect": "downloads one thumbnail to --out",
+      "options": ["Account", "Root", "Path", "Out", "Size", "Format", "Yes"],
+      "required": ["Account", "Path", "Out"], "handler": "Route",
+      "calls": [{ "route": "files/get_thumbnail_v2", "body": { "resource": { ".tag": "path", "path": "$Path" }, "size": "$Size", "format": "$Format" } }],
+      "output": { "kind": "Download" }
+    },
+    {
+      "key": "Api", "command": "dropbox api",
+      "usage": "dropbox api --account <id> --route <ns/route> [--body <json|@abs-file>] [--in <abs-file>] [--out <abs-file>] [--root ns:<id>] [--yes]",
+      "effect": "calls one route from the user-token route table",
+      "options": ["Account", "Root", "Route", "Body", "In", "Out", "Yes"],
+      "required": ["Account", "Route"], "handler": "Api", "calls": [],
+      "output": { "kind": "Api" }
+    },
+    {
+      "key": "Routes", "command": "dropbox routes",
+      "usage": "dropbox routes [--search <text>] [--account <id>]",
+      "effect": "lists the user-token route table",
+      "options": ["Search", "Account"], "handler": "Routes", "calls": [],
+      "output": { "kind": "Routes" }
+    }
+  ],
+  "messages": {
+    "MissingRequired": "The command '{command}' requires {options}.",
+    "OneOf": "The command '{command}' requires exactly one of: {groups}.",
+    "AbsolutePath": "The option {option} requires an absolute local path; a relative path cannot be resolved against the running application's working directory.",
+    "MissingScope": "The route {route} needs the Dropbox scope {scope}, which account {account} was not granted. Widening scopes is an owner decision; nothing was sent.",
+    "RouteDenied": "The route {route} is denied in the user-token route table and is never called; use 'accounts disconnect' to remove the stored credential.",
+    "UnknownRoute": "The route {route} is not in the user-token route table; run 'dropbox routes' to list the callable routes.",
+    "RequiresYes": "The command '{command}' changes Dropbox and requires --yes. The CLI never auto-approves a Dropbox change.",
+    "AccountNotFound": "No retained Dropbox account matches '{account}'. Run 'accounts list' for the exact connection id.",
+    "CredentialUnavailable": "The protected credential for account {account} is unavailable. Reauthorize it with 'accounts reauthorize --account {account} --yes'.",
+    "InFileMissing": "The local file '{path}' does not exist or cannot be read.",
+    "InFileUnsafe": "The local file '{path}' is a reparse point, placeholder or otherwise unsafe to read.",
+    "OutExists": "The file '{path}' already exists; pass --yes to replace it.",
+    "OutFolderMissing": "The folder for '{path}' does not exist; create it first.",
+    "OutIsFolder": "The path '{path}' is an existing folder; --out must name a file.",
+    "StateUnavailable": "The Dropbox group needs the retained product state and its account credentials.",
+    "BadJson": "The value of {option} must be JSON, or '@<absolute-file>' naming a JSON file.",
+    "JsonFileMissing": "The file named by {option} does not exist or cannot be read.",
+    "JsonTooLarge": "The value of {option} exceeds its size limit.",
+    "BatchTooLarge": "A batch accepts at most {max} entries.",
+    "BadRoot": "The option --root requires 'ns:<namespace-id>' with a decimal namespace id.",
+    "ModeValue": "The option --mode requires add, overwrite or update.",
+    "ModeRev": "The option --rev is only valid together with --mode update.",
+    "ModeRevRequired": "The option --mode update requires --rev <revision>.",
+    "NoCall": "The command '{command}' does not accept the given combination of options.",
+    "NoOutput": "The command '{command}' has no result shape to print.",
+    "NoJobId": "The route {route} returned no batch job id.",
+    "DownloadHashMismatch": "The downloaded content did not match Dropbox's returned content_hash.",
+    "DownloadUnverified": "The route {route} returned no content_hash, so the download was written without a verified content match.",
+    "CleanupFailed": "The Dropbox CLI could not remove {path}: {error}",
+    "LongpollSeconds": "--seconds requires an integer from {min} to {max}.",
+    "ApiIn": "The route {route} uses the '{style}' style and does not accept --in.",
+    "ApiNeedsIn": "The route {route} uses the '{style}' style and requires --in <absolute-file>.",
+    "ApiNeedsOut": "The route {route} uses the '{style}' style and requires --out <absolute-file>.",
+    "BatchIncomplete": "The batch job did not finish within {seconds} seconds; it is still running on Dropbox. Poll it with 'dropbox api --route {check}' and job id {job}.",
+    "BatchFailed": "The batch job failed on Dropbox: {error}",
+    "BatchStatusUnknown": "The batch check route {route} returned the unrecognised status '{tag}'; the job was not relaunched.",
+    "Deprecated": "The route {route} is deprecated by Dropbox; the call was still made.",
+    "Preview": "The route {route} is a Dropbox preview route and may change; the call was still made.",
+    "HashMismatch": "The uploaded content did not match Dropbox's returned content_hash.",
+    "EffectUncertain": "The Dropbox change for route {route} may have been accepted but its outcome is unknown. Inspect with 'dropbox stat' before retrying; nothing is replayed."
+  },
+  "views": {
+    "EntryLine": "{tag}  {size}  {modified}  {path}",
+    "EntryTime": "yyyy-MM-dd HH:mm:ss",
+    "Absent": "-",
+    "None": "none",
+    "PageFooter": "cursor={cursor}  hasMore={hasMore}",
+    "BatchFailed": "failed  {error}",
+    "BatchFooter": "complete={complete}  job={job}",
+    "RoutesHeader": "{count} route(s) at {commit}",
+    "RouteLine": "{name}  {style}  {host}  {policy}  {scope}{granted}{special}",
+    "RouteGranted": "  granted={granted}",
+    "RouteSpecial": "  {special}"
+  }
+}
