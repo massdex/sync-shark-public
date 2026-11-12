@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "store",
+    "gone-identities",
+    "repair-forgotten"
+  ],
+  "core": [],
+  "ui": []
+}
