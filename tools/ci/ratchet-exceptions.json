@@ -1,0 +1,14 @@
+[
+  {
+    "version": "0.3.82",
+    "category": "magic-tunables",
+    "accepted_total": 1401,
+    "reason": "accepted for release 0.3.82 pending removal of the underlying items; ceiling recomputed on the merged int/0382-m2 tree at 56297c0fe (H11)"
+  },
+  {
+    "version": "0.3.82",
+    "category": "user-strings",
+    "accepted_total": 12102,
+    "reason": "accepted for release 0.3.82 pending removal of the underlying items; ceiling recomputed on the merged int/0382-m2 tree at 56297c0fe (H11)"
+  }
+]
