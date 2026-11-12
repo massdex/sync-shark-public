@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "gone-identities",
+    "engine-host"
+  ],
+  "core": [],
+  "ui": []
+}
