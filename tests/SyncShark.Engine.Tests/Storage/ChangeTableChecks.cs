@@ -84,8 +84,9 @@ public static partial class ChangeTableChecks
         WithStore((_, database) => ReplacedWithStaleMember(database, vanished: true));
         WithStore((_, database) => VanishedHeldFile(database, Identity));
         WithStore((_, database) => VanishedHeldFile(database, OtherIdentity));
-        WithStore((_, database) => B203H2RenamedAwayCompletes(database));
-        WithStore((_, database) => B203H2ReplacementReturnCompletes(database));
+        var b203H2Failures = new List<string>();
+        B203H2Cases(b203H2Failures);
+        Check.Require(b203H2Failures.Count == 0, "B-203 H2 reproduced: " + string.Join(" | ", b203H2Failures));
         foreach (var mixed in new[] { false, true })
             foreach (var own in new[] { false, true })
                 WithStore((_, database) => InUseMemberWithUnknownItem(database, mixed, own));

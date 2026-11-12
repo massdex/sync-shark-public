@@ -8,14 +8,16 @@ public static partial class ChangeTableChecks
     // B-203 H2 (rehearsal 0.3.85): the trigger is a RENAME (V1 moved v1.txt -> v1.away while held) or the
     // replacement-id arrival (V3 put v3.old beside a new v3.txt), not a plain same-id return. Both leave a live
     // in-use episode on a LATER row of the same identity while the earlier row becomes unheld. The earlier
-    // identity selection's completion DELETE spans [anchor, through] with a NULL obligation (acquired rows carry
-    // none), so it reaches the later episode-named row; issue.item_retry_work_id REFERENCES change_work ON DELETE
-    // NO ACTION, so CompleteWork must not delete it and must not throw.
-    private static void B203H2RenamedAwayCompletes(string database) => B203H2Case(database, replacement: false);
+    // identity selection's completion DELETE spans [anchor, through] with the anchor's NULL obligation (acquired
+    // rows carry none), so it reaches the later episode-named row; issue.item_retry_work_id REFERENCES change_work
+    // ON DELETE NO ACTION, so CompleteWork must not delete it and must not throw.
+    private static void B203H2Cases(List<string> failures)
+    {
+        WithStore((_, database) => B203H2Case(database, replacement: false, failures));
+        WithStore((_, database) => B203H2Case(database, replacement: true, failures));
+    }
 
-    private static void B203H2ReplacementReturnCompletes(string database) => B203H2Case(database, replacement: true);
-
-    private static void B203H2Case(string database, bool replacement)
+    private static void B203H2Case(string database, bool replacement, List<string> failures)
     {
         const string Away = "Parent/File.away";
         var name = replacement ? "replacement-id return" : "renamed away while held";
@@ -81,17 +83,17 @@ public static partial class ChangeTableChecks
             }
             catch (Microsoft.Data.Sqlite.SqliteException error)
             {
-                Console.WriteLine($"b203-h2 {name}: completing selection {selection.AnchorWorkId}..{selection.ThroughWorkId} " +
-                    $"threw SqliteException: SqliteErrorCode={error.SqliteErrorCode} " +
-                    $"SqliteExtendedErrorCode={error.SqliteExtendedErrorCode} Message={error.Message}; {string.Join(' ', trace)}");
-                throw new InvalidOperationException($"B-203 H2 ({name}): completing the identity selection must not throw: " +
-                    $"SqliteErrorCode={error.SqliteErrorCode} SqliteExtendedErrorCode={error.SqliteExtendedErrorCode} " +
-                    $"Message={error.Message}; {string.Join(' ', trace)} " +
-                    $"sel({selection.Identity},{selection.AnchorWorkId}..{selection.ThroughWorkId})", error);
+                var detail = $"B-203 H2 ({name}): sel({selection.Identity},{selection.AnchorWorkId}.." +
+                    $"{selection.ThroughWorkId}) threw SqliteException: SqliteErrorCode={error.SqliteErrorCode} " +
+                    $"SqliteExtendedErrorCode={error.SqliteExtendedErrorCode} Message={error.Message}";
+                Console.WriteLine($"b203-h2 REPRODUCED {detail}; {string.Join(' ', trace)}");
+                failures.Add(detail);
+                return;
             }
             store.EndWorkPass(PairId);
         }
-        var awayIssue = store.Issues(PairId).SingleOrDefault(issue => issue.Path == Away);
-        Console.WriteLine($"b203-h2 {name}: {string.Join(' ', trace)} away-notice={awayIssue is not null}");
+        var awayLive = store.Issues(PairId).Any(issue => issue.Path == Away);
+        Console.WriteLine($"b203-h2 NOT-REPRODUCED {name}: {string.Join(' ', trace)} away-notice={awayLive}");
+        Check.Require(awayLive, $"B-203 H2 ({name}): the away episode stays live for its own retry");
     }
 }
