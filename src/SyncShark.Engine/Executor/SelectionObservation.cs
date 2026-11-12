@@ -1,0 +1,85 @@
+using Massdex.SyncShark.Engine.Planner;
+
+namespace Massdex.SyncShark.Engine.Executor;
+
+/// <summary>Projects one branch observation with its Local echo authority and exact failure row.</summary>
+internal readonly struct SelectionObservation(SelectionPass pass, ExecutorContext _context, Observer _observer,
+    Parents _parents, RowContexts _rows, ActionExecutor _executor)
+{
+    // One observation of both sides projects one row; the error paths fail that same observation.
+    internal async ValueTask<Row?> ReadAsync(SelectionBranch branch, ItemFailedException? failedWalk,
+        Action<Row, string?> observed, CancellationToken ct)
+    {
+        var selection = branch.Selection;
+        var notice = branch.Notice;
+        Row? raw = null;
+        branch.Evidence = null;
+        branch.Failed = false;
+        try
+        {
+            if (failedWalk is not null) throw failedWalk;
+            var suppliedPrimary = branch.TakePrimary();
+            var local = await _observer.ObserveLocalAsync(notice.Side, notice.Path, ct, suppliedPrimary).ConfigureAwait(false);
+            // One scope answer settles an unbound Local entry (B-10); repeating Excludes for in-scope rows is
+            // the accepted cost of saving an excluded row's Dropbox read.
+            if (branch.Excluded && notice is { Side: Side.Local, Kind: ChangeKind.Changed, OldPath: null } &&
+                local is { Local: { } entry, Synced: null } &&
+                _context.Store.SyncedById(selection.PairId, Side.Local, entry.Id) is null)
+                return null;
+            var atBaseline = notice is { Side: Side.Local, Kind: not ChangeKind.Deleted, IdentityDeleted: false } &&
+                Decide.LocalMatchesBaseline(local.Local, local.Synced);
+            if (atBaseline && (pass.LocalEcho ??= _context.Store.CreateLocalEchoProbe(selection))(local.Synced!,
+                    branch.ThroughPeer ?? _context.Store.ReadWorkWatermark()))
+            {
+                if (local.Local!.IsFolder) return null;
+                var evidence = _context.Evidence.Read(local.Local, local.Synced);
+                // No observation means no peer settlement authority.
+                if (!evidence.Dirty) return null;
+                branch.Evidence = new LocalEvidence.DirtyProof(evidence.Dirty, evidence.Boundary, evidence.Version);
+            }
+            RefuseSuperseded(branch, local.Local, local.Synced, atBaseline);
+            raw = await _observer.ObserveDropboxAsync(notice.Side, notice.Path, local, ct, suppliedPrimary).ConfigureAwait(false);
+            var other = PathNames.Other(notice.Side);
+            var otherKey = branch.Original is null || branch.Peer is null && branch.ThroughPeer is not null
+                ? PathNames.KeyFor(other, raw.PathOn(other) ?? _parents.Counterpart(other, notice.Path, raw.Synced)) : null;
+            if (branch.Original is null && branch.SeparateWork!(other, otherKey!, raw.EntryOn(other)?.Id)) return null;
+            observed(raw, otherKey);
+            return raw with { Context = await _rows.ForSelectionAsync(raw, ct).ConfigureAwait(false) };
+        }
+        catch (Exception error) when (ItemFailures.IsItemError(error) && error is not ChangedUnderneathException)
+        {
+            raw ??= Row.ForOneSide(notice.Side, branch.Key, notice.Observed, branch.Saved, [], null, RowContext.Neutral);
+            var outcome = await _executor.Failures.FailAsync(raw, null, error, ct, issue => branch.Retain(raw, issue),
+                selection: selection).ConfigureAwait(false);
+            // A temporary observation failure keeps its selection out of the rest of the run, as an execution one does.
+            if (outcome.None == NoneReason.Unfinished) pass.RecordTemporary?.Invoke(selection);
+            branch.Failed = true;
+            return null;
+        }
+    }
+
+    // B-179b: an eligible changed plain Local file candidate refuses before its Dropbox read when later own-side
+    // evidence already supersedes it (admission's own rule); a baseline match may be a no-op, which admission never
+    // sees (B-176). Refusal-only: admission still decides everything else.
+    private void RefuseSuperseded(SelectionBranch branch, Entry? current, SyncedEntry? synced, bool atBaseline)
+    {
+        var notice = branch.Notice;
+        if (notice is { Side: Side.Local, Kind: ChangeKind.Changed, IdentityDeleted: false, OldPath: null } &&
+            branch.Original is { OldPath: null } original && PathNames.KeyFor(Side.Local, original.Path) == branch.Key &&
+            current is { IsFolder: false } && PathNames.KeyFor(Side.Local, current.Path) == branch.Key &&
+            synced is null or { IsFolder: false } && !atBaseline &&
+            (branch.Saved is null || branch.Saved is { IsFolder: false } saved && saved.LocalKey == branch.Key) &&
+            !_rows.Covers(branch.Key))
+        {
+            try { _ = _context.Store.SyncedById(branch.Selection.PairId, Side.Local, current.Id); _context.Store.RefuseLaterEvidence(branch.Selection, LockKeys.ForLivePaths(_context.Pair, [(Side.Local, notice.Path)], false)); }
+            catch (LiveAdmissionStaleException)
+            {
+                // B-202, asked only once a refusal is due: a rename candidate goes to RenameWork, whose holds attach
+                // before admission, so the refusal is dropped and the branch goes the ordinary way.
+                if (Renames.Candidate(Side.Local, current,
+                        _context.Store.SyncedById(branch.Selection.PairId, Side.Local, current.Id)) is null)
+                    throw;
+            }
+        }
+    }
+}
