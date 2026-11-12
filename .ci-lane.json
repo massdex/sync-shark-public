@@ -1,0 +1,15 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "issues",
+    "store",
+    "syncer",
+    "engine-host",
+    "scenarios-offline",
+    "live-wake"
+  ],
+  "core": [],
+  "ui": []
+}
