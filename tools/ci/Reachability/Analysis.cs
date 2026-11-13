@@ -12,14 +12,14 @@ using Microsoft.CodeAnalysis.Operations;
 internal sealed record Cut(string Route, string Path, int First, int Last, string Hash, bool Gui);
 internal sealed record Sentinel(string Type, string Profile);
 internal sealed record EdgeCheck(string Route, string Target);
-internal sealed record Config(Cut[] Cuts, Dictionary<string, string> InteropFiles, Sentinel[] Sentinels, EdgeCheck[] EdgeChecks);
+internal sealed record Config(Cut[] Cuts, Dictionary<string, string> InteropFiles, Sentinel[] Sentinels, EdgeCheck[] EdgeChecks, Dictionary<string, string[]> TextKeepExclusions);
 internal sealed record Edge(string Target, string Path, int Position, string Reason);
 internal sealed class TypeNode(string id, string project, INamedTypeSymbol symbol, bool product)
 {
     internal string Id = id, Project = project;
     internal INamedTypeSymbol Symbol = symbol;
-    internal bool Product = product, Unknown;
-    internal HashSet<string> Files = [], Risks = [], Roots = [];
+    internal bool Product = product;
+    internal HashSet<string> Files = [], Risks = [], Roots = [], UnknownReasons = [];
     internal HashSet<Edge> Edges = [];
 }
 

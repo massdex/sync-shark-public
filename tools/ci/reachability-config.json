@@ -1,4 +1,18 @@
 {
+  "TextKeepExclusions": {
+    "Tooling inventories and this analyzer describe code rather than consume it": [
+      "tools/ci/spec-baseline-files.jsonl",
+      "tools/ci/spec-baseline.jsonl",
+      "tools/ci/spec-verdicts.json",
+      "tools/ci/structure-debt.md",
+      "tools/ci/Reachability/Analysis.cs",
+      "tools/ci/Reachability/KeepRules.cs",
+      "tools/ci/Reachability/Program.cs",
+      "tools/ci/Reachability/Report.cs",
+      "tools/ci/Reachability/WpfHelper.cs",
+      "tools/ci/reachability-config.json"
+    ]
+  },
   "Cuts": [
     {
       "Route": "legacy-supervisor",

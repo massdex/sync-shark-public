@@ -26,6 +26,7 @@ internal sealed class KeepRules(Analysis graph)
             foreach (var token in new[] { name }.Concat(name.Split('.')))
                 if (names.TryGetValue(token, out var nodes)) foreach (var node in nodes) { node.Roots.Add(reason); node.Risks.Add("name-in-text"); }
         }
+        var textKeepExclusions = graph.Config.TextKeepExclusions.Values.SelectMany(paths => paths).ToHashSet(StringComparer.Ordinal);
         foreach (var path in graph.Tracked)
         {
             var full = Path.Combine(graph.Root, path);
@@ -55,10 +56,19 @@ internal sealed class KeepRules(Analysis graph)
                     if (Regex.IsMatch(source, @"GetManifestResource(Stream|Names)|Application\.(GetResourceStream|LoadComponent)|pack://"))
                         foreach (var node in product) node.Roots.Add("component:resource-loader");
                 }
-                foreach (var node in nodes.Where(n => !n.Product))
-                    node.Unknown |= Regex.IsMatch(source, @"\b(Process|Assembly|Activator|Type|BindingFlags|CSharpCompilation|CSharpSyntaxTree|MSBuildWorkspace)\b|\.Get(Type|Property|Method|Field|Constructor)\(|\.cs\b|\.csproj\b|\.xaml\b|ReadAll(Text|Lines)|ReadAllBytes");
+                var tests = nodes.Where(n => !n.Product).ToArray();
+                if (tests.Length != 0)
+                foreach (var marker in Regex.Matches(source, @"\b(Process|Assembly|Activator|Type|BindingFlags|CSharpCompilation|CSharpSyntaxTree|MSBuildWorkspace)\b|\.Get(Type|Property|Method|Field|Constructor)\(|\.cs\b|\.csproj\b|\.xaml\b|ReadAll(Text|Lines)|ReadAllBytes").Select(m => m.Value).Distinct())
+                {
+                    var reason = marker switch {
+                        "Process" => "test:subprocess",
+                        "CSharpCompilation" or "CSharpSyntaxTree" or "MSBuildWorkspace" => "test:compiler-inspection",
+                        "Assembly" or "Activator" or "Type" or "BindingFlags" => "test:reflection",
+                        _ => marker.StartsWith(".Get") ? "test:reflection" : "test:source-or-file-inspection" };
+                    foreach (var test in tests) test.UnknownReasons.Add(reason);
+                }
             }
-            else if (!path.StartsWith("docs/"))
+            else if (!path.StartsWith("docs/") && !textKeepExclusions.Contains(path))
             {
                 var bytes = File.ReadAllBytes(full);
                 if (!bytes.Contains((byte)0)) TextRoots(System.Text.Encoding.UTF8.GetString(bytes), "component:text:" + path);
