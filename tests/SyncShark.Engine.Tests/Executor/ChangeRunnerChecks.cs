@@ -7735,7 +7735,7 @@ public static partial class ChangeRunnerChecks
             {
                 var localParent = FolderEntry(parent.Path, "local-parent");
                 fixture.Local.Seed(localParent, null);
-                // B-214 settles exact saved echoes before selection; a replaced folder keeps the held ancestor selectable.
+                // B-214 needs a non-echo replacement; discovery is stubbed because this checks held-ancestor scheduling.
                 fixture.Inner.Commit(PairId, StateChange.Empty with
                     { Record = [SyncedEntries.From(localParent, parent with { Id = "remote-prior-parent" })] });
             }
@@ -7815,7 +7815,8 @@ public static partial class ChangeRunnerChecks
                 Events = value => { if (value.Kind == RunEventKind.Failed) failures.Add(value); }
             };
             await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-                RefusingExecutionBoundary.Instance, 1)).SyncWorkAsync(default);
+                RefusingExecutionBoundary.Instance, 1) { RunBatchAsync = (_, _, _, _, _, _) => Task.CompletedTask })
+                .SyncWorkAsync(default);
             Check.Require(rounds == (held ? 1 : 2) && completions == 0 && fixture.Inner.Issues(PairId).Count == 0 &&
                 PendingAt(fixture, Side.Dropbox, parent.Path).Count == 1,
                 "B84-01: only genuine refusal causes contention replay; skipped dependencies credit no retirement.");
