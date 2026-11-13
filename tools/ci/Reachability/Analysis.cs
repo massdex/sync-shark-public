@@ -137,6 +137,13 @@ internal sealed class Analysis(string root, Config config)
 
     internal IEnumerable<TypeNode> Resolve(INamedTypeSymbol symbol)
     {
+        // Compiler-only signature placeholders have no assembly and cannot name a source declaration.
+        if (symbol.ContainingAssembly is null)
+        {
+            if (symbol.DeclaringSyntaxReferences.Any(r => r.GetSyntax() is BaseTypeDeclarationSyntax or DelegateDeclarationSyntax))
+                throw new InvalidOperationException("Source declaration without assembly: " + symbol.ToDisplayString());
+            yield break;
+        }
         if (identities.TryGetValue(SymbolKey(symbol), out var ids))
             foreach (var id in ids) yield return Types[id];
     }
@@ -261,7 +268,7 @@ internal sealed class Analysis(string root, Config config)
         foreach (var id in extraRoots ?? []) if (reached.TryAdd(id, (null, "route"))) queue.Enqueue(id);
         while (queue.TryDequeue(out var id))
         foreach (var edge in Types[id].Edges.Where(e => Allowed(e, profile)))
-            if (Types[edge.Target].Product && reached.TryAdd(edge.Target, (id, edge.Reason))) queue.Enqueue(edge.Target);
+            if (Types[edge.Target].Product && reached.TryAdd(edge.Target, (id, CutsFor(edge).Select(c => "route:" + c.Route).FirstOrDefault() ?? reached[id].Item2))) queue.Enqueue(edge.Target);
         return reached;
     }
 }

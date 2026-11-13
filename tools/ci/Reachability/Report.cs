@@ -50,14 +50,15 @@ internal sealed class Report(Analysis graph)
             chain.Reverse();
             return string.Join(" -> ", chain);
         }
+        string Reasons(TypeNode node) => string.Join(";", node.Roots.Concat(all.TryGetValue(node.Id, out var keep) ? new[] { keep.Reason } : []).Distinct());
         var rows = new List<Row>();
         foreach (var (path, nodes) in graph.Files.Where(f => File.Exists(Path.Combine(graph.Root, f.Key))))
         {
             var lines = File.ReadLines(Path.Combine(graph.Root, path)).Count();
-            foreach (var node in nodes) rows.Add(new(path, node.Project, node.Id, labels[node.Id], string.Join(";", node.Roots), string.Join(";", node.Risks), Why(node), lines));
+            foreach (var node in nodes) rows.Add(new(path, node.Project, node.Id, labels[node.Id], Reasons(node), string.Join(";", node.Risks), Why(node), lines));
             var label = nodes.Select(n => labels[n.Id]).OrderBy(Rank).First();
             rows.Add(new(path, string.Join(";", nodes.Select(n => n.Project).Distinct()), "", label,
-                string.Join(";", nodes.SelectMany(n => n.Roots).Distinct()), string.Join(";", nodes.SelectMany(n => n.Risks).Distinct()), "whole-file roll-up", lines));
+                string.Join(";", nodes.SelectMany(n => Reasons(n).Split(';', StringSplitOptions.RemoveEmptyEntries)).Distinct()), string.Join(";", nodes.SelectMany(n => n.Risks).Distinct()), "whole-file roll-up", lines));
         }
         // Only compiled product C# files can be candidates; retain assets and excluded source explicitly.
         foreach (var path in graph.Tracked.Where(p => !graph.Files.ContainsKey(p)))
