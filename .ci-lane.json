@@ -1,0 +1,13 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "strings"
+  ],
+  "core": [
+    "--cli-checks"
+  ],
+  "ui": []
+}
