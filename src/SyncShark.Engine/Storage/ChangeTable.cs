@@ -330,7 +330,7 @@ internal sealed partial class ChangeTable
             foreach (var claim in claims.Values)
                 if (FindAnchor(transaction, pair.Row, claim) is { } anchor &&
                     (Owned(claim, anchor, first) || claim.Side == Side.Local && claim.Key == first.Key ||
-                     claim.Side == Side.Dropbox && claim.Peer?.Key == first.Key)) return 0;
+                     false)) return 0;
         // Attempted and suspended ids are immutable for this ordered store call. They bound both walks alike.
         foreach (var protectedId in (pass.Attempted ?? Enumerable.Empty<long>())
             .Concat(pass.Suspended?.Keys ?? Enumerable.Empty<long>())
