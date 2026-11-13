@@ -224,7 +224,6 @@ jobs:
       # Release ownership configures the public tag and its public commit, not private SHAs.
       RATCHET_LIVE_TAG: ${{ vars.RATCHET_LIVE_TAG }}
       RATCHET_LIVE_COMMIT: ${{ vars.RATCHET_LIVE_COMMIT }}
-      RATCHET_LITERAL_SITES: ${{ runner.temp }}/literal-sites.jsonl
     outputs:
       evidence: ${{ steps.ratchet.outputs.evidence }}
     steps:
@@ -268,7 +267,7 @@ jobs:
         run: |
           python -I tools/ci/test-spec-ratchet.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -I tools/ci/check-spec-ratchet.py | Tee-Object -Variable ratchetOutput
+          python -I tools/ci/check-spec-ratchet.py --literal-sites "$env:RUNNER_TEMP/literal-sites.jsonl" | Tee-Object -Variable ratchetOutput
           $code = $LASTEXITCODE
           $ratchetOutput | Where-Object { $_ -match '^(POLICY REVIEW|TRUSTED RELEASE) ' } |
             ForEach-Object { "- $_" } | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
