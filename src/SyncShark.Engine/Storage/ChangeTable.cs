@@ -356,7 +356,7 @@ internal sealed partial class ChangeTable
         {
             if (TransferableWork(transaction, pair.Row, row, null, pathOnly: true) is not { } content ||
                 before is not null && row.Before is not null && !string.Equals(before, row.Before, StringComparison.Ordinal)) break;
-            notice = notice is null ? content.Notice : MergeContent(notice, content.Notice);
+            notice = content.Notice;
             before ??= row.Before;
             acquisition = Math.Max(acquisition, row.Acquisition!.Value);
             newest = row;
