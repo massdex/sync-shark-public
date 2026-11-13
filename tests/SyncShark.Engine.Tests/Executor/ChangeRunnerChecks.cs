@@ -7735,10 +7735,11 @@ public static partial class ChangeRunnerChecks
             {
                 var localParent = FolderEntry(parent.Path, "local-parent");
                 fixture.Local.Seed(localParent, null);
-                fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(localParent, parent)] });
+                // B-214 settles exact saved echoes before selection; a replaced folder keeps the held ancestor selectable.
+                fixture.Inner.Commit(PairId, StateChange.Empty with
+                    { Record = [SyncedEntries.From(localParent, parent with { Id = "remote-prior-parent" })] });
             }
-            // B-214 settles exact saved echoes before selection; a case-change hint keeps the ancestor selectable.
-            var opportunity = SeedRemote(fixture, parent with { Path = parent.Path.ToUpperInvariant() });
+            var opportunity = SeedRemote(fixture, parent);
             var children = Enumerable.Range(0, dependents)
                 .Select(index => RemoteEntry("Parent/Child" + index, "remote-child-" + index)).ToArray();
             foreach (var child in children)
