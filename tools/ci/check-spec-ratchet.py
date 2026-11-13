@@ -120,7 +120,7 @@ def text_count(source, masked, spans, path, finding=None, permitted=()):
         if start in permitted:
             continue
         literal = source[start:end]
-        value = literal.lstrip('$@"').rstrip('"').strip()
+        value = literal.removesuffix('u8').removesuffix('U8').lstrip('$@"').rstrip('"').strip()
         if not value or not re.search(r'[A-Za-z]', value):
             continue
         prefix = masked[max(0, start - 250):start]
@@ -151,8 +151,9 @@ def text_count(source, masked, spans, path, finding=None, permitted=()):
 
 
 def tunable_name(name):
-    return any(TUNABLE.fullmatch(word) for token in lex.IDENT.finditer(name)
-               for word in re.split(r'_|(?<=[a-z])(?=[A-Z])', token[0].lstrip('@')))
+    return any(TUNABLE.fullmatch(stem) for token in lex.IDENT.finditer(name)
+               for word in re.split(r'_|(?<=[a-z])(?=[A-Z])', token[0].lstrip('@'))
+               for stem in (word, re.sub(r'(?i)s$', '', word), re.sub(r'(?i)es$', '', word), re.sub(r'(?i)ies$', 'y', word)))
 
 
 def tunable_count(masked, path, finding=None):

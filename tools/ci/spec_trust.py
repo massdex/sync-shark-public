@@ -41,7 +41,7 @@ def snapshot(root, tag, commit, target):
     archive = target.parent / 'release.tar'
     with archive.open('wb') as stream:
         result = subprocess.run(['git', '-C', str(root), 'archive', commit,
-                                 'src', 'tools/ci', '.github/workflows'], stdout=stream,
+                                 'src', 'tools/ci', '.github/workflows', 'tests/SyncShark.Engine.Tests/Layout'], stdout=stream,
                                 stderr=subprocess.PIPE)
     if result.returncode:
         raise ValueError('trusted release archive unavailable')
@@ -67,7 +67,8 @@ def policy_findings(root, trusted):
     for folder in ('tools/ci', '.github/workflows'):
         paths.update(p.relative_to(trusted).as_posix() for p in (trusted / folder).glob('*') if p.is_file())
         paths.update(p.relative_to(root).as_posix() for p in (root / folder).glob('*') if p.is_file())
-    paths.add('tools/Test-PreReview.ps1')
+    paths.update(('tools/Test-PreReview.ps1', 'tests/SyncShark.Engine.Tests/Layout/LiteralsChecks.cs',
+                  'tests/SyncShark.Engine.Tests/Layout/LiteralSites.cs'))
     for relative in sorted(paths):
         old, new = trusted / relative, root / relative
         if new.is_symlink():

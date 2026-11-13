@@ -395,6 +395,13 @@ public static class LiteralsChecks
         const string schema = "class StateSchema { const string Fragment = \"EXISTS(SELECT 1 FROM synced_entry)\"; }";
         Passes(schema, StateSchemaFile);
         Fails(schema.Replace("const string", "static readonly string"), StateSchemaFile);
+        foreach (var (source, path, expected) in new[] {
+            (schema, StateSchemaFile, new[] { true }),
+            (schema.Replace("const string", "static readonly string"), StateSchemaFile, new[] { false }),
+            ("""class C { object M() => $"outer {Call("inner text")} text"; }""", "src/Example.cs", new[] { false, false }),
+            ("""class C { object M() => $"{x}"; }""", "src/Example.cs", new[] { true }) })
+            Check.Require(LiteralSites.Sites(source, path).Select(site => System.Text.Json.JsonSerializer.SerializeToElement(site)
+                .GetProperty("permitted").GetBoolean()).SequenceEqual(expected), "literal artifact permission mapping");
     }
 
     private static void DefaultArithmeticFixtures()

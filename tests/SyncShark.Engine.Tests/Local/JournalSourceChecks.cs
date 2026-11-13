@@ -1544,6 +1544,17 @@ public static class JournalSourceChecks
             notices.Select(item => item.Path).ToHashSet().SetEquals(new[] { "first.txt", "second.txt" }) &&
             notices.All(item => item.Id is null && !item.IdentityDeleted && item.LocalContentDirty),
             "Alias page folding produces each path once with later write dirtiness and no Repair debt.");
+        var next = scenario.Start with { NextUsn = scenario.Start.NextUsn + 1 };
+        scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, next, Fences(scenario),
+            Enumerable.Range(0, 3).SelectMany(_ => notices.Select(notice => (pair.PairId, notice))));
+        var scope = new PathScope(pair, [pair]);
+        var selectedA = scenario.Store.SelectWork(pair.PairId, 0, scope);
+        var selectedB = scenario.Store.SelectWork(pair.PairId, 0, scope);
+        Check.Require(selectedA is not null && selectedB is not null &&
+            selectedA.Key != selectedB.Key && selectedA.Identity is null && selectedB.Identity is null &&
+            scenario.Store.CountWork(pair.PairId, 0, scenario.Store.ReadWorkWatermark()).Local == 2,
+            "B210-AliasIndependence: real hard-link names retain separate path-only obligations");
+        scenario.Store.EndWorkPass(pair.PairId);
         File.Delete(first);
         paths.BeginPage();
         paths.Observe(fileId, 0, 3, 0, 0x00010000, FileAttributes.Normal);
@@ -1552,6 +1563,16 @@ public static class JournalSourceChecks
             notices.Single(item => item.Path == "first.txt") is { Kind: ChangeKind.Deleted, Id: null, Observed: null } &&
             notices.Single(item => item.Path == "second.txt") is { Kind: ChangeKind.Changed, Id: null },
             "Removed aliases retain their own saved-path absence rather than following the surviving name.");
+        scenario.Store.AcquireJournalPage(scenario.VolumeKey, next, next with { NextUsn = next.NextUsn + 1 },
+            Fences(scenario), notices.Select(notice => (pair.PairId, notice)));
+        var retained = new List<PendingChange>();
+        while (scenario.Store.SelectWork(pair.PairId, 0, scope) is { } selected)
+            retained.AddRange(scenario.Store.ReadWork(selected));
+        Check.Require(retained.Count == 3 && retained.Count(item => item.Notice.Path == "first.txt") == 2 &&
+            retained.Single(item => item.Notice.Kind == ChangeKind.Deleted).Notice.Path == "first.txt" &&
+            retained.All(item => item.Notice.Id is null),
+            "B210-RenameAway: vanished alias debt and Deleted stay separate from the surviving link");
+        scenario.Store.EndWorkPass(pair.PairId);
     }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

@@ -64,9 +64,20 @@ class RatchetChecks(unittest.TestCase):
         return code, output.getvalue()
 
     def test_tunable_identifier_words(self):
-        for name, count in (('examined', 0), ('terminal', 0), ('minimum', 1), ('MinDelay', 1), ('max_min', 1), ('RetryMin', 1)):
+        for name, count in (('examined', 0), ('terminal', 0), ('minimum', 1), ('MinDelay', 1), ('max_min', 1), ('RetryMin', 1),
+                            ('RootVerifyAttempts', 1), ('RestoredEvidenceReleaseAttempts', 1),
+                            ('VerificationPublicationPages', 1), ('_ordinaryHistoryMaintenanceBatches', 1), ('pages', 1)):
             with self.subTest(name=name):
                 self.assertEqual(count, ratchet.tunable_count('int ' + name + ' = 0;', Path('Example.cs')))
+
+    def test_utf8_suffix_is_token_text_not_display_text(self):
+        for suffix in ('u8', 'U8'):
+            with self.subTest(suffix=suffix):
+                source = 'class Example { object Value = "null"' + suffix + '; }'
+                spans = []
+                masked = ratchet.lex.mask(source, spans)
+                self.assertEqual(['"null"' + suffix], [source[a:b] for a, b in spans])
+                self.assertEqual(0, ratchet.text_count(source, masked, spans, Path('Example.cs')))
 
     def test_new_long_method_fails(self):
         self.put(long_method() + long_method('Added'))
@@ -752,7 +763,7 @@ class TrustedRatchetChecks(unittest.TestCase):
         self.source = self.root / 'src' / 'Example.cs'
         self.source.parent.mkdir()
         self.put('Shipped message one.')
-        for relative in ratchet.trust.ENFORCEMENT:
+        for relative in (*ratchet.trust.ENFORCEMENT, 'tests/SyncShark.Engine.Tests/Layout/LiteralsChecks.cs'):
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture\n', encoding='utf-8')
@@ -809,6 +820,15 @@ class TrustedRatchetChecks(unittest.TestCase):
             code = ratchet.main()
         return code, output.getvalue() + error.getvalue()
 
+    def test_literal_producer_changes_require_policy_review(self):
+        for name in ('LiteralsChecks.cs', 'LiteralSites.cs'):
+            relative = 'tests/SyncShark.Engine.Tests/Layout/' + name
+            (self.root / relative).write_text('changed fixture\n', encoding='utf-8')
+        code, output = self.check()
+        self.assertEqual(0, code, output)
+        for name in ('LiteralsChecks.cs', 'LiteralSites.cs'):
+            self.assertIn('POLICY REVIEW changed tests/SyncShark.Engine.Tests/Layout/' + name, output)
+
     def test_literal_artifact_missing_is_incomplete(self):
         code, output = self.check(artifact=False)
         self.assertEqual(2, code, output)
@@ -839,7 +859,7 @@ class TrustedRatchetChecks(unittest.TestCase):
     def test_permitted_schema_fragments_are_excluded(self):
         schema = self.root / 'src/SyncShark.Engine/Storage/StateSchema.cs'
         schema.parent.mkdir(parents=True)
-        schema.write_text('class StateSchema { const string Bound = "EXISTS(SELECT 1 FROM synced_entry)"; }', encoding='utf-8')
+        schema.write_text('class StateSchema { const string Bound = "SELECT 1 FROM synced_entry WHERE pair_id = $p"; }', encoding='utf-8')
         rows = self.artifact()
         row = next(row for row in rows if row['path'].endswith('/StateSchema.cs'))
         self.assertEqual(1, len(row['sites']))

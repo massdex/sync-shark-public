@@ -39,6 +39,7 @@ public static partial class ChangeTableChecks
 
     public static void Run()
     {
+        PathOnlyCoalescing();
         WithStore(RenameResponsibilitySurvives);
         WithStore(store => PersistedRenameBootstrap(store, false));
         WithStore(store => PersistedRenameBootstrap(store, true));

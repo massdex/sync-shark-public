@@ -5379,6 +5379,8 @@ public static partial class ChangeRunnerChecks
     private static async Task RunAsync()
     {
         var failures = new List<Exception>();
+        try { await PathOnlyLiveReadsAsync(); }
+        catch (Exception error) { failures.Add(error); }
         try { await OlderEpisodeConvergenceAsync(); }
         catch (Exception error) { failures.Add(error); }
         try { await StaleFreshnessAsync(); }

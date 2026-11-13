@@ -140,7 +140,7 @@ def mask(src, literals=None, preserve_chars=False):
                 continue
             if c == '"' or (c in '$@' and re.match(r'[$@]{1,6}"', src[i:i + 8])):
                 end = scan_string(i)
-                if src[end:end + 2] == 'u8':
+                if src[end:end + 2] in ('u8', 'U8'):
                     blank(end, end + 2)
                     end += 2
                 if literals is not None:

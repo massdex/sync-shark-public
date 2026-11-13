@@ -38,7 +38,7 @@ internal static class LiteralSites
         }
     }
 
-    private static IEnumerable<object> Sites(string source, string path)
+    internal static IEnumerable<object> Sites(string source, string path)
     {
         // The lexical inventory includes inactive branches, but not directive lines.
         var options = new CSharpParseOptions(LanguageVersion.CSharp12);
