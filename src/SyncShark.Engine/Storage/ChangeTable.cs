@@ -286,6 +286,7 @@ internal sealed partial class ChangeTable
             {
                 _passes[pairId] = pass;
                 AccountAttachment(pairId, -retired);
+                pass = pass with { Through = observedThrough!.Value };
                 merged = true;
                 continue;
             }
