@@ -123,7 +123,7 @@ public static partial class ChangeTableChecks
             store.AdvanceSource(PairId, side, provenance.PairGeneration, current.Epoch, current.Revision,
                 current.Provenance, current.Cursor, current.Epoch, current.Revision,
                 shape == "provenance" ? null : current.Provenance,
-                shape == "cursor" ? "" : current.Cursor,
+                shape == "cursor" ? null : current.Cursor,
                 shape.EndsWith("debt", StringComparison.Ordinal) ? SourceObligation.NormalRepair : null);
         }
         Check.Require(SettleEchoPage(store).Settled == 0 &&

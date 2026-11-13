@@ -142,6 +142,90 @@ public static partial class CallBudgetChecks
     public static void RunBudgetComposedProvider() => InBudgetFolder(folder =>
         ComposedProviderCostsAsync(folder).GetAwaiter().GetResult());
 
+    public static void RunDropboxEchoMoves() => InBudgetFolder(folder =>
+        DropboxEchoMovesAsync(folder).GetAwaiter().GetResult());
+
+    private static async Task DropboxEchoMovesAsync(string folder)
+    {
+        foreach (var origin in new[] { Side.Local, Side.Dropbox })
+        {
+            (int Metadata, int Begins)? previous = null;
+            foreach (var children in new[] { 50, 5_000 })
+            {
+                var root = Path.Combine(folder, origin + "-" + children);
+                var begins = 0;
+                await using var rig = await RepairChecks.ComposeRigAsync(root, level: 1,
+                    decorate: inner => new HookStore(inner) { BeforeBeginSelection = () => begins++ });
+                Directory.CreateDirectory(Path.Combine(rig.Pair.LocalRoot, "Old"));
+                rig.Wire.SeedFolder("Old");
+                for (var index = 0; index < children; index++)
+                {
+                    var path = $"Old/{index:D5}";
+                    await File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, path), "content");
+                    File.SetLastWriteTimeUtc(Path.Combine(rig.Pair.LocalRoot, path), BaseTime.UtcDateTime);
+                    rig.Wire.SeedFile(path, "content", BaseTime);
+                }
+                using (var baseline = rig.Log(root, "baseline"))
+                    Check.Require((await rig.RunAsync(baseline, default)).Completed,
+                        "B214-T1/T2 setup: the composed baseline completes");
+                var pairId = rig.Pair.PairId;
+                var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
+                using var log = rig.Log(root, "move-echo");
+                await rig.Host.DispatchSessionAsync(pairId, () => log, async (session, ct) =>
+                {
+                    var side = session.Context.For(origin);
+                    var old = (await side.ReadOneAsync("Old", ct))!;
+                    var moved = await side.MoveAsync(old, "New", ct);
+                    var source = rig.Store.ReadSource(pairId, origin)!.Value;
+                    var notice = new ChangeNotice(origin, origin == Side.Local ? ChangeKind.Renamed : ChangeKind.Changed,
+                        "New", origin == Side.Local ? "Old" : null, moved.Id, moved, false, false);
+                    if (origin == Side.Dropbox)
+                        rig.Store.AcquireDropboxPage(pairId, generation, source.Epoch, source.Revision,
+                            source.Provenance!, source.Cursor, [notice], source.Cursor!);
+                    else
+                    {
+                        var domain = rig.Pair.Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                        var position = rig.Store.ReadJournal(domain)!;
+                        Check.Require(rig.Store.AcquireJournalPage(domain, position, position,
+                            [(pairId, generation, source.Epoch, source.Revision, false)], [(pairId, notice)]) is not null,
+                            "B214-T1 setup: the Local rename notice is acquired");
+                    }
+                    rig.Wire.Calls.Clear();
+                    begins = 0;
+                    var local = new CountingSide(session.Local);
+                    var syncer = new Syncer(session.Context with { Local = local },
+                        new SyncPorts(new RecoveryExecutionBoundary(() => session),
+                            new LiveExecutionBoundary(_ => session), PairSafety.SelectedBoundaryFor(session), LocalSide.HashSlots));
+                    await syncer.SyncWorkAsync(ct);
+                    var moves = rig.Wire.Calls.Count(route => route.EndsWith("/move_v2", StringComparison.Ordinal));
+                    Check.Require(moves == (origin == Side.Local ? 1 : 0) && local.Moves == (origin == Side.Dropbox ? 1 : 0) &&
+                        Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "New")) &&
+                        !Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "Old")),
+                        "B214-T1/T2: one counterpart native move leaves the entire Local tree at New");
+                    var remote = rig.Store.ReadSource(pairId, Side.Dropbox)!.Value;
+                    var echo = Enumerable.Range(0, children).Select(index =>
+                            rig.Wire.ChangeDeleted(rig.Pair.DropboxRoot + $"/Old/{index:D5}"))
+                        .Concat(new[] { rig.Wire.ChangeExistingFile("New") })
+                        .Concat(Enumerable.Range(0, children).Select(index => rig.Wire.ChangeExistingFile($"New/{index:D5}")))
+                        .ToArray();
+                    rig.Wire.SeedChangePage(remote.Cursor!, echo, false, "echo-terminal");
+                    await rig.Host.CatchUpDropboxAsync(session.Registration, pairId, generation, ct);
+                    var metadata = rig.Wire.Calls.Count(route => route.EndsWith("/get_metadata", StringComparison.Ordinal));
+                    await syncer.SyncWorkAsync(ct);
+                    Check.Require(rig.Wire.Calls.Count(route => route.EndsWith("/get_metadata", StringComparison.Ordinal)) == metadata &&
+                        rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark()) == (0L, 0L),
+                        "B214-T1/T2: one echo opportunity drains all feed rows with zero additional HTTP metadata");
+                    return true;
+                }, default);
+                var measured = (rig.Wire.Calls.Count(route => route.EndsWith("/get_metadata", StringComparison.Ordinal)), begins);
+                if (previous is { } before)
+                    Check.Require(measured == before, "B214-T1/T2: HTTP metadata and BeginSelection counts stay flat at 50/5000 children");
+                previous = measured;
+                Console.WriteLine($"B214 HTTP move origin={origin} children={children} metadata={measured.Item1} begins={begins}");
+            }
+        }
+    }
+
     private static void GrowthBySize(string name, Func<Shape, Cost> run)
     {
         var small = run(SmallShape);

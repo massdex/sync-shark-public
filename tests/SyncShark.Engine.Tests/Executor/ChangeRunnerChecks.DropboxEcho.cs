@@ -11,23 +11,25 @@ public static partial class ChangeRunnerChecks
 
     private static async Task DropboxEchoesAsync()
     {
+        List<Func<Task>> cases =
+        [
+            () => DropboxEchoFifoAsync(1, stagedEdit: true), () => DropboxEchoFifoAsync(10_001, stagedEdit: false),
+            DropboxEchoRollbackAsync, DropboxEchoHostRollbackAsync, DropboxEchoResponsibilityAsync
+        ];
         foreach (var shape in new[] { "exact", "metadata", "case", "replacement", "kind", "skip", "hash", "new" })
-            await DropboxEchoEntryAsync(shape);
-        foreach (var rename in new[] { false, true }) await DropboxEchoLaterEvidenceAsync(rename);
-        await DropboxEchoFifoAsync(1, stagedEdit: true);
-        await DropboxEchoFifoAsync(10_001, stagedEdit: false);
-        await DropboxEchoRollbackAsync();
-        await DropboxEchoResponsibilityAsync();
-        foreach (var failedSave in new[] { false, true }) await DropboxEchoRestartAsync(failedSave);
-        foreach (var explicitKey in new[] { false, true }) await DropboxEchoBoundDeletionAsync(explicitKey);
-        foreach (var origin in new[] { Side.Local, Side.Dropbox })
-        {
-            var small = await DropboxEchoMoveAsync(origin, 50);
-            var large = await DropboxEchoMoveAsync(origin, 5_000);
-            Check.Require(small == large, "B214-T1/T2: move metadata and BeginSelection counts do not grow with children");
-        }
+            cases.Add(() => DropboxEchoEntryAsync(shape));
+        foreach (var rename in new[] { false, true }) cases.Add(() => DropboxEchoLaterEvidenceAsync(rename));
+        foreach (var failedSave in new[] { false, true }) cases.Add(() => DropboxEchoRestartAsync(failedSave));
+        foreach (var explicitKey in new[] { false, true }) cases.Add(() => DropboxEchoBoundDeletionAsync(explicitKey));
         foreach (var overrides in new[] { 10, 100, 1_000, 100_000 })
-            await DropboxEchoOverrideAsync(overrides);
+            foreach (var inherited in new[] { false, true }) cases.Add(() => DropboxEchoOverrideAsync(overrides, inherited));
+        var failures = new List<Exception>();
+        foreach (var run in cases)
+        {
+            try { await run(); }
+            catch (Exception error) { failures.Add(error); }
+        }
+        if (failures.Count != 0) throw new AggregateException(failures);
     }
 
     private static WorkSelection SeedEchoBindings(Fixture fixture, int count)
@@ -66,7 +68,7 @@ public static partial class ChangeRunnerChecks
         {
             "metadata" => remote with { Revision = "different", Modified = Stamp.AddDays(1) },
             "case" => remote with { Path = "ITEM" },
-            "replacement" => remote with { Id = "replacement" },
+            "replacement" => remote with { Id = "replacement", Modified = Stamp.AddMinutes(1) },
             "kind" => remote with { IsFolder = true },
             "skip" => remote with { Skip = "synthetic-skip" },
             "hash" => remote with { ContentHash = DropboxContentHash.Compute(new byte[] { 2 }) },
@@ -84,8 +86,11 @@ public static partial class ChangeRunnerChecks
         var remoteCounter = new CountingSide(new HookedSide(fixture.Dropbox, beforeRead: path => reads.Add(path)));
         fixture.DropboxView = remoteCounter;
         var counters = new StoreCounters(fixture.Store);
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [], configure: context => context with
-            { Store = counters }).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [], configure: context =>
+        {
+            ((FakeTimeProvider)context.Time).Advance(Stamp.AddDays(1) - context.Time.GetUtcNow());
+            return context with { Store = counters };
+        }).SyncWorkAsync(default);
         var eligible = shape is "exact" or "metadata";
         Check.Require(counters.EchoesSettled == (eligible ? 1 : 0) &&
             reads.Count(path => PathNames.DropboxKey(path) == PathNames.DropboxKey(changed.Path)) == (eligible ? 0 : 1),
@@ -194,14 +199,14 @@ public static partial class ChangeRunnerChecks
         var faulted = first.AnchorWorkId + 49;
         ExecuteDatabase(fixture.DatabasePath!, "CREATE TRIGGER echo_abort AFTER DELETE ON change_work WHEN OLD.work_id=" +
             faulted + " BEGIN SELECT RAISE(ABORT,'echo-fixture'); END;");
-        var order = new List<(string Call, long Work)>();
-        fixture.Hooks.BeforeCallWith = (method, args) =>
-        {
-            lock (order) order.Add((method.Name, args.FirstOrDefault() is WorkSelection selected ? selected.AnchorWorkId : 0));
-        };
-        var failures = new List<RunEvent>();
         var rolledBack = false;
-        var counters = new StoreCounters(fixture.Store);
+        var observed = new EchoRollbackStore(fixture.Store)
+        {
+            RolledBack = error => rolledBack = error.Selection.AnchorWorkId == faulted &&
+                Enumerable.Range(0, 100).All(index => WorkRows(fixture, first.AnchorWorkId + index) == 1)
+        };
+        var order = observed.Order;
+        var counters = new StoreCounters(observed);
         var events = new List<RunEvent>();
         ExecutorContext Configure(ExecutorContext context) => context with
         {
@@ -213,10 +218,7 @@ public static partial class ChangeRunnerChecks
                 {
                     events.Add(item);
                     if (item.Kind != RunEventKind.Failed || item.WorkId != faulted) return;
-                    order.Add(("Failed", faulted));
-                    failures.Add(item);
-                    if (failures.Count == 1)
-                        rolledBack = Enumerable.Range(0, 100).All(index => WorkRows(fixture, first.AnchorWorkId + index) == 1);
+                    observed.Record("Failed", faulted);
                 }
             }
         };
@@ -238,6 +240,89 @@ public static partial class ChangeRunnerChecks
             { Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
         Check.Require(fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0L, 0L),
             "B214-T6c: after removing the fault the next opportunity empties the queue");
+    }
+
+    private static async Task DropboxEchoHostRollbackAsync()
+    {
+        var folder = Directory.CreateTempSubdirectory("SyncSharkEchoHost-");
+        try
+        {
+            EchoRollbackStore observed = null!;
+            var returned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var failed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var rolledBack = false;
+            var armed = false;
+            long first = 0;
+            await using var rig = await Massdex.SyncShark.Engine.Tests.Run.RepairChecks.ComposeRigAsync(folder.FullName,
+                level: 1, decorate: inner =>
+                {
+                    observed = new EchoRollbackStore(inner)
+                    {
+                        RolledBack = error =>
+                        {
+                            rolledBack = error.Selection.AnchorWorkId == first + 49 &&
+                                inner.CountWork("pair-a", error.Selection.PairGeneration, inner.ReadWorkWatermark()).Dropbox == 201;
+                        }
+                    };
+                    return new HookStore(observed) { OnFolderJobProgress = () => { if (armed) returned.TrySetResult(); } };
+                });
+            for (var index = 0; index < 201; index++)
+            {
+                var path = $"X{index:D3}";
+                await File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, path), "content");
+                rig.Wire.SeedFile(path, "content");
+            }
+            Directory.CreateDirectory(Path.Combine(rig.Pair.LocalRoot, "OldY"));
+            rig.Wire.SeedFolder("OldY");
+            using (var baseline = rig.Log(folder.FullName, "baseline"))
+                Check.Require((await rig.RunAsync(baseline, default)).Completed, "B214-T6c host baseline completes");
+            var pairId = rig.Pair.PairId;
+            var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
+            var remote = rig.Store.ReadSource(pairId, Side.Dropbox)!.Value;
+            rig.Wire.SeedChangePage(remote.Cursor!, Enumerable.Range(0, 201)
+                .Select(index => rig.Wire.ChangeExistingFile($"X{index:D3}")).ToArray(), false, "echo-host-terminal");
+            using var log = rig.Log(folder.FullName, "rollback");
+            await rig.Host.DispatchSessionAsync(pairId, () => log, async (session, ct) =>
+            {
+                Check.Require(session.Settings.StoragePageSize == 100, "B214-T6c host uses the specified 100-row page");
+                await rig.Host.CatchUpDropboxAsync(session.Registration, pairId, generation, ct);
+                first = rig.Store.ReadWorkWatermark() - 200;
+                var old = (await session.Local.ReadOneAsync("OldY", ct))!;
+                var moved = await session.Local.MoveAsync(old, "Y", ct);
+                var local = rig.Store.ReadSource(pairId, Side.Local)!.Value;
+                var domain = rig.Pair.Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                var position = rig.Store.ReadJournal(domain)!;
+                Check.Require(rig.Store.AcquireJournalPage(domain, position, position,
+                    [(pairId, generation, local.Epoch, local.Revision, false)],
+                    [(pairId, new ChangeNotice(Side.Local, ChangeKind.Renamed, "Y", "OldY", moved.Id, moved, false, false))]) is not null,
+                    "B214-T6c host acquires Y behind the echo");
+                return true;
+            }, default);
+            var database = Path.Combine(folder.FullName, "composed.db");
+            ExecuteDatabase(database, "CREATE TRIGGER echo_host_abort AFTER DELETE ON change_work WHEN OLD.work_id=" +
+                (first + 49) + " BEGIN SELECT RAISE(ABORT,'echo-host-fixture'); END;");
+            armed = true;
+            using var stopped = rig.Host.Stopping.Register(() => failed.TrySetResult());
+            var auto = new Massdex.SyncShark.Engine.Run.AutoSync(rig.Store, _ => log, rig.Host);
+            auto.Start();
+            try
+            {
+                await Task.WhenAny(returned.Task, failed.Task).WaitAsync(TimeSpan.FromSeconds(30));
+                Check.Require(returned.Task.IsCompleted && rig.Host.Status().Status != AutoStatus.Held && rolledBack &&
+                    rig.Wire.Snapshot().Any(item => item.Path == "Y"),
+                    "B214-T6c: real AutoSync returns normally, host is not Held, atomic rollback preserves work and Y moves");
+            }
+            finally { await auto.StopAsync(); }
+            ExecuteDatabase(database, "DROP TRIGGER echo_host_abort;");
+            await rig.Host.DispatchSessionAsync(pairId, () => log, async (session, ct) =>
+            {
+                await session.Syncer.SyncWorkAsync(ct);
+                return true;
+            }, default);
+            Check.Require(rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark()) == (0L, 0L),
+                "B214-T6c: the real host drains the preserved work after the fault is removed");
+        }
+        finally { Directory.Delete(folder.FullName, true); }
     }
 
     private static async Task DropboxEchoResponsibilityAsync()
@@ -311,58 +396,6 @@ public static partial class ChangeRunnerChecks
                 "B214-T6a: committed RenameApplied permits read-free echo settlement after reopening");
     }
 
-    private static async Task<(int Reads, int Begins)> DropboxEchoMoveAsync(Side origin, int children)
-    {
-        using var fixture = new Fixture(realStore: true);
-        var localRoot = FolderEntry("Old", "local-root");
-        var remoteRoot = FolderEntry("Old", "remote-root");
-        fixture.Local.Seed(localRoot, null);
-        fixture.Dropbox.Seed(remoteRoot, null);
-        var bindings = new List<SyncedEntry> { SyncedEntries.From(localRoot, remoteRoot) };
-        for (var index = 0; index < children; index++)
-        {
-            var local = LocalEntry($"Old/{index:D5}", "local-" + index);
-            var remote = RemoteEntry(local.Path, "remote-" + index);
-            fixture.Local.Seed(local, [1]);
-            fixture.Dropbox.Seed(remote, [1]);
-            bindings.Add(SyncedEntries.From(local, remote));
-        }
-        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = bindings });
-        var source = origin == Side.Local ? fixture.Local : fixture.Dropbox;
-        var moved = await source.MoveAsync(origin == Side.Local ? localRoot : remoteRoot, "New", default);
-        var selected = origin == Side.Local
-            ? Seed(fixture, new ChangeNotice(origin, ChangeKind.Renamed, moved.Path, "Old", moved.Id, moved, false, false))
-            : SeedRemote(fixture, moved);
-        TrustEchoSources(fixture);
-        var localCounter = new CountingSide(fixture.Local);
-        var remoteCounter = new CountingSide(fixture.Dropbox);
-        fixture.LocalView = localCounter;
-        fixture.DropboxView = remoteCounter;
-        var counters = new StoreCounters(fixture.Store);
-        ExecutorContext Configure(ExecutorContext context) => context with
-            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } };
-        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: Configure).SyncWorkAsync(default);
-        Check.Require((origin == Side.Local ? remoteCounter.Moves : localCounter.Moves) == 1,
-            "B214-T1/T2: one native counterpart folder move: " + origin + "/" + children);
-        var echo = bindings.SelectMany(saved =>
-        {
-            var current = fixture.Dropbox.FindById(saved.DropboxId)!;
-            return new[]
-            {
-                new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, saved.DropboxPath, null, null, null, false, false),
-                new ChangeNotice(Side.Dropbox, ChangeKind.Changed, current.Path, null, current.Id, current, false, false)
-            };
-        }).ToArray();
-        AcquireRemotePage(fixture, echo);
-        var readsBeforeEcho = remoteCounter.Reads;
-        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: Configure).SyncWorkAsync(default);
-        Check.Require(remoteCounter.Reads == readsBeforeEcho &&
-            fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0L, 0L),
-            "B214-T1/T2: the complete move echo drains in one opportunity without metadata: " + origin + "/" + children);
-        Console.WriteLine($"B214 move origin={origin} children={children} metadata={remoteCounter.Reads} begins={fixture.Hooks.BegunSelections.Count}");
-        return (remoteCounter.Reads, fixture.Hooks.BegunSelections.Count);
-    }
-
     private static async Task DropboxEchoBoundDeletionAsync(bool explicitKey)
     {
         using var fixture = new Fixture(realStore: true);
@@ -391,11 +424,12 @@ public static partial class ChangeRunnerChecks
             "B214-T5: a bound descendant needs fresh Dropbox absence before Local removal: " + explicitKey);
     }
 
-    private static async Task DropboxEchoOverrideAsync(int overrides)
+    private static async Task DropboxEchoOverrideAsync(int overrides, bool inherited)
     {
         using var fixture = new Fixture(realStore: true);
         var saved = Enumerable.Range(0, overrides).Select(index => SyncedEntries.From(
-            LocalEntry($"P/{index:D6}", "local-" + index), RemoteEntry($"Q/{index:D6}", "remote-" + index))).ToArray();
+            LocalEntry($"P/{index:D6}", "local-" + index), RemoteEntry($"Q/{index:D6}", "remote-" + index)))
+            .Concat(inherited ? [SyncedEntries.From(LocalEntry("P/Z", "local-z"), RemoteEntry("P/Z", "remote-z"))] : []).ToArray();
         fixture.Inner.Commit(PairId, StateChange.Empty with { Record = saved });
         var selection = SeedRemote(fixture, FolderEntry("P", "deleted"),
             new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, "P", null, null, null, false, false));
@@ -405,7 +439,9 @@ public static partial class ChangeRunnerChecks
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [], configure: context => context with
             { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
-        Check.Require(counters.EchoesSettled == (overrides < 100 ? 1 : 0) && counter.Reads == (overrides < 100 ? 0 : 1),
-            "B214-QP2: a short exhausted probe settles; a full probe falls back to one ordinary metadata read: " + overrides);
+        var settles = overrides < 100 && !inherited;
+        Check.Require(counters.EchoesSettled == (settles ? 1 : 0) && counter.Reads == (settles ? 0 : 1) &&
+            (settles || fixture.Hooks.BegunSelections.Any(row => row.AnchorWorkId == selection.AnchorWorkId)),
+            $"B214-QP2: only a short exhausted probe settles; bound/undecided gets one ordinary read: {overrides}/{inherited}");
     }
 }
