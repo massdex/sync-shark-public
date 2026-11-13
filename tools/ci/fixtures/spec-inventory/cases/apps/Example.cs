@@ -7,6 +7,14 @@ public class Example
     public int Overload(int value) => value + Number;
     public string Overload(string value) => value + "alpha";
     public void Raise() => Changed();
+    public async System.Threading.Tasks.Task<int> BlockingAsync(
+        System.IO.Stream stream, System.Threading.CancellationToken cancellationToken)
+    {
+        byte[] buffer = new byte[1];
+        stream.Read(buffer, 0, buffer.Length);
+        await System.Threading.Tasks.Task.Delay(1);
+        return System.Threading.Tasks.Task.FromResult(1).Result;
+    }
     public void EmptyCatch()
     {
         try { Raise(); } catch (System.Exception) { }

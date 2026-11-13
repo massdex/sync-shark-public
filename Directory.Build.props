@@ -15,7 +15,7 @@
     <WarningsNotAsErrors>$(WarningsNotAsErrors);SA1402;SA1649;CA1849;VSTHRD002;VSTHRD103;CA2016;CA1031;RCS1075;CS1591</WarningsNotAsErrors>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>8.0-all</AnalysisLevel>
-    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+    <NuGetLockFilePath>$(SpecInventoryOutput)/$(MSBuildProjectName).packages.lock.json</NuGetLockFilePath>
     <RestoreLockedMode>false</RestoreLockedMode>
     <ErrorLog>$(SpecInventoryOutput)/$(MSBuildProjectName).sarif,version=2.1</ErrorLog>
     <MetricsOutputFile>$(SpecInventoryOutput)/$(MSBuildProjectName).metrics.xml</MetricsOutputFile>

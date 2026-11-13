@@ -67,6 +67,23 @@ def check_metrics(output):
     print('PASS native metrics: partial aggregation, namespaces, overloads, field/event/lambda initializers')
 
 
+def check_diagnostics(output):
+    native = json.loads((output / 'Fixture.sarif').read_text(encoding='utf-8-sig'))
+    results = [r for run in native['runs'] for r in run.get('results', [])]
+    rules = {r['ruleId'] for r in results}
+    expected = {'SA1402', 'SA1649', 'CA1849', 'VSTHRD002', 'VSTHRD103', 'CA2016', 'CA1031', 'RCS1075', 'CS1591'}
+    assert expected <= rules, 'Missing native diagnostics: ' + str(sorted(expected - rules))
+    paths = [loc['physicalLocation']['artifactLocation']['uri'].replace('\\', '/')
+             for r in results for loc in r.get('locations', [])]
+    for area in ('apps', 'tests', 'tools'):
+        assert any('/cases/' + area + '/' in path for path in paths), 'No native finding under ' + area
+    candidates = (output / 'suppressions.txt').read_text(encoding='utf-8-sig')
+    fixture = Path(__file__).parent / 'cases/suppression-syntaxes.txt'
+    for line in fixture.read_text().splitlines()[1:]:
+        assert line in candidates, 'Suppression candidate missing: ' + line
+    print('PASS all requested analyzer rules, scope locations, and suppression candidate syntaxes')
+
+
 if __name__ == '__main__':
     output = Path(sys.argv[1])
     failures = []
@@ -76,9 +93,10 @@ if __name__ == '__main__':
                 check(Path(temporary))
             except Exception as error:
                 failures.append(check.__name__ + ': ' + repr(error))
-    try:
-        check_metrics(output)
-    except Exception as error:
-        failures.append('check_metrics: ' + repr(error))
+    for check in (check_metrics, check_diagnostics):
+        try:
+            check(output)
+        except Exception as error:
+            failures.append(check.__name__ + ': ' + repr(error))
     if failures:
         raise AssertionError('; '.join(failures))

@@ -59,8 +59,10 @@ def compare(current, baseline):
 def finding(rule, message, path=None, line=1, **properties):
     row = {'ruleId': rule, 'level': 'warning', 'message': {'text': message}, 'properties': properties}
     if path:
-        row['locations'] = [{'physicalLocation': {'artifactLocation': {'uri': path},
-                            'region': {'startLine': max(1, int(line))}}}]
+        physical = {'artifactLocation': {'uri': path}}
+        if line:
+            physical['region'] = {'startLine': max(1, int(line))}
+        row['locations'] = [{'physicalLocation': physical}]
     return row
 
 
@@ -69,7 +71,7 @@ def source_lines(path):
     return path.read_text(encoding='utf-8-sig').splitlines(keepends=True)
 
 
-def region_identity(root, result):
+def region_identity(root, result, column_kind='utf16CodeUnits'):
     """Use the native primary region, not inferred declarations or diagnostic text."""
     try:
         physical = result['locations'][0]['physicalLocation']
@@ -83,11 +85,11 @@ def region_identity(root, result):
         if not 1 <= first <= last <= len(lines):
             raise ValueError('region outside source')
         selected = lines[first - 1:last]
-        # SARIF defaults to UTF-16 columns; native converters below use line-only regions.
+        encoding, width = ('utf-32-le', 4) if column_kind == 'unicodeCodePoints' else ('utf-16-le', 2)
         if 'endColumn' in region:
-            selected[-1] = selected[-1].encode('utf-16-le')[:(region['endColumn'] - 1) * 2].decode('utf-16-le')
+            selected[-1] = selected[-1].encode(encoding)[:(region['endColumn'] - 1) * width].decode(encoding)
         if 'startColumn' in region:
-            selected[0] = selected[0].encode('utf-16-le')[(region['startColumn'] - 1) * 2:].decode('utf-16-le')
+            selected[0] = selected[0].encode(encoding)[(region['startColumn'] - 1) * width:].decode(encoding)
         text = ''.join(selected).replace('\r\n', '\n').replace('\r', '\n').strip()
         result['partialFingerprints'] = {'inventory.rule': result['ruleId'], 'inventory.path': file,
                                         'inventory.regionHash': hashlib.sha256(text.encode()).hexdigest()}
@@ -139,7 +141,7 @@ def native_sarif(root, path):
                 artifact['uri'] = file or 'external-input'
                 if file:
                     covered.add(file)
-            region_identity(root, result)
+            region_identity(root, result, run.get('columnKind', 'utf16CodeUnits'))
             rows.append(result)
             if result.get('suppressions'):
                 suppressed = finding('suppression/diagnostic', 'Native tool reported a suppressed diagnostic',
@@ -187,9 +189,11 @@ def repository_checks(root, files):
 
 def coverage(tool, files, covered, status, detail):
     denominators = Counter(language(p) for p in files)
-    numerators = Counter(language(p) for p in set(covered).intersection(files))
+    covered = set(covered).intersection(files)
+    numerators = Counter(language(p) for p in covered)
     return [{'tool': tool, 'language': lang, 'denominator': count,
              'coveredFiles': numerators[lang],
+             'notCoveredFiles': sorted(p for p in files if language(p) == lang and p not in covered),
              'status': 'INCOMPLETE' if status == 'INCOMPLETE' else status if numerators[lang] else 'NOT COVERED',
              'detail': detail} for lang, count in sorted(denominators.items())]
 
@@ -206,6 +210,8 @@ def tool_run(root, output, tool, files):
             covered.update(seen)
         except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as error:
             errors.append(type(error).__name__ + ': ' + str(error))
+        finally:
+            source_lines.cache_clear()
     if tool.get('inputReport'):
         try:
             evaluated = json.loads((output / tool['inputReport']).read_text(encoding='utf-8-sig'))
