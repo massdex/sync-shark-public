@@ -239,7 +239,7 @@ public static class SyncCli
 
     /// <summary>True for the startup refusals that cannot clear without a user action and must never relaunch.</summary>
     public static bool IsPersistentStartupRefusal(int exitCode) => (SyncCliExitCode)exitCode is
-        SyncCliExitCode.StartupReleaseRecoveryRequired or SyncCliExitCode.StartupInvalidDataLocation
+        SyncCliExitCode.StartupReleaseRecoveryRequired
         or SyncCliExitCode.StartupLegacyFootprintRefused;
 
     /// <summary>The edge message key that explains one persistent startup refusal and the user's options.</summary>
