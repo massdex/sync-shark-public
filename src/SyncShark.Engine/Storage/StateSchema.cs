@@ -838,8 +838,9 @@ public static class StateSchema
         "json_extract(pending_json,'$.Version') IS NOT 1 OR " + EchoOverlap + "json_extract(pending_json,'$.Path')) OR " +
         EchoOverlap + "json_extract(pending_json,'$.Saved.LocalPath')) OR " + EchoOverlap + "json_extract(pending_json,'$.Saved.DropboxPath'))));";
     private const string PeerOwnership = "w.path_key=$key AND w.work_id<=$through AND w.work_origin='Acquired' AND w.old_path_key IS NULL AND (w.parent_anchor IS NULL OR NOT EXISTS(SELECT 1 FROM change_work parent WHERE parent.pair_id=w.pair_id AND parent.work_id=w.parent_anchor)) AND (w.before_json IS NULL OR w.before_json=$before) AND NOT EXISTS(SELECT 1 FROM issue_member m WHERE m.work_id=w.work_id) AND NOT EXISTS(SELECT 1 FROM change_work child WHERE child.parent_anchor=w.work_id)";
-    public const string PeerPathPage = WorkEvidence + "w.path_key=$key AND w.work_id>$after AND w.work_id<=$through AND w.work_origin='Acquired' ORDER BY w.path_key,w.work_id LIMIT $take;";
-    public const string OwnedPeerPathPage = WorkEvidence + PeerOwnership + " AND w.work_id>$after ORDER BY w.path_key,w.work_id LIMIT $take;";
+    private static readonly string WorkEvidenceByPath = WorkEvidence.Replace(ClaimWorkFrom, ClaimPeerFrom, StringComparison.Ordinal);
+    public static readonly string PeerPathPage = WorkEvidenceByPath + "w.path_key=$key AND w.work_id>$after AND w.work_id<=$through AND w.work_origin='Acquired' ORDER BY w.path_key,w.work_id LIMIT $take;";
+    public static readonly string OwnedPeerPathPage = WorkEvidenceByPath + PeerOwnership + " AND w.work_id>$after ORDER BY w.path_key,w.work_id LIMIT $take;";
     private const string ClaimedWork = "SELECT w.work_id FROM change_work w INDEXED BY work_identity WHERE " + IdentitySelection + " UNION ALL SELECT w.work_id FROM change_work w WHERE " + PathSelection + " UNION ALL SELECT w.work_id FROM change_work w WHERE w.parent_anchor=$anchor";
     internal const int EchoSubject = 1;
     internal const int EchoSaved = 2;

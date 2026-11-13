@@ -32,6 +32,14 @@ public static partial class ChangeRunnerChecks
         if (failures.Count != 0) throw new AggregateException(failures);
     }
 
+    private static void TrustEchoBaseline(Fixture fixture)
+    {
+        var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
+        fixture.Inner.AcquireJournalPage(VolumeKey, null, new JournalPosition(1, 1),
+            [(PairId, Generation, source.Epoch, source.Revision, false)], []);
+        TrustEchoSources(fixture);
+    }
+
     private static WorkSelection SeedEchoBindings(Fixture fixture, int count)
     {
         fixture.Local.Seed(FolderEntry("X", "local-x"), null);
@@ -50,7 +58,7 @@ public static partial class ChangeRunnerChecks
         }
         fixture.Inner.Commit(PairId, StateChange.Empty with { Record = bindings });
         var (through, epoch, domain) = AcquireRemotePage(fixture, [.. notices]);
-        TrustEchoSources(fixture);
+        TrustEchoBaseline(fixture);
         return new(PairId, Generation, epoch, Side.Dropbox, domain, notices[0].Id,
             PathNames.DropboxKey(notices[0].Path), through - count + 1, through);
     }
@@ -85,7 +93,7 @@ public static partial class ChangeRunnerChecks
             fixture.Dropbox.Seed(changed, [2]);
         }
         var selection = SeedRemote(fixture, changed);
-        TrustEchoSources(fixture);
+        TrustEchoBaseline(fixture);
         var reads = new List<string>();
         var remoteCounter = new CountingSide(new HookedSide(fixture.Dropbox, beforeRead: path => reads.Add(path)));
         fixture.DropboxView = remoteCounter;
@@ -151,7 +159,7 @@ public static partial class ChangeRunnerChecks
         fixture.Dropbox.Seed(remote, null);
         var moved = old with { Path = "Y" };
         fixture.Local.Seed(moved, null);
-        return Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Renamed, "Y", "OldY", moved.Id, moved, false, false));
+        return Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Renamed, "Y", "OldY", moved.Id, moved, false, false), page: 2);
     }
 
     private static async Task DropboxEchoFifoAsync(int echoes, bool stagedEdit)
@@ -392,7 +400,7 @@ public static partial class ChangeRunnerChecks
             new ChangeNotice(Side.Dropbox, ChangeKind.Changed, "New", null, remote.Id, remote, false, false),
             new ChangeNotice(Side.Dropbox, ChangeKind.Changed, "New/c", null, remoteChild.Id,
                 remoteChild with { Path = "New/c" }, false, false));
-        TrustEchoSources(fixture);
+        TrustEchoBaseline(fixture);
         fixture.RestartStore();
         var reads = new List<string>();
         var localCounter = new CountingSide(fixture.Local);
@@ -422,7 +430,7 @@ public static partial class ChangeRunnerChecks
         var path = explicitKey ? "Remote" : "P";
         var selected = SeedRemote(fixture, FolderEntry(path, "remote-p"),
             new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, path, null, null, null, false, false));
-        TrustEchoSources(fixture);
+        TrustEchoBaseline(fixture);
         var readBeforeDelete = false;
         var reads = new List<string>();
         fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: read =>
@@ -449,7 +457,7 @@ public static partial class ChangeRunnerChecks
         fixture.Inner.Commit(PairId, StateChange.Empty with { Record = saved });
         var selection = SeedRemote(fixture, FolderEntry("P", "deleted"),
             new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, "P", null, null, null, false, false));
-        TrustEchoSources(fixture);
+        TrustEchoBaseline(fixture);
         var counter = new CountingSide(fixture.Dropbox);
         fixture.DropboxView = counter;
         var counters = new StoreCounters(fixture.Store);

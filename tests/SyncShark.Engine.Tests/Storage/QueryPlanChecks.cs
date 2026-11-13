@@ -74,14 +74,17 @@ public static class QueryPlanChecks
             inherited.Any(line => line.Contains("synced_local_key", StringComparison.Ordinal) &&
                 line.Contains("<expr>>? AND <expr><?", StringComparison.Ordinal)),
             "B214-QP1: one bounded inherited-key range: " + string.Join("; ", inherited));
-        var peer = Plan(connection, StateSchema.PeerPathPage);
-        Console.WriteLine("B214-QP1 Local peer plan: " + string.Join("; ", peer));
-        Check.Require(peer.Any(line => line.StartsWith("SEARCH change_work ", StringComparison.Ordinal) &&
-            line.Contains("work_path", StringComparison.Ordinal)), "B214-QP1: Local peers seek work_path");
+        var peers = new[] { StateSchema.PeerPathPage, StateSchema.OwnedPeerPathPage }.Select(sql => Plan(connection, sql)).ToArray();
+        foreach (var peer in peers)
+        {
+            Console.WriteLine("B214-QP1 Local peer plan: " + string.Join("; ", peer));
+            Check.Require(peer.Any(line => line.StartsWith("SEARCH w USING INDEX work_path ", StringComparison.Ordinal) &&
+                line.Contains("path_key=?", StringComparison.Ordinal)), "B214-QP1: Local peers seek work_path at the exact path");
+        }
         var pending = Plan(connection, StateSchema.EchoPending, keepPair: true);
         Check.Require(pending.Any(line => line.StartsWith("SEARCH pair USING INTEGER PRIMARY KEY", StringComparison.Ordinal)),
             "B214-QP1: pending effects read the pair primary key");
-        foreach (var line in direct.Concat(inherited).Concat(peer).Concat(pending))
+        foreach (var line in direct.Concat(inherited).Concat(peers.SelectMany(plan => plan)).Concat(pending))
             Check.Require(!new[] { "SCAN synced_entry", "SCAN change_work", "LIST SUBQUERY", "MATERIALIZE",
                 "COMPOUND", "UNION ALL", "USE TEMP B-TREE" }.Any(part => line.Contains(part, StringComparison.Ordinal)),
                 "B214-QP1: no materialization, durable scan or read-time sort: " + line);
@@ -114,7 +117,7 @@ public static class QueryPlanChecks
         }
         foreach (var (overrides, inherited, rows, found) in new[]
         {
-            (10, false, 10, false), (10, true, 11, true),
+            (10, false, 10, false), (10, true, 11, true), (60, false, 60, false),
             (pageSize, false, pageSize, false), (pageSize - 1, true, pageSize, true)
         })
         {
