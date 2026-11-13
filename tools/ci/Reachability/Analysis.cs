@@ -68,7 +68,7 @@ internal sealed class Analysis(string root, Config config)
         catch (Exception error)
         {
             // Never publish candidate rows after a failed completeness gate.
-            var message = error.Message.Replace(graph.Root, "<repo>", StringComparison.OrdinalIgnoreCase);
+            var message = error.ToString().Replace(graph.Root, "<repo>", StringComparison.OrdinalIgnoreCase);
             File.WriteAllText(Path.Combine(args[1], "failure.json"), JsonSerializer.Serialize(new {
                 valid = false, diagnostic = message, elapsedSeconds = clock.Elapsed.TotalSeconds,
                 peakWorkingSetBytes = Process.GetCurrentProcess().PeakWorkingSet64 }));
