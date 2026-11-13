@@ -1216,7 +1216,7 @@ internal sealed partial class ChangeTable
             (!pathOnly || row.Side == Side.Local && row.Identity is null && row.Obligation is null &&
                 notice.Id is null && notice.Observed is { IsFolder: false, Skip: null }) &&
             before is not { IsFolder: true } && (before is null ||
-                before.LocalKey == row.Key && (pathOnly ? row.Identity is null : before.LocalId == row.Identity)) &&
+                before.LocalKey == row.Key && (before.LocalId == row.Identity)) &&
             Read(transaction, StateSchema.TransferableWork, static reader => reader.GetBoolean(StateSchema.FirstColumn),
                 (StateSchema.ParamPairRow, pair), (StateSchema.ParamWork, row.WorkId)).First()
             ? (notice, before) : null;
