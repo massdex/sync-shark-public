@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "new-file-case-rename",
+    "scenarios-offline"
+  ],
+  "core": [],
+  "ui": []
+}
