@@ -48,13 +48,8 @@ public sealed partial class StateStore : IStateStore
             if (ids.Length == 0) return null;
             if (ids.Length != 1) throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged);
             var candidate = IssueTable.ReadItemRetryState(_connection, transaction, pairId, pair, ids)[ids[0]];
-            // The exact comparison runs first; only its miss pays for the binding read and the case-rename pairing
-            // (43a), never a subset.
             if (candidate is null || candidate.Token.PairGeneration != expectedGeneration || !(registeredWithin
-                    ? candidate.Token.Subject.HasItemsWithin(subject) : candidate.Token.Subject.HasSameItems(subject) ||
-                      local.Id is { Length: > 0 } && candidate.Token.Subject.HasCaseRenamedItems(subject,
-                          ReadOne(transaction, StateSchema.SelectSyncedByLocalKey, DecodeSynced,
-                              (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, key)))))
+                    ? candidate.Token.Subject.HasItemsWithin(subject) : candidate.Token.Subject.HasSameItems(subject)))
                 throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged);
             return candidate;
         }
