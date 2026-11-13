@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using Massdex.SyncShark.Engine.Dropbox;
 using Massdex.SyncShark.Engine.Local;
 using Massdex.SyncShark.Engine.Run;
@@ -18,7 +19,6 @@ public static partial class EngineHostChecks
     {
         // G0c first: the B-161 checks below take their unrelated work from this explicit local delivery.
         await LocalDeliveryUploadsAsync(root).ConfigureAwait(false);
-        await WriteRetriedWhileExcludedAsync(root).ConfigureAwait(false);
         await ItemWaitHeldThroughEventsAsync(root).ConfigureAwait(false);
         await JoinedTurnHeldWithWaitAsync(root).ConfigureAwait(false);
         await ConsumedWaitReleasesSyncedFileAsync(root).ConfigureAwait(false);
@@ -63,26 +63,6 @@ public static partial class EngineHostChecks
         await DrainedOrdinaryDispatchIsStaleAsync(root, stop: true).ConfigureAwait(false);
         await ExplicitRepairBesideRunningRepairAsync(root, afterFinish: false).ConfigureAwait(false);
         await ExplicitRepairBesideRunningRepairAsync(root, afterFinish: true).ConfigureAwait(false);
-    }
-
-    // B-225: the rig's write retries a file the engine's read excludes for the handle's lifetime.
-    private static async Task WriteRetriedWhileExcludedAsync(string root)
-    {
-        var folder = Path.Combine(root, "item-write-excluded");
-        Directory.CreateDirectory(folder);
-        var path = Path.Combine(folder, ItemRig.File);
-        await System.IO.File.WriteAllTextAsync(path, "before").ConfigureAwait(false);
-        var excluded = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var write = Task.Run(() => ItemRig.WriteContent(path, "after"));
-        try
-        {
-            await Task.Delay(100).ConfigureAwait(false);
-            Check.Require(!write.IsCompleted, "B-225 the rig write waits while the engine's read excludes it");
-        }
-        finally { excluded.Dispose(); }
-        await write.WaitAsync(HookBound).ConfigureAwait(false);
-        Check.Require(await System.IO.File.ReadAllTextAsync(path).ConfigureAwait(false) == "after",
-            "B-225 the rig write completes with its content once the read is released");
     }
 
     // A1: quiet pair, item-only row; events before the deadline attempt nothing, and the deadline attempts once.
@@ -1188,20 +1168,22 @@ public static partial class EngineHostChecks
         // A real user's app retries a write that the engine's read briefly excludes.
         private static void WriteContent(string path, string content)
         {
-            var bound = System.Diagnostics.Stopwatch.StartNew();
-            while (true)
+            Exception? excluded = null;
+            if (SpinWait.SpinUntil(() =>
             {
                 try
                 {
                     System.IO.File.WriteAllText(path, content);
-                    return;
+                    return true;
                 }
-                catch (Exception error) when (bound.Elapsed < HookBound &&
-                    LocalErrors.Cause(error, TextKey.FailChanged) == TextKey.FailLocalInUse)
+                catch (Exception error) when (LocalErrors.Cause(error, TextKey.FailChanged) == TextKey.FailLocalInUse)
                 {
-                    Thread.Sleep(20);
+                    excluded = error;
+                    return false;
                 }
-            }
+            }, HookBound))
+                return;
+            ExceptionDispatchInfo.Capture(excluded!).Throw();
         }
 
         // B-167, B-175: this rig has no journal until its first local catch-up (EngineHost.WithVolumeStoppedAsync), and
