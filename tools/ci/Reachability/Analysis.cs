@@ -142,7 +142,8 @@ internal sealed class Analysis(string root, Config config)
     }
     internal void Reference(TypeNode from, ISymbol? symbol, string path, int position, string reason = "reference")
     {
-        if (symbol is null) return;
+        // Control-flow labels have no type dependency; Roslyn deliberately rejects their containment API.
+        if (symbol is null or ILabelSymbol) return;
         if (symbol is IAliasSymbol alias) symbol = alias.Target;
         var owner = symbol.ContainingType?.ToDisplayString();
         if (from.Product && ((owner == "System.Type" && symbol.Name is "GetType" or "MakeGenericType" or "InvokeMember") ||
