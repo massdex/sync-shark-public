@@ -1,0 +1,6 @@
+# Engine check groups that need the authorized live route. Hosted CI must not
+# schedule them, and they must not go in .ci-lane.json. One owner for the list:
+# read by tools/Test-PreReview.ps1; hosted CI scheduling is to read it once the
+# CI-split lane lands.
+scenarios
+scenarios-live
