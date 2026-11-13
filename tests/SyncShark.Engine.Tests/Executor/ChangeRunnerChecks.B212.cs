@@ -15,14 +15,25 @@ public static partial class ChangeRunnerChecks
     private const string RepairX = "folder-x";
     private const string RepairR = "folder-r";
     private const string RepairE = "folder-e";
+    private const string RepairThird = "Third";
+    private const string RepairZed = "Zed";
 
     public static void RunDuplicateRepair() => RunDuplicateRepairAsync().GetAwaiter().GetResult();
 
+    // Every witness runs, so one cycle reports all independent failures together (standard 4.1).
     private static async Task RunDuplicateRepairAsync()
     {
-        await RepairDropboxVictimAsync();
-        await RepairHandDeletedVictimAsync();
-        await RepairLateDescendantAsync();
+        var failures = new List<Exception>();
+        foreach (var witness in new Func<Task>[]
+        {
+            RepairDropboxVictimAsync, RepairHandDeletedVictimAsync, RepairLateDescendantAsync, RepairObsoleteHeldAsync,
+            RepairChangedShapeAsync, RepairLinkedElsewhereAsync, RepairHeldThenRetryAsync, RepairOwnRetainedAsync
+        })
+        {
+            try { await witness(); }
+            catch (Exception error) { failures.Add(error); }
+        }
+        if (failures.Count > 0) throw new AggregateException(failures);
     }
 
     // E1 (T1): one Dropbox delete, the settle through the operation path (-7 2), then W renames R onto Renamed.
@@ -113,6 +124,158 @@ public static partial class ChangeRunnerChecks
             "; obligations=" + RepairRows(fixture));
     }
 
+    // E9 (T5): a held obligation whose bindings changed is obsolete: the row goes, its Failure closes, the obligation
+    // makes no provider call, and W runs.
+    private static async Task RepairObsoleteHeldAsync()
+    {
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var fixture = RepairFixture(victimPresent: false);
+        RepairHold(fixture, TextKey.ReasonHistory, TextKey.ReasonNotEmpty);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { ForgetSelf = [(Side.Local, PathNames.Key(RepairNew))] });
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Renamed, RepairNew, RepairOld,
+            RepairX, null, false, false));
+        var (local, dropbox, submits) = RepairViews(fixture);
+        int? beforeLanes = null;
+        fixture.Hooks.BeforeCall = method =>
+        {
+            if (method.Name == nameof(IStateStore.BeginSelection))
+                beforeLanes ??= local.Reads + local.Listings + dropbox.Reads + dropbox.Listings + submits.Count;
+        };
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        fixture.Hooks.BeforeCall = null;
+        var renamed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew));
+        Check.Require(RepairRows(fixture) == 0 && fixture.Inner.Issues(PairId).Count == 0 && beforeLanes == 0 &&
+            dropbox.Moves == 1 && renamed is { LocalId: RepairX, DropboxId: RepairR },
+            "B212-E9: the obsolete obligation settles with no provider call, its Failure closes, and W runs: obligations=" +
+            RepairRows(fixture) + "; issues=" + fixture.Inner.Issues(PairId).Count + "; callsBeforeLanes=" + beforeLanes +
+            "; dropboxMoves=" + dropbox.Moves + "; renamed=" + renamed);
+    }
+
+    // E9c: X bound to a third folder after the step: the changed shape settles the obligation with one
+    // FailDuplicateFolderLinks and deletes nothing.
+    private static async Task RepairChangedShapeAsync()
+    {
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var fixture = RepairFixture(victimPresent: true);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [RepairBinding(RepairThird, "folder-f")] });
+        fixture.Dropbox.Seed(FolderEntry(RepairThird, "folder-f"), null);
+        var (local, _, submits) = RepairViews(fixture);
+        await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        var issues = fixture.Inner.Issues(PairId);
+        Check.Require(RepairRows(fixture) == 0 && issues is [{ Cause: TextKey.FailDuplicateFolderLinks }] &&
+            submits.Count == 0 && local.Deletes == 0,
+            "B212-E9c: a changed shape settles with one links notice and no delete: obligations=" + RepairRows(fixture) +
+            "; issues=" + string.Join(" | ", issues.Select(issue => issue.Cause + ":" + issue.Path)) +
+            "; submits=" + submits.Count + "; localDeletes=" + local.Deletes);
+    }
+
+    // E13: E's id is bound elsewhere (Z<->E): no delete, one Failure naming ReasonLinkedElsewhere for both items, and
+    // the obligation is held by it.
+    private static async Task RepairLinkedElsewhereAsync()
+    {
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var fixture = RepairFixture(victimPresent: true);
+        fixture.Inner.Commit(PairId, StateChange.Empty with
+            { Record = [SyncedEntries.From(FolderEntry(RepairZed, "folder-z"), FolderEntry(RepairZed, RepairE))] });
+        var (local, _, submits) = RepairViews(fixture);
+        await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        var issues = fixture.Inner.Issues(PairId);
+        Check.Require(submits.Count == 0 && local.Deletes == 0 && issues is [{ Cause: TextKey.FailDuplicateFolderBinding,
+                Path: RepairOld } failure] && failure.Subject.Folders ==
+            new IssueSubject.DuplicateFolders(TextKey.ReasonLinkedElsewhere, TextKey.ReasonLinkedElsewhere) &&
+            RepairHeldBy(fixture) == failure.Id,
+            "B212-E13: a linked-elsewhere partner holds one Failure and deletes nothing: submits=" + submits.Count +
+            "; issues=" + string.Join(" | ", issues.Select(issue => issue.Cause + ":" + issue.Path + ":" + issue.Subject.Folders)) +
+            "; heldBy=" + RepairHeldBy(fixture));
+    }
+
+    // E5 (T7): A fails P2 and D fails P6, so one Failure holds the obligation and W, with no delete. After E's file
+    // is moved away, Retry releases the hold without reading X's paths, and the next opportunity gives E1's outcome.
+    private static async Task RepairHeldThenRetryAsync()
+    {
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var fixture = RepairFixture(victimPresent: true);
+        var inner = RemoteEntry(RepairNew + "/inner", "inner-dropbox");
+        fixture.Dropbox.Seed(inner, [1]);
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Renamed, RepairNew, RepairOld,
+            RepairX, null, false, false));
+        var (local, dropbox, submits) = RepairViews(fixture);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        var issues = fixture.Inner.Issues(PairId);
+        Check.Require(submits.Count == 0 && dropbox.Moves == 0 && issues is [{ Cause: TextKey.FailDuplicateFolderBinding } held] &&
+            held.Subject.Folders == new IssueSubject.DuplicateFolders(TextKey.ReasonHistory, TextKey.ReasonNotEmpty) &&
+            RepairHeldBy(fixture) == held.Id &&
+            fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) != (0, 0),
+            "B212-E5: one Failure holds the obligation and W, with no delete: submits=" + submits.Count +
+            "; dropboxMoves=" + dropbox.Moves + "; issues=" +
+            string.Join(" | ", issues.Select(issue => issue.Cause + ":" + issue.Path + ":" + issue.Subject.Folders)) +
+            "; heldBy=" + RepairHeldBy(fixture));
+        await fixture.Dropbox.DeleteAsync(inner, null, default);
+        var reads = local.Reads + local.Listings + dropbox.Reads + dropbox.Listings;
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
+            .ResolveAsync(issues[0], ResolutionChoice.Retry, null, null, guard.Token).WaitAsync(guard.Token);
+        var retryReads = local.Reads + local.Listings + dropbox.Reads + dropbox.Listings - reads;
+        Check.Require(retryReads == 0 && fixture.Inner.IssueById(PairId, issues[0].Id) is null && RepairHeldBy(fixture) is null &&
+            RepairRows(fixture) == 1,
+            "B212-E5: Retry releases the hold and reads none of X's paths: reads=" + retryReads +
+            "; heldBy=" + RepairHeldBy(fixture) + "; obligations=" + RepairRows(fixture));
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        var renamed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew));
+        Check.Require(submits.Count == 1 && dropbox.Moves == 1 && LocalEffects(local) == 0 && RepairRows(fixture) == 0 &&
+            fixture.Inner.Issues(PairId).Count == 0 && renamed is { LocalId: RepairX, DropboxId: RepairR },
+            "B212-E5: after Retry the next opportunity gives the E1 outcome: submits=" + submits.Count +
+            "; dropboxMoves=" + dropbox.Moves + "; localEffects=" + LocalEffects(local) +
+            "; obligations=" + RepairRows(fixture) + "; issues=" + fixture.Inner.Issues(PairId).Count + "; renamed=" + renamed);
+    }
+
+    // E2b (T15): a child appears in E after the freeze, so the send refuses and the Repair operation is Retained with
+    // its own notice; row 3 (Own, inactive) then does nothing, so no FailDuplicateFolderBinding is raised.
+    private static async Task RepairOwnRetainedAsync()
+    {
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var fixture = RepairFixture(victimPresent: true);
+        var (_, _, submits) = RepairViews(fixture);
+        fixture.Hooks.AfterCall = (name, _, _) =>
+        {
+            if (name != nameof(IStateStore.BeginFolderRemoval)) return;
+            fixture.Hooks.AfterCall = null;
+            fixture.Dropbox.Seed(RemoteEntry(RepairNew + "/added", "added-dropbox"), [1]);
+        };
+        for (var opportunity = 0; opportunity < 2; opportunity++)
+            await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
+                .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        var operations = fixture.Inner.UnresolvedFolderRemovals(PairId, default).ToArray();
+        var issues = fixture.Inner.Issues(PairId);
+        Check.Require(submits.Count == 0 &&
+            operations is [{ Active: false, Phase: FolderRemovalPhase.Retained, Authority: FolderRemovalAuthority.Repair }] &&
+            RepairRows(fixture) == 1 && RepairHeldBy(fixture) is null && issues.Count >= 1 &&
+            issues.All(issue => issue.Cause != TextKey.FailDuplicateFolderBinding),
+            "B212-E2b: the changed endpoint retains the own operation and raises no duplicate-folder Failure: submits=" +
+            submits.Count + "; operations=" +
+            string.Join(" | ", operations.Select(operation => operation.Phase + ":" + operation.Active + ":" + operation.Authority)) +
+            "; obligations=" + RepairRows(fixture) + "; heldBy=" + RepairHeldBy(fixture) +
+            "; issues=" + string.Join(" | ", issues.Select(issue => issue.Cause + ":" + issue.Path)));
+    }
+
+    // The runner's own hold commit (-6 3.5.4), made directly: the Failure at A's shared-side path and the CAS hold.
+    private static void RepairHold(Fixture fixture, TextKey first, TextKey second)
+    {
+        var subject = IssueSubject.DuplicateFolderItems(Side.Local,
+            [RepairBinding(RepairOld, RepairR), RepairBinding(RepairNew, RepairE)]) with
+            { Folders = new IssueSubject.DuplicateFolders(first, second) };
+        fixture.Inner.Commit(PairId, StateChange.Empty with
+        {
+            Raise = [(IssueKind.Failure, TextKey.FailDuplicateFolderBinding, RepairOld, subject)],
+            HoldRepair = (Side.Local, RepairX, null)
+        });
+        Check.Require(RepairHeldBy(fixture) is not null, "B212 fixture: the hold commit binds the obligation to its Failure");
+    }
+
     // The T1 store: the two duplicate bindings and A's saved child, committed and then made a genuine version-14 file
     // (the two v15 additions removed), so reopening runs the one-time step. Its own schema check refuses any other shape.
     private static Fixture RepairFixture(bool victimPresent)
@@ -164,6 +327,15 @@ public static partial class ChangeRunnerChecks
         var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
         return new WorkSelection(PairId, Generation, source.Epoch, Side.Local, VolumeKey, RepairX,
             PathNames.KeyFor(Side.Local, RepairNew), 0, 0);
+    }
+
+    private static long? RepairHeldBy(Fixture fixture)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + fixture.DatabasePath + ";Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT issue_id FROM binding_repair;";
+        return command.ExecuteScalar() is long id ? id : null;
     }
 
     private static long RepairRows(Fixture fixture)
