@@ -14,6 +14,8 @@ public static class StateCommitter
         ICollection<(Issue Issue, bool IsNew)>? settled = null)
     {
         ValidateChange(change, scans);
+        // Before any stage writes: a settle's own forget would otherwise hide the binding it checks (-7 2).
+        if (change.SettleRepair is { } settle) DuplicateRepairs.RequirePreForget(connection, transaction, pairId, settle);
         foreach (var rename in change.Renames)
             ApplyRename(connection, transaction, pairId, rename, scans, change);
 
@@ -26,6 +28,8 @@ public static class StateCommitter
             foreach (var endpoint in released)
                 changes.RegisterReleasedEndpoint(transaction, pairId, endpoint.Side, endpoint.Path, endpoint.Id);
 
+        if (change.SettleRepair is { } settlement)
+            DuplicateRepairs.Settle(connection, transaction, changes, pairId, settlement, now, raised);
         if (change.Release is { } release) DuplicateRepairs.Release(connection, transaction, pairId, release);
         // Acknowledged first: Close leaves a Failure in place while it still carries unfinished first-run work.
         foreach (var item in change.FirstRunAcknowledged)
@@ -34,6 +38,9 @@ public static class StateCommitter
             IssueTable.Close(connection, transaction, pairId, path, kinds, change.CloseScope);
         foreach (var (kind, cause, path, subject) in change.Raise)
             IssueTable.Raise(connection, transaction, pairId, kind, cause, path, subject, now, raised, settled);
+        // The hold commit raises exactly its one Failure; the hold binds to whatever Failure that raise left there.
+        if (change.HoldRepair is { } hold)
+            DuplicateRepairs.Hold(connection, transaction, pairId, hold, change.Raise.Single().Path);
     }
 
     private static void ValidateChange(StateChange change, IReadOnlyList<ScanPartition> scans)

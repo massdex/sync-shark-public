@@ -867,6 +867,14 @@ public static class StateSchema
     internal const string InsertDuplicateRepair = "INSERT INTO binding_repair(pair_id,side,identity,other_first,other_second,issue_id) VALUES($pair,$side,$identity,min($first,$second),max($first,$second),NULL) ON CONFLICT(pair_id,side,identity) DO NOTHING;";
     internal const string ReleaseClashContinuations = "UPDATE change_work SET rename_continuation_json=NULL WHERE pair_id=" + PairRow + " AND json_extract(rename_continuation_json,'$.Value.Clash.Id')=$issue;";
     internal const string ReleaseRepairHold = "UPDATE binding_repair SET issue_id=NULL WHERE pair_id=" + PairRow + " AND issue_id=$issue;";
+    private const string RepairKeyFilter = " WHERE pair_id=$pair AND side=$side AND identity=$identity";
+    /// <summary>V1, the obligation's primary-key probe.</summary>
+    internal const string SelectDuplicateRepair = "SELECT other_first,other_second,issue_id FROM binding_repair" + RepairKeyFilter + ";";
+    internal const string DeleteDuplicateRepair = "DELETE FROM binding_repair" + RepairKeyFilter + ";";
+    /// <summary>The hold CAS: binds the obligation to its Failure only while it still names the expected issue.</summary>
+    internal const string HoldDuplicateRepair = "UPDATE binding_repair SET issue_id=$issue" + RepairKeyFilter + " AND issue_id IS $expected;";
+    /// <summary>A FailDuplicateFolderBinding Failure is responsible while an obligation names it (-6 3.5.4).</summary>
+    internal const string RepairHoldsIssue = "SELECT EXISTS(SELECT 1 FROM binding_repair WHERE pair_id=$pair AND issue_id=$issue);";
     internal const string LocalEchoPending = "SELECT EXISTS(SELECT 1 FROM pair WHERE id=$pair AND pending_json IS NOT NULL AND (" +
         "json_extract(pending_json,'$.Version') IS NOT 1 OR " + EchoOverlap + "json_extract(pending_json,'$.Path')) OR " +
         EchoOverlap + "json_extract(pending_json,'$.Saved.LocalPath')) OR " + EchoOverlap + "json_extract(pending_json,'$.Saved.DropboxPath'))));";

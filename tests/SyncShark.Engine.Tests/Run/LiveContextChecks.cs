@@ -1283,7 +1283,7 @@ public static class LiveContextChecks
 
     private static FolderRemovalState Operation() =>
         new(OperationId, Generation, FolderRemovalPhase.Prepared, Side.Local, Folder(ChildPath), null, null,
-            Neutral, null, true, null, null);
+            Neutral, null, true, null, null, FolderRemovalAuthority.Inferred);
 
     private static RepairSummary CompletedSummary() => new(RunId, DateTimeOffset.UnixEpoch,
         DateTimeOffset.UnixEpoch, true, false, null, false, new Dictionary<string, int>(),

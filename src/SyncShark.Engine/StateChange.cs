@@ -28,6 +28,16 @@ public sealed record StateChange(
     /// before Close, so the issue's responsibility ends in the same commit (B-216, -6 3.5.4).</summary>
     public Issue? Release { get; init; }
 
+    /// <summary>Settles X's duplicate-folder obligation on Side. Victim set dissolves that binding (OperationId set when a
+    /// Repair operation removed its endpoint, null for the state-only forget); Victim null is the obsolete settle. Handoff
+    /// names where X was proven present, for its released-endpoint rename (-6 3.5.5, -7 2).</summary>
+    public (Side Side, string Identity, SyncedEntry? Victim, string? OperationId,
+        (Side Side, string Path, string Id)? Handoff)? SettleRepair { get; init; }
+
+    /// <summary>Holds X's obligation on Side behind the one Failure this change raises, a CAS on the issue it recorded
+    /// (-6 3.5.4).</summary>
+    public (Side Side, string Identity, long? ExpectedIssue)? HoldRepair { get; init; }
+
     /// <summary>Process-local provenance for a listed Record or Adopt, revalidated after its queue wait.</summary>
     internal Guid? ListedScanId { get; init; }
 
@@ -47,7 +57,8 @@ public sealed record StateChange(
             PathNames.Same(before.DropboxPath, rename.After.DropboxPath) &&
             (before.LocalPath != rename.After.LocalPath || before.DropboxPath != rename.After.DropboxPath)) &&
         Record.Count + ForgetSelf.Count + ForgetSubtrees.Count + Raise.Count + Close.Count + FirstRunAcknowledged.Count +
-        StaleBindings.Count + ForgetBothSubtrees.Count == 0 && LocalPublished is null && CloseScope is null;
+        StaleBindings.Count + ForgetBothSubtrees.Count == 0 && LocalPublished is null && CloseScope is null &&
+        Release is null && SettleRepair is null && HoldRepair is null;
 
     /// <summary>A change that records, forgets and closes nothing.</summary>
     public static StateChange Empty { get; } = new([], [], [], [], [], [], []);

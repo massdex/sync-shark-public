@@ -39,7 +39,7 @@ internal static class DuplicateRepairs
         using var reader = command.ExecuteReader();
         var rows = new List<SyncedEntry>();
         while (reader.Read()) rows.Add(StateEncoding.ReadSynced(reader, reader.GetString(0), 1));
-        return rows.OrderBy(row => row.LocalKey, StringComparer.Ordinal).ToArray();
+        return rows.OrderBy(row => row.LocalKey, PathLocks.KeyComparer).ToArray();
     }
 
     private static void RecordGroup(SqliteConnection connection, SqliteTransaction transaction, long pair,
@@ -47,16 +47,14 @@ internal static class DuplicateRepairs
     {
         var other = PathNames.Other(side);
         var qualifies = bindings.Count == 2 && bindings[0].IdOn(other) != bindings[1].IdOn(other) &&
-            bindings.All(binding => Bindings(connection, transaction, pair, other,
-                StateEncoding.IdFor(other, binding.IdOn(other))!, foldersOnly: false, take: 2).Count == 1 &&
+            bindings.All(binding => BoundOnce(connection, transaction, pair, side, binding) &&
                 !HasCustody(connection, transaction, pair, binding, null));
         using var pairQuery = StorageCommand.Create(connection, transaction, StateSchema.PairIdByRow,
             (StateSchema.ParamPairRow, pair));
         var pairId = (string)pairQuery.ExecuteScalar()!;
         if (!qualifies)
         {
-            IssueTable.Raise(connection, transaction, pairId, IssueKind.Failure, TextKey.FailDuplicateFolderLinks,
-                bindings[0].PathOn(side), LinksSubject(side, bindings), now);
+            LinksNotice(connection, transaction, pairId, side, bindings, now, null);
             return;
         }
         using (var insert = StorageCommand.Create(connection, transaction, StateSchema.InsertDuplicateRepair,
@@ -65,6 +63,12 @@ internal static class DuplicateRepairs
             ("$second", StateEncoding.IdFor(other, bindings[1].IdOn(other))))) insert.ExecuteNonQuery();
         ReleaseClashes(connection, transaction, pairId, side, bindings);
     }
+
+    /// <summary>The one FailDuplicateFolderLinks notice for a group that has no obligation (L-5, G1).</summary>
+    private static void LinksNotice(SqliteConnection connection, SqliteTransaction transaction, string pairId, Side side,
+        IReadOnlyList<SyncedEntry> bindings, DateTimeOffset now, ICollection<Issue>? raised) =>
+        IssueTable.Raise(connection, transaction, pairId, IssueKind.Failure, TextKey.FailDuplicateFolderLinks,
+            bindings[0].PathOn(side), LinksSubject(side, bindings), now, raised);
 
     private static IssueSubject LinksSubject(Side side, IReadOnlyList<SyncedEntry> bindings)
     {
@@ -96,6 +100,192 @@ internal static class DuplicateRepairs
         ChangeTable.ReleaseClashContinuations(connection, transaction, pairId, issue);
         using var command = StorageCommand.Create(connection, transaction, StateSchema.ReleaseRepairHold,
             (StateSchema.ParamPair, pairId), (StateSchema.ParamIssue, issue.Id));
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>The pre-forget invariants of each settle shape, checked once before any commit stage writes
+    /// (-7 2): the operation path refuses as folder state, the state-only and obsolete settles as changed underneath.</summary>
+    internal static void RequirePreForget(SqliteConnection connection, SqliteTransaction transaction, string pairId,
+        (Side Side, string Identity, SyncedEntry? Victim, string? OperationId, (Side Side, string Path, string Id)? Handoff) settle)
+    {
+        var pair = IssueTable.PairFor(connection, transaction, pairId);
+        var identity = StateEncoding.IdFor(settle.Side, settle.Identity)!;
+        if (settle.Victim is not { } victim)
+        {
+            if (!Obsolete(connection, transaction, pairId, pair, settle.Side, identity))
+                throw new ChangedUnderneathException(string.Empty);
+            return;
+        }
+        var exact = BindingAt(connection, transaction, pairId, victim.LocalKey) == victim &&
+            !HasSavedDescendants(connection, transaction, pair, victim);
+        if (settle.OperationId is not null)
+        {
+            if (!exact || Row(connection, transaction, pair, settle.Side, identity) is null)
+                throw new FolderStateRefusedException();
+            return;
+        }
+        if (!exact || !Validate(connection, transaction, pair, settle.Side, identity, null))
+            throw new ChangedUnderneathException(victim.PathOn(settle.Side));
+    }
+
+    /// <summary>The SettleRepair stage (-6 3.5.5, -7 2): RequirePreForget proved the facts, so it only writes. The row
+    /// goes first, so the recorded Failure is no longer protected when it closes.</summary>
+    internal static void Settle(SqliteConnection connection, SqliteTransaction transaction, ChangeTable changes,
+        string pairId, (Side Side, string Identity, SyncedEntry? Victim, string? OperationId,
+            (Side Side, string Path, string Id)? Handoff) settle, DateTimeOffset now, ICollection<Issue>? raised)
+    {
+        var pair = IssueTable.PairFor(connection, transaction, pairId);
+        var identity = StateEncoding.IdFor(settle.Side, settle.Identity)!;
+        var row = Row(connection, transaction, pair, settle.Side, identity)!.Value;
+        Execute(connection, transaction, StateSchema.DeleteDuplicateRepair, pair, settle.Side, identity);
+        IReadOnlyList<SyncedEntry> current = [];
+        if (settle.Victim is { } victim) ReleaseClashes(connection, transaction, pairId, settle.Side, [victim]);
+        else
+        {
+            var other = PathNames.Other(settle.Side);
+            current = Bindings(connection, transaction, pair, settle.Side, identity, foldersOnly: true, take: 3);
+            foreach (var binding in current.Where(binding => StateEncoding.IdFor(other, binding.IdOn(other)) is { } id &&
+                (id.Equals(row.First) || id.Equals(row.Second))))
+                ReleaseClashes(connection, transaction, pairId, settle.Side, [binding]);
+        }
+        if (row.Issue is { } recorded && IssueTable.ById(connection, pairId, recorded, transaction) is
+            { Cause: TextKey.FailDuplicateFolderBinding } failure)
+            IssueTable.CloseExact(connection, transaction, pairId, failure);
+        if (settle.Handoff is { } handoff)
+            changes.RegisterReleasedEndpoint(transaction, pairId, handoff.Side, handoff.Path, handoff.Id);
+        if (current.Count >= 2) LinksNotice(connection, transaction, pairId, settle.Side, current, now, raised);
+    }
+
+    /// <summary>The HoldRepair stage, after Raise (-6 3.5.4): binds the obligation to the Failure now at path, a CAS on
+    /// the issue it recorded; a miss rolls the hold commit back.</summary>
+    internal static void Hold(SqliteConnection connection, SqliteTransaction transaction, string pairId,
+        (Side Side, string Identity, long? ExpectedIssue) hold, string path)
+    {
+        var pair = IssueTable.PairFor(connection, transaction, pairId);
+        if (IssueTable.AtPath(connection, transaction, pairId, path, IssueKind.Failure) is not { } issue)
+            throw new ChangedUnderneathException(path);
+        using var command = StorageCommand.Create(connection, transaction, StateSchema.HoldDuplicateRepair,
+            (StateSchema.ParamPairRow, pair), (StateSchema.ParamSide, (int)hold.Side),
+            (StateSchema.ParamIdentity, StateEncoding.IdFor(hold.Side, hold.Identity)),
+            (StateSchema.ParamIssue, issue.Id), (StateSchema.ParamExpected, hold.ExpectedIssue));
+        if (command.ExecuteNonQuery() == 0) throw new ChangedUnderneathException(path);
+    }
+
+    /// <summary>V1-V4 (-6 3.5.2): the row exists, X's folder bindings are exactly the recorded two, each other-side id
+    /// is bound once, and no unresolved custody but operation's own overlaps either binding.</summary>
+    internal static bool Validate(SqliteConnection connection, SqliteTransaction transaction, long pair, Side side,
+        object identity, string? operation) =>
+        Row(connection, transaction, pair, side, identity) is { } row &&
+        Partners(connection, transaction, pair, side, identity, row) is { } bindings &&
+        bindings.All(binding => BoundOnce(connection, transaction, pair, side, binding) &&
+            !HasCustody(connection, transaction, pair, binding, operation));
+
+    /// <summary>P2: a saved descendant under the binding's Local, explicit Dropbox or inherited Dropbox key.</summary>
+    internal static bool HasSavedDescendants(SqliteConnection connection, SqliteTransaction transaction, long pair,
+        SyncedEntry binding)
+    {
+        var local = PathNames.DescendantBounds(binding.LocalKey);
+        var dropbox = PathNames.DescendantBounds(binding.DropboxKey);
+        return Any(StateSchema.SelectSyncedUnderLocalKeyPaged, local) ||
+            Any(StateSchema.SelectSyncedUnderInheritedKeyPaged, dropbox) ||
+            Any(StateSchema.SelectSyncedUnderDropboxKeyPaged, dropbox);
+
+        bool Any(string sql, (string Low, string High) bounds)
+        {
+            using var command = StorageCommand.Create(connection, transaction, sql, (StateSchema.ParamPairRow, pair),
+                (StateSchema.ParamAfter, bounds.Low), (StateSchema.ParamHigh, bounds.High),
+                (StateSchema.ParamTake, StateSchema.OneRow));
+            using var reader = command.ExecuteReader();
+            return reader.Read();
+        }
+    }
+
+    /// <summary>R0: the pair's unresolved Repair operations by (shared side, X, other-side id), authority compared
+    /// before the row is decoded (-7 5.1). A Repair's shared side is the one it does not delete on.</summary>
+    internal static Dictionary<(Side Side, object? Identity, object? Other), FolderRemovalState> OwnOperations(
+        SqliteConnection connection, SqliteTransaction transaction, long pair, long take)
+    {
+        var own = new Dictionary<(Side, object?, object?), FolderRemovalState>();
+        for (var after = string.Empty; ;)
+        {
+            using var command = StorageCommand.Create(connection, transaction, StateSchema.UnresolvedFolders,
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamAfterOperation, after), (StateSchema.ParamTake, take));
+            using var reader = command.ExecuteReader();
+            long read = 0;
+            while (reader.Read())
+            {
+                read++;
+                after = reader.GetString(StateSchema.FolderOperationId);
+                if (StateEncoding.ReadEnum<FolderRemovalAuthority>(reader, StateSchema.FolderAuthority) !=
+                    FolderRemovalAuthority.Repair) continue;
+                var operation = StateEncoding.ReadFolderRemoval(reader, null);
+                if (operation.SavedRoot is not { } root) continue;
+                var shared = PathNames.Other(operation.DeletingSide);
+                own[(shared, StateEncoding.IdFor(shared, root.IdOn(shared)),
+                    StateEncoding.IdFor(operation.DeletingSide, root.IdOn(operation.DeletingSide)))] = operation;
+            }
+            if (read < take) return own;
+        }
+    }
+
+    // Classify rows 1-4 (-6 3.5.2), which decide Obsolete; the obsolete settle re-runs them inside its own commit.
+    // R0 runs as one statement here, as the commit's other unbounded in-transaction reads do.
+    private static bool Obsolete(SqliteConnection connection, SqliteTransaction transaction, string pairId, long pair,
+        Side side, object identity)
+    {
+        if (Row(connection, transaction, pair, side, identity) is not { } row) return false;
+        var valid = Partners(connection, transaction, pair, side, identity, row) is not null;
+        if (row.Issue is { } issue && IssueTable.ById(connection, pairId, issue, transaction) is not null) return !valid;
+        var own = OwnOperations(connection, transaction, pair, long.MaxValue);
+        if (own.ContainsKey((side, identity, row.First)) || own.ContainsKey((side, identity, row.Second))) return false;
+        return !valid;
+    }
+
+    // V1, the obligation's primary-key probe.
+    private static (object First, object Second, long? Issue)? Row(SqliteConnection connection,
+        SqliteTransaction transaction, long pair, Side side, object identity)
+    {
+        using var command = StorageCommand.Create(connection, transaction, StateSchema.SelectDuplicateRepair,
+            (StateSchema.ParamPairRow, pair), (StateSchema.ParamSide, (int)side), (StateSchema.ParamIdentity, identity));
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? (reader.GetValue(0), reader.GetValue(1), reader.IsDBNull(2) ? null : reader.GetInt64(2)) : null;
+    }
+
+    // V2: X's current folder bindings (LIMIT 3) are exactly two, with the recorded other-side ids.
+    private static IReadOnlyList<SyncedEntry>? Partners(SqliteConnection connection, SqliteTransaction transaction,
+        long pair, Side side, object identity, (object First, object Second, long? Issue) row)
+    {
+        var other = PathNames.Other(side);
+        var bindings = Bindings(connection, transaction, pair, side, identity, foldersOnly: true, take: 3);
+        var ids = bindings.Select(binding => StateEncoding.IdFor(other, binding.IdOn(other))).ToArray();
+        return bindings.Count == 2 && ids.Contains(row.First) && ids.Contains(row.Second) ? bindings : null;
+    }
+
+    // V3 for one binding: its other-side id is bound exactly once.
+    private static bool BoundOnce(SqliteConnection connection, SqliteTransaction transaction, long pair, Side side,
+        SyncedEntry binding)
+    {
+        var other = PathNames.Other(side);
+        return Bindings(connection, transaction, pair, other, StateEncoding.IdFor(other, binding.IdOn(other))!,
+            foldersOnly: false, take: 2).Count == 1;
+    }
+
+    private static SyncedEntry? BindingAt(SqliteConnection connection, SqliteTransaction transaction, string pairId,
+        string localKey)
+    {
+        using var command = StorageCommand.Create(connection, transaction, StateSchema.SelectSyncedByLocalKey,
+            (StateSchema.ParamPair, pairId), (StateSchema.ParamTargetKey, localKey));
+        using var reader = command.ExecuteReader();
+        return reader.Read()
+            ? StateEncoding.ReadSynced(reader, reader.GetString(StateSchema.SyncedLocalKey), StateSchema.SyncedLocalPath)
+            : null;
+    }
+
+    private static void Execute(SqliteConnection connection, SqliteTransaction transaction, string sql, long pair,
+        Side side, object identity)
+    {
+        using var command = StorageCommand.Create(connection, transaction, sql,
+            (StateSchema.ParamPairRow, pair), (StateSchema.ParamSide, (int)side), (StateSchema.ParamIdentity, identity));
         command.ExecuteNonQuery();
     }
 

@@ -683,8 +683,16 @@ public sealed class FolderDeleteRunner
         var root = operation.RootEntry;
         try
         {
-            _context.Store.CompleteFolderRemoval(PairId, operation.OperationId, operation.Generation,
-                Forget(operation.DeletingSide, root.Path, operation.SavedRoot, FolderEffectKind.RecursiveFolder), selection);
+            var change = Forget(operation.DeletingSide, root.Path, operation.SavedRoot, FolderEffectKind.RecursiveFolder);
+            // A Repair removal settles X's obligation with its forget; the handoff names only where X was seen (-6 3.5.5).
+            if (operation is { Authority: FolderRemovalAuthority.Repair, SavedRoot: { } victim })
+            {
+                var shared = PathNames.Other(operation.DeletingSide);
+                (Side Side, string Path, string Id)? handoff =
+                    operation.SourceEvidence is { } seen ? (shared, seen.Path, seen.Id) : null;
+                change = change with { SettleRepair = (shared, victim.IdOn(shared), victim, operation.OperationId, handoff) };
+            }
+            _context.Store.CompleteFolderRemoval(PairId, operation.OperationId, operation.Generation, change, selection);
         }
         catch (FolderStateRefusedException)
         {

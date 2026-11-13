@@ -197,8 +197,8 @@ public static class IssueTable
     }
 
     /// <summary>Reads one issue only when its id belongs to the requested pair.</summary>
-    public static Issue? ById(SqliteConnection connection, string pairId, long id) =>
-        ReadOne(connection, null, StateSchema.SelectIssueById,
+    public static Issue? ById(SqliteConnection connection, string pairId, long id, SqliteTransaction? transaction = null) =>
+        ReadOne(connection, transaction, StateSchema.SelectIssueById,
             (StateSchema.ParamPair, pairId), (StateSchema.ParamId, id));
 
     /// <summary>One bounded page of non-dismissed issues across the pair, account or all pairs, ordered by issue id,
@@ -717,8 +717,8 @@ public static class IssueTable
         issue.Subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None;
 
     private static bool MayHoldResponsibility(Issue issue) => issue.Kind == IssueKind.Failure &&
-        (issue.Cause is TextKey.RequiredRepairRetry or TextKey.FailDropboxDeleteJobInvalid or TextKey.FailRecycledLate ||
-         IssuePolicy.IsLocalAccessRetryCause(issue.Cause));
+        (issue.Cause is TextKey.RequiredRepairRetry or TextKey.FailDropboxDeleteJobInvalid or TextKey.FailRecycledLate
+            or TextKey.FailDuplicateFolderBinding || IssuePolicy.IsLocalAccessRetryCause(issue.Cause));
 
     // Live retry debt or an in-use lifecycle. First-run work is not here: it may change cause, only not close.
     internal static bool HoldsResponsibility(SqliteConnection connection, SqliteTransaction? transaction, long pair,
@@ -729,6 +729,13 @@ public static class IssueTable
         if (issue.Cause == TextKey.FailRecycledLate) return !issue.Dismissed;
         if (issue.Cause == TextKey.FailDropboxDeleteJobInvalid)
             return StateStore.ReadInvalidFolderJob(connection, transaction, pair, issue.Path);
+        // A held duplicate-folder obligation keeps its Failure until Retry releases it or settlement deletes the row.
+        if (issue.Cause == TextKey.FailDuplicateFolderBinding)
+        {
+            using var held = StorageCommand.Create(connection, transaction, StateSchema.RepairHoldsIssue,
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamIssue, issue.Id));
+            return (long)held.ExecuteScalar()! != 0;
+        }
         if (issue.Cause == TextKey.RequiredRepairRetry)
         {
             using var protection = StorageCommand.Create(connection, transaction, StateSchema.RetryNoticeProtected,
@@ -758,7 +765,7 @@ public static class IssueTable
     internal static bool AtPendingPath(Issue issue, string? pendingPath) => issue.Kind == IssueKind.Failure &&
         pendingPath is not null && PathNames.Same(issue.Path, pendingPath);
 
-    private static long PairFor(SqliteConnection connection, SqliteTransaction transaction, string pairId)
+    internal static long PairFor(SqliteConnection connection, SqliteTransaction transaction, string pairId)
     {
         using var command = StorageCommand.Create(connection, transaction, StateSchema.PairFence,
             StateSchema.ParamPair, pairId);

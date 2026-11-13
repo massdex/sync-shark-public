@@ -14,6 +14,7 @@ public enum TextKey
     SkipReservedName,
     FailChanged,
     FailDuplicateFolderLinks,
+    FailDuplicateFolderBinding,
     FailStoreMutation,
     FailFolderDependencyCycle,
     ResolutionRetryRepairConsequence,
