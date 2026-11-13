@@ -490,8 +490,9 @@ function Get-SelectionAttention {
     foreach ($path in $OutsideRegistry) {
         $attention.Add("$path is outside the Engine registry: select core/ui/build by hand or run the full matrix")
     }
+    $effectiveEngine = @($LaneEngine) + @(Get-MandatoryEngineGroups)
     foreach ($group in $HostedGroups) {
-        if ($LaneEngine -cnotcontains $group) {
+        if ($effectiveEngine -cnotcontains $group) {
             $attention.Add("'.ci-lane.json' engine omits '$group' selected by the diff; add it or drop .ci-lane.json")
         }
     }
@@ -948,7 +949,7 @@ REVIEW SPLIT-PENDING | src/C.cs | file-size |  |  | ~hash
 
         # P2-1: a lane file that selects no engine group (no engine key, or an
         # empty engine list) must not read as "no lane file" (which means CI runs
-        # every group). CI runs no engine groups in both cases.
+        # every group). Mandatory groups are added by CI; other groups still need selection.
         foreach ($laneCase in @(
             @{ Label = 'no engine key'; Json = '{ "core": ["--v2-x"] }' },
             @{ Label = 'empty engine list'; Json = '{ "engine": [] }' },
@@ -960,9 +961,11 @@ REVIEW SPLIT-PENDING | src/C.cs | file-size |  |  | ~hash
             $emptyLaneCommit = (Invoke-Git -Root $repo -ArgumentList @('rev-parse', 'HEAD')).Trim()
             $emptyLane = Get-LaneEngineGroups -Root $repo -Commit $emptyLaneCommit
             Assert-True ($null -ne $emptyLane) "P2-1 $($laneCase.Label): an existing lane file is not 'no lane file'"
-            Assert-True (@($emptyLane).Count -eq 0) "P2-1 $($laneCase.Label): CI runs no engine group"
-            $emptyLaneAttention = Get-SelectionAttention -Unmapped @() -SharedHelpers @() -OutsideRegistry @() -HostedGroups @('dependencies') -LaneEngine $emptyLane
+            Assert-True (@($emptyLane).Count -eq 0) "P2-1 $($laneCase.Label): lane requests no engine group"
+            $emptyLaneAttention = Get-SelectionAttention -Unmapped @() -SharedHelpers @() -OutsideRegistry @() -HostedGroups @('store') -LaneEngine $emptyLane
             Assert-True (@($emptyLaneAttention).Count -ge 1) "P2-1 $($laneCase.Label): a selected hosted group is flagged, not hidden"
+            $mandatoryAttention = Get-SelectionAttention -Unmapped @() -SharedHelpers @() -OutsideRegistry @() -HostedGroups @(Get-MandatoryEngineGroups) -LaneEngine $emptyLane
+            Assert-True (@($mandatoryAttention).Count -eq 0) 'Mandatory groups are selected by CI, not omitted'
         }
 
         $report = Join-Path $temp 'report.md'

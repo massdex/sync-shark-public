@@ -34,4 +34,9 @@ if ($code -ne 2 -or ($output -join "`n") -notmatch 'SUMMARY  INCOMPLETE' -or
     ($output -join "`n") -match 'SUMMARY\s+PASS') {
     throw "Skipped ratchet must be INCOMPLETE/2, not PASS (exit $code)."
 }
+if (($output -join "`n") -match 'CHECK receipt\s+ERROR|engine omits ''(dependencies|literals|strings)''') {
+    throw 'Pre-review prerequisite or effective mandatory selection is incompatible.'
+}
 Write-Host 'PASS negative fixture: real pre-review -SkipRatchet -> INCOMPLETE/2'
+# The expected child exit code must not become the hosted fixture step's exit code.
+exit 0

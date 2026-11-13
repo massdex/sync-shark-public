@@ -118,7 +118,7 @@ def register_source(root, relative):
     return path.read_text(encoding='utf-8-sig')
 
 
-def check_register(root, ledger, lex):
+def check_register(root, ledger, lex, sink=None):
     path = root / REGISTER
     if not path.exists():
         if ledger['verdicts'] or ledger['register_reviews']:
@@ -128,22 +128,30 @@ def check_register(root, ledger, lex):
     sections = list(register_sections(path.read_text(encoding='utf-8-sig')))
     paths = {relative for relative, *_ in sections}
     pending = {row['key'][0] for row in ledger['verdicts'] if row['verdict'] == 'SPLIT-PENDING'}
+
+    def record(relative, reason):
+        # The gate reuses this rule through `sink`; CI keeps the printed form.
+        if sink is None:
+            print('REGISTER review required:', relative, reason)
+        else:
+            sink.append((relative, reason))
+
     for relative in sorted(pending - paths):
-        print('REGISTER review required:', relative, '(pending verdict has no section)')
+        record(relative, '(pending verdict has no section)')
         failures += 1
     for relative, _, _, section in sections:
         receipt = RECEIPT.search(section)
         try:
             source = register_source(root, relative)
         except FileNotFoundError:
-            print('REGISTER review required:', relative, '(listed source missing; reconcile its section)')
+            record(relative, '(listed source missing; reconcile its section)')
             failures += 1
             continue
         digest = content_hash(source, lex)
         exception = any(row['path'] == relative and row['hash'] == digest
                         for row in ledger['register_reviews'])
         if not exception and (receipt is None or receipt[1] != digest):
-            print('REGISTER review required:', relative, '(update its section or record a content-bound review reason)')
+            record(relative, '(update its section or record a content-bound review reason)')
             failures += 1
     return failures
 
