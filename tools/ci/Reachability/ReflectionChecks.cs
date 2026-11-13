@@ -36,8 +36,7 @@ internal static class ReflectionChecks
         var tree = CSharpSyntaxTree.ParseText(source, path: "src/Fixture.cs");
         var compilation = CSharpCompilation.Create("Fixture", [tree], [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)],
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
-        var errors = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToArray();
-        if (errors.Length != 0) throw new InvalidOperationException(string.Join("\n", errors.Select(e => e.ToString())));
+        Analysis.ValidateCompilation(compilation);
         var model = compilation.GetSemanticModel(tree);
         var graph = new Analysis(Environment.CurrentDirectory, new Config([], [], [], [], []));
         foreach (var method in tree.GetRoot().DescendantNodes().OfType<MethodDeclarationSyntax>().Where(m => m.Identifier.ValueText.StartsWith("Case")))

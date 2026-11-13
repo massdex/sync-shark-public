@@ -30,17 +30,7 @@ internal sealed class KeepRules(Analysis graph)
             if (graph.Files.TryGetValue(path, out var nodes))
             {
                 var source = File.ReadAllText(full);
-                var product = nodes.Where(n => n.Product).ToArray();
-                if (product.Length != 0)
-                {
-                    var root = CSharpSyntaxTree.ParseText(source).GetRoot();
-                    if (Reflection.IsMatch(source)) throw new InvalidOperationException($"Unmodelled reflection: {path}");
-                    KeepInterop(path, source, root, product);
-                    foreach (var literal in root.DescendantNodes().OfType<LiteralExpressionSyntax>().Where(s => s.IsKind(SyntaxKind.StringLiteralExpression)))
-                        TextRoots(literal.Token.ValueText, "component:text:" + path);
-                    if (Regex.IsMatch(source, @"GetManifestResource(Stream|Names)|Application\.(GetResourceStream|LoadComponent)|pack://"))
-                        foreach (var node in product) node.Roots.Add("component:resource-loader");
-                }
+                KeepProductSource(path, source, nodes.Where(n => n.Product).ToArray());
                 MarkTests(nodes, source);
             }
             else if (!path.StartsWith("docs/") && !textKeepExclusions.Contains(path))
@@ -74,6 +64,23 @@ internal sealed class KeepRules(Analysis graph)
         foreach (var name in Identifier.Matches(text).Select(m => m.Value).Distinct())
         foreach (var token in new[] { name }.Concat(name.Split('.')))
             if (names.TryGetValue(token, out var nodes)) foreach (var node in nodes) { node.Roots.Add(reason); node.Risks.Add("name-in-text"); }
+    }
+
+    void KeepProductSource(string path, string source, TypeNode[] product)
+    {
+        if (product.Length == 0) return;
+        var root = CSharpSyntaxTree.ParseText(source).GetRoot();
+        if (Reflection.IsMatch(source)) throw new InvalidOperationException($"Unmodelled reflection: {path}");
+        KeepInterop(path, source, root, product);
+        KeepLiteralsAndResources(path, source, root, product);
+    }
+
+    void KeepLiteralsAndResources(string path, string source, SyntaxNode root, TypeNode[] product)
+    {
+        foreach (var literal in root.DescendantNodes().OfType<LiteralExpressionSyntax>().Where(s => s.IsKind(SyntaxKind.StringLiteralExpression)))
+            TextRoots(literal.Token.ValueText, "component:text:" + path);
+        if (Regex.IsMatch(source, @"GetManifestResource(Stream|Names)|Application\.(GetResourceStream|LoadComponent)|pack://"))
+            foreach (var node in product) node.Roots.Add("component:resource-loader");
     }
 
     void KeepInterop(string path, string source, SyntaxNode root, TypeNode[] product)

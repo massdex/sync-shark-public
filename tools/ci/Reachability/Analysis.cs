@@ -98,7 +98,7 @@ internal sealed class Analysis(string root, Config config)
         }
     }
 
-    static void ValidateCompilation(Compilation compilation)
+    internal static void ValidateCompilation(Compilation compilation)
     {
         var errors = compilation.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).ToArray();
         if (errors.Length != 0) throw new InvalidOperationException(string.Join("\n", errors.Select(d => d.ToString())));
