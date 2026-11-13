@@ -1083,14 +1083,10 @@ internal sealed partial class ChangeTable
                     episode.Identity != identity) return false;
                 var issue = Read(transaction, StateSchema.SelectIssueById, IssueTable.ReadIssue,
                     (StateSchema.ParamPair, selection.PairId), (StateSchema.ParamId, expected.Token.IssueId)).Single();
-                if (IssuePolicy.UnknownMove(issue.Kind, issue.Subject)) return false;
-                // The existing LocalEchoPending caller passes the saved entry's Dropbox key; mirror it from the item path.
-                var localPath = expected.Token.Subject.Items.First(item => item.Side == Side.Local &&
-                    item.Id == identity && PathNames.Key(item.Path) == selection.Key).Path;
-                if (Read(transaction, StateSchema.LocalEchoPending, static reader => reader.GetBoolean(StateSchema.FirstColumn),
+                if (IssuePolicy.UnknownMove(issue.Kind, issue.Subject) ||
+                    Read(transaction, StateSchema.LocalEchoPending, static reader => reader.GetBoolean(StateSchema.FirstColumn),
                         (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamLocalKey, selection.Key),
-                        (StateSchema.ParamDropboxKey, PathNames.DropboxKey(localPath)),
-                        (StateSchema.ParamIsFolder, false)).First()) return false;
+                        (StateSchema.ParamDropboxKey, selection.Key), (StateSchema.ParamIsFolder, false)).First()) return false;
                 SyncedEntry? earliestBefore = null;
                 // One row back: the bound stays strictly older than the episode (inclusive through the previous work id).
                 var bounded = selection with { ThroughWorkId = Math.Min(selection.ThroughWorkId, episode.WorkId - StateSchema.OneRow) };

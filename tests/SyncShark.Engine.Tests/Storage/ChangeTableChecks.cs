@@ -3219,6 +3219,31 @@ public static partial class ChangeTableChecks
                 reopened.ReadItemRetryState(PairId, [episode.Token.IssueId])[episode.Token.IssueId] is not null,
                 "B1: restart retains the child and exact waiting episode without authorizing upload");
         }
+        if (!acquired)
+        {
+            // N2 (REVIEW-0388-INT-1): B1 transfer, then A1 retirement of the same source-less episode. The moved
+            // child survives as ordinary pending work with its notice and before-image intact; only the exact
+            // source-less episode row retires. Explicit Retry settling a source-less episode stays covered by
+            // OlderDirtyEpisodeAttachment.
+            store.RetireReplacedItemRetry(episode, File, null);
+            Check.Require(store.ReadItemRetryState(PairId, [episode.Token.IssueId])[episode.Token.IssueId] is null &&
+                store.ReadWork(child).Single() == transferred,
+                "B1xA1: A1 retires the source-less episode but keeps the transferred child (notice and before-image)");
+            using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + database + ";Pooling=False"))
+            {
+                connection.Open();
+                using var gone = connection.CreateCommand();
+                gone.CommandText = "SELECT count(*) FROM change_work WHERE work_id=$owner;";
+                gone.Parameters.AddWithValue("$owner", episode.Token.WorkId);
+                Check.Require((long)gone.ExecuteScalar()! == 0,
+                    "B1xA1: only the exact source-less episode row is gone");
+            }
+            store.EndWorkPass(PairId);
+            var releasedChild = store.SelectWork(PairId, generation, new PathScope(store.Pair(PairId)!, store.Pairs()));
+            Check.Require(releasedChild?.AnchorWorkId == childId,
+                "B1xA1: the transferred child is selectable as ordinary pending work");
+            return;
+        }
         store.CompleteItemAttempt(episode, attempt, StateChange.Empty with { Close = [(File, IssueClosure.AfterEffect)] }, null, null);
         // Explicit Retry settles its episode owner itself, whether acquired or source-less.
         using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + database + ";Pooling=False"))

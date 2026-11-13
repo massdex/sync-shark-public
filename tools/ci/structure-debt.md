@@ -123,7 +123,7 @@ Category-change split clearing condition (class-size and file-size rows, and the
 
 Category-change split clearing condition (class-size and file-size rows): splitting ChangeTable is deferred beyond 0.3.82, whose scope is serious sync-reliability fixes only. Clearing trigger: the 0.3.83 refactor unit split (owner-approved 10 Nov), at its cleanup-only structural recheck. Owner: storage structural lane. Destination: this register section and the extracted owners under src/SyncShark.Engine/Storage/. Closure requires the completed extraction preserving transaction, locking and publication semantics, plus a fresh cross-family verdict; if the coupled storage, runner and Host interfaces are still changing then, the obligation stays visibly open at that release gate and is not treated as cleared.
 
-<!-- spec-source: 5e913e10c148~974dd31cc746~f81a2a134af6~9c27212bd74b~1801518442eb~97f0 -->
+<!-- spec-source: a0c6afd1223c~543f751d8c49~1d1868ba4f67~88571c439914~f155fc1eec85~ed35 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
