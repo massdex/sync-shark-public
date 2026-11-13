@@ -1,0 +1,10 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "dropbox-echo"
+  ],
+  "core": [],
+  "ui": []
+}
