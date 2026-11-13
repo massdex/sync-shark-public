@@ -166,7 +166,7 @@ Category-change split clearing condition (class-size and file-size rows): splitt
 
 ## src/SyncShark.Engine/Dropbox/DropboxEntries.cs
 
-<!-- spec-source: 4a2ccca55e7f~62f3f77e8b5a~47de4ab79d39~05381257d579~01e2e651bffc~68b0 -->
+<!-- spec-source: 01ba2e7d16d8~406b551d4d69~dc83eef83498~fbdadf95caff~89c5b3a9f6b9~eca5 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -346,7 +346,7 @@ Category-change split clearing condition (class-size and file-size rows): splitt
 
 ## src/SyncShark.Core/SyncLocalFileAuthority.cs
 
-<!-- spec-source: fd56bb1db727~48368369414d~27fecf92726e~2771889c5d5f~a0171bcc9ed8~374c -->
+<!-- spec-source: a1c8e7253bb9~38ac859d6ee0~24e9ab39e240~519e7d87f7c5~02a676d4e6ec~7255 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
