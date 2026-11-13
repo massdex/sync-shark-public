@@ -1943,6 +1943,10 @@ internal sealed partial class ChangeTable
     // An in-use lifecycle waits for its real opportunity; any other association follows the issue's own hold.
     private bool Held(long pair, long work)
     {
+        // Checked first, with no exemption: X's other work waits for its duplicate-folder obligation in any generation.
+        if (Read(null, StateSchema.WorkRepairHeld, static reader => reader.GetInt64(0) != 0,
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamWork, work)).FirstOrDefault())
+            return true;
         if (Read(null, StateSchema.ItemEpisodeByWork,
                 static reader => reader.GetInt64(StateSchema.EpisodeByWorkIssueId),
                 (StateSchema.ParamWork, work)).Any())

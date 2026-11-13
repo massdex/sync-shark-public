@@ -111,6 +111,12 @@ internal sealed class ResolutionRunner(
         }
         // Settlement closes and may restore, so it acts on the stored row, not the caller's snapshot.
         if (IssuePolicy.UnknownMove(current.Kind, current.Subject)) return await SettleMoveAsync(current, ct);
+        // Release only: syncing the subject paths would reach X outside its hold; the cleanup runs at the next wake.
+        if (IssuePolicy.RetryWakesRepair(current.Cause))
+        {
+            Close(current, release: true);
+            return SyncOutcome.InSync;
+        }
         var retried = SyncOutcome.InSync;
         IReadOnlySet<long> retryIssues = new HashSet<long> { issue.Id };
         if (issue.Subject.Items.Count == 0)

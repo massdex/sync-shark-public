@@ -42,6 +42,9 @@ public static class IssuePolicy
     public static bool RetryRunsRepair(Issue? issue, ResolutionChoice choice) =>
         choice == ResolutionChoice.Retry && issue?.Cause == TextKey.FailFolderDependencyCycle;
 
+    /// <summary>Identifies the Failures whose Retry releases a duplicate-folder hold so the cleanup tries again.</summary>
+    public static bool RetryWakesRepair(TextKey cause) => cause == TextKey.FailDuplicateFolderBinding;
+
     public static bool UnbaselinedLocal(Row row) =>
         row.Synced is null && row.Dropbox is null && row.Local is { Skip: null };
 

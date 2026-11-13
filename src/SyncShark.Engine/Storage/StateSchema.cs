@@ -873,6 +873,9 @@ public static class StateSchema
     internal const string DeleteDuplicateRepair = "DELETE FROM binding_repair" + RepairKeyFilter + ";";
     /// <summary>The hold CAS: binds the obligation to its Failure only while it still names the expected issue.</summary>
     internal const string HoldDuplicateRepair = "UPDATE binding_repair SET issue_id=$issue" + RepairKeyFilter + " AND issue_id IS $expected;";
+    /// <summary>Work on an identity with a duplicate-folder obligation on its side waits behind it (-6 3.5.4).</summary>
+    internal const string WorkRepairHeld = "SELECT EXISTS(SELECT 1 FROM change_work w JOIN binding_repair b ON b.pair_id=$pair AND " +
+        "b.side=w.side AND b.identity=w.identity WHERE w.work_id=$work);";
     /// <summary>A FailDuplicateFolderBinding Failure is responsible while an obligation names it (-6 3.5.4).</summary>
     internal const string RepairHoldsIssue = "SELECT EXISTS(SELECT 1 FROM binding_repair WHERE pair_id=$pair AND issue_id=$issue);";
     internal const string LocalEchoPending = "SELECT EXISTS(SELECT 1 FROM pair WHERE id=$pair AND pending_json IS NOT NULL AND (" +
