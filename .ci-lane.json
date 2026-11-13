@@ -1,0 +1,15 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "cli",
+    "host-reads"
+  ],
+  "core": [
+    "--cli-checks",
+    "--v2-autosync-checks"
+  ],
+  "ui": []
+}
