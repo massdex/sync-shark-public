@@ -15926,7 +15926,7 @@
       "verdict": "SPLIT-PENDING",
       "family": "anthropic",
       "register": "tools/ci/structure-debt.md",
-      "reason": "Re-judged F1 on docs/windows-installation.md:111/:127 and the owner coupling role to format (UpdaterSignature.cs:40-53, :143-148): the owner cannot verify a package-signed setup without a trust-boundary contract change, so this is not a callable duplicate today. The weaker-strength gap is owed split debt under B-57 (0.3.80), which merges role-parameterised verification into one owner.",
+      "reason": "Re-judged F1 on RELEASING.md:6/:28 at 1231a4efd (now docs/windows-installation.md:34-37) and the owner coupling role to format (UpdaterSignature.cs:40-53, :143-148): the owner cannot verify a package-signed setup without a trust-boundary contract change, so this is not a callable duplicate today. The weaker-strength gap is owed split debt under B-57 (0.3.80), which merges role-parameterised verification into one owner.",
       "source_revision": "1231a4efd"
     },
     {
