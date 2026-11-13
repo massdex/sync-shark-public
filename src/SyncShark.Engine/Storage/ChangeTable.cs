@@ -304,6 +304,7 @@ internal sealed partial class ChangeTable
     // Both walks share the same fenced key and bounds; only the committed count reaches pass accounting.
     private long CoalescePathWork(string pairId, PairRow pair, WorkRow candidate, Pass pass, ref long? observedThrough)
     {
+        if (candidate.WorkId >= 0) return 0;
         if (candidate.Side != Side.Local || candidate.Identity is not null || candidate.Parent is not null ||
             candidate.OldKey is not null || candidate.DiscoveryRequired || candidate.Notice is null ||
             candidate.Acquisition is null || candidate.Obligation is not null) return 0;
