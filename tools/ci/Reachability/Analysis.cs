@@ -161,7 +161,7 @@ internal sealed class Analysis(string root, Config config)
         if (from.Product && (symbol is ITypeSymbol { TypeKind: TypeKind.Dynamic } ||
             owner == "System.Activator" && symbol.Name == "CreateInstance" || owner == "System.Type" && symbol.Name.StartsWith("GetTypeFrom") ||
             owner == "System.Runtime.InteropServices.Marshal" && symbol.Name == "GetFunctionPointerForDelegate" ||
-            symbol is INamedTypeSymbol attribute && attribute.ContainingNamespace.ToDisplayString() == "System.Runtime.InteropServices" &&
+            symbol is INamedTypeSymbol attribute && attribute.ContainingNamespace?.ToDisplayString() == "System.Runtime.InteropServices" &&
             attribute.Name is "DllImportAttribute" or "ComImportAttribute" or "ComVisibleAttribute" or "GuidAttribute" or "StructLayoutAttribute" or nameof(System.Runtime.InteropServices.UnmanagedFunctionPointerAttribute)))
             SemanticInterop.Add(path);
         if (symbol is IArrayTypeSymbol array) { Reference(from, array.ElementType, path, position, reason); return; }
