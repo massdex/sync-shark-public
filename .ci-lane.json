@@ -1,0 +1,30 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "dependencies",
+    "literals",
+    "strings",
+    "dropbox-echo",
+    "path-only-coalescing",
+    "work-lifecycle",
+    "decide",
+    "syncer",
+    "completion-containment",
+    "attempt-cost",
+    "budget-1",
+    "budget-2",
+    "budget-3",
+    "budget-4",
+    "live-admission",
+    "stale-freshness",
+    "mapped-holds",
+    "excluded-admission"
+  ],
+  "core": [
+    "--engine-layout-checks"
+  ],
+  "ui": []
+}
