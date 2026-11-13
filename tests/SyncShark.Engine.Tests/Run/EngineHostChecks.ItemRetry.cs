@@ -1189,6 +1189,7 @@ public static partial class EngineHostChecks
             private readonly TaskCompletionSource _turned = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private readonly TaskCompletionSource _completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private int _proceeds;
+            private volatile string _phase = "before FinishRepair hook";
 
             internal HeldRepair(ItemRig rig, Exception? failure, bool window)
             {
@@ -1196,8 +1197,10 @@ public static partial class EngineHostChecks
                 {
                     rig.BeforeFinish = null;
                     rig.MarkAttempts();
+                    _phase = "before-finish hold entered";
                     _finishing.TrySetResult();
                     rig.Hold(_turned.Task, "the held Repair reaches FinishRepair");
+                    _phase = "before-finish hold returned; store call next";
                     if (failure is not null) throw failure;
                 };
                 // A FinishRepair failure ends the window wait with that error, not a timeout.
@@ -1206,7 +1209,9 @@ public static partial class EngineHostChecks
                 {
                     rig.AfterFinish = null;
                     // Changed after the Repair's scans, so only the retained turn's later work carries it.
+                    _phase = "after-finish hook entered; retained write next";
                     rig.WriteRetained();
+                    _phase = "retained write returned; window signal next";
                     if (!window) return;
                     _window.TrySetResult();
                     rig.Hold(_completed.Task, "the held Repair completes after FinishRepair");
@@ -1215,6 +1220,7 @@ public static partial class EngineHostChecks
 
             internal Task Finishing => _finishing.Task;
             internal Task Window => _window.Task;
+            internal string Phase => _phase;
 
             // The first call lets FinishRepair run; the second ends the window after it.
             internal void Proceed() => (Interlocked.Increment(ref _proceeds) == 1 ? _turned : _completed).TrySetResult();
@@ -1584,7 +1590,15 @@ public static partial class EngineHostChecks
             {
                 await repair.Finishing.WaitAsync(HookBound).ConfigureAwait(false);
                 repair.Proceed();
-                await repair.Window.WaitAsync(HookBound).ConfigureAwait(false);
+                try
+                {
+                    await repair.Window.WaitAsync(HookBound).ConfigureAwait(false);
+                }
+                catch (TimeoutException error)
+                {
+                    throw new TimeoutException(
+                        $"B-141 completed Repair window {what}; last phase: {repair.Phase}; {error.Message}", error);
+                }
                 rig.BeforeFinish = () =>
                 {
                     rig.BeforeFinish = null;

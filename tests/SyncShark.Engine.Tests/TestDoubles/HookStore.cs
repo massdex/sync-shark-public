@@ -17,26 +17,25 @@ internal sealed class HookStore(IStateStore inner) : ForwardingStateStore(inner)
     /// <summary>Returned as a committed completion's secondary failure, as a postcommit maintenance fault is.</summary>
     public Exception? FinishSecondary { get; init; }
     public Action? AfterFinishRepair { get; init; }
-    /// <summary>Sees the store's own FinishRepair failure before it propagates; the host absorbs a failed Repair.</summary>
+    /// <summary>Sees store and hook FinishRepair failures before they propagate; the host absorbs a failed Repair.</summary>
     public Action<Exception>? FinishFailed { get; init; }
     public override bool FinishRepair(string pairId, RepairSummary summary, long expectedGeneration, Guid scanToken,
         LocalCatchUp local, DropboxCatchUp dropbox, out Exception? secondaryFailure)
     {
-        BeforeFinishRepair?.Invoke();
-        bool committed;
         try
         {
-            committed = base.FinishRepair(pairId, summary, expectedGeneration, scanToken, local, dropbox,
+            BeforeFinishRepair?.Invoke();
+            var committed = base.FinishRepair(pairId, summary, expectedGeneration, scanToken, local, dropbox,
                 out secondaryFailure);
+            if (committed && FinishSecondary is not null) secondaryFailure = FinishSecondary;
+            AfterFinishRepair?.Invoke();
+            return committed;
         }
         catch (Exception error)
         {
             FinishFailed?.Invoke(error);
             throw;
         }
-        if (committed && FinishSecondary is not null) secondaryFailure = FinishSecondary;
-        AfterFinishRepair?.Invoke();
-        return committed;
     }
 
     // The host item-retry checks: AutoSync reads live refusal once per opportunity before its dispatch, and asks

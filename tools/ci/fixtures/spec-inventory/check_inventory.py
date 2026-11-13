@@ -78,7 +78,11 @@ def check_diagnostics(output):
     fixture = Path(__file__).parent / 'cases/suppression-syntaxes.txt'
     for line in fixture.read_text().splitlines()[1:]:
         assert line in candidates, 'Suppression candidate missing: ' + line
-    print('PASS all requested analyzer rules, scope locations, and suppression candidate syntaxes')
+    assembled = json.loads((output / 'inventory.sarif').read_text())
+    failed = [run['tool']['driver']['name'] for run in assembled['runs']
+              if run.get('properties', {}).get('status') == 'INCOMPLETE']
+    assert not failed, 'Native execution/report failures: ' + str(failed)
+    print('PASS all requested analyzer rules, scope locations, suppression candidates, and native tool execution')
 
 
 if __name__ == '__main__':

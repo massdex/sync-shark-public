@@ -50,7 +50,7 @@ foreach ($project in $projects) {
     $name = [IO.Path]::GetFileNameWithoutExtension($project)
     $buildArguments = @((Join-Path $Root $project), '-nologo', '-v:quiet', '-p:SpecInventory=true',
         "-p:SpecInventoryOutput=$Output", '-p:Configuration=Debug', '-p:RestoreLockedMode=false',
-        '-p:EnableWindowsTargeting=true')
+        '-p:EnableWindowsTargeting=true', "-p:SyncSharkZigPath=$env:ZIG_EXE")
     # Deliberately do not disable TreatWarningsAsErrors. Inventory captures reports even on build failure.
     Invoke-InventoryTool "roslyn-$name" $analyzerVersions sarif @("$name.sarif") @() @(0) {
         & $processRunner -Executable dotnet -Arguments (@('build') + $buildArguments) -OutputPath "$Output/$name.build.log" -TimeoutSeconds $timeouts.buildSeconds
