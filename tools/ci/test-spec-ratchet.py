@@ -177,12 +177,12 @@ class RatchetChecks(unittest.TestCase):
         (self.root / 'Directory.Build.props').write_text(
             "<Project><PropertyGroup><Version Condition=\"'$(Version)' == ''\">" +
             version + "</Version></PropertyGroup></Project>", encoding='utf-8')
-        lines = ['# Changelog', '', '## [Unreleased]', '']
-        lines += ['- ' + row for row in pending]
-        lines += ['## [' + row + '] - 2026-01-01' for row in released]
-        if released or pending:
-            (self.root / 'CHANGELOG.md').write_text(
-                '\n'.join(lines) + '\n', encoding='utf-8')
+        rows = ['| ' + row + ' | ' + 'a' * 40 + ' |' for row in released]
+        rows += ['| ' + row + ' | -- |' for row in pending]
+        if rows:
+            (self.root / 'VERSION-MAP.md').write_text(
+                '# map\n\n| version | commit |\n|---|---|\n' +
+                ''.join(row + '\n' for row in rows), encoding='utf-8')
 
     def put_exceptions(self, entries):
         path = self.root / ratchet.EXCEPTIONS
@@ -245,7 +245,7 @@ class RatchetChecks(unittest.TestCase):
         self.assertEqual(2, code)
         self.assertIn('already released', error)
 
-    def test_pending_changelog_version_does_not_expire(self):
+    def test_pending_version_map_row_does_not_expire(self):
         self.grow_user_strings()
         self.put_release(version='0.3.82', pending=('0.3.82',))
         self.put_exceptions([self.exception(total=2)])
@@ -875,11 +875,11 @@ class ReviewNegativeControls(unittest.TestCase):
 
     def test_pending_row_control(self):
         def loose(root):
-            path = root / ratchet.CHANGELOG
-            return set(re.findall(r'([0-9]+(?:\.[0-9]+)*)',
-                                  path.read_text(encoding='utf-8-sig')))
+            path = root / ratchet.VERSION_MAP
+            return set(re.findall(r'^\|\s*([0-9]+(?:\.[0-9]+)*)\s*\|',
+                                  path.read_text(encoding='utf-8-sig'), re.M))
         self.rejected_mutation(ratchet, 'released_versions', loose,
-                               'test_pending_changelog_version_does_not_expire')
+                               'test_pending_version_map_row_does_not_expire')
 
     def test_exception_category_control(self):
         self.rejected_mutation(ratchet, 'total_excepted', lambda row, value, accepted: True,

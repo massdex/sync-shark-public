@@ -31,7 +31,7 @@ respect the repository privacy guard without storing literal text or hash IDs.
 Repository-total regressions may be accepted only by tools/ci/ratchet-exceptions.json
 for the release version stamped in Directory.Build.props and only up to its recorded
 total; an entry from another release fails, an entry whose version already appears in
-CHANGELOG.md fails, and any further growth still fails.
+VERSION-MAP.md fails, and any further growth still fails.
 """
 import argparse
 import collections
@@ -376,7 +376,7 @@ COUNTED = ('user-strings', 'magic-tunables', 'data-outside-storage')
 COUNTED_SQL = '(' + ','.join("'" + category + "'" for category in COUNTED) + ')'
 EXCEPTIONS = 'tools/ci/ratchet-exceptions.json'
 VERSION_FILE = 'Directory.Build.props'
-CHANGELOG = 'CHANGELOG.md'
+VERSION_MAP = 'VERSION-MAP.md'
 
 
 def identity_manifest(baseline):
@@ -394,11 +394,11 @@ def release_version(root):
 
 
 def released_versions(root):
-    """Versions with a released heading in CHANGELOG.md; [Unreleased] has no digits."""
-    path = root / CHANGELOG
+    """Versions with a full source SHA already recorded as released in VERSION-MAP.md."""
+    path = root / VERSION_MAP
     if not path.exists():
         return set()
-    return set(re.findall(r'^## \[([0-9]+(?:\.[0-9]+)*)\]',
+    return set(re.findall(r'^\|\s*([0-9]+(?:\.[0-9]+)*)\s*\|\s*[0-9a-f]{40}\s*\|',
                           path.read_text(encoding='utf-8-sig'), re.M))
 
 
