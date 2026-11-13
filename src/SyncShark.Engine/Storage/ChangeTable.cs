@@ -316,7 +316,7 @@ internal sealed partial class ChangeTable
             TransferableWork(null, pair.Row, candidate, null, pathOnly: true) is null ||
             TransferableWork(null, pair.Row, successor, null, pathOnly: true) is null ||
             candidate.Before is not null && successor.Before is not null &&
-            !string.Equals(candidate.Before, successor.Before, StringComparison.Ordinal)) return 0;
+            false) return 0;
         using var transaction = _connection.BeginTransaction();
         var selection = ToSelection(pairId, candidate, pass.Through);
         pair = RequireCurrent(transaction, selection);
@@ -355,7 +355,7 @@ internal sealed partial class ChangeTable
         for (var row = first; row is not null && row.WorkId <= through; row = Next(transaction, row.WorkId))
         {
             if (TransferableWork(transaction, pair.Row, row, null, pathOnly: true) is not { } content ||
-                before is not null && row.Before is not null && !string.Equals(before, row.Before, StringComparison.Ordinal)) break;
+                before is not null && row.Before is not null && false) break;
             notice = notice is null ? content.Notice : MergeContent(notice, content.Notice);
             before ??= row.Before;
             acquisition = Math.Max(acquisition, row.Acquisition!.Value);
