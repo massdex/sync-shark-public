@@ -105,7 +105,7 @@ def baseline_findings(root, trusted, connection, ratchet):
     return failures
 
 
-def findings(root, ratchet, connection=None, tree=None):
+def findings(root, ratchet, connection, tree):
     """Stream content-bound sites owned by enclosing type, never member spelling or line."""
     for path in ratchet.identity.source_files(root):
         relative = path.relative_to(root).as_posix()
@@ -119,7 +119,7 @@ def findings(root, ratchet, connection=None, tree=None):
             owner = prefix + '.'.join([t[0] for t in declarations if t[3] < start < t[4]] + [name])
             owners.append((start, end, owner))
         sites = []
-        permitted = literal_sites.consume(connection, tree, relative, source, spans) if connection is not None else ()
+        permitted = literal_sites.consume(connection, tree, relative, source, spans)
         ratchet.text_count(source, masked, spans, path, lambda a, b: sites.append(('user-strings', a, b)), permitted)
         ratchet.tunable_count(masked, path, lambda a, b: sites.append(('magic-tunables', a, b)))
         if 'Storage' not in Path(relative).parts:

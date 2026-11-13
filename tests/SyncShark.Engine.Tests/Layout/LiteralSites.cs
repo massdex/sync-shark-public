@@ -60,7 +60,7 @@ internal static class LiteralSites
         var previous = 0;
         foreach (var expression in root.DescendantNodes().OfType<ExpressionSyntax>().Where(node =>
             node is InterpolatedStringExpressionSyntax || node is LiteralExpressionSyntax literal &&
-            literal.Token.Kind().ToString().Contains("StringLiteral", StringComparison.Ordinal)))
+            LiteralsChecks.IsStringLiteral(literal.Token)))
         {
             for (var i = previous; i < expression.SpanStart; i++)
                 if (source[i] == '\n') { line++; ordinals.Clear(); }

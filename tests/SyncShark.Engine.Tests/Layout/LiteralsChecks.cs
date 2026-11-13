@@ -557,7 +557,7 @@ public static class LiteralsChecks
     {
         if (token.IsKind(SyntaxKind.InterpolatedStringTextToken))
             return token.Value is string interpolated && interpolated.Length > 0 ? "interpolated text " + token.Text : null;
-        if (!token.Kind().ToString().Contains("StringLiteral", StringComparison.Ordinal) ||
+        if (!IsStringLiteral(token) ||
             token.Value is not string text || text.Length == 0) return null;
         // Schema SQL owns its const fragments; other owners cannot hide sentences.
         var owner = OwnerOf(token.Parent, relativePath);
@@ -571,6 +571,9 @@ public static class LiteralsChecks
         }
         return "text literal " + token.Text;
     }
+
+    internal static bool IsStringLiteral(SyntaxToken token) =>
+        token.Kind().ToString().Contains("StringLiteral", StringComparison.Ordinal);
 
     /// <summary>The classes allowed to hold named literals, each for its own kind, and the file each must be declared
     /// in (design section 10).</summary>

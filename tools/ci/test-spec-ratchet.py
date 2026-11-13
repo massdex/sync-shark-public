@@ -73,7 +73,7 @@ class RatchetChecks(unittest.TestCase):
     def test_utf8_suffix_is_token_text_not_display_text(self):
         for suffix in ('u8', 'U8'):
             with self.subTest(suffix=suffix):
-                source = 'class Example { object Value = "null"' + suffix + '; }'
+                source = 'class Example { object Message = "null"' + suffix + '; }'
                 spans = []
                 masked = ratchet.lex.mask(source, spans)
                 self.assertEqual(['"null"' + suffix], [source[a:b] for a, b in spans])
