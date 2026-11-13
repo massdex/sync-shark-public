@@ -64,6 +64,10 @@ public static partial class ChangeRunnerChecks
         fixture.Dropbox.Seed(remote, [1]);
         var saved = SyncedEntries.From(local, remote);
         fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
+        const string persisted = "SELECT json_array(rowid,quote(pair_id),quote(local_path),quote(dropbox_key_delta)," +
+            "quote(dropbox_path_delta),quote(is_folder),quote(local_id),quote(local_size),quote(local_mtime)," +
+            "quote(dropbox_id),quote(dropbox_hash)) FROM synced_entry;";
+        var before = ExecuteScalarOnStore(fixture, persisted);
         var changed = shape switch
         {
             "metadata" => remote with { Revision = "different", Modified = Stamp.AddDays(1) },
@@ -86,18 +90,22 @@ public static partial class ChangeRunnerChecks
         var remoteCounter = new CountingSide(new HookedSide(fixture.Dropbox, beforeRead: path => reads.Add(path)));
         fixture.DropboxView = remoteCounter;
         var counters = new StoreCounters(fixture.Store);
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [], configure: context =>
+        var events = new List<RunEvent>();
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events, configure: context =>
         {
             ((FakeTimeProvider)context.Time).Advance(Stamp.AddDays(1) - context.Time.GetUtcNow());
             return context with { Store = counters };
         }).SyncWorkAsync(default);
+        Console.WriteLine($"B214 entry={shape} settled={counters.EchoesSettled} reads={string.Join(',', reads)} opens={remoteCounter.Opens} " +
+            $"issues={string.Join(';', fixture.Inner.Issues(PairId))} events={string.Join(';', events)}");
         var eligible = shape is "exact" or "metadata";
         Check.Require(counters.EchoesSettled == (eligible ? 1 : 0) &&
             reads.Count(path => PathNames.DropboxKey(path) == PathNames.DropboxKey(changed.Path)) == (eligible ? 0 : 1),
             "B214-T12/T13: only exact baseline echoes avoid their fresh metadata read: " + shape);
         if (eligible)
-            Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, saved.LocalKey) == saved,
-                "B214-T13: Revision/Modified-only evidence leaves the complete saved record unchanged");
+            Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, saved.LocalKey) == saved &&
+                Equals(before, ExecuteScalarOnStore(fixture, persisted)),
+                "B214-T13: Revision/Modified-only evidence leaves every persisted value and encoded byte unchanged");
         if (shape is "replacement" or "new" or "hash")
             Check.Require(remoteCounter.Opens == 1 &&
                 await fixture.Local.ContentHashAsync((await fixture.Local.ReadOneAsync(changed.Path, default))!, default) ==
@@ -119,6 +127,9 @@ public static partial class ChangeRunnerChecks
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, first, new Boundary(_ => new Lease()), [], configure: context => context with
             { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+        Console.WriteLine($"B214 later rename={rename} first={first.AnchorWorkId} later={later.AnchorWorkId} " +
+            $"settled={counters.EchoesSettled} begins={string.Join(',', fixture.Hooks.BegunSelections.Select(row => row.AnchorWorkId))} " +
+            $"opens={counter.Opens} issues={string.Join(';', fixture.Inner.Issues(PairId))}");
         Check.Require(counters.EchoesSettled == 1 &&
             fixture.Hooks.BegunSelections.Count(row => row.AnchorWorkId == later.AnchorWorkId) == 1,
             "B214-T11: exact-row settlement cannot retire later evidence of the same identity");
@@ -308,6 +319,9 @@ public static partial class ChangeRunnerChecks
             try
             {
                 await Task.WhenAny(returned.Task, failed.Task).WaitAsync(TimeSpan.FromSeconds(30));
+                Console.WriteLine($"B214 host returned={returned.Task.IsCompleted} stopping={failed.Task.IsCompleted} " +
+                    $"status={rig.Host.Status()} rolledBack={rolledBack} paths={string.Join(',', rig.Wire.Snapshot().Select(item => item.Path))} " +
+                    $"issues={string.Join(';', rig.Store.Issues(pairId))}");
                 Check.Require(returned.Task.IsCompleted && rig.Host.Status().Status != AutoStatus.Held && rolledBack &&
                     rig.Wire.Snapshot().Any(item => item.Path == "Y"),
                     "B214-T6c: real AutoSync returns normally, host is not Held, atomic rollback preserves work and Y moves");
@@ -419,6 +433,8 @@ public static partial class ChangeRunnerChecks
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: context => context with
             { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+        Console.WriteLine($"B214 bound explicit={explicitKey} settled={counters.EchoesSettled} reads={string.Join(',', reads)} " +
+            $"before={readBeforeDelete} remains={fixture.Local.FindById(local.Id) is not null} issues={string.Join(';', fixture.Inner.Issues(PairId))}");
         Check.Require(counters.EchoesSettled == 0 && reads.Count(read => read == path) == 1 && readBeforeDelete &&
             await fixture.Local.ReadOneAsync(local.Path, default) is null,
             "B214-T5: a bound descendant needs fresh Dropbox absence before Local removal: " + explicitKey);

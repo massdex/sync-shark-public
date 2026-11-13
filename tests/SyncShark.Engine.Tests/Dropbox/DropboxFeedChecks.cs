@@ -105,12 +105,13 @@ public static class DropboxFeedChecks
                 await session.Syncer.SyncWorkAsync(ct);
                 return true;
             }, default);
-            for (var step = 0; step < DriveSteps && !opportunity.IsCompleted; step++)
+            var bounded = opportunity.WaitAsync(TimeSpan.FromSeconds(30));
+            while (!bounded.IsCompleted)
             {
                 await Task.Yield();
                 time.Advance(Tick);
             }
-            Check.Require(opportunity.IsCompleted && await opportunity,
+            Check.Require(await bounded,
                 "B214-T5a: native Local execution returns after the recovered page");
             Check.Require(rig.Wire.ContinueCursors.Count >= 3 && rig.Wire.ContinueCursors[1] == CursorOne &&
                 rig.Wire.ContinueCursors[2] == CursorOne &&

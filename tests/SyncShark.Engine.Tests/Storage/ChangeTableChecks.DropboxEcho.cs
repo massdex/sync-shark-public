@@ -72,6 +72,7 @@ public static partial class ChangeTableChecks
         store.Commit(PairId, StateChange.Empty with { Record = bindings });
         Acquire(store, source, NextCursor, Enumerable.Range(0, 10)
             .Select(index => Notice(Side.Dropbox, "P" + index, null, kind: ChangeKind.Deleted)));
+        // Page outcomes plus raw QP counts imply 120 examined rows per page; this is not direct real-store row instrumentation.
         for (var page = 0; page < 5; page++)
             Check.Require(SettleEchoPage(store) == (2, true),
                 "B214-T15: two exhausted 60-row probes consume 122 units and end the page");
@@ -123,7 +124,7 @@ public static partial class ChangeTableChecks
             store.AdvanceSource(PairId, side, provenance.PairGeneration, current.Epoch, current.Revision,
                 current.Provenance, current.Cursor, current.Epoch, current.Revision,
                 shape == "provenance" ? null : current.Provenance,
-                shape == "cursor" ? null : current.Cursor,
+                shape is "cursor" or "provenance" ? null : current.Cursor,
                 shape.EndsWith("debt", StringComparison.Ordinal) ? SourceObligation.NormalRepair : null);
         }
         Check.Require(SettleEchoPage(store).Settled == 0 &&

@@ -170,6 +170,8 @@ public static partial class CallBudgetChecks
                         "B214-T1/T2 setup: the composed baseline completes");
                 var pairId = rig.Pair.PairId;
                 var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
+                var childIds = Enumerable.Range(0, children).Select(index =>
+                    rig.Store.SyncedByKey(pairId, Side.Local, PathNames.Key($"Old/{index:D5}"))!.DropboxId).ToHashSet();
                 using var log = rig.Log(root, "move-echo");
                 await rig.Host.DispatchSessionAsync(pairId, () => log, async (session, ct) =>
                 {
@@ -191,11 +193,23 @@ public static partial class CallBudgetChecks
                             "B214-T1 setup: the Local rename notice is acquired");
                     }
                     rig.Wire.Calls.Clear();
+                    rig.Wire.MetadataPaths.Clear();
                     begins = 0;
                     var local = new CountingSide(session.Local);
-                    var syncer = new Syncer(session.Context with { Local = local },
-                        new SyncPorts(new RecoveryExecutionBoundary(() => session),
-                            new LiveExecutionBoundary(_ => session), PairSafety.SelectedBoundaryFor(session), LocalSide.HashSlots));
+                    var context = session.Context with { Local = local };
+                    var ports = new SyncPorts(new RecoveryExecutionBoundary(() => session),
+                        new LiveExecutionBoundary(_ => session), PairSafety.SelectedBoundaryFor(session), LocalSide.HashSlots);
+                    var syncer = new Syncer(context, ports with
+                    {
+                        RunBatchAsync = async (selection, batchSide, scope, retries, settles, token) =>
+                        {
+                            await PairSafety.CheckRootsAsync(session, token);
+                            await FolderBatch.RunAsync(context, ports, session.PrerequisiteDropbox, log,
+                                selection, batchSide, scope, retries, settles,
+                                next => PairSafety.CheckRootsAsync(session, next), session.Scans,
+                                () => session.Host.TryHoldGeneration(session.Registration), token);
+                        }
+                    });
                     await syncer.SyncWorkAsync(ct);
                     var moves = rig.Wire.Calls.Count(route => route.EndsWith("/move_v2", StringComparison.Ordinal));
                     Check.Require(moves == (origin == Side.Local ? 1 : 0) && local.Moves == (origin == Side.Dropbox ? 1 : 0) &&
@@ -217,6 +231,10 @@ public static partial class CallBudgetChecks
                         "B214-T1/T2: one echo opportunity drains all feed rows with zero additional HTTP metadata");
                     return true;
                 }, default);
+                Check.Require(rig.Wire.MetadataPaths.All(path => !childIds.Contains(path) &&
+                    !path.Contains("/Old/", StringComparison.OrdinalIgnoreCase) &&
+                    !path.Contains("/New/", StringComparison.OrdinalIgnoreCase)),
+                    "B214-T1/T2: the move and its echo make zero child metadata requests");
                 var measured = (rig.Wire.Calls.Count(route => route.EndsWith("/get_metadata", StringComparison.Ordinal)), begins);
                 if (previous is { } before)
                     Check.Require(measured == before, "B214-T1/T2: HTTP metadata and BeginSelection counts stay flat at 50/5000 children");

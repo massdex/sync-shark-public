@@ -75,6 +75,7 @@ public static class QueryPlanChecks
                 line.Contains("<expr>>? AND <expr><?", StringComparison.Ordinal)),
             "B214-QP1: one bounded inherited-key range: " + string.Join("; ", inherited));
         var peer = Plan(connection, StateSchema.PeerPathPage);
+        Console.WriteLine("B214-QP1 Local peer plan: " + string.Join("; ", peer));
         Check.Require(peer.Any(line => line.StartsWith("SEARCH change_work ", StringComparison.Ordinal) &&
             line.Contains("work_path", StringComparison.Ordinal)), "B214-QP1: Local peers seek work_path");
         var pending = Plan(connection, StateSchema.EchoPending, keepPair: true);
