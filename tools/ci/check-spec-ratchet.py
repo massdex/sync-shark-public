@@ -11,27 +11,24 @@ M5/M6 (standards 2.1/2.2/2.4): repository-wide heuristic counts reuse the marker
 swarm/scripts/classify.py and scan_tunables.py behind strings.csv/tunables.csv.
 They include exception text, CLI vocabulary, literal durations, tunable-named
 initializers/defaults, threshold/call literals and global settings reads.
-Strings, tunables and Microsoft.Data references use repository totals; per-file
-changes are informational only. Existing per-file baseline slices are retained
-for provenance; updates only remove/lower slices to match the new total. Counts
-avoid brittle text identities and never store literal values. Replacement within
-a count is invisible. Microsoft.Data.* is counted outside Storage. T1 owns edges.
+Strings, tunables and Microsoft.Data references retain repository totals. The
+trusted entry point also compares entity-owned content fingerprints, so removing
+unrelated debt cannot finance new findings. Literal values are never printed.
+Microsoft.Data.* is counted outside Storage. T1 owns edges.
 
 The baseline was seeded once from 832e0009. There is deliberately no bootstrap
-CLI. --update-baseline remains atomic and remove-only, even for reviewed sizes.
+CLI. Reviewed candidate lowering is checked against immutable release rows.
 Source is processed one file at a time; a temporary SQLite index orders comparison.
 Members use project/namespace/type/signature, never file paths or line numbers.
 Class sizes pair descending per-type declaration sizes. Size findings trigger
 content-anchored review; literals and type-layout findings retain their ratchets.
 File categories follow one-to-one type/content matches from the committed file
-identity manifest. No Git executable or history is needed at runtime.
+identity manifest. The trusted entry point requires the release Git history.
 Baseline paths remain provenance only for members; remove-only updates retain
 original spelling so rename lineage survives subsequent runs. '~' splits identifiers to
 respect the repository privacy guard without storing literal text or hash IDs.
-Repository-total regressions may be accepted only by tools/ci/ratchet-exceptions.json
-for the release version stamped in Directory.Build.props and only up to its recorded
-total; an entry from another release fails, an entry whose version already appears in
-VERSION-MAP.md fails, and any further growth still fails.
+The release owner supplies a pinned live tag outside candidate policy. Its
+measured inventory is the comparison; committed baselines are never raised.
 """
 import argparse
 import collections
@@ -42,6 +39,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import types
 import tempfile
 import sqlite3
 
@@ -56,6 +54,9 @@ identity_spec.loader.exec_module(identity)
 review_spec = importlib.util.spec_from_file_location('spec_reviews', HERE / 'spec_reviews.py')
 reviews = importlib.util.module_from_spec(review_spec)
 review_spec.loader.exec_module(reviews)
+trust_spec = importlib.util.spec_from_file_location('spec_trust', HERE / 'spec_trust.py')
+trust = importlib.util.module_from_spec(trust_spec)
+trust_spec.loader.exec_module(trust)
 METHOD_LIMIT = 40
 SIZE_LIMIT = 300
 TYPE = re.compile(r'\b(class|struct|interface|enum|record(?:\s+(?:class|struct))?)\s+(@?[A-Za-z_]\w*)')
@@ -117,7 +118,7 @@ def type_declarations(masked):
             yield match[1], 'delegate', match.start(), end, end
 
 
-def text_count(source, masked, spans, path):
+def text_count(source, masked, spans, path, finding=None):
     count = 0
     for start, end in spans:
         literal = source[start:end]
@@ -138,32 +139,39 @@ def text_count(source, masked, spans, path):
         # Include CLI flags and case vocabulary (the inventory labels these command).
         if value.startswith('--') or re.search(r'\bcase\s*$', prefix):
             count += 1
+            if finding is not None:
+                finding(start, end)
             continue
         if re.fullmatch(r'[a-z][a-z0-9]*(?:[-._:][a-z0-9]+)*:?', value):
             continue
         notice = re.search(r'Notice|Reasons?|Vocabulary|Presentation|Refusal|FailureText|ScanFailureText', path.name)
         if DISPLAY.search(prefix) or notice or (' ' in value and len(value) > 12):
             count += 1
+            if finding is not None:
+                finding(start, end)
     return count
 
 
-def tunable_count(masked, path):
+def tunable_count(masked, path, finding=None):
     if path.name in ('V2Settings.cs', 'EngineSettings.cs'):
         return 0
     # Count sites, not numeric tokens: 1024 * 1024 is one default, not two.
-    sites = set()
+    sites = {}
     for match in CALL.finditer(masked):
         end = lex.match_close(masked, match.end() - 1, '(', ')')
         if NUMBER.search(masked[match.end():end]):
-            sites.add(('call', match.start()))
+            sites[('call', match.start())] = end + 1
     for match in re.finditer(r'\b(\w+)\s*=\s*(?!=|>)([^;{}\n]*)', masked):
         if TUNABLE.search(match[1]) and not NON_TUNABLE.search(match[1]) and NUMBER.search(match[2]):
-            sites.add(('default', match.start()))
+            sites[('default', match.start())] = match.end()
     for match in re.finditer(r'\b(?:[\w]+\.)*(count|elapsed|entries|attempts|size|age|depth|bytes)\s*[<>]=?\s*(\d[\d_]*)', masked, re.I):
         if match[2] not in ('0', '1'):
-            sites.add(('threshold', match.start()))
+            sites[('threshold', match.start())] = match.end()
     for match in re.finditer(r'\b(?:V2Settings|EngineSettings)\s*\.\s*Default\b', masked):
-        sites.add(('global', match.start()))
+        sites[('global', match.start())] = match.end()
+    if finding is not None:
+        for (_, start), end in sorted(sites.items()):
+            finding(start, end)
     return len(sites)
 
 
@@ -374,77 +382,10 @@ def write_row(stream, row):
 
 COUNTED = ('user-strings', 'magic-tunables', 'data-outside-storage')
 COUNTED_SQL = '(' + ','.join("'" + category + "'" for category in COUNTED) + ')'
-EXCEPTIONS = 'tools/ci/ratchet-exceptions.json'
-VERSION_FILE = 'Directory.Build.props'
-VERSION_MAP = 'VERSION-MAP.md'
 
 
 def identity_manifest(baseline):
     return baseline.with_name(baseline.stem + '-files.jsonl')
-
-
-def release_version(root):
-    """Release version stamped in the repository's build defaults."""
-    path = root / VERSION_FILE
-    if not path.exists():
-        return None
-    match = re.search(r'<Version\b[^>]*>\s*([^<\s]+)\s*</Version>',
-                      path.read_text(encoding='utf-8-sig'))
-    return match[1] if match else None
-
-
-def released_versions(root):
-    """Versions with a full source SHA already recorded as released in VERSION-MAP.md."""
-    path = root / VERSION_MAP
-    if not path.exists():
-        return set()
-    return set(re.findall(r'^\|\s*([0-9]+(?:\.[0-9]+)*)\s*\|\s*[0-9a-f]{40}\s*\|',
-                          path.read_text(encoding='utf-8-sig'), re.M))
-
-
-def assert_exception_scope(entry, version, released):
-    """An exception is valid only for the current, not-yet-released version."""
-    if entry.get('version') != version:
-        raise ValueError('ratchet exception for release ' + str(entry.get('version')) +
-                         ' is not the current release ' + version)
-    if entry['version'] in released:
-        raise ValueError('ratchet exception for release ' + entry['version'] +
-                         ' is already released; remove it')
-
-
-def total_exceptions(root):
-    """Accepted repository-total ceilings for the current release only."""
-    version = release_version(root)
-    path = root / EXCEPTIONS
-    if not path.exists() or version is None:
-        return {}
-    released = released_versions(root)
-    accepted = {}
-    for entry in json.loads(path.read_text(encoding='utf-8-sig')):
-        if entry.get('category') not in COUNTED:
-            raise ValueError('ratchet exception has unknown total category: ' + str(entry.get('category')))
-        if type(entry.get('accepted_total')) is not int or entry['accepted_total'] < 1:
-            raise ValueError('ratchet exception needs a positive accepted_total')
-        if not str(entry.get('reason', '')).strip():
-            raise ValueError('ratchet exception needs a reason')
-        assert_exception_scope(entry, version, released)
-        if entry['category'] in accepted:
-            raise ValueError('duplicate ratchet exception for ' + entry['category'])
-        accepted[entry['category']] = entry
-    return accepted
-
-
-def exception_applies(accepted, category, value):
-    entry = accepted.get(category)
-    if entry is None or value > entry['accepted_total']:
-        return False
-    print('EXCEPTION', category, value, '<=', entry['accepted_total'], '|', entry['reason'])
-    return True
-
-
-def total_excepted(row, value, accepted):
-    """Only a counted total row is excepted, and only within its ceiling."""
-    return row[0][1] in COUNTED and exception_applies(accepted, row[0][1], value)
 
 
 def canonical_rows(rows, connection, table, renames=None):
@@ -478,10 +419,10 @@ def canonical_rows(rows, connection, table, renames=None):
         yield key, value, tuple(json.loads(original))
 
 
-def compare(root, baseline, update=False):
-    accepted = total_exceptions(root)
-    ledger = reviews.read_ledger(root)
-    register_failures = reviews.check_register(root, ledger, lex)
+def compare(root, baseline, update=False, policy_root=None):
+    ledger = reviews.read_ledger(policy_root or root)
+    register_failures = (reviews.check_register(root, ledger, lex, policy_root=policy_root)
+                         if policy_root else reviews.check_register(root, ledger, lex))
     with tempfile.TemporaryDirectory(prefix='spec-ratchet-index-') as directory:
         with closing(sqlite3.connect(str(Path(directory) / 'index.sqlite'))) as connection:
             renames = identity.match_paths(root, identity_manifest(baseline), connection,
@@ -495,7 +436,7 @@ def compare(root, baseline, update=False):
                 connection.execute('INSERT INTO review_units VALUES (?, ?)', (json.dumps(key), json.dumps(unit)))
             current = iter(canonical_rows(scan(root, collect), connection, 'current_rows', renames))
             old = iter(canonical_rows(baseline_rows(baseline), connection, 'old_rows'))
-            return compare_rows(current, old, baseline, update, connection, verdicts, register_failures, accepted)
+            return compare_rows(current, old, baseline, update, connection, verdicts, register_failures)
 
 
 def canonical_key(key, renames=None):
@@ -520,11 +461,10 @@ def size_review(row, connection, verdicts, required):
     return int(verdict is None)
 
 
-def compare_rows(current, old, baseline, update, connection, verdicts=None, register_failures=0, accepted=None):
+def compare_rows(current, old, baseline, update, connection, verdicts=None, register_failures=0):
     a, b = next(current, None), next(old, None)
     failures, improved = register_failures, 0
     verdicts = verdicts or {}
-    accepted = accepted or {}
     totals = collections.Counter()
     remaining = collections.Counter()
     for original, delta in connection.execute(
@@ -553,10 +493,7 @@ def compare_rows(current, old, baseline, update, connection, verdicts=None, regi
                 totals[a[0][1]] += 1
                 if a[1] > b[1]:
                     print('GROWN', ' | '.join(a[0]), str(b[1]) + ' -> ' + str(a[1]))
-                if a[1] > b[1] and total_excepted(a, a[1], accepted):
-                    pass
-                else:
-                    failures += size_review(a, connection, verdicts, a[1] > b[1])
+                failures += size_review(a, connection, verdicts, a[1] > b[1])
                 if a[1] < b[1]:
                     print('improved', ' | '.join(a[0]), str(b[1]) + ' -> ' + str(a[1]))
                     improved += 1
@@ -599,8 +536,10 @@ def compare_rows(current, old, baseline, update, connection, verdicts=None, regi
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=HERE.parents[1])
-    parser.add_argument('--baseline', type=Path, default=HERE / 'spec-baseline.jsonl')
+    parser.add_argument('--baseline', type=Path, help='legacy input; rejected by trusted clearance')
     parser.add_argument('--update-baseline', action='store_true')
+    parser.add_argument('--live-tag', default=os.environ.get('RATCHET_LIVE_TAG'))
+    parser.add_argument('--live-commit', default=os.environ.get('RATCHET_LIVE_COMMIT'))
     parser.add_argument('--refresh-register', nargs='+', metavar='SOURCE_PATH',
                         help='refresh explicitly reviewed sections using the shared code hash')
     args = parser.parse_args()
@@ -608,9 +547,11 @@ def main():
         if args.refresh_register:
             reviews.refresh_register(args.root.resolve(), args.refresh_register, lex)
             return 0
-        return compare(args.root.resolve(), args.baseline.resolve(), args.update_baseline)
+        if args.update_baseline or args.baseline:
+            raise ValueError('candidate baseline overrides are not clearance inputs; submit reviewed lowering instead')
+        return trust.check(args.root.resolve(), args.live_tag, args.live_commit, types.SimpleNamespace(**globals()))
     except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError, sqlite3.Error) as error:
-        print('ERROR:', error, file=sys.stderr)
+        print('INCOMPLETE:', error, file=sys.stderr)
         return 2
 
 

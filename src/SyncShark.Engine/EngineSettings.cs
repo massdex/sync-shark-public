@@ -11,6 +11,8 @@ public sealed record EngineSettings(string ConflictLabelFormat, string ConflictL
     RecycleFallback WhenRecycleBinUnavailable, int LogRetentionDays, FirstRunPolicy DefaultFirstRunPolicy,
     int InitialLimiterLevel, string DefaultIgnoreRules, int LogBufferCharacters, int StoreBatchRows)
 {
+    internal const string RatchetMutantMessage = "New hard coded ratchet mutant message.";
+
     // The accepted atomic-publish policy doubles each successive wait.
     private const int AtomicReplaceDelayMultiplier = 2;
 

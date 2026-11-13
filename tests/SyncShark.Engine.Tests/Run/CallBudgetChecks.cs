@@ -17,7 +17,8 @@ namespace Massdex.SyncShark.Engine.Tests.Run;
 
 /// <summary>The call-budget check (`--engine-checks budget`): a Repair over a large fake pair costs listings only, and
 /// its provider calls, store commands, commits, allocation and database bytes per item stay flat as the pair grows.
-/// It also runs the section 9.4 storage cost shapes, which assert operation counts rather than elapsed times.</summary>
+/// It also runs the section 9.4 storage cost shapes, which assert operation counts rather than elapsed times.
+/// The executable keeps the aggregate; budget-1 through budget-4 partition it, and hosted CI expands budget.</summary>
 public static partial class CallBudgetChecks
 {
     // Both sizes are 5,110 and 20,440 items, exactly fourfold, but no longer the same folder count: the large size
@@ -30,7 +31,7 @@ public static partial class CallBudgetChecks
     private const int LargeTops = SmallTops * 4;
     private const int DenseFiles = SmallFiles * 4 + 330;
     private const int UnequalTimePercent = 40;
-    // Historical measured mean in ; the generated distribution is reported, not assumed.
+    // Historical measured mean; the generated distribution is reported, not assumed.
     private const int TypicalPathLength = 144;
     private const string TreeRoot = "Tree";
     private const int SampleMilliseconds = 50;
@@ -56,7 +57,7 @@ public static partial class CallBudgetChecks
         };
     }
 
-    public static void Run()
+    public static void RunBudgetCommon()
     {
         foreach (var size in new[] { SmallFiles, LargeFiles })
             Massdex.SyncShark.Engine.Tests.Storage.ForgetUnreadableChecks.Run(size, budget: true);
@@ -66,61 +67,97 @@ public static partial class CallBudgetChecks
         PageAttemptCosts();
         RecordAtomicityCosts();
         ReconciliationPendingReads();
+        InBudgetFolder(folder =>
+            ParentsChecks.OwnFolderBudgetAsync(folder, SmallShape.Items, LargeShape.Items).GetAwaiter().GetResult());
+    }
+
+    public static void RunBudgetPair() => InBudgetFolder(folder =>
+    {
+        var small = PairCosts(Path.Combine(folder, "small"), SmallShape);
+        var large = PairCosts(Path.Combine(folder, "large"), LargeShape);
+        var dense = PairCosts(Path.Combine(folder, "dense"), DenseShape);
+        AssertGrowth("identical first run", small.First, large.First, elapsedGate: true);
+        AssertGrowth("unchanged pair", small.Unchanged, large.Unchanged, elapsedGate: true);
+        AssertGrowth("1%-changed run", small.Changed, large.Changed, elapsedGate: true);
+        AssertGrowth("mixed-type 1%-changed run", small.Mixed, large.Mixed);
+        // The same 1% share changes four times the items; these counts must follow the items exactly.
+        Check.Require(large.Changed.ProviderCalls == small.Changed.ProviderCalls * 4 &&
+            large.Changed.Hashes == small.Changed.Hashes * 4 &&
+            large.Changed.CommitCalls == small.Changed.CommitCalls * 4,
+            "1%-changed run: provider calls, hashes and commits grow exactly with the item count: calls=" +
+            large.Changed.ProviderCalls + "/" + small.Changed.ProviderCalls + ", hashes=" +
+            large.Changed.Hashes + "/" + small.Changed.Hashes + ", commits=" + large.Changed.CommitCalls +
+            "/" + small.Changed.CommitCalls);
+        AssertGrowth("dense-folder unchanged pair", small.Unchanged, dense.Unchanged, elapsedGate: true);
+    });
+
+    public static void RunBudgetWholeFolder() => InBudgetFolder(folder =>
+        GrowthBySize("whole folder", shape => FolderCosts(Path.Combine(folder, shape.Name + "-delete"),
+            shape with { Rooted = true })));
+
+    public static void RunBudgetDeepFolder() => InBudgetFolder(folder =>
+        GrowthBySize("deep folder", shape => FolderCosts(Path.Combine(folder, shape.Name + "-deep"),
+            shape with { Rooted = true, Deep = true })));
+
+    public static void RunBudgetManyFolders() => InBudgetFolder(folder =>
+        GrowthBySize("many folders", shape => ManyFolderCosts(Path.Combine(folder, shape.Name + "-many-roots"), shape)));
+
+    public static void RunBudgetPartialFolder() => InBudgetFolder(folder =>
+        GrowthBySize("partial folder", shape => FolderCosts(Path.Combine(folder, shape.Name + "-partial"),
+            Flat(shape), partial: true)));
+
+    public static void RunBudgetExclusion() => InBudgetFolder(folder =>
+        GrowthBySize("dense exclusion", shape => ExclusionCosts(Path.Combine(folder, shape.Name + "-exclude"), Flat(shape))));
+
+    public static void RunBudgetPlanSql() => InBudgetFolder(folder =>
+    {
+        Dictionary<string, StatementCost>? smallSql = null;
+        foreach (var shape in new[] { SmallShape, LargeShape })
+        {
+            var flat = Flat(shape);
+            var sql = PlanSqlCosts(Path.Combine(folder, shape.Name + "-sql"), flat);
+            if (smallSql is not null)
+                foreach (var (phase, cost) in sql)
+                {
+                    var before = smallSql[phase];
+                    // Partial phases visit M-1 removed children, so their ratio is slightly greater than M's.
+                    var smallRemoved = SmallShape.Items - 2;
+                    var largeRemoved = flat.Files - 1;
+                    Check.Require(cost.VmSteps * smallRemoved <= before.VmSteps * largeRemoved &&
+                        cost.PathKeyCalls * smallRemoved <= before.PathKeyCalls * largeRemoved &&
+                        cost.DepthCalls * smallRemoved <= before.DepthCalls * largeRemoved &&
+                        cost.ChangedRows * smallRemoved <= before.ChangedRows * largeRemoved,
+                        phase + ": executed VM and callback counts grow no faster than children");
+                }
+            smallSql = sql;
+        }
+    });
+
+    public static void RunBudgetAdverse() => InBudgetFolder(folder =>
+    {
+        foreach (var shape in new[] { SmallShape, LargeShape })
+            FailedListingCosts(Path.Combine(folder, shape.Name + "-failed"), shape);
+    });
+
+    public static void RunBudgetComposedProvider() => InBudgetFolder(folder =>
+        ComposedProviderCostsAsync(folder).GetAwaiter().GetResult());
+
+    private static void GrowthBySize(string name, Func<Shape, Cost> run)
+    {
+        var small = run(SmallShape);
+        var large = run(LargeShape);
+        AssertGrowth(name, small, large);
+    }
+
+    private static Shape Flat(Shape shape) => new(shape.Name + "-flat", shape.Items - 1, 0, Rooted: true);
+
+    private static void InBudgetFolder(Action<string> run)
+    {
         var folder = Path.Combine(Path.GetTempPath(), "syncshark-budget-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         try
         {
-            ParentsChecks.OwnFolderBudgetAsync(folder, SmallShape.Items, LargeShape.Items).GetAwaiter().GetResult();
-            var small = PairCosts(Path.Combine(folder, "small"), SmallShape);
-            var large = PairCosts(Path.Combine(folder, "large"), LargeShape);
-            var dense = PairCosts(Path.Combine(folder, "dense"), DenseShape);
-            AssertGrowth("identical first run", small.First, large.First, elapsedGate: true);
-            AssertGrowth("unchanged pair", small.Unchanged, large.Unchanged, elapsedGate: true);
-            AssertGrowth("1%-changed run", small.Changed, large.Changed, elapsedGate: true);
-            AssertGrowth("mixed-type 1%-changed run", small.Mixed, large.Mixed);
-            // The same 1% share changes four times the items; these counts must follow the items exactly.
-            Check.Require(large.Changed.ProviderCalls == small.Changed.ProviderCalls * 4 &&
-                large.Changed.Hashes == small.Changed.Hashes * 4 &&
-                large.Changed.CommitCalls == small.Changed.CommitCalls * 4,
-                "1%-changed run: provider calls, hashes and commits grow exactly with the item count: calls=" +
-                large.Changed.ProviderCalls + "/" + small.Changed.ProviderCalls + ", hashes=" +
-                large.Changed.Hashes + "/" + small.Changed.Hashes + ", commits=" + large.Changed.CommitCalls +
-                "/" + small.Changed.CommitCalls);
-            AssertGrowth("dense-folder unchanged pair", small.Unchanged, dense.Unchanged, elapsedGate: true);
-            Dictionary<string, Cost>? smallFolders = null;
-            Dictionary<string, StatementCost>? smallSql = null;
-            foreach (var shape in new[] { SmallShape, LargeShape })
-            {
-                var flat = new Shape(shape.Name + "-flat", shape.Items - 1, 0, Rooted: true);
-                var costs = new Dictionary<string, Cost>
-                {
-                    ["whole folder"] = FolderCosts(Path.Combine(folder, shape.Name + "-delete"), shape with { Rooted = true }),
-                    ["deep folder"] = FolderCosts(Path.Combine(folder, shape.Name + "-deep"), shape with { Rooted = true, Deep = true }),
-                    ["many folders"] = ManyFolderCosts(Path.Combine(folder, shape.Name + "-many-roots"), shape),
-                    ["partial folder"] = FolderCosts(Path.Combine(folder, shape.Name + "-partial"), flat, partial: true),
-                    ["dense exclusion"] = ExclusionCosts(Path.Combine(folder, shape.Name + "-exclude"), flat)
-                };
-                if (smallFolders is not null)
-                    foreach (var (name, cost) in costs) AssertGrowth(name, smallFolders[name], cost);
-                smallFolders = costs;
-                var sql = PlanSqlCosts(Path.Combine(folder, shape.Name + "-sql"), flat);
-                if (smallSql is not null)
-                    foreach (var (phase, cost) in sql)
-                    {
-                        var before = smallSql[phase];
-                        // Partial phases visit M-1 removed children, so their ratio is slightly greater than M's.
-                        var smallRemoved = SmallShape.Items - 2;
-                        var largeRemoved = flat.Files - 1;
-                        Check.Require(cost.VmSteps * smallRemoved <= before.VmSteps * largeRemoved &&
-                            cost.PathKeyCalls * smallRemoved <= before.PathKeyCalls * largeRemoved &&
-                            cost.DepthCalls * smallRemoved <= before.DepthCalls * largeRemoved &&
-                            cost.ChangedRows * smallRemoved <= before.ChangedRows * largeRemoved,
-                            phase + ": executed VM and callback counts grow no faster than children");
-                    }
-                smallSql = sql;
-                FailedListingCosts(Path.Combine(folder, shape.Name + "-failed"), shape);
-            }
-            ComposedProviderCostsAsync(folder).GetAwaiter().GetResult();
+            run(folder);
         }
         finally
         {

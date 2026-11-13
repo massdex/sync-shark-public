@@ -171,116 +171,6 @@ class RatchetChecks(unittest.TestCase):
             for row in ratchet.scan(self.root):
                 ratchet.write_row(stream, row)
 
-    # --- release-scoped total exception ---
-
-    def put_release(self, version='0.3.82', released=(), pending=()):
-        (self.root / 'Directory.Build.props').write_text(
-            "<Project><PropertyGroup><Version Condition=\"'$(Version)' == ''\">" +
-            version + "</Version></PropertyGroup></Project>", encoding='utf-8')
-        rows = ['| ' + row + ' | ' + 'a' * 40 + ' |' for row in released]
-        rows += ['| ' + row + ' | -- |' for row in pending]
-        if rows:
-            (self.root / 'VERSION-MAP.md').write_text(
-                '# map\n\n| version | commit |\n|---|---|\n' +
-                ''.join(row + '\n' for row in rows), encoding='utf-8')
-
-    def put_exceptions(self, entries):
-        path = self.root / ratchet.EXCEPTIONS
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(entries), encoding='utf-8')
-
-    @staticmethod
-    def exception(version='0.3.82', category='user-strings', total=2):
-        return {'version': version, 'category': category, 'accepted_total': total,
-                'reason': 'accepted for release 0.3.82 pending removal of the underlying items'}
-
-    def check_main(self, *extra):
-        argv = ['check-spec-ratchet.py', '--root', str(self.root),
-                '--baseline', str(self.baseline)] + list(extra)
-        output, error = io.StringIO(), io.StringIO()
-        with mock.patch.object(sys, 'argv', argv), \
-                contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
-            code = ratchet.main()
-        return code, output.getvalue(), error.getvalue()
-
-    def counted_total(self, category):
-        return sum(value for key, value in ratchet.baseline_rows(self.baseline)
-                   if key[1] == category)
-
-    def grow_user_strings(self):
-        self.put('    void M() { Console.WriteLine("Please retry this operation."); }\n')
-        self.seed_current()
-        self.put('    void M() { Console.WriteLine("Please retry this operation."); '
-                 'Console.WriteLine("Please inspect the next operation."); }\n')
-
-    def test_exception_at_ceiling_passes_with_visible_line(self):
-        self.grow_user_strings()
-        self.put_release()
-        self.put_exceptions([self.exception(total=2)])
-        code, output = self.check()
-        self.assertEqual(0, code)
-        self.assertIn('EXCEPTION user-strings 2 <= 2', output)
-
-    def test_exception_above_ceiling_fails(self):
-        self.grow_user_strings()
-        self.put_release()
-        self.put_exceptions([self.exception(total=1)])
-        code, output = self.check()
-        self.assertEqual(1, code)
-        self.assertNotIn('EXCEPTION user-strings', output)
-
-    def test_exception_version_mismatch_exits_two(self):
-        self.grow_user_strings()
-        self.put_release(version='0.3.99')
-        self.put_exceptions([self.exception(version='0.3.82', total=2)])
-        code, output, error = self.check_main()
-        self.assertEqual(2, code)
-        self.assertIn('not the current release', error)
-
-    def test_exception_for_released_version_exits_two(self):
-        self.grow_user_strings()
-        self.put_release(version='0.3.82', released=('0.3.82',))
-        self.put_exceptions([self.exception(total=2)])
-        code, output, error = self.check_main()
-        self.assertEqual(2, code)
-        self.assertIn('already released', error)
-
-    def test_pending_version_map_row_does_not_expire(self):
-        self.grow_user_strings()
-        self.put_release(version='0.3.82', pending=('0.3.82',))
-        self.put_exceptions([self.exception(total=2)])
-        code, output, error = self.check_main()
-        self.assertEqual(0, code)
-        self.assertIn('EXCEPTION user-strings 2 <= 2', output)
-
-    def test_exception_does_not_cover_size_rows(self):
-        self.put_release()
-        self.put_exceptions([self.exception(total=5)])
-        self.put(long_method(extra=1))
-        code, output = self.check()
-        self.assertEqual(1, code)
-        self.assertIn('GROWN', output)
-
-    def test_exception_does_not_cover_counted_category_without_entry(self):
-        self.put('    void M() { var a = new Microsoft.Data.Sqlite.SqliteConnection(); }\n')
-        self.seed_current()
-        self.put('    void M() { var a = new Microsoft.Data.Sqlite.SqliteConnection(); '
-                 'var b = new Microsoft.Data.Sqlite.SqliteConnection(); }\n')
-        self.put_release()
-        self.put_exceptions([self.exception(category='user-strings', total=99)])
-        code, output = self.check()
-        self.assertEqual(1, code)
-        self.assertNotIn('EXCEPTION data-outside-storage', output)
-
-    def test_update_baseline_does_not_raise_counted_slice(self):
-        self.grow_user_strings()
-        before = self.counted_total('user-strings')
-        self.put_release()
-        self.put_exceptions([self.exception(total=2)])
-        code, output = self.check(update=True)
-        self.assertEqual(0, code)
-        self.assertLessEqual(self.counted_total('user-strings'), before)
-
     def test_constant_moved_between_files_passes(self):
         constant = '    const int RetryLimit = 20;\n'
         self.put(constant)
@@ -851,47 +741,162 @@ class ReviewNegativeControls(unittest.TestCase):
         self.rejected_mutation(ratchet.reviews, 'check_register', lambda *args: 0,
                                'test_register_requires_its_own_section_update_each_time')
 
-    def test_exception_at_ceiling_control(self):
-        self.rejected_mutation(ratchet, 'exception_applies', lambda *args: False,
-                               'test_exception_at_ceiling_passes_with_visible_line')
 
-    def test_exception_above_ceiling_control(self):
-        def loosened(accepted, category, value):
-            entry = accepted.get(category)
-            if entry is None or value > entry['accepted_total'] + 1:
-                return False
-            print('EXCEPTION', category, value, '<=', entry['accepted_total'], '|', entry['reason'])
-            return True
-        self.rejected_mutation(ratchet, 'exception_applies', loosened,
-                               'test_exception_above_ceiling_fails')
 
-    def test_exception_version_control(self):
-        self.rejected_mutation(ratchet, 'assert_exception_scope', lambda *args: None,
-                               'test_exception_version_mismatch_exits_two')
+class TrustedRatchetChecks(unittest.TestCase):
+    """Public entry-point fixtures with real, temporary Git history; hosted only."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='trusted-ratchet-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / 'src' / 'Example.cs'
+        self.source.parent.mkdir()
+        self.put('Shipped message one.')
+        for relative in ratchet.trust.ENFORCEMENT:
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture\n', encoding='utf-8')
+        self.baseline = self.root / ratchet.trust.BASELINE
+        with self.baseline.open('w', encoding='utf-8') as stream:
+            for row in ratchet.scan(self.root):
+                ratchet.write_row(stream, row)
+        ratchet.identity.write_manifest(self.root, self.root / ratchet.trust.MANIFEST,
+                                        ratchet.lex, ratchet.type_declarations, ratchet.safe_key)
+        (self.root / ratchet.reviews.LEDGER).write_text(
+            json.dumps({'version': 1, 'verdicts': [], 'register_reviews': []}), encoding='utf-8')
+        (self.root / ratchet.reviews.REGISTER).write_text('# Debt\n', encoding='utf-8')
+        # The shipped source exceeds its old committed baseline; this is inherited debt.
+        self.put('Shipped message one.', 'Shipped message two.')
+        self.git('init', '-q')
+        self.commit()
+        self.live = self.git('rev-parse', 'HEAD')
+        self.git('tag', 'v1.0.0')
 
-    def test_exception_released_control(self):
-        self.rejected_mutation(ratchet, 'assert_exception_scope', lambda *args: None,
-                               'test_exception_for_released_version_exits_two')
+    def git(self, *args):
+        return ratchet.trust.git(self.root, *args)
 
-    def test_pending_row_control(self):
-        def loose(root):
-            path = root / ratchet.VERSION_MAP
-            return set(re.findall(r'^\|\s*([0-9]+(?:\.[0-9]+)*)\s*\|',
-                                  path.read_text(encoding='utf-8-sig'), re.M))
-        self.rejected_mutation(ratchet, 'released_versions', loose,
-                               'test_pending_version_map_row_does_not_expire')
+    def commit(self):
+        self.git('add', '-A')
+        self.git('-c', 'user.name=Fixture', '-c', 'user.email=noreply', 'commit', '-qm',
+                 'Fixture\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>')
 
-    def test_exception_category_control(self):
-        self.rejected_mutation(ratchet, 'total_excepted', lambda row, value, accepted: True,
-                               'test_exception_does_not_cover_size_rows')
+    def put(self, *messages):
+        self.source.write_text('namespace Example;\nclass Example { void Text() { ' +
+                               ' '.join('Console.WriteLine(' + json.dumps(s) + ');' for s in messages) +
+                               ' } }\n', encoding='utf-8')
 
-    def test_exception_missing_entry_control(self):
-        def all_counted(root):
-            return {category: {'version': '0.3.82', 'category': category,
-                               'accepted_total': 10 ** 9, 'reason': 'control'}
-                    for category in ratchet.COUNTED}
-        self.rejected_mutation(ratchet, 'total_exceptions', all_counted,
-                               'test_exception_does_not_cover_counted_category_without_entry')
+    def check(self, tag='v1.0.0', commit=None):
+        output, error = io.StringIO(), io.StringIO()
+        argv = ['check-spec-ratchet.py', '--root', str(self.root), '--live-tag', tag,
+                '--live-commit', commit or self.live]
+        with mock.patch.object(sys, 'argv', argv), contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            code = ratchet.main()
+        return code, output.getvalue() + error.getvalue()
+
+    def test_live_measurement_not_committed_baseline(self):
+        before = self.baseline.read_bytes()
+        code, output = self.check()
+        self.assertEqual(0, code, output)
+        self.assertIn('INHERITED DEBT total user-strings 1 -> 2 delta=1', output)
+        self.assertIn('INHERITED DEBT slice src/Example.cs', output)
+        self.assertEqual(before, self.baseline.read_bytes())
+
+    def test_new_string_fails_by_entity(self):
+        self.put('Shipped message one.', 'Shipped message two.', 'A newly hard coded message.')
+        code, output = self.check()
+        self.assertEqual(1, code, output)
+        self.assertIn('NEW FINDING user-strings | :Example.Example:Text()', output)
+        self.assertNotIn('A newly hard coded message.', output)
+
+    def test_same_count_replacement_cannot_spend_removed_debt(self):
+        self.put('A newly hard coded message.')
+        code, output = self.check()
+        self.assertEqual(1, code, output)
+        self.assertIn('NEW FINDING user-strings', output)
+
+    def test_unrelated_entity_cannot_spend_removed_debt(self):
+        self.put()
+        self.source.write_text(self.source.read_text().replace('void Text()', 'void Other()').replace(
+            '{  }', '{ Console.WriteLine("Shipped message one."); }'), encoding='utf-8')
+        code, output = self.check()
+        self.assertEqual(1, code, output)
+        self.assertIn('Other()', output)
+
+    def test_candidate_baseline_addition_and_raise_fail(self):
+        original = list(ratchet.baseline_rows(self.baseline))
+        for rows in ([(key, value + 1) for key, value in original],
+                     original + [(('src/Other.cs', 'user-strings', '', ''), 1)]):
+            with self.subTest(rows=rows), self.baseline.open('w', encoding='utf-8') as stream:
+                for row in sorted(rows, key=ratchet.order_key):
+                    ratchet.write_row(stream, row)
+            code, output = self.check()
+            self.assertEqual(1, code, output)
+            self.assertIn('FAIL candidate baseline added/raised', output)
+
+    def test_forged_manifest_fails(self):
+        (self.root / ratchet.trust.MANIFEST).write_text('', encoding='utf-8')
+        code, output = self.check()
+        self.assertEqual(1, code, output)
+        self.assertIn('candidate identity manifest differs', output)
+
+    def test_missing_tag_or_mismatched_pin_is_incomplete(self):
+        for tag, commit in (('v9.0.0', self.live), ('v1.0.0', '0' * 40)):
+            with self.subTest(tag=tag, commit=commit):
+                code, output = self.check(tag, commit)
+                self.assertEqual(2, code, output)
+                self.assertIn('INCOMPLETE:', output)
+
+    def test_unrelated_history_is_incomplete(self):
+        self.git('checkout', '--orphan', 'unrelated')
+        self.commit()
+        code, output = self.check()
+        self.assertEqual(2, code, output)
+        self.assertIn('merge-base --is-ancestor', output)
+
+    def test_missing_trusted_file_is_incomplete(self):
+        (self.root / ratchet.trust.MANIFEST).unlink()
+        self.commit()
+        self.live = self.git('rev-parse', 'HEAD')
+        self.git('tag', 'v1.0.1')
+        code, output = self.check('v1.0.1')
+        self.assertEqual(2, code, output)
+        self.assertIn('trusted file missing:', output)
+
+    def test_semantic_entity_rename_and_lowering_pass(self):
+        self.source.rename(self.source.with_name('Example.Moved.cs'))
+        self.baseline.write_text('', encoding='utf-8')
+        code, output = self.check()
+        self.assertEqual(0, code, output)
+        self.assertIn('POLICY REVIEW changed tools/ci/spec-baseline.jsonl', output)
+
+    def test_old_version_stamp_and_waiver_cannot_accept_growth(self):
+        (self.root / 'Directory.Build.props').write_text('<Project><Version>0.3.82</Version></Project>', encoding='utf-8')
+        (self.root / 'tools/ci/ratchet-exceptions.json').write_text(json.dumps([
+            {'version': '0.3.82', 'category': 'user-strings', 'accepted_total': 999, 'reason': 'fixture'}]), encoding='utf-8')
+        self.put('New message not shipped.')
+        code, output = self.check()
+        self.assertEqual(1, code, output)
+        self.assertIn('NEW FINDING user-strings', output)
+        self.assertNotIn('EXCEPTION user-strings', output)
+
+    def test_candidate_policy_cannot_grant_a_verdict(self):
+        # Invalid candidate JSON is not even read; release-owned policy is used instead.
+        (self.root / ratchet.reviews.LEDGER).write_text('not trusted policy', encoding='utf-8')
+        code, output = self.check()
+        self.assertEqual(0, code, output)
+        self.assertIn('POLICY REVIEW changed tools/ci/spec-verdicts.json', output)
+
+    def test_removed_ledger_register_or_enforcement_test_fails(self):
+        for relative in (*ratchet.trust.POLICY, 'tools/ci/test-spec-ratchet.py'):
+            path = self.root / relative
+            before = path.read_bytes()
+            try:
+                path.unlink()
+                code, output = self.check()
+                self.assertEqual(1, code, output)
+                self.assertIn('FAIL removed required evidence ' + relative, output)
+            finally:
+                path.write_bytes(before)
 
 
 if __name__ == '__main__':
