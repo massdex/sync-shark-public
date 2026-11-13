@@ -79,7 +79,7 @@ public sealed record IssuesResult(IReadOnlyList<Issue> Issues, IReadOnlyList<Iss
     // Keep-both locations and in-use guidance share the UI renderer; other templates keep this listing's
     // operands ({Id}, {Pair}) so a template's placeholder never renders as a literal.
     private string CauseText(Issue issue, string id) => issue.Cause == TextKey.InfoKeptBoth ||
-        IssuePolicy.IsLocalAccessRetryCause(issue.Cause)
+        issue.Subject.Folders is not null || IssuePolicy.IsLocalAccessRetryCause(issue.Cause)
         ? IssuePresentation.Render(issue, ViewFor(issue))
         : Text.Get(issue.Cause, (TextArg.Path, issue.Path), (TextArg.Message, ""), (TextArg.Id, id),
             (TextArg.Pair, PairId ?? ""));

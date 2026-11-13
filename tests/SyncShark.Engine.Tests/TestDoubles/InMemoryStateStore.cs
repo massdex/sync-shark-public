@@ -2098,6 +2098,14 @@ public sealed class InMemoryStateStore : IStateStore
         FolderRemovals(pairId, state => state.Active || state.Phase is FolderRemovalPhase.Unknown or
             FolderRemovalPhase.Retained && state.RetirementDisposition is null, ct);
 
+    // Only the version-15 upgrade records duplicate-folder obligations, and an in-memory store never upgrades.
+    public IReadOnlyList<(DuplicateRepair Obligation, DuplicateRepairState State, IReadOnlyList<SyncedEntry> Bindings,
+        FolderRemovalState? Own)> DuplicateRepairPage(string pairId, PathScope scope, DuplicateRepairKey? after, int take) =>
+        [];
+
+    public DuplicateRepairProof CheckDuplicateRepair(string pairId, DuplicateRepairKey key, SyncedEntry binding,
+        string? operationId = null) => DuplicateRepairProof.Changed;
+
     private IEnumerable<FolderRemovalState> FolderRemovals(string pairId, Func<FolderRemovalState, bool> selected,
         CancellationToken ct)
     {

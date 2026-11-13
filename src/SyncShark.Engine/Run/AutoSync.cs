@@ -135,12 +135,14 @@ internal sealed class AutoSync
                 }
                 else
                 {
-                    await session.Syncer.SyncWorkAsync(token).ConfigureAwait(false);
+                    var revisit = await session.Syncer.SyncWorkAsync(token).ConfigureAwait(false);
                     // A normal return means no selectable work remained only while the host still admits this
                     // dispatch: a drain refuses lanes before cancellation reaches the token, and its state stays set
                     // until retirement. Only the exact admitted wait is cleared.
                     if (admitted is { } drained && _host.TryHoldGeneration(session.Registration))
                         _store.CompleteItemRetry(pairId, generation, drained);
+                    // A waiting cleanup's blocker finished after the lanes: one coalesced revisit (-6 3.5.1).
+                    if (revisit) Kick(pairId);
                 }
                 _host.ScheduleFolderPoll(pairId, _store.HasFolderJobProgress(pairId, token),
                     () => Kick(pairId, receiptsOnly: true));

@@ -717,6 +717,20 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         return inner.UnresolvedFolderRemovals(pairId, ct);
     }
 
+    public IReadOnlyList<(DuplicateRepair Obligation, DuplicateRepairState State, IReadOnlyList<SyncedEntry> Bindings,
+        FolderRemovalState? Own)> DuplicateRepairPage(string pairId, PathScope scope, DuplicateRepairKey? after, int take)
+    {
+        Command();
+        return inner.DuplicateRepairPage(pairId, scope, after, take);
+    }
+
+    public DuplicateRepairProof CheckDuplicateRepair(string pairId, DuplicateRepairKey key, SyncedEntry binding,
+        string? operationId = null)
+    {
+        Command();
+        return inner.CheckDuplicateRepair(pairId, key, binding, operationId);
+    }
+
     public IEnumerable<FolderRemovalEffect> ReadyFolderEffects(string pairId, string operationId,
         long afterOrdinal, int pageSize)
     {

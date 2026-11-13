@@ -47,8 +47,7 @@ internal static class DuplicateRepairs
     {
         var other = PathNames.Other(side);
         var qualifies = bindings.Count == 2 && bindings[0].IdOn(other) != bindings[1].IdOn(other) &&
-            bindings.All(binding => BoundOnce(connection, transaction, pair, side, binding) &&
-                !HasCustody(connection, transaction, pair, binding, null));
+            Validity(connection, transaction, pair, side, bindings, null) == DuplicateRepairProof.Valid;
         using var pairQuery = StorageCommand.Create(connection, transaction, StateSchema.PairIdByRow,
             (StateSchema.ParamPairRow, pair));
         var pairId = (string)pairQuery.ExecuteScalar()!;
@@ -68,20 +67,12 @@ internal static class DuplicateRepairs
     private static void LinksNotice(SqliteConnection connection, SqliteTransaction transaction, string pairId, Side side,
         IReadOnlyList<SyncedEntry> bindings, DateTimeOffset now, ICollection<Issue>? raised) =>
         IssueTable.Raise(connection, transaction, pairId, IssueKind.Failure, TextKey.FailDuplicateFolderLinks,
-            bindings[0].PathOn(side), LinksSubject(side, bindings), now, raised);
-
-    private static IssueSubject LinksSubject(Side side, IReadOnlyList<SyncedEntry> bindings)
-    {
-        var first = bindings[0];
-        var other = PathNames.Other(side);
-        return new IssueSubject([new IssueItem(side, first.PathOn(side), first.IdOn(side)),
-            .. bindings.Take(2).Select(binding => new IssueItem(other, binding.PathOn(other), binding.IdOn(other)))], null);
-    }
+            bindings[0].PathOn(side), IssueSubject.DuplicateFolderItems(side, bindings), now, raised);
 
     private static void ReleaseClashes(SqliteConnection connection, SqliteTransaction transaction, string pairId,
         Side side, IReadOnlyList<SyncedEntry> bindings)
     {
-        var subject = LinksSubject(side, bindings);
+        var subject = IssueSubject.DuplicateFolderItems(side, bindings);
         foreach (var path in bindings.SelectMany(binding => new[] { binding.PathOn(side), binding.PathOn(PathNames.Other(side)) })
             .Distinct(PathNames.Comparer))
         {
@@ -112,7 +103,11 @@ internal static class DuplicateRepairs
         var identity = StateEncoding.IdFor(settle.Side, settle.Identity)!;
         if (settle.Victim is not { } victim)
         {
-            if (!Obsolete(connection, transaction, pairId, pair, settle.Side, identity))
+            // R0 runs as one statement here, as the commit's other unbounded in-transaction reads do.
+            if (Row(connection, transaction, pair, settle.Side, identity) is not { } row ||
+                Classify(connection, transaction, pairId, pair, settle.Side, identity, row,
+                    new(() => OwnOperations(connection, transaction, pair, long.MaxValue)), null) is not
+                    { State: DuplicateRepairState.Obsolete })
                 throw new ChangedUnderneathException(string.Empty);
             return;
         }
@@ -124,7 +119,7 @@ internal static class DuplicateRepairs
                 throw new FolderStateRefusedException();
             return;
         }
-        if (!exact || !Validate(connection, transaction, pair, settle.Side, identity, null))
+        if (!exact || Validate(connection, transaction, pair, settle.Side, identity, null) != DuplicateRepairProof.Valid)
             throw new ChangedUnderneathException(victim.PathOn(settle.Side));
     }
 
@@ -171,14 +166,62 @@ internal static class DuplicateRepairs
         if (command.ExecuteNonQuery() == 0) throw new ChangedUnderneathException(path);
     }
 
-    /// <summary>V1-V4 (-6 3.5.2): the row exists, X's folder bindings are exactly the recorded two, each other-side id
-    /// is bound once, and no unresolved custody but operation's own overlaps either binding.</summary>
-    internal static bool Validate(SqliteConnection connection, SqliteTransaction transaction, long pair, Side side,
-        object identity, string? operation) =>
+    /// <summary>V1-V4 (-6 3.5.2): the row exists and X's folder bindings are exactly the recorded two (else Changed),
+    /// then <see cref="Validity"/> over those two.</summary>
+    internal static DuplicateRepairProof Validate(SqliteConnection connection, SqliteTransaction transaction, long pair,
+        Side side, object identity, string? operation) =>
         Row(connection, transaction, pair, side, identity) is { } row &&
-        Partners(connection, transaction, pair, side, identity, row) is { } bindings &&
-        bindings.All(binding => BoundOnce(connection, transaction, pair, side, binding) &&
-            !HasCustody(connection, transaction, pair, binding, operation));
+        Partners(connection, transaction, pair, side, identity, row) is { } bindings
+            ? Validity(connection, transaction, pair, side, bindings, operation)
+            : DuplicateRepairProof.Changed;
+
+    // V4 then V3, the classifier's order (rows 6 and 7): no unresolved custody but operation's own overlaps a binding,
+    // then each other-side id is bound once.
+    private static DuplicateRepairProof Validity(SqliteConnection connection, SqliteTransaction transaction, long pair,
+        Side side, IReadOnlyList<SyncedEntry> bindings, string? operation)
+    {
+        if (bindings.Any(binding => HasCustody(connection, transaction, pair, binding, operation)))
+            return DuplicateRepairProof.Busy;
+        return bindings.All(binding => BoundOnce(connection, transaction, pair, side, binding))
+            ? DuplicateRepairProof.Valid : DuplicateRepairProof.LinkedElsewhere;
+    }
+
+    /// <summary>One binding's Repair proofs (-7 1.4): V1-V4, excluding the operation's own custody when given, then P2.</summary>
+    internal static DuplicateRepairProof Check(SqliteConnection connection, SqliteTransaction transaction, string pairId,
+        DuplicateRepairKey key, SyncedEntry binding, string? operation)
+    {
+        var pair = IssueTable.PairFor(connection, transaction, pairId);
+        var proof = Validate(connection, transaction, pair, key.Side, StateEncoding.IdFor(key.Side, key.Identity)!, operation);
+        return proof == DuplicateRepairProof.Valid && HasSavedDescendants(connection, transaction, pair, binding)
+            ? DuplicateRepairProof.History : proof;
+    }
+
+    /// <summary>One classified page (-6 3.5.2): the keyset read, R0 at most once, then each obligation's checks. X's
+    /// bindings are its two current ones in key order, empty when V2 fails; Own is row 3's operation.</summary>
+    internal static IReadOnlyList<(DuplicateRepair Obligation, DuplicateRepairState State,
+        IReadOnlyList<SyncedEntry> Bindings, FolderRemovalState? Own)> Page(SqliteConnection connection,
+        SqliteTransaction transaction, string pairId, PathScope scope, DuplicateRepairKey? after, int take)
+    {
+        var pair = IssueTable.PairFor(connection, transaction, pairId);
+        var rows = new List<(DuplicateRepairKey Key, (object First, object Second, long? Issue) Row)>();
+        using (var command = StorageCommand.Create(connection, transaction, StateSchema.DuplicateRepairPage,
+            (StateSchema.ParamPairRow, pair),
+            (StateSchema.ParamSide, after is { } start ? (int)start.Side : StateSchema.BeforeFirstRepairSide),
+            (StateSchema.ParamIdentity, after is { } key ? StateEncoding.IdFor(key.Side, key.Identity) : null),
+            (StateSchema.ParamTake, take)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read())
+                rows.Add((new DuplicateRepairKey((Side)reader.GetInt32(StateSchema.RepairSide),
+                    reader.GetString(StateSchema.RepairIdentity)), ReadRow(reader)));
+        var own = new Lazy<Dictionary<(Side Side, object? Identity, object? Other), FolderRemovalState>>(() =>
+            OwnOperations(connection, transaction, pair, take));
+        return rows.Select(row =>
+        {
+            var (state, bindings, found) = Classify(connection, transaction, pairId, pair, row.Key.Side,
+                StateEncoding.IdFor(row.Key.Side, row.Key.Identity)!, row.Row, own, scope)!.Value;
+            return (new DuplicateRepair(row.Key, row.Row.Issue), state, bindings, found);
+        }).ToArray();
+    }
 
     /// <summary>P2: a saved descendant under the binding's Local, explicit Dropbox or inherited Dropbox key.</summary>
     internal static bool HasSavedDescendants(SqliteConnection connection, SqliteTransaction transaction, long pair,
@@ -228,17 +271,29 @@ internal static class DuplicateRepairs
         }
     }
 
-    // Classify rows 1-4 (-6 3.5.2), which decide Obsolete; the obsolete settle re-runs them inside its own commit.
-    // R0 runs as one statement here, as the commit's other unbounded in-transaction reads do.
-    private static bool Obsolete(SqliteConnection connection, SqliteTransaction transaction, string pairId, long pair,
-        Side side, object identity)
+    // Classify (-6 3.5.2): the first check that decides. Rows 1-4 alone decide Obsolete, so the obsolete settle's
+    // in-commit re-check passes no scope and stops there (null); R0 is read at most once per page or commit.
+    private static (DuplicateRepairState State, IReadOnlyList<SyncedEntry> Bindings, FolderRemovalState? Own)? Classify(
+        SqliteConnection connection, SqliteTransaction transaction, string pairId, long pair, Side side, object identity,
+        (object First, object Second, long? Issue) row,
+        Lazy<Dictionary<(Side Side, object? Identity, object? Other), FolderRemovalState>> own, PathScope? scope)
     {
-        if (Row(connection, transaction, pair, side, identity) is not { } row) return false;
-        var valid = Partners(connection, transaction, pair, side, identity, row) is not null;
-        if (row.Issue is { } issue && IssueTable.ById(connection, pairId, issue, transaction) is not null) return !valid;
-        var own = OwnOperations(connection, transaction, pair, long.MaxValue);
-        if (own.ContainsKey((side, identity, row.First)) || own.ContainsKey((side, identity, row.Second))) return false;
-        return !valid;
+        IReadOnlyList<SyncedEntry> none = [];
+        var bindings = Partners(connection, transaction, pair, side, identity, row);
+        if (row.Issue is { } issue && IssueTable.ById(connection, pairId, issue, transaction) is not null)
+            return (bindings is null ? DuplicateRepairState.Obsolete : DuplicateRepairState.Held, bindings ?? none, null);
+        if (own.Value.TryGetValue((side, identity, row.First), out var found) ||
+            own.Value.TryGetValue((side, identity, row.Second), out found))
+            return (DuplicateRepairState.Own, none, found);
+        if (bindings is null) return (DuplicateRepairState.Obsolete, none, null);
+        if (scope is null) return null;
+        if (bindings.All(scope.ExcludesBinding)) return (DuplicateRepairState.Excluded, bindings, null);
+        return (Validity(connection, transaction, pair, side, bindings, null) switch
+        {
+            DuplicateRepairProof.Busy => DuplicateRepairState.Waiting,
+            DuplicateRepairProof.LinkedElsewhere => DuplicateRepairState.LinkedElsewhere,
+            _ => DuplicateRepairState.Valid
+        }, bindings, null);
     }
 
     // V1, the obligation's primary-key probe.
@@ -248,8 +303,12 @@ internal static class DuplicateRepairs
         using var command = StorageCommand.Create(connection, transaction, StateSchema.SelectDuplicateRepair,
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamSide, (int)side), (StateSchema.ParamIdentity, identity));
         using var reader = command.ExecuteReader();
-        return reader.Read() ? (reader.GetValue(0), reader.GetValue(1), reader.IsDBNull(2) ? null : reader.GetInt64(2)) : null;
+        return reader.Read() ? ReadRow(reader) : null;
     }
+
+    private static (object First, object Second, long? Issue) ReadRow(SqliteDataReader reader) =>
+        (reader.GetValue(StateSchema.RepairFirst), reader.GetValue(StateSchema.RepairSecond),
+            reader.IsDBNull(StateSchema.RepairIssue) ? null : reader.GetInt64(StateSchema.RepairIssue));
 
     // V2: X's current folder bindings (LIMIT 3) are exactly two, with the recorded other-side ids.
     private static IReadOnlyList<SyncedEntry>? Partners(SqliteConnection connection, SqliteTransaction transaction,

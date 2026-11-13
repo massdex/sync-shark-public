@@ -868,8 +868,21 @@ public static class StateSchema
     internal const string ReleaseClashContinuations = "UPDATE change_work SET rename_continuation_json=NULL WHERE pair_id=" + PairRow + " AND json_extract(rename_continuation_json,'$.Value.Clash.Id')=$issue;";
     internal const string ReleaseRepairHold = "UPDATE binding_repair SET issue_id=NULL WHERE pair_id=" + PairRow + " AND issue_id=$issue;";
     private const string RepairKeyFilter = " WHERE pair_id=$pair AND side=$side AND identity=$identity";
+    private const string RepairColumns = "SELECT side,identity,other_first,other_second,issue_id FROM binding_repair";
     /// <summary>V1, the obligation's primary-key probe.</summary>
-    internal const string SelectDuplicateRepair = "SELECT other_first,other_second,issue_id FROM binding_repair" + RepairKeyFilter + ";";
+    internal const string SelectDuplicateRepair = RepairColumns + RepairKeyFilter + ";";
+    /// <summary>The keyset page of a pair's obligations in primary-key order (-6 3.5.2).</summary>
+    internal const string DuplicateRepairPage = RepairColumns + " WHERE pair_id=$pair AND (side,identity)>($side,$identity) ORDER BY side,identity LIMIT $take;";
+    /// <summary>A first page's keyset start: below Side.Local, the lowest stored side, so the identity is never compared.</summary>
+    internal const int BeforeFirstRepairSide = -1;
+    /// <summary>binding_repair records exactly two other-side ids (other_first, other_second).</summary>
+    internal const int DuplicateRepairPartners = 2;
+    // Column ordinals: RepairColumns.
+    internal const int RepairSide = 0;
+    internal const int RepairIdentity = 1;
+    internal const int RepairFirst = 2;
+    internal const int RepairSecond = 3;
+    internal const int RepairIssue = 4;
     internal const string DeleteDuplicateRepair = "DELETE FROM binding_repair" + RepairKeyFilter + ";";
     /// <summary>The hold CAS: binds the obligation to its Failure only while it still names the expected issue.</summary>
     internal const string HoldDuplicateRepair = "UPDATE binding_repair SET issue_id=$issue" + RepairKeyFilter + " AND issue_id IS $expected;";
@@ -1101,6 +1114,7 @@ public static class StateSchema
     public const string ParamProgressOnly = "$progressOnly";
     public const string ParamAccount = "$account";
     public const string ParamFirst = "$first";
+    public const string ParamSecond = "$second";
     public const string ParamAt = "$at";
     public const string ParamConnection = "$c";
     public const string ParamCause = "$cause";

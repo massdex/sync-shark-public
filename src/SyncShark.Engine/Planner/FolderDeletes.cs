@@ -22,6 +22,12 @@ public static class FolderDeletes
         entry is { IsFolder: true, SharedRoot: true } && authority is FolderRemovalAuthority.Inferred
             or FolderRemovalAuthority.Vacate or FolderRemovalAuthority.Repair or FolderRemovalAuthority.Legacy;
 
+    /// <summary>True when an automatic folder removal may not reach the binding: it is excluded, or either side is a
+    /// nested pair root (vacate, Repair P3a).</summary>
+    public static bool OutOfScope(PathScope scope, SyncedEntry binding) =>
+        scope.Excludes(binding.LocalPath, binding.DropboxPath, true) || scope.HoldsNestedRoot(Side.Local, binding.LocalPath) ||
+        scope.HoldsNestedRoot(Side.Dropbox, binding.DropboxPath);
+
     /// <summary>Classifies a child using saved content and current scope facts.</summary>
     public static FolderVerdict Classify(Row childRow, Side deletingFrom, FolderChildFacts facts, bool localContentDirty)
     {

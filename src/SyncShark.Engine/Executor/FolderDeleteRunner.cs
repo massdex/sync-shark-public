@@ -830,6 +830,11 @@ public sealed class FolderDeleteRunner
         {
             if (refused.Contains(id)) continue;
             var operation = Read(id);
+            if (operation.Authority == FolderRemovalAuthority.Repair)
+            {
+                if (!RepairAuthorized(operation)) refused.Add(id);
+                continue;
+            }
             if (operation.Authority is not (FolderRemovalAuthority.Inferred or FolderRemovalAuthority.Vacate or
                 FolderRemovalAuthority.Legacy)) continue;
             try
@@ -843,6 +848,17 @@ public sealed class FolderDeleteRunner
             }
         }
         return chunk.Where(effect => !refused.Contains(effect.OperationId)).ToArray();
+    }
+
+    // The Repair arm (-6 2.3), Storage probes only: the victim is unchanged by key, and V1-V4 apart from this
+    // operation's own custody and P2 still hold.
+    private bool RepairAuthorized(FolderRemovalState operation)
+    {
+        if (operation.SavedRoot is not { } victim) return false;
+        var shared = PathNames.Other(operation.DeletingSide);
+        return _context.Store.SyncedByKey(_context.Pair.PairId, Side.Local, victim.LocalKey) == victim &&
+            _context.Store.CheckDuplicateRepair(_context.Pair.PairId, new DuplicateRepairKey(shared, victim.IdOn(shared)),
+                victim, operation.OperationId) == DuplicateRepairProof.Valid;
     }
 
     // A recursive effect deletes whatever is there, so each footprint's complete inventory must equal its frozen members.

@@ -1,5 +1,10 @@
 {
   "FailDuplicateFolderBinding": "This folder is linked to two folders on the other side: {First} and {Second}. Sync Shark removes one of them only when it is empty, has no synced items recorded inside it, isn't a shared folder and isn't linked to anything else. Neither qualifies now: {First}: {FirstReason}; {Second}: {SecondReason}. Nothing was changed or deleted, and moves of this folder wait until this is resolved. Change that, then choose Retry. Ignore only hides this notice; the moves keep waiting.",
+  "ReasonLinkedElsewhere": "it is also linked to another folder",
+  "ReasonHistory": "items inside it are still synced",
+  "ReasonOutOfScope": "it is outside the synced folders",
+  "ReasonShared": "it is a shared folder",
+  "ReasonNotEmpty": "it contains items",
   "FailDuplicateFolderLinks": "This folder is linked to several folders on the other side in a way Sync Shark can't repair automatically. Nothing was changed or deleted, and Sync Shark won't delete any of these folders on its own.",
   "RepairSuperseded": "Repair was superseded by newer local source responsibility. Completed changes are preserved.",
   "RepairStoppedNoSpace": "Repair stopped because a drive has insufficient available space. Free space and run Repair again; work already saved stays saved.",

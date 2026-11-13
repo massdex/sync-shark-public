@@ -2605,6 +2605,34 @@ public sealed partial class StateStore : IStateStore
     public IEnumerable<FolderRemovalState> UnresolvedFolderRemovals(string pairId, CancellationToken ct) =>
         FolderRemovals(pairId, StateSchema.UnresolvedFolders, ct);
 
+    /// <inheritdoc />
+    public IReadOnlyList<(DuplicateRepair Obligation, DuplicateRepairState State, IReadOnlyList<SyncedEntry> Bindings,
+        FolderRemovalState? Own)> DuplicateRepairPage(string pairId, PathScope scope, DuplicateRepairKey? after, int take)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(take);
+        if (_legacy) return [];
+        lock (_lock)
+        {
+            using var transaction = _connection.BeginTransaction(deferred: true);
+            var page = DuplicateRepairs.Page(_connection, transaction, pairId, scope, after, take);
+            transaction.Commit();
+            return page;
+        }
+    }
+
+    /// <inheritdoc />
+    public DuplicateRepairProof CheckDuplicateRepair(string pairId, DuplicateRepairKey key, SyncedEntry binding,
+        string? operationId = null)
+    {
+        lock (_lock)
+        {
+            using var transaction = _connection.BeginTransaction(deferred: true);
+            var proof = DuplicateRepairs.Check(_connection, transaction, pairId, key, binding, operationId);
+            transaction.Commit();
+            return proof;
+        }
+    }
+
     // One operation per statement in operation order, so neither keyset read holds the lock across the caller's work.
     private IEnumerable<FolderRemovalState> FolderRemovals(string pairId, string sql, CancellationToken ct)
     {

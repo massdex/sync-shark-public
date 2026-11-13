@@ -214,6 +214,11 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
         Inner.ActiveFolderRemovals(pairId, ct);
     public virtual IEnumerable<FolderRemovalState> UnresolvedFolderRemovals(string pairId, CancellationToken ct) =>
         Inner.UnresolvedFolderRemovals(pairId, ct);
+    public virtual IReadOnlyList<(DuplicateRepair Obligation, DuplicateRepairState State, IReadOnlyList<SyncedEntry> Bindings,
+        FolderRemovalState? Own)> DuplicateRepairPage(string pairId, PathScope scope, DuplicateRepairKey? after, int take) =>
+        Inner.DuplicateRepairPage(pairId, scope, after, take);
+    public virtual DuplicateRepairProof CheckDuplicateRepair(string pairId, DuplicateRepairKey key, SyncedEntry binding,
+        string? operationId = null) => Inner.CheckDuplicateRepair(pairId, key, binding, operationId);
     public virtual IEnumerable<FolderRemovalEffect> ReadyFolderEffects(string pairId, string operationId,
         long afterOrdinal, int pageSize) => Inner.ReadyFolderEffects(pairId, operationId, afterOrdinal, pageSize);
     public virtual IEnumerable<FolderRemovalItem> PendingFolderFollowUps(string pairId, string operationId,

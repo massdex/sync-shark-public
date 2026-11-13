@@ -16,6 +16,7 @@ public sealed class Syncer
     private readonly FolderSync _folders;
     private readonly ItemSync _items;
     private readonly AncestorFence _ancestors;
+    private readonly DuplicateRepairRunner _repairs;
     internal Syncer(ExecutorContext context, SyncPorts ports)
     {
         ArgumentNullException.ThrowIfNull(context.Opportunity);
@@ -30,6 +31,7 @@ public sealed class Syncer
         _items = new ItemSync(context, _parents, _executor, _keepBoth, _folderDelete, ports, _ancestors);
         _firstRunFolders = new FirstRunFolders(context, _parents, _executor, _items);
         _folders = _items.Folders;
+        _repairs = new DuplicateRepairRunner(context, _folders);
         _exclusions = new ExclusionRunner(context, _parents, _executor, _keepBoth, _items);
     }
 
@@ -74,10 +76,11 @@ public sealed class Syncer
     // This session's one live copy, so every effect live work reaches meets the live refusal.
     private Syncer Live => _context.Live ? this : _live ??= new Syncer(_context with { Live = true }, _ports);
 
-    /// <summary>Runs pending work on this session's one live copy.</summary>
-    internal Task SyncWorkAsync(CancellationToken ct) => Live.RunWorkAsync(ct);
+    /// <summary>Runs pending work on this session's one live copy. True when a duplicate-folder repair still waits and
+    /// a follow-up completed an operation after the lanes, so one more opportunity may unblock it (-6 3.5.1).</summary>
+    internal Task<bool> SyncWorkAsync(CancellationToken ct) => Live.RunWorkAsync(ct);
 
-    private async Task RunWorkAsync(CancellationToken ct)
+    private async Task<bool> RunWorkAsync(CancellationToken ct)
     {
         await ReconcileReceiptsAsync(ct).ConfigureAwait(false);
         lock (_temporary)
@@ -106,8 +109,9 @@ public sealed class Syncer
         _context.Events(RunEvent.Stage(TextKey.StageRows));
         try
         {
-            await RunLanesAsync(floor, Progress, ct).ConfigureAwait(false);
-            try { await _folders.ContinueReleasedFollowUpsAsync(ct, TemporaryAt).ConfigureAwait(false); }
+            var waiting = await RunLanesAsync(floor, Progress, ct).ConfigureAwait(false);
+            // The follow-ups always run; a waiting repair revisits only when one of them completed an operation.
+            try { return waiting & await _folders.ContinueReleasedFollowUpsAsync(ct, TemporaryAt).ConfigureAwait(false); }
             catch (LiveAdmissionStaleException error)
             {
                 // A refused follow-up stays durable and pending; the refusal is reported, never silent.
@@ -119,7 +123,7 @@ public sealed class Syncer
     }
 
     // The finite watermark and pass retirement govern the same lane schedule, including its contention fallback.
-    private async Task RunLanesAsync(long floor, Action<RowStage, bool> progress, CancellationToken ct)
+    private async Task<bool> RunLanesAsync(long floor, Action<RowStage, bool> progress, CancellationToken ct)
     {
         var pairId = _context.Pair.PairId;
         RowContexts? rows = null;
@@ -128,8 +132,11 @@ public sealed class Syncer
             TemporaryThisRun);
         var serial = false;
         bool repeat;
+        bool waiting;
         do
         {
+            // Outside any pass: the previous iteration ended its pass and this one has not selected yet (-6 3.5.1).
+            waiting = await _repairs.RunAsync(ct).ConfigureAwait(false);
             var lanes = 0;
             var refused = 0;
             var progress0 = 0;
@@ -181,6 +188,7 @@ public sealed class Syncer
             repeat = competed || retired;
             serial = competed && Volatile.Read(ref progress0) == 0;
         } while (repeat);
+        return waiting;
     }
 
     // Reason: one traversal state machine; the pending stack, visited set and stale-run boundary share one selection

@@ -33,6 +33,26 @@ public sealed record IssueSubject(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public UnknownMove? Move { get; init; }
 
+    /// <summary>Why neither of a duplicate-folder Failure's two other-side items could be removed, in the order of
+    /// those items, as the Repair attempt decided (-6 3.7). Stored by name, so a later key cannot shift it; null for
+    /// every other subject and omitted from stored JSON.</summary>
+    public sealed record DuplicateFolders(
+        [property: JsonConverter(typeof(JsonStringEnumConverter<TextKey>))] TextKey FirstReason,
+        [property: JsonConverter(typeof(JsonStringEnumConverter<TextKey>))] TextKey SecondReason);
+
+    /// <summary>The duplicate-folder reasons this Failure names; null for every other subject.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DuplicateFolders? Folders { get; init; }
+
+    /// <summary>The one duplicate-folder subject shape: X on side, then the other-side items of its first two bindings.</summary>
+    internal static IssueSubject DuplicateFolderItems(Side side, IReadOnlyList<SyncedEntry> bindings)
+    {
+        var other = PathNames.Other(side);
+        return new IssueSubject([new IssueItem(side, bindings[0].PathOn(side), bindings[0].IdOn(side)),
+            new IssueItem(other, bindings[0].PathOn(other), bindings[0].IdOn(other)),
+            new IssueItem(other, bindings[1].PathOn(other), bindings[1].IdOn(other))], null);
+    }
+
     /// <summary>The side of the endpoint a turn at path retains: the incoming side, else the item at that path.</summary>
     internal Side? EndpointSide(string path) => Incoming ?? Items.FirstOrDefault(item => item.Path == path)?.Side;
 

@@ -138,6 +138,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             FolderRemovalRoute.SelectedReplacement => observed.Local == folder.Local && observed.Dropbox == folder.Dropbox,
             FolderRemovalRoute.PlannedReplacement => PlannedReplacementJustified(observed, folder, deletingFrom),
             FolderRemovalRoute.Vacate => observed.EntryOn(deletingFrom) == folder.EntryOn(deletingFrom),
+            FolderRemovalRoute.Repair => RepairJustified(observed, folder, deletingFrom),
             _ => FolderDeletes.PlanJustified(observed.EntryOn(deletingFrom), observed.EntryOn(PathNames.Other(deletingFrom)),
                 request.Exclusion is not null || request.Route == FolderRemovalRoute.Chosen ||
                 request.RestoredAncestors?.Contains(folder.Key) == true)
@@ -145,6 +146,16 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         return justified && !(AuthorityOf(request.Route, request.Exclusion) is FolderRemovalAuthority.Inferred
             or FolderRemovalAuthority.Vacate && await FolderIdentity.KeptElsewhereAsync(_context, observed.Synced,
                 deletingFrom, ct));
+    }
+
+    // D4's Repair arm (-7 1.2): the reobserved binding is the request's, X is absent or itself at its shared-side path
+    // (P8), and the endpoint is absent or a plain folder (P4; its id is D5's).
+    private static bool RepairJustified(Row observed, Row folder, Side deletingFrom)
+    {
+        var shared = PathNames.Other(deletingFrom);
+        return observed.Synced is { } saved && saved == folder.Synced &&
+            (observed.EntryOn(shared) is not { } present || present.Id == saved.IdOn(shared)) &&
+            observed.EntryOn(deletingFrom) is null or { IsFolder: true, Skip: null };
     }
 
     // The route decides the authority once (-6 2.3); an exclusion is the user's scope choice on any route.
@@ -274,17 +285,23 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
     // final validation and the publication (R6-4, B-153).
     private static Action Admission(IAdmittedExecution? execution) => () => execution?.Revalidate();
 
-    /// <summary>Reaches released survivors on an ordinary work opportunity without replaying unresolved effects.</summary>
-    internal async Task ContinueReleasedFollowUpsAsync(CancellationToken ct, Func<Side, string, string?, bool>? temporary = null)
+    /// <summary>Reaches released survivors on an ordinary work opportunity without replaying unresolved effects. True
+    /// when one of them completed its operation, which may be the blocker a waiting duplicate-folder repair needs.</summary>
+    internal async Task<bool> ContinueReleasedFollowUpsAsync(CancellationToken ct,
+        Func<Side, string, string?, bool>? temporary = null)
     {
+        var completed = false;
         foreach (var operation in _context.Store.ActiveFolderRemovals(_context.Pair.PairId, ct))
         {
             // An operation or survivor whose own selection ended temporarily this run waits for the next run (§6.3).
             if (temporary is not null && TemporaryThisRun(operation.SavedRoot, null, temporary)) continue;
             if (!PendingFollowUps(operation.OperationId, ct).Any(FollowUpReleased)) continue;
-            if (_folderDelete.FollowUpsReady(operation, ct))
-                await FinishFolderRemovalAsync(operation.OperationId, null, ct, temporary: temporary);
+            if (_folderDelete.FollowUpsReady(operation, ct) &&
+                (await FinishFolderRemovalAsync(operation.OperationId, null, ct, temporary: temporary)).Status ==
+                FolderRemovalStatus.Complete)
+                completed = true;
         }
+        return completed;
     }
 
     // Exact keys and identities on both sides: the saved binding, and the expected entry's own identity at its path
@@ -515,7 +532,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
 
     // An earlier opportunity's operation, as its caller just read it, continued without a new check: a Complete one
     // reports, a Prepared one first sends its Ready effects, then the shared finish.
-    private async Task<FolderRemovalResult> ContinueOwnAsync(FolderRemovalState operation, WorkSelection? selection,
+    internal async Task<FolderRemovalResult> ContinueOwnAsync(FolderRemovalState operation, WorkSelection? selection,
         CancellationToken ct)
     {
         var id = operation.OperationId;
@@ -593,9 +610,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                 incoming.Side == Side.Local ? freshIncoming : occupant,
                 incoming.Side == Side.Dropbox ? freshIncoming : occupant,
                 saved, [], null, destination.Context);
-            if (_context.Scope.Excludes(saved.LocalPath, saved.DropboxPath, true) ||
-                _context.Scope.HoldsNestedRoot(Side.Local, saved.LocalPath) ||
-                _context.Scope.HoldsNestedRoot(Side.Dropbox, saved.DropboxPath) || occupant?.Skip is not null ||
+            if (FolderDeletes.OutOfScope(_context.Scope, saved) || occupant?.Skip is not null ||
                 FolderDeletes.KeepsMount(occupant, FolderRemovalAuthority.Vacate)) return null;
             var clash = _context.Store.ReadRenameContinuation(selection)?.Clash;
             var currentClash = clash is null ? null : _context.Store.IssueById(_context.Pair.PairId, clash.Id);

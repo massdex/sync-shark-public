@@ -11,10 +11,23 @@ public static class IssuePresentation
     public static string Render(Issue issue, IssueRetryView retry)
     {
         if (issue.Cause == TextKey.InfoKeptBoth) return KeptBoth(issue);
+        if (issue.Subject.Folders is { } folders) return DuplicateFolders(issue, folders);
         var cause = Text.Get(issue.Cause, (TextArg.Path, issue.Path), (TextArg.Message, ""));
         return IssuePolicy.IsLocalAccessRetryCause(issue.Cause)
             ? cause + Environment.NewLine + Text.Get(StateKey(retry.State))
             : cause;
+    }
+
+    // {First} and {Second} are the subject's two other-side items; their reasons were decided once, by the attempt.
+    private static string DuplicateFolders(Issue issue, IssueSubject.DuplicateFolders folders)
+    {
+        if (issue.Subject.Items is not [_, var first, var second]) return Text.Get(issue.Cause, (TextArg.Path, issue.Path));
+        return Text.Get(issue.Cause, (TextArg.Path, issue.Path), (TextArg.First, first.Path),
+            (TextArg.Second, second.Path), (TextArg.FirstReason, Reason(folders.FirstReason, first.Path)),
+            (TextArg.SecondReason, Reason(folders.SecondReason, second.Path)));
+
+        static string Reason(TextKey reason, string path) =>
+            Text.Get(reason, (TextArg.Path, path), (TextArg.Message, string.Empty));
     }
 
     private static string KeptBoth(Issue issue)

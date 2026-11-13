@@ -274,6 +274,16 @@ public partial interface IStateStore : IDisposable
     /// <summary>Every operation still in custody: active, or inactive Unknown or Retained without a disposition.</summary>
     IEnumerable<FolderRemovalState> UnresolvedFolderRemovals(string pairId, CancellationToken ct) =>
         throw new NotSupportedException();
+    /// <summary>At most take duplicate-folder obligations after the key, each classified (-6 3.5.2) in one read: X's
+    /// two current folder bindings in key order (empty when they are not the recorded two), and its own unresolved
+    /// Repair operation (state Own).</summary>
+    IReadOnlyList<(DuplicateRepair Obligation, DuplicateRepairState State, IReadOnlyList<SyncedEntry> Bindings,
+        FolderRemovalState? Own)> DuplicateRepairPage(string pairId, PathScope scope, DuplicateRepairKey? after, int take) =>
+        throw new NotSupportedException();
+    /// <summary>One binding's Repair proofs in one read (-7 1.4): V1-V4, not counting the given operation's own custody,
+    /// then no synced item recorded inside the binding (P2).</summary>
+    DuplicateRepairProof CheckDuplicateRepair(string pairId, DuplicateRepairKey key, SyncedEntry binding,
+        string? operationId = null) => throw new NotSupportedException();
     IEnumerable<FolderRemovalEffect> ReadyFolderEffects(string pairId, string operationId,
         long afterOrdinal, int pageSize);
     IEnumerable<FolderRemovalItem> PendingFolderFollowUps(string pairId, string operationId,
