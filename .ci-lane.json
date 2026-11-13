@@ -1,18 +1,11 @@
 {
   "build": [
-    "engine-tests",
-    "core-tests",
-    "core-tests",
-    "app",
-    "ui-fixture"
+    "engine-tests"
   ],
   "engine": [
-    "strings"
+    "duplicate-repair",
+    "issues"
   ],
-  "core": [
-    "--engine-layout-checks"
-  ],
-  "ui": [
-    "tray-tooltip-contract"
-  ]
+  "core": [],
+  "ui": []
 }

@@ -17,6 +17,7 @@ public static class IssueSubjectChecks
         ReusableProofIdentity();
         ProofJson();
         FirstRunDeletionJson();
+        DuplicateFoldersJson();
         UnknownMoveIdentity();
         CaseRenamedItems();
         PendingMembership();
@@ -352,6 +353,21 @@ public static class IssueSubjectChecks
             Check.Require(JsonSerializer.Deserialize<IssueSubject>(json)!.FirstRunDeletion == kind,
                 "first-run deletion " + kind + " round-trips through JSON");
         }
+    }
+
+    // Issue rows store subjects with the default serializer (IssueTable), so enums are numbers there; the duplicate-
+    // folder reasons are stored by name, and every other subject keeps its exact bytes (B-212 ruling 1).
+    private static void DuplicateFoldersJson()
+    {
+        const string ordinary = "{\"Items\":[{\"Side\":0,\"Path\":\"a.txt\",\"Id\":\"id-a\"}],\"Incoming\":null}";
+        Check.Require(JsonSerializer.Serialize(new IssueSubject([LocalA], null)) == ordinary,
+            "B212: a subject without duplicate-folder reasons keeps its stored bytes");
+        var subject = new IssueSubject([LocalA, DropboxC], Side.Local)
+            { Folders = new IssueSubject.DuplicateFolders(TextKey.ReasonHistory, TextKey.ReasonNotEmpty) };
+        var json = JsonSerializer.Serialize(subject);
+        Check.Require(json.Contains("\"Folders\":{\"FirstReason\":\"ReasonHistory\",\"SecondReason\":\"ReasonNotEmpty\"}",
+                StringComparison.Ordinal) && JsonSerializer.Deserialize<IssueSubject>(json)!.Folders == subject.Folders,
+            "B212: duplicate-folder reasons are stored by name and round-trip: " + json);
     }
 
     private static Entry LocalEntry(string path, string id, long size, DateTimeOffset? modified = null,

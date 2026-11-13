@@ -81,6 +81,7 @@ public static class CheckRegistry
         ["receipt-walk-measure"] = [Local.LocalBinChecks.MeasureReceiptWalk],
         ["path-only-coalescing"] = [Storage.ChangeTableChecks.PathOnlyCoalescing, Executor.ChangeRunnerChecks.PathOnlyLiveReads],
         ["work-lifecycle"] = [Storage.ChangeTableChecks.Run, Storage.QueryPlanChecks.Run],
+        ["duplicate-repair"] = [Executor.ChangeRunnerChecks.RunDuplicateRepair],
         ["repair-held"] = [Storage.ChangeTableChecks.RepairHeldSelection, Executor.ChangeRunnerChecks.RunRepairHeld, Executor.FolderDeleteRunnerChecks.RunRepairHeld, Executor.ScanPassChecks.RunRepairHeld],
         ["repair-claims"] = [Storage.StateStoreChecks.ClaimedRepair, Storage.QueryPlanChecks.ClaimedRetirement,
             Executor.ChangeRunnerChecks.FailedSelectionReleasesClaim],
