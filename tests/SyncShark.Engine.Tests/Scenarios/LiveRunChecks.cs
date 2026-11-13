@@ -261,6 +261,11 @@ public static class LiveRunChecks
             // B-209 repro only: no behaviour change, evidence for the failure.
             Console.WriteLine($"B209 last-selection: {scenario.LastSelection}");
             Console.WriteLine($"B209 last-refused: {scenario.LastRefusedSelection} reason={scenario.LastRefusalReason}");
+            Console.WriteLine($"B209 newer-episode-refusals: {scenario.NewerEpisodeRefusals}");
+            Console.WriteLine($"B209 expected-hash: {path}={DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes(replacement))} " +
+                $"{moved}={DropboxContentHash.Compute(System.Text.Encoding.UTF8.GetBytes(edited))}");
+            Console.WriteLine("B209 dropbox: " + string.Join("|", scenario.DropboxFiles().Select(file =>
+                file.Key + "=" + Text(file.Value))));
             scenario.DumpLockEpisode(path, moved);
             throw;
         }

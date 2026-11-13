@@ -158,8 +158,8 @@ internal static class PendingWork
             " ORDER BY member_id;",
             ("$pair", pairId), ("$key", key), ("$movedKey", movedKey));
         Print(connection,
-            "B209 synced_entry: local_path|local_id|dropbox_path|dropbox_hash",
-            "SELECT local_path,local_id,dropbox_path,dropbox_hash FROM synced_entry" +
+            "B209 synced_entry: local_path|local_id|dropbox_path|dropbox_hash_hex",
+            "SELECT local_path,local_id,dropbox_path,hex(dropbox_hash) FROM synced_entry" +
             " WHERE pair_id=(SELECT id FROM pair WHERE pair_id=$pair)" +
             " AND lower(local_path) IN (lower($path),lower($moved)) ORDER BY local_path;",
             ("$pair", pairId), ("$path", path), ("$moved", moved));

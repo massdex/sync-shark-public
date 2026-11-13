@@ -246,6 +246,7 @@ internal sealed class Scenario : IDisposable
     internal WorkSelection? LastSelection => observedStore.LastSelection;
     internal WorkSelection? LastRefusedSelection => observedStore.LastRefusedSelection;
     internal LiveAdmissionStaleReason? LastRefusalReason => observedStore.LastRefusalReason;
+    internal int NewerEpisodeRefusals => Volatile.Read(ref observedStore.NewerEpisodeRefusals);
     internal void DumpLockEpisode(string path, string moved) =>
         PendingWork.DumpLockEpisode(Store, Pair.PairId, path, moved);
     // G7: one pair's own ReadItemRetry calls, and its HasFolderJobProgress calls (AutoSync makes one after an
@@ -1292,6 +1293,7 @@ internal sealed class Scenario : IDisposable
         internal WorkSelection? LastSelection;
         internal WorkSelection? LastRefusedSelection;
         internal LiveAdmissionStaleReason? LastRefusalReason;
+        internal int NewerEpisodeRefusals;
         internal int LiveValidations;
         internal int EndedWorkPasses;
         internal Action? PassEnded;
@@ -1426,6 +1428,7 @@ internal sealed class Scenario : IDisposable
             }
             catch (LiveAdmissionStaleException error)
             {
+                if (error.NewerEpisode is not null) Interlocked.Increment(ref NewerEpisodeRefusals);
                 LastRefusedSelection = selection;
                 LastRefusalReason = error.Reason;
                 Refused.TrySetResult(error.Reason);
