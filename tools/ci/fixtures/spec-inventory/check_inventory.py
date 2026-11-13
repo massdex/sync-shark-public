@@ -62,45 +62,11 @@ def check_missing(root):
     print('PASS missing executable/output, zero findings, and native locationless diagnostics')
 
 
-def check_metrics(output):
-    tree = inventory.ET.parse(output / 'Fixture.metrics.xml')
-    partial = [t for t in tree.findall('.//NamedType') if t.attrib['Name'] == 'Together']
-    assert len(partial) == 1, 'Partial declarations must aggregate into one semantic type'
-    values = {m.attrib['Name']: int(m.attrib['Value']) for m in partial[0].findall('./Metrics/Metric')}
-    assert values['SourceLines'] > 300, values
-    assert all(len((output / f'Partial.{part}.cs').read_text().splitlines()) < 300 for part in ('Left', 'Right'))
-    names = [n.attrib['Name'] for n in tree.findall('.//Namespace')]
-    assert 'Fixture.Apps' in names and 'Fixture.Tests' in names
-    methods = [m.attrib['Name'] for m in tree.findall('.//Method')]
-    assert len([m for m in methods if 'Overload(' in m]) == 2
-    fields = tree.findall('.//Field')
-    assert any('Factory' in f.attrib['Name'] for f in fields), 'Lambda-containing field missing'
-    assert tree.findall('.//Event'), 'Event initializer metrics missing'
-    rows, _ = inventory.metrics(output, output / 'Fixture.metrics.xml')
-    expected_units = sum(len(tree.findall('.//' + tag)) for tag in ('NamedType', 'Method', 'Field', 'Event', 'Property'))
-    assert len(rows) == expected_units, 'Every native type/member/accessor metric must survive normalization'
-    symbols = [r['partialFingerprints']['inventory.symbol'] for r in rows]
-    assert 'Fixture.Apps.Example' in symbols and 'Fixture.Tests.Example' in symbols
-    meaning = next(r['properties']['metrics'] for r in rows
-                   if 'LineMeaning.' in r['partialFingerprints']['inventory.symbol']
-                   and 'Count(' in r['partialFingerprints']['inventory.symbol'])
-    assert meaning['SourceLines'] == 7, 'SourceLines includes comments/blank lines in the declaration FullSpan'
-    assert meaning['ExecutableLines'] == 1, 'One return contributes one executable line'
-    assert all('inventory.regionHash' not in r['partialFingerprints'] for r in rows)
-    moved = rows[0] | {'locations': inventory.finding('R', 'move', 'Moved.cs')['locations']}
-    inventory.compare({'runs': [{'results': [moved]}]}, {'runs': [{'results': [rows[0]]}]})
-    assert moved['baselineState'] == 'unchanged', 'Native metric symbol identity is independent of navigation location'
-    (output / 'metric-calibration.json').write_text(json.dumps([
-        {'symbol': r['partialFingerprints']['inventory.symbol'], 'metrics': r['properties']['metrics'],
-         'missingMetrics': r['properties']['missingMetrics']} for r in rows], indent=2), encoding='utf-8')
-    print('PASS native metrics: partial aggregation, namespaces, overloads, field/event/lambda initializers')
-
-
 def check_diagnostics(output):
     native = json.loads((output / 'Fixture.sarif').read_text(encoding='utf-8-sig'))
     results = [r for run in native['runs'] for r in run.get('results', [])]
     rules = {r['ruleId'] for r in results}
-    expected = {'SA1402', 'SA1649', 'CA1849', 'VSTHRD002', 'VSTHRD103', 'CA2016', 'CA1031', 'RCS1075', 'CS1570', 'CS1591'}
+    expected = {'SA1402', 'SA1649', 'CA1849', 'VSTHRD002', 'VSTHRD103', 'CA2016', 'CA1031', 'CA1501', 'CA1502', 'CA1505', 'CA1506', 'RCS1075', 'CS1570', 'CS1591'}
     assert expected <= rules, 'Missing native diagnostics: ' + str(sorted(expected - rules))
     suppressed = {r['ruleId'] for r in results if r.get('suppressions')}
     assert {'CA1031', 'CS1591'} <= suppressed, 'Attribute and pragma suppression evidence must be retained'
@@ -124,7 +90,7 @@ if __name__ == '__main__':
                 check(Path(temporary))
             except Exception as error:
                 failures.append(check.__name__ + ': ' + repr(error))
-    for check in (check_metrics, check_diagnostics):
+    for check in (check_diagnostics,):
         try:
             check(output)
         except Exception as error:

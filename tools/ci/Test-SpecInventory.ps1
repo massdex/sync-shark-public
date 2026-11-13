@@ -15,12 +15,26 @@ try {
     $probe = Get-Content "$Output/timeout-probe.log.execution.json" -Raw | ConvertFrom-Json
     if (-not $probe.timedOut -or $probe.elapsedSeconds -lt 0) { $failures.Add('native timeout evidence missing') }
 } catch { $failures.Add('native timeout probe: ' + $_.Exception.Message) }
-# Each declaration is below the adopted 300-line review trigger; together they exceed it.
-foreach ($part in @('Left', 'Right')) {
-    $members = 1..151 | ForEach-Object { "    public int ${part}$_ => $_;" }
-    @('namespace Fixture.Partials;', 'public partial class Together', '{') + $members + @('}') |
-        Set-Content "$Output/Partial.$part.cs"
+# Exercise documented thresholds without a second threshold owner or tracked oversized source.
+$limits = @{}
+Get-Content "$PSScriptRoot/CodeMetricsConfig.txt" | Where-Object { $_ -notmatch '^#' -and $_.Trim() } | ForEach-Object {
+    $key, $value = $_ -split ':', 2
+    $limits[$key.Trim()] = [int]$value
 }
+$cases = [Collections.Generic.List[string]]::new()
+$cases.Add('namespace Fixture.MetricCases;')
+$cases.Add('public class Base0 {}')
+foreach ($index in 1..($limits['CA1501'] + 1)) { $cases.Add("public class Base$index : Base$($index - 1) {}") }
+foreach ($index in 0..$limits['CA1506(Type)']) { $cases.Add("public class Coupled$index { public int Value; }") }
+$cases.Add('public class MetricCases { public int Evaluate(int input) { int result = 0;')
+# The branch/coupling cross-product is deliberately low-maintainability, using the same default boundaries.
+foreach ($branch in 0..$limits['CA1502']) {
+    $cases.Add("if (input == $branch) {")
+    foreach ($index in 0..$limits['CA1506(Type)']) { $cases.Add("result += new Coupled$index().Value;") }
+    $cases.Add('}')
+}
+$cases.Add('return result; } }')
+$cases | Set-Content "$Output/MetricCases.cs"
 # Production and fixture projects use one invocation/configuration owner.
 try { & "$PSScriptRoot/Collect-SpecInventory.ps1" -Root $root -Output $Output }
 catch { $failures.Add('collector: ' + $_.Exception.Message) }

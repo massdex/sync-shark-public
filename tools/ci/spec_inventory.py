@@ -8,14 +8,13 @@ from pathlib import Path
 import subprocess
 import sys
 from urllib.parse import unquote, urlparse
-import xml.etree.ElementTree as ET
 
 LANGUAGES = {'.cs': 'C#', '.ps1': 'PowerShell', '.psm1': 'PowerShell',
              '.py': 'Python', '.c': 'native', '.cpp': 'native', '.h': 'native',
              '.zig': 'native', '.md': 'docs', '.txt': 'docs'}
 SCHEMA = 'https://json.schemastore.org/sarif-2.1.0.json'
 CPD_SOURCE = 'https://github.com/pmd/pmd/blob/pmd_releases/7.29.0/pmd-cs/src/main/java/net/sourceforge/pmd/lang/cs/'
-IDENTITY_LIMIT = ('5a uses native metric symbols and diagnostic rule/path/normalized-region hashes. '
+IDENTITY_LIMIT = ('5a uses diagnostic rule/path/normalized-region hashes, including metric-analyzer findings. '
                   'Shared ratchet symbol/code-hash identity is deferred to step 5b; owner=coordinator.')
 
 
@@ -95,33 +94,6 @@ def region_identity(root, result, column_kind='utf16CodeUnits'):
                                         'inventory.regionHash': hashlib.sha256(text.encode()).hexdigest()}
     except (OSError, UnicodeError, KeyError, IndexError, ValueError, TypeError) as error:
         result.setdefault('properties', {})['identityStatus'] = 'INCOMPLETE: ' + str(error)
-
-
-def metrics(root, path):
-    tree = ET.parse(path)
-    rows, covered = [], set()
-    targets = tree.findall('.//Target')
-    if not targets:
-        raise ValueError('Metrics report has no Target')
-    for target in targets:
-        for namespace in target.findall('.//Namespace'):
-            for kind in namespace.findall('.//NamedType'):
-                symbol = namespace.attrib['Name'] + '.' + kind.attrib['Name']
-                members = kind.findall('./Members/*') + kind.findall('./Members/*/Accessors/*')
-                for node, name in [(kind, symbol)] + [(m, symbol + '.' + m.attrib['Name'])
-                                                    for m in members if m.tag != 'NamedType']:
-                    file = relative(root, node.attrib.get('File', ''))
-                    if file:
-                        covered.add(file)
-                    values = {m.attrib['Name']: float(m.attrib['Value']) for m in node.findall('./Metrics/Metric')}
-                    row = finding('metrics/' + node.tag, 'Native semantic metrics', file,
-                                  node.attrib.get('Line', 1), metrics=values, project=target.attrib['Name'])
-                    row['partialFingerprints'] = {'inventory.rule': row['ruleId'], 'inventory.symbol': name}
-                    row['properties']['missingMetrics'] = sorted({'SourceLines', 'ExecutableLines'} - values.keys())
-                    if row['properties']['missingMetrics']:
-                        row['properties']['status'] = 'INCOMPLETE'
-                    rows.append(row)
-    return rows, covered
 
 
 def suppression(result):
@@ -214,13 +186,13 @@ def tool_run(root, output, tool, files):
     results, covered, errors = [], set(), []
     for report in tool['reports']:
         try:
-            parser = {'metrics': metrics, 'sarif': native_sarif, 'powershell': powershell,
+            parser = {'sarif': native_sarif, 'powershell': powershell,
                       'suppressions': suppressions}[tool['format']]
             scan_root = output / 'tracked-snapshot' if tool['name'] == 'gitleaks' else root
             rows, seen = parser(scan_root, output / report)
             results.extend(rows)
             covered.update(seen)
-        except (OSError, ValueError, KeyError, TypeError, ET.ParseError) as error:
+        except (OSError, ValueError, KeyError, TypeError) as error:
             errors.append(type(error).__name__ + ': ' + str(error))
         finally:
             source_lines.cache_clear()
@@ -263,8 +235,8 @@ def collect(root, output, baseline=None):
                           + CPD_SOURCE + 'cpd/CsCpdLexer.java; owner=coordinator; trigger=step 5b'))
     cover.extend(coverage('suppression semantics', files, [], 'NOT COVERED',
                           'Native suppressions and textual candidates retained; candidates are not semantic confirmation.'))
-    cover.extend(coverage('separate lambda metrics', files, [], 'NOT COVERED',
-                          'Metrics exposes declaring members, not independent lambda units; initializers remain in native member metrics.'))
+    cover.extend(coverage('below-threshold numeric metrics', files, [], 'NOT COVERED',
+                          'CA1501/1502/1505/1506 report threshold violations, not every symbol value; line/size counts stay with the existing ratchet.'))
     result = {'$schema': SCHEMA, 'version': '2.1.0', 'runs': runs,
               'properties': {'coverage': cover, 'status': 'INCOMPLETE', 'identityLimit': IDENTITY_LIMIT,
                              'coverageScope': 'Tracked files in this checkout only; source files omitted by a publication/export boundary are NOT COVERED.'}}

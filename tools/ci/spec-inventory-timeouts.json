@@ -1,6 +1,5 @@
 {
-  "status": "build measured; Metrics provisional, uncalibrated",
-  "source": "Build: run 43500103993 completed analyzer pass 128.2378289 s, ceil(duration * 2) gives 100% margin; XML-doc errors are separately inventoried. Metrics: GitHub Actions default job timeout-minutes 360, https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idtimeout-minutes ; replace after first healthy Metrics run.",
-  "buildSeconds": 257,
-  "metricsSeconds": 21600
+  "status": "build measured",
+  "source": "Run 43500103993 completed analyzer pass in 128.2378289 s; ceil(duration * 2) gives 100% margin. Documentation debt is separately inventoried.",
+  "buildSeconds": 257
 }

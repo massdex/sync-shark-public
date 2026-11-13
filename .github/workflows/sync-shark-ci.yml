@@ -16,6 +16,7 @@ concurrency:
 
 env:
   CONFIGURATION: Debug
+  ZIG_ARCHIVE_SHA256: '68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e'
   DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
   DOTNET_NOLOGO: 'true'
   DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
@@ -44,8 +45,7 @@ env:
 jobs:
   spec-inventory:
     name: spec inventory (non-gating)
-    # shortcut: windows-2022 for Metrics 4.14 MSBuild compatibility; re-test on the rolling image when Metrics updates or 2022 is deprecated
-    runs-on: windows-2022
+    runs-on: windows-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +55,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12.8'
+      - name: Install native build toolchain
+        shell: pwsh
+        run: ./tools/ci/Install-CiZig.ps1
       - name: Calibrate native tools and collect inventory
         shell: pwsh
         run: ./tools/ci/Test-SpecInventory.ps1 -Output "$env:RUNNER_TEMP/spec-inventory"
@@ -457,19 +460,7 @@ jobs:
       - name: Install Zig 0.16.0
         if: ${{ needs.select.outputs.needs_zig == 'true' }}
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $zipPath = Join-Path $env:RUNNER_TEMP 'zig-0.16.0.zip'
-          Invoke-WebRequest -Uri 'https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip' -OutFile $zipPath
-          $expected = '68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e'
-          $actual = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "Zig archive checksum mismatch: $actual" }
-          $extractRoot = Join-Path $env:RUNNER_TEMP 'zig'
-          Expand-Archive -Path $zipPath -DestinationPath $extractRoot -Force
-          $zig = Get-ChildItem -Path $extractRoot -Filter 'zig.exe' -Recurse -File | Select-Object -First 1
-          if ($null -eq $zig) { throw 'zig.exe was not found in the extracted toolchain.' }
-          "ZIG_EXE=$($zig.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          & $zig.FullName version
+        run: ./tools/ci/Install-CiZig.ps1
 
       - name: Build selected projects
         shell: pwsh

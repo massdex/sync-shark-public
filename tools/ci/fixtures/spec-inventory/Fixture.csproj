@@ -6,6 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="cases/**/*.cs" />
-    <Compile Include="$(SpecInventoryOutput)/Partial.*.cs" />
+    <Compile Include="$(SpecInventoryOutput)/MetricCases.cs" />
   </ItemGroup>
 </Project>

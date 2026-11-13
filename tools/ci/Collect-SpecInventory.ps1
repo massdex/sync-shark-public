@@ -19,7 +19,6 @@ function Invoke-InventoryTool($ToolName, $Version, $Format, $Reports, $Inputs, $
     $toolClock = [Diagnostics.Stopwatch]::StartNew()
     $previousInventory, $previousOutput = $env:SpecInventory, $env:SpecInventoryOutput
     try {
-        # Metrics starts its own MSBuild workspace; environment properties cross that boundary.
         $env:SpecInventory, $env:SpecInventoryOutput = 'true', $Output
         $global:LASTEXITCODE = 0
         & $Run *> (Join-Path $Output "$ToolName.log")
@@ -34,7 +33,7 @@ function Invoke-InventoryTool($ToolName, $Version, $Format, $Reports, $Inputs, $
         inputs = @($Inputs); exit = $exit; acceptedExits = @($Accepted)
         failure = $failure; elapsedSeconds = $toolClock.Elapsed.TotalSeconds; timeoutStatus = $timeouts.status
         inputCoverage = $(if ($ToolName -in @('gitleaks', 'suppression-candidates')) { 'offered-only' } else { 'evaluated' })
-        inputReport = $(if ($ToolName -match '^(roslyn|metrics)-(.+)$') { $Matches[2] + '.compile.json' } else { $null }) })
+        inputReport = $(if ($ToolName -match '^roslyn-(.+)$') { $Matches[1] + '.compile.json' } else { $null }) })
 }
 
 # The config's rule list has one owner; production projects never import this copy.
@@ -44,11 +43,8 @@ $config = @(Get-Content "$Root/.editorconfig" | Where-Object { $_ -match '^dotne
 $packages = @{}
 ([xml](Get-Content "$Root/Directory.Build.props" -Raw)).Project.ItemGroup.PackageReference |
     Where-Object Include | ForEach-Object { $packages[$_.Include] = $_.Version }
-$analyzerVersions = ($packages.GetEnumerator() | Where-Object Key -ne 'Microsoft.CodeAnalysis.Metrics' |
+$analyzerVersions = ($packages.GetEnumerator() |
     Sort-Object Key | ForEach-Object { "$($_.Key) $($_.Value)" }) -join '; '
-# Metrics.exe targets net472; locate desktop MSBuild once, not the dotnet host.
-$vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-$desktopMsbuild = if (Test-Path $vswhere) { & $vswhere -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1 }
 $projects = @($files | Where-Object { $_ -like '*.csproj' })
 foreach ($project in $projects) {
     $name = [IO.Path]::GetFileNameWithoutExtension($project)
@@ -63,10 +59,7 @@ foreach ($project in $projects) {
         if ($LASTEXITCODE -ne 0 -and $buildExit -eq 0) { $buildExit = $LASTEXITCODE }
         $global:LASTEXITCODE = $buildExit
     }
-    Invoke-InventoryTool "metrics-$name" $packages['Microsoft.CodeAnalysis.Metrics'] metrics @("$name.metrics.xml") @() @(0) {
-        if (-not $desktopMsbuild) { throw 'Visual Studio MSBuild unavailable for native Metrics' }
-        & $processRunner -Executable $desktopMsbuild -Arguments ($buildArguments + @('/t:Metrics', '-v:normal')) -OutputPath "$Output/$name.metrics.log" -TimeoutSeconds $timeouts.metricsSeconds
-    }
+
 }
 
 $ruffVersion = '0.8.6'
