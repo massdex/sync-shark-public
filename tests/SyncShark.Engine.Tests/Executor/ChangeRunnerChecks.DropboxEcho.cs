@@ -17,6 +17,15 @@ public static partial class ChangeRunnerChecks
         await DropboxEchoFifoAsync(1, stagedEdit: true);
         await DropboxEchoFifoAsync(10_001, stagedEdit: false);
         await DropboxEchoRollbackAsync();
+        await DropboxEchoResponsibilityAsync();
+        foreach (var failedSave in new[] { false, true }) await DropboxEchoRestartAsync(failedSave);
+        foreach (var explicitKey in new[] { false, true }) await DropboxEchoBoundDeletionAsync(explicitKey);
+        foreach (var origin in new[] { Side.Local, Side.Dropbox })
+        {
+            var small = await DropboxEchoMoveAsync(origin, 50);
+            var large = await DropboxEchoMoveAsync(origin, 5_000);
+            Check.Require(small == large, "B214-T1/T2: move metadata and BeginSelection counts do not grow with children");
+        }
         foreach (var overrides in new[] { 10, 100, 1_000, 100_000 })
             await DropboxEchoOverrideAsync(overrides);
     }
@@ -229,6 +238,157 @@ public static partial class ChangeRunnerChecks
             { Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
         Check.Require(fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0L, 0L),
             "B214-T6c: after removing the fault the next opportunity empties the queue");
+    }
+
+    private static async Task DropboxEchoResponsibilityAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var selected = SeedEchoBindings(fixture, 1);
+        var remote = fixture.Dropbox.FindById(selected.Identity!)!;
+        var subject = new IssueSubject([new IssueItem(Side.Dropbox, remote.Path, remote.Id)], Side.Dropbox);
+        fixture.Inner.Commit(PairId, StateChange.Empty with
+            { Raise = [(IssueKind.NameClash, TextKey.ClashNameTaken, remote.Path, subject)] });
+        var issue = fixture.Inner.Issues(PairId).Single();
+        var reads = new List<string>();
+        fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: reads.Add);
+        var counters = new StoreCounters(fixture.Store);
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: context => context with
+            { Store = counters }).SyncWorkAsync(default);
+        Check.Require(counters.EchoesSettled == 0 && reads.Count(path => path == remote.Path) == 1 &&
+            fixture.Inner.Issues(PairId).Any(current => current.Id == issue.Id),
+            "B214-T7: responsibility retains the ordinary read and the open NameClash");
+    }
+
+    private static async Task DropboxEchoRestartAsync(bool failedSave)
+    {
+        using var fixture = new Fixture(realStore: true);
+        var local = FolderEntry("Old", "local-root");
+        var remote = FolderEntry("Old", "remote-root");
+        fixture.Local.Seed(local, null);
+        fixture.Dropbox.Seed(remote, null);
+        var child = LocalEntry("Old/c", "local-c");
+        var remoteChild = RemoteEntry("Old/c", "remote-c");
+        fixture.Local.Seed(child, [1]);
+        fixture.Dropbox.Seed(remoteChild, [1]);
+        var saved = SyncedEntries.From(local, remote);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved, SyncedEntries.From(child, remoteChild)] });
+        local = await fixture.Local.MoveAsync(local, "New", default);
+        remote = await fixture.Dropbox.MoveAsync(remote, "New", default);
+        if (failedSave)
+            ExecuteDatabase(fixture.DatabasePath!, "CREATE TRIGGER echo_rename_fault BEFORE UPDATE ON synced_entry " +
+                "BEGIN SELECT RAISE(ABORT,'rename-fixture'); END;");
+        var failed = false;
+        try
+        {
+            fixture.Inner.Commit(PairId, StateChange.Empty with
+                { Renames = [new RenameApplied(saved, SyncedEntries.From(local, remote), null, null, null)] });
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) when (failedSave) { failed = true; }
+        Check.Require(failed == failedSave, "B214-T6 setup: the intended RenameApplied transaction commits or aborts");
+        if (failedSave) ExecuteDatabase(fixture.DatabasePath!, "DROP TRIGGER echo_rename_fault;");
+        var selected = SeedRemote(fixture, remote,
+            new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, "Old", null, null, null, false, false));
+        AcquireRemotePage(fixture,
+            new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, "Old/c", null, null, null, false, false),
+            new ChangeNotice(Side.Dropbox, ChangeKind.Changed, "New", null, remote.Id, remote, false, false),
+            new ChangeNotice(Side.Dropbox, ChangeKind.Changed, "New/c", null, remoteChild.Id,
+                remoteChild with { Path = "New/c" }, false, false));
+        TrustEchoSources(fixture);
+        fixture.RestartStore();
+        var reads = new List<string>();
+        var localCounter = new CountingSide(fixture.Local);
+        fixture.LocalView = new HookedSide(localCounter);
+        fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: reads.Add);
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: context => context with
+            { Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+        Check.Require(localCounter.Deletes == 0 && await fixture.Local.ReadOneAsync("New/c", default) is not null,
+            "B214-T6: restart never deletes the moved child, including after an aborted binding save");
+        if (failedSave)
+            Check.Require(reads.Contains("Old"), "B214-T6b: an old bound tombstone takes the fresh ordinary path");
+        else
+            Check.Require(reads.Count == 0 &&
+                fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0L, 0L),
+                "B214-T6a: committed RenameApplied permits read-free echo settlement after reopening");
+    }
+
+    private static async Task<(int Reads, int Begins)> DropboxEchoMoveAsync(Side origin, int children)
+    {
+        using var fixture = new Fixture(realStore: true);
+        var localRoot = FolderEntry("Old", "local-root");
+        var remoteRoot = FolderEntry("Old", "remote-root");
+        fixture.Local.Seed(localRoot, null);
+        fixture.Dropbox.Seed(remoteRoot, null);
+        var bindings = new List<SyncedEntry> { SyncedEntries.From(localRoot, remoteRoot) };
+        for (var index = 0; index < children; index++)
+        {
+            var local = LocalEntry($"Old/{index:D5}", "local-" + index);
+            var remote = RemoteEntry(local.Path, "remote-" + index);
+            fixture.Local.Seed(local, [1]);
+            fixture.Dropbox.Seed(remote, [1]);
+            bindings.Add(SyncedEntries.From(local, remote));
+        }
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = bindings });
+        var source = origin == Side.Local ? fixture.Local : fixture.Dropbox;
+        var moved = await source.MoveAsync(origin == Side.Local ? localRoot : remoteRoot, "New", default);
+        var selected = origin == Side.Local
+            ? Seed(fixture, new ChangeNotice(origin, ChangeKind.Renamed, moved.Path, "Old", moved.Id, moved, false, false))
+            : SeedRemote(fixture, moved);
+        TrustEchoSources(fixture);
+        var localCounter = new CountingSide(fixture.Local);
+        var remoteCounter = new CountingSide(fixture.Dropbox);
+        fixture.LocalView = localCounter;
+        fixture.DropboxView = remoteCounter;
+        var counters = new StoreCounters(fixture.Store);
+        ExecutorContext Configure(ExecutorContext context) => context with
+            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } };
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: Configure).SyncWorkAsync(default);
+        Check.Require((origin == Side.Local ? remoteCounter.Moves : localCounter.Moves) == 1,
+            "B214-T1/T2: one native counterpart folder move: " + origin + "/" + children);
+        var echo = bindings.SelectMany(saved =>
+        {
+            var current = fixture.Dropbox.FindById(saved.DropboxId)!;
+            return new[]
+            {
+                new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, saved.DropboxPath, null, null, null, false, false),
+                new ChangeNotice(Side.Dropbox, ChangeKind.Changed, current.Path, null, current.Id, current, false, false)
+            };
+        }).ToArray();
+        AcquireRemotePage(fixture, echo);
+        var readsBeforeEcho = remoteCounter.Reads;
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: Configure).SyncWorkAsync(default);
+        Check.Require(remoteCounter.Reads == readsBeforeEcho &&
+            fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0L, 0L),
+            "B214-T1/T2: the complete move echo drains in one opportunity without metadata: " + origin + "/" + children);
+        Console.WriteLine($"B214 move origin={origin} children={children} metadata={remoteCounter.Reads} begins={fixture.Hooks.BegunSelections.Count}");
+        return (remoteCounter.Reads, fixture.Hooks.BegunSelections.Count);
+    }
+
+    private static async Task DropboxEchoBoundDeletionAsync(bool explicitKey)
+    {
+        using var fixture = new Fixture(realStore: true);
+        var parent = FolderEntry("P", "local-p");
+        fixture.Local.Seed(parent, null);
+        var local = LocalEntry("P/c", "local-c");
+        fixture.Local.Seed(local, [1]);
+        var remote = RemoteEntry(explicitKey ? "Remote/c" : "P/c", "remote-c");
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(local, remote)] });
+        var path = explicitKey ? "Remote" : "P";
+        var selected = SeedRemote(fixture, FolderEntry(path, "remote-p"),
+            new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, path, null, null, null, false, false));
+        TrustEchoSources(fixture);
+        var readBeforeDelete = false;
+        var reads = new List<string>();
+        fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: read =>
+        {
+            reads.Add(read);
+            if (read == path) readBeforeDelete = fixture.Local.FindById(local.Id) is not null;
+        });
+        var counters = new StoreCounters(fixture.Store);
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: context => context with
+            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+        Check.Require(counters.EchoesSettled == 0 && reads.Count(read => read == path) == 1 && readBeforeDelete &&
+            await fixture.Local.ReadOneAsync(local.Path, default) is null,
+            "B214-T5: a bound descendant needs fresh Dropbox absence before Local removal: " + explicitKey);
     }
 
     private static async Task DropboxEchoOverrideAsync(int overrides)

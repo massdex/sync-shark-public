@@ -2682,6 +2682,9 @@ public static class ActionExecutorChecks
             string? cursor, SourceObligation? obligation) => throw new NotSupportedException();
         public WorkSelection? SelectWork(string pairId, long expectedGeneration, PathScope scope) =>
             throw new NotSupportedException();
+        public (int Settled, bool More) SettleEchoes(string pairId, long expectedGeneration, PathScope scope,
+            Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize) =>
+            (inner ?? throw new NotSupportedException()).SettleEchoes(pairId, expectedGeneration, scope, settles, pageSize);
         public bool CompleteOutOfScope(WorkSelection selection, PathScope scope) =>
             throw new NotSupportedException();
         public bool EndWorkPass(string pairId) => throw new NotSupportedException();

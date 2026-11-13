@@ -68,7 +68,8 @@ public static class CheckRegistry
         ["containment"] = [Executor.ChangeRunnerChecks.RunContainment, Storage.ScanReaderChecks.Run, Storage.ChangeTableChecks.Run],
         // B-204: completion containment, with its own key so a red control fails here first.
         ["completion-containment"] = [Executor.ChangeRunnerChecks.CompletionFailureContained],
-        ["dropbox-echo"] = [Storage.ChangeTableChecks.RunDropboxEchoes, Executor.ChangeRunnerChecks.RunDropboxEchoes],
+        ["dropbox-echo"] = [Storage.ChangeTableChecks.RunDropboxEchoes, Executor.ChangeRunnerChecks.RunDropboxEchoes,
+            Dropbox.DropboxFeedChecks.RunDropboxEchoPartialPage],
         ["completion-containment-cost"] = [Executor.ChangeRunnerChecks.CompletionFailureCost],
         ["containment-move-out"] = [Executor.ChangeRunnerChecks.RunMoveOutSafety],
         // Its own key: the syncer group aborts before this case on an inherited red (CI-B153-1).

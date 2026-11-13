@@ -59,6 +59,67 @@ public static class DropboxFeedChecks
 
     public static void Run() => RunAsync().GetAwaiter().GetResult();
 
+    public static void RunDropboxEchoPartialPage() => DropboxEchoPartialPageAsync().GetAwaiter().GetResult();
+
+    private static async Task DropboxEchoPartialPageAsync()
+    {
+        using var fixture = new Fixture();
+        fixture.Handler.Reply = (_, _, _) => Json(new { cursor = CursorZero });
+        await fixture.Feed.EnsureSourceBaseAsync(fixture.Stop.Token);
+        MarkRepaired(fixture);
+        foreach (var side in new[] { Side.Local, Side.Dropbox })
+        {
+            var source = fixture.Store.ReadSource(PairId, side)!.Value;
+            fixture.Store.AdvanceSource(PairId, side, Generation, source.Epoch, source.Revision,
+                source.Provenance, source.Cursor, source.Epoch, source.Revision,
+                source.Provenance, source.Cursor, null);
+        }
+        var bindings = new[] { "New/a", "New/b" }.Select(path => new SyncedEntry(
+            PathNames.Key(path), path, PathNames.DropboxKey(path), path, false, "local-" + path,
+            1, 0, "id:" + path, new string('a', 64))).ToArray();
+        fixture.Store.Commit(PairId, StateChange.Empty with { Record = bindings });
+        var pages = 0;
+        fixture.Handler.Reply = (_, path, _) =>
+        {
+            Check.Require(IsContinue(path), "B214-T5a: echo acquisition sends only continue requests, never metadata");
+            return ++pages switch
+            {
+                1 => Page(true, CursorOne, Deleted(DescriptorPath, "Old/a"), File(DescriptorPath, "New/a")),
+                2 => Error(HttpStatusCode.InternalServerError, "internal_error/.."),
+                _ => Page(false, CursorTwo, Deleted(DescriptorPath, "Old/b"), File(DescriptorPath, "New/b"))
+            };
+        };
+        Exception? failure = null;
+        var catchUp = fixture.Feed.CatchUpAsync(fixture.Stop.Token);
+        for (var step = 0; step < DriveSteps && !catchUp.IsCompleted; step++)
+        {
+            await Task.Yield();
+            fixture.Time.Advance(Tick);
+        }
+        Check.Require(catchUp.IsCompleted, "B214-T5a: failed second page finishes the finite opportunity");
+        try { await catchUp; }
+        catch (Exception error) { failure = error; }
+        Check.Require(failure is LiveAdmissionStaleException && fixture.Acquires.Count == 1 &&
+            fixture.Acquires[0].Notices.Count == 2 && StoredSource(fixture).Cursor == CursorOne &&
+            fixture.Store.CountWork(PairId, Generation, fixture.Store.ReadWorkWatermark()) == (0L, 2L),
+            "B214-T5a: a failed second continue commits no page-two rows or cursor");
+        Check.Require(bindings.All(saved => fixture.Store.SyncedByKey(PairId, Side.Local, saved.LocalKey) == saved),
+            "B214-T5a: the partial listing leaves every binding unchanged");
+        await fixture.Feed.CatchUpAsync(fixture.Stop.Token);
+        var requests = fixture.Handler.Requests.Where(request => IsContinue(request.Path)).ToArray();
+        Check.Require(requests.Length == 3 && CursorOf(requests[1].Body) == CursorOne &&
+            CursorOf(requests[2].Body) == CursorOne && fixture.Acquires.Count == 2,
+            "B214-T5a: recovery retries the unpublished second page exactly once");
+        var scope = new PathScope(fixture.Pair, [fixture.Pair]);
+        var settled = fixture.Store.SettleEchoes(PairId, Generation, scope,
+            Massdex.SyncShark.Engine.Executor.SelectionObservation.SettlesDropboxEcho, 100);
+        Check.Require(settled == (4, false) &&
+            fixture.Store.CountWork(PairId, Generation, fixture.Store.ReadWorkWatermark()) == (0L, 0L) &&
+            bindings.All(saved => fixture.Store.SyncedByKey(PairId, Side.Local, saved.LocalKey) == saved) &&
+            fixture.Handler.Requests.Count == 4,
+            "B214-T5a: recovered exact echoes drain without metadata or changing a binding");
+    }
+
     private static async Task RunAsync()
     {
         await InstallAndPageAsync();
