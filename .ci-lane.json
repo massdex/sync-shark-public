@@ -1,0 +1,20 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "scenarios-offline",
+    "live-run-core",
+    "live-admission",
+    "random-sequence",
+    "repair",
+    "live-reservation",
+    "persistent-failure",
+    "ancestor-retry",
+    "syncer",
+    "local",
+    "speed"
+  ],
+  "core": [],
+  "ui": []
+}
