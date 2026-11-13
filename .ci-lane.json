@@ -1,0 +1,17 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "containment",
+    "store",
+    "work-lifecycle",
+    "syncer",
+    "repair",
+    "repair-forgotten",
+    "scenarios-offline",
+    "completion-containment"
+  ],
+  "core": [],
+  "ui": []
+}
