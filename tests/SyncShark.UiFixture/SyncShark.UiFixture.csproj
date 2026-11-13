@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <StartupObject>SyncShark.UiFixture.Program</StartupObject>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\SyncShark.Core.Tests\SparsePlanningContextChecks.cs" Link="SparsePlanningContextChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\BoundedPresentationHistoryChecks.cs" Link="BoundedPresentationHistoryChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\ExplicitWorkAdmissionChecks.cs" Link="ExplicitWorkAdmissionChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\CompactObservationCutChecks.cs" Link="CompactObservationCutChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\SyntheticDriveServer.cs" Link="SyntheticDriveServer.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\PairEndpointRuntimeChecks.cs" Link="PairEndpointRuntimeChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\GoogleDriveTrashChecks.cs" Link="GoogleDriveTrashChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\GoogleDriveSharedDriveBrowserChecks.cs" Link="GoogleDriveSharedDriveBrowserChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\EndpointModelChecks.cs" Link="EndpointModelChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\PairEditorChecks.cs" Link="PairEditorChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\EndpointPickerChecks.cs" Link="EndpointPickerChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\OAuthPresentationChecks.cs" Link="OAuthPresentationChecks.cs" />
+    <ProjectReference Include="..\..\apps\SyncShark\SyncShark.csproj" />
+    <Compile Include="..\..\tools\SyncShark.DiscoveryTransaction.cs" Link="DiscoveryTransaction.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\GoogleDriveSharingChecks.cs" Link="GoogleDriveSharingChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\GoogleDriveNavigationChecks.cs" Link="GoogleDriveNavigationChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\GoogleDriveVerifiedRangeChecks.cs" Link="GoogleDriveVerifiedRangeChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\CloudPlaceholderIdentityChecks.cs" Link="CloudPlaceholderIdentityChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\GoogleDriveRecoveryChecks.cs" Link="GoogleDriveRecoveryChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\GoogleDriveRevisionChecks.cs" Link="GoogleDriveRevisionChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\GoogleRevisionRestoreHostChecks.cs" Link="GoogleRevisionRestoreHostChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\ManualRecoveryRecordChecks.cs" Link="ManualRecoveryRecordChecks.cs" />
+    <Compile Include="..\SyncShark.Core.Tests\CloudNativeObservationChecks.cs" Link="CloudNativeObservationChecks.cs" />
+  </ItemGroup>
+</Project>
