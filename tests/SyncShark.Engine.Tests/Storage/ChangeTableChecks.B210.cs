@@ -29,6 +29,7 @@ public static partial class ChangeTableChecks
         CheckCase(() => WithStore((_, database) => B210EpisodeBarrier(database)));
         foreach (var overlap in new[] { false, true }) CheckCase(() => WithStore(store => B210PendingScope(store, overlap)));
         foreach (var afterDelete in new[] { false, true }) CheckCase(() => WithStore(store => B210AtomicRollback(store, afterDelete)));
+        CheckCase(() => WithStore(store => B210AtomicRollback(store, false, certified: false)));
         foreach (var rollbackFails in new[] { false, true })
             CheckCase(() => WithStore(store => B210CompletionCertificate(store, rollbackFails)));
         CheckCase(() => WithStore((store, database) => B210RestartDrain(store, database)));
@@ -280,7 +281,17 @@ public static partial class ChangeTableChecks
         return JsonSerializer.Serialize(rows);
     }
 
-    private static void B210AtomicRollback(StateStore store, bool afterDelete)
+    private static Exception? B210AuthorizedFailure(StateStore store, Action operation,
+        SQLitePCL.strdelegate_authorizer authorize)
+    {
+        var connection = B210Connection(store);
+        SQLitePCL.raw.sqlite3_set_authorizer(connection.Handle, authorize, null);
+        try { operation(); return null; }
+        catch (Exception error) { return error; }
+        finally { SQLitePCL.raw.sqlite3_set_authorizer(connection.Handle, (SQLitePCL.strdelegate_authorizer)null!, null); }
+    }
+
+    private static void B210AtomicRollback(StateStore store, bool afterDelete, bool certified = true)
     {
         InstallWithoutObligations(store);
         var first = B210Acquire(store, B210Notice() with { LocalContentDirty = true });
@@ -290,13 +301,16 @@ public static partial class ChangeTableChecks
             ? "CREATE TRIGGER b210_fault BEFORE DELETE ON change_work WHEN (SELECT count(*) FROM change_work)=2 BEGIN SELECT raise(ABORT,'b210 fault'); END;"
             : "CREATE TRIGGER b210_fault BEFORE DELETE ON change_work BEGIN SELECT raise(ABORT,'b210 fault'); END;");
         WorkSelection? selected = null;
-        Exception? failure = null;
-        try { selected = B210Next(store); }
-        catch (Exception error) { failure = error; }
+        var failure = B210AuthorizedFailure(store, () => selected = B210Next(store),
+            (_, action, table, _, _, _) => !certified && action == SQLitePCL.raw.SQLITE_DELETE && table == "change_work"
+                ? SQLitePCL.raw.SQLITE_DENY : SQLitePCL.raw.SQLITE_OK);
         Check.Require(B210Snapshot(store) == snapshot && !store.EndWorkPass(PairId),
             "B210-AtomicRollback: update and prior deletes roll back with no published accounting; afterDelete=" + afterDelete);
-        Check.Require(failure is null && selected?.AnchorWorkId == first,
-            "B210-CertifiedRollback: a certified transaction failure still selects the original row; afterDelete=" + afterDelete);
+        Check.Require(certified ? failure is null && selected?.AnchorWorkId == first :
+            failure is SqliteException { SqliteErrorCode: SQLitePCL.raw.SQLITE_AUTH } && selected is null,
+            (certified ? "B210-CertifiedRollback: a certified transaction failure still selects the original row" :
+                "B210-NonCertifiedRollback: an authorization failure escapes selection without ordinary fallback") +
+            "; afterDelete=" + afterDelete);
     }
 
     private static void B210CompletionCertificate(StateStore store, bool rollbackFails)
@@ -306,9 +320,8 @@ public static partial class ChangeTableChecks
         var selected = B210Selection(store, first);
         var snapshot = B210Snapshot(store);
         B210Sql(store, "CREATE TRIGGER b210_completion BEFORE DELETE ON change_work BEGIN SELECT raise(ABORT,'b210 fault'); END;");
-        var connection = B210Connection(store);
         var denyRollback = rollbackFails;
-        // Deny only the certification rollback; disposal must still be able to roll the synthetic transaction back.
+        // The one-shot deny proves rollback was attempted; the open synthetic transaction ends when the store closes.
         SQLitePCL.strdelegate_authorizer authorize = (_, action, operation, _, _, _) =>
         {
             if (denyRollback && action == SQLitePCL.raw.SQLITE_TRANSACTION && operation == "ROLLBACK")
@@ -318,11 +331,7 @@ public static partial class ChangeTableChecks
             }
             return SQLitePCL.raw.SQLITE_OK;
         };
-        SQLitePCL.raw.sqlite3_set_authorizer(connection.Handle, authorize, null);
-        Exception? failure = null;
-        try { store.CompleteWork(selected, null); }
-        catch (Exception error) { failure = error; }
-        finally { SQLitePCL.raw.sqlite3_set_authorizer(connection.Handle, (SQLitePCL.strdelegate_authorizer)null!, null); }
+        var failure = B210AuthorizedFailure(store, () => store.CompleteWork(selected, null), authorize);
         Check.Require(B210Snapshot(store) == snapshot && (rollbackFails
             ? !denyRollback && failure is AggregateException aggregate && aggregate.InnerExceptions.Count == 2 &&
                 aggregate.InnerExceptions[0] is SqliteException { SqliteErrorCode: SQLitePCL.raw.SQLITE_CONSTRAINT } &&

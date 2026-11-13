@@ -356,7 +356,7 @@ internal sealed partial class ChangeTable
                 if (deleted != validated - StateSchema.OneRow) throw new InvalidOperationException();
                 transaction.Commit();
             }
-            catch (SqliteException error) when (error.SqliteErrorCode == SQLitePCL.raw.SQLITE_CONSTRAINT)
+            catch (SqliteException error) when (IntegrityRefusal(error))
             {
                 throw RollbackMutation(transaction, selection, error);
             }
@@ -1018,7 +1018,7 @@ internal sealed partial class ChangeTable
                 }
                 transaction.Commit();
             }
-            catch (SqliteException error) when (error.SqliteErrorCode == SQLitePCL.raw.SQLITE_CONSTRAINT)
+            catch (SqliteException error) when (IntegrityRefusal(error))
             {
                 throw RollbackMutation(transaction, selection, error);
             }
@@ -1032,6 +1032,9 @@ internal sealed partial class ChangeTable
         }
         return true;
     }
+
+    private static bool IntegrityRefusal(SqliteException error) =>
+        error.SqliteErrorCode == SQLitePCL.raw.SQLITE_CONSTRAINT;
 
     private static ItemStoreMutationException RollbackMutation(
         SqliteTransaction transaction, WorkSelection selection, SqliteException error)
