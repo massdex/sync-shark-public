@@ -12,6 +12,64 @@ actually landed.
 
 ## [Unreleased]
 
+## [0.3.88] - 2026-11-13
+
+### Fixed
+- B-205: a file released by another app after an in-use wait now uploads on the wait's own change, instead of staying refused behind a newer wait.
+- B-206: when a file that was waiting as in-use is removed or replaced, its stale in-use wait and notice are now cleared.
+
+## [0.3.87] - 2026-11-13
+
+### Fixed
+- B-204: a store integrity (FK) failure while completing one item's selection is now contained to that item — it is recorded as one notice and retried normally, and no longer stops the whole sync pass.
+
+## [0.3.86] - 2026-11-12
+
+### Fixed
+- The end-of-pass completion keeps work rows that a live item episode or an issue member still owns, so the host no longer stops on a FOREIGN KEY error at the end of a pass (B-203).
+
+## [0.3.85] - 2026-11-12
+
+### Fixed
+- A file that vanishes before it is read retires its in-use wait instead of holding the file indefinitely (B-195b).
+
+### Internal
+- Superseded the same day by 0.3.86: the host stopped on a FOREIGN KEY error at the end of a pass (B-203).
+
+## [0.3.84] - 2026-11-12
+
+### Changed
+- A held Local file that a later row supersedes is refused before its Dropbox read, so superseded churn no longer costs a provider call (B-179c).
+- In-use and source-less member reads skip only an item whose file id is unknown, instead of refusing the whole read (B-198).
+
+### Internal
+- The member-cost probe prints in-use and source-less read costs for each member shape.
+
+## [0.3.83] - 2026-11-11
+
+### Fixed
+- A file replaced while it was open in another program now syncs once released, and its waiting notice closes (B-195, C38).
+
+### Known
+- A case-only rename while held, and a file deleted while held, are still pending (next release).
+
+## [0.3.82] - 2026-11-11
+
+### Changed
+- A row that a later row supersedes retires without a provider call, and an absent file's identity is read once.
+- The store upgrades its schema once (13 to 14) to keep rename continuation evidence.
+
+### Fixed
+- A file replaced while it is in use is handled as a delete plus a new file instead of staying stuck.
+- A folder under a Dropbox root of "/" no longer refuses every child of its batch.
+- A replace blocked by a held file is refused before the file is downloaded.
+- A stuck pending replace note settles, or raises a visible recovery notice.
+- A full Repair retires replaced episodes, and a pending note keeps its recovery notice.
+- The Engine host transport survives a client that leaves before its reply.
+
+### Internal
+- Repair-held test fixtures now use saved parents, designed notices and retained obligations.
+
 ## [0.3.81] - 2026-11-08
 
 ### Changed

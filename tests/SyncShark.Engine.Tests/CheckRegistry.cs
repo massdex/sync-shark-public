@@ -3,6 +3,54 @@ namespace Massdex.SyncShark.Engine.Tests;
 /// <summary>Check name → the test files it runs (design section 10).</summary>
 public static class CheckRegistry
 {
+    // Membership and placement share one catalog; literal All keys remain discoverable before the build.
+    private static readonly (Action Run, int Shard)[] BudgetCatalog =
+    [
+        (Run.CallBudgetChecks.RunBudgetCommon, 4),
+        (Run.CallBudgetChecks.RunBudgetPair, 1),
+        (Run.CallBudgetChecks.RunBudgetWholeFolder, 2),
+        (Run.CallBudgetChecks.RunBudgetDeepFolder, 3),
+        (Run.CallBudgetChecks.RunBudgetManyFolders, 4),
+        (Run.CallBudgetChecks.RunBudgetPartialFolder, 3),
+        (Run.CallBudgetChecks.RunBudgetExclusion, 4),
+        (Run.CallBudgetChecks.RunBudgetPlanSql, 1),
+        (Run.CallBudgetChecks.RunBudgetAdverse, 2),
+        (Run.CallBudgetChecks.RunBudgetComposedProvider, 1),
+        (Executor.ActionExecutorChecks.FileSizedForgetCosts, 4)
+    ];
+    private static readonly Action[] BudgetChecks = ValidateBudget();
+
+    static CheckRegistry()
+    {
+        foreach (var entry in BudgetCatalog)
+            if (!All.TryGetValue("budget-" + entry.Shard, out var shard) || !shard.Contains(entry.Run))
+                throw new InvalidOperationException("Budget entry is absent from its registered shard: " + entry.Run.Method.Name);
+    }
+
+    private static Action[] ValidateBudget()
+    {
+        if (BudgetCatalog.Select(entry => entry.Run.Method).Distinct().Count() != BudgetCatalog.Length)
+            throw new InvalidOperationException("Duplicate budget catalog method.");
+        Action forget = Executor.ActionExecutorChecks.FileSizedForgetCosts;
+        if (!BudgetCatalog.Any(entry => entry.Run.Method == forget.Method))
+            throw new InvalidOperationException("Missing budget catalog method: " + forget.Method.Name);
+        var methods = typeof(Run.CallBudgetChecks).GetMethods(System.Reflection.BindingFlags.Public |
+                System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly)
+            .Where(method => method.Name.StartsWith("RunBudget", StringComparison.Ordinal) &&
+                method.ReturnType == typeof(void) && method.GetParameters().Length == 0);
+        foreach (var method in methods)
+            if (!BudgetCatalog.Any(entry => entry.Run.Method == method))
+                throw new InvalidOperationException("Missing budget catalog method: " + method.Name);
+        return BudgetCatalog.Select(entry => entry.Run).ToArray();
+    }
+
+    private static Action[] BudgetShard(int shard)
+    {
+        var actions = BudgetCatalog.Where(entry => entry.Shard == shard).Select(entry => entry.Run).ToArray();
+        if (actions.Length == 0) throw new InvalidOperationException("Budget shard is empty: " + shard);
+        return actions;
+    }
+
     public static IReadOnlyDictionary<string, IReadOnlyList<Action>> All { get; } = new Dictionary<string, IReadOnlyList<Action>>
     {
         ["literals"] = [Layout.LiteralsChecks.Run, Layout.OwnershipChecks.Run],
@@ -90,8 +138,12 @@ public static class CheckRegistry
             Executor.ChangeRunnerChecks.RunPeers, Scenarios.LiveRunChecks.Run, Scenarios.LiveRunChecks.RunHeldTwice,
             Run.LiveContextChecks.Run],
         ["random-sequence"] = [Run.RandomSequenceChecks.Run],
-        ["budget"] = [Run.CallBudgetChecks.Run, Run.StorageCostChecks.Run, Executor.ActionExecutorChecks.FileSizedForgetCosts],
-        // Its own key: the integrated budget catalog replaces this literal budget entry.
+        ["budget"] = BudgetChecks,
+        ["budget-1"] = BudgetShard(1),
+        ["budget-2"] = BudgetShard(2),
+        ["budget-3"] = BudgetShard(3),
+        ["budget-4"] = BudgetShard(4),
+        // int/0388 groups absent from ci/137's budget catalog: keep every int/0388 registration.
         ["projection-cost"] = [Storage.ChangeTableChecks.SelectionProjectionCosts, Storage.ChangeTableChecks.ReplacedRetirementCosts, Storage.ChangeTableChecks.B198MemberCostProbe,
             Executor.ChangeRunnerChecks.VanishedWaitCosts, Executor.ChangeRunnerChecks.RunB179Costs],
         ["issue-category-cost"] = [Run.IssueCategoryCostChecks.Run],

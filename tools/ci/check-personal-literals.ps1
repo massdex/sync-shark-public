@@ -6,7 +6,9 @@
 param(
     [switch]$Staged,
     [string]$ExportRoot,
-    [switch]$NoExclusions
+    [switch]$NoExclusions,
+    [switch]$GetPatterns,
+    $Scan
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,17 +34,18 @@ if ($ExportRoot) {
         ('resources[\\/]+(?:evidence|references|worklists)'),
         ('[\\/]\.claude[\\/]'), ('[\\/]worktrees[\\/]')
     )
+    if ($GetPatterns) { return $patterns }
     $found = $false
-    foreach ($file in Get-ChildItem -LiteralPath $ExportRoot -Recurse -File -Force) {
-        $bytes = [IO.File]::ReadAllBytes($file.FullName)
-        $text = $file.FullName.Substring($ExportRoot.Length) + "`n" + [Text.Encoding]::UTF8.GetString($bytes) +
-            "`n" + [Text.Encoding]::Unicode.GetString($bytes) + "`n" + [Text.Encoding]::BigEndianUnicode.GetString($bytes)
-        foreach ($pattern in $patterns) {
-            if ([regex]::IsMatch($text, $pattern, 'IgnoreCase')) {
-                Write-Host ("Personal literal match in " + $file.FullName.Substring($ExportRoot.Length))
-                $found = $true
-                break
-            }
+    if ($Scan) {
+        if ($Scan.Root -cne [IO.Path]::GetFullPath($ExportRoot).TrimEnd('\','/')) { throw 'Guard scan belongs to another export root.' }
+        foreach ($relative in $Scan.PersonalPaths) { Write-Host ("Personal literal match in " + $relative); $found = $true }
+    } else {
+        $source = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'PersonalLiteralScan.cs'))
+        $scanner = Add-Type -TypeDefinition $source -PassThru
+        $files = @(Get-ChildItem -LiteralPath $ExportRoot -Recurse -File -Force)
+        foreach ($relative in $scanner::Scan($ExportRoot, $files, $patterns)) {
+            Write-Host ("Personal literal match in " + $relative)
+            $found = $true
         }
     }
     if ($found) { throw 'check-personal-literals: exported tree refused (no exclusions).' }
