@@ -298,7 +298,10 @@ public static partial class ChangeRunnerChecks
             Directory.CreateDirectory(Path.Combine(rig.Pair.LocalRoot, "OldY"));
             rig.Wire.SeedFolder("OldY");
             using (var baseline = rig.Log(folder.FullName, "baseline"))
+            {
                 Check.Require((await rig.RunAsync(baseline, default)).Completed, "B214-T6c host baseline completes");
+                await rig.DrainWorkAsync(baseline, default);
+            }
             var pairId = rig.Pair.PairId;
             var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
             var remote = rig.Store.ReadSource(pairId, Side.Dropbox)!.Value;
@@ -362,6 +365,8 @@ public static partial class ChangeRunnerChecks
         var destination = SyncedEntries.From(FolderEntry("Q", "local-q"), FolderEntry("Q", "remote-q"));
         fixture.Local.Seed(FolderEntry("Q", "local-q"), null);
         fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [destination] });
+        selected = fixture.Inner.BeginSelection(selected) ??
+            throw new InvalidOperationException("B214-V1 setup: the rename selection must capture its baseline");
         fixture.Inner.RegisterRenameContinuation(selected, saved, destination, null);
         using var plan = await new FolderPlanBuilder(fixture.Context(selected)).BuildAsync(
             Row.ForOneSide(Side.Local, destination.LocalKey, FolderEntry("Q", "local-q"), destination, [], null,
@@ -372,6 +377,8 @@ public static partial class ChangeRunnerChecks
         Check.Require(fixture.Inner.ReadRenameContinuation(selected) is null &&
             fixture.Inner.RenameRemoval(selected) == operation,
             "B214-V1 setup: completed rename evidence leaves an incomplete removal's work link");
+        fixture.Inner.EndSelection(selected);
+        fixture.Inner.EndWorkPass(PairId);
         var move = SeedEchoUnrelatedMove(fixture);
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: context => context with

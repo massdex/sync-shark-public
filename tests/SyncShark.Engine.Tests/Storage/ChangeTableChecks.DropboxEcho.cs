@@ -67,7 +67,7 @@ public static partial class ChangeTableChecks
         var scope = new PathScope(store.Pair(PairId)!, store.Pairs());
         (int Settled, bool More) result = default;
         var statements = Statements(store, () => result = store.SettleEchoes(PairId, source.PairGeneration,
-            scope, SelectionObservation.SettlesDropboxEcho, count));
+            scope, SelectionObservation.SettlesDropboxEcho, count), $"deleted={deleted} rows={count}");
         Console.WriteLine($"B214-CR2 settled trace deleted={deleted} rows={count} statements={statements}");
         Check.Require(result == (count, true), "B214-CR2: the measured page retires only its exact echo rows");
     }

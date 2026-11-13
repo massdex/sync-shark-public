@@ -5061,6 +5061,16 @@ public static class RepairChecks
                     return await Repair.RunAsync(session, token, retryIssues);
                 }, ct);
 
+        // Baseline journal rows would otherwise precede echo acquisition.
+        public Task<bool> DrainWorkAsync(RunLog log, CancellationToken ct) =>
+            Host.DispatchSessionAsync(Pair.PairId, () => log, async (session, token) =>
+            {
+                await session.Syncer.SyncWorkAsync(token);
+                Check.Require(Store.CountWork(Pair.PairId, session.Context.ExpectedGeneration, Store.ReadWorkWatermark()) == (0L, 0L),
+                    "The composed baseline queue is empty before acquiring test work.");
+                return true;
+            }, ct);
+
         public async ValueTask DisposeAsync()
         {
             try { await Host.DisposeAsync(); }

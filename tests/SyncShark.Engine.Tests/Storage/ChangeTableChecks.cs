@@ -700,7 +700,7 @@ public static partial class ChangeTableChecks
     }
 
     // Statements the real store runs for one action, counted by sqlite3_trace; 0 on the double.
-    private static int Statements(IStateStore store, Action action)
+    private static int Statements(IStateStore store, Action action, string? traceLabel = null)
     {
         if (store is not StateStore real)
         {
@@ -710,9 +710,22 @@ public static partial class ChangeTableChecks
         var connection = (Microsoft.Data.Sqlite.SqliteConnection)typeof(StateStore).GetField("_connection",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(real)!;
         var statements = 0;
-        SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, _) => statements++), null);
+        var groups = traceLabel is null ? null : new Dictionary<string, int>();
+        SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, sql) =>
+        {
+            statements++;
+            if (groups is null) return;
+            var text = sql.utf8_to_string();
+            var kind = text.TrimStart().StartsWith("--", StringComparison.Ordinal) ? "subprogram" : "statement";
+            text = System.Text.RegularExpressions.Regex.Replace(text, @"'(?:''|[^'])*'|\b\d+\b", "?");
+            text = kind + " " + System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+            groups[text] = groups.GetValueOrDefault(text) + 1;
+        }), null);
         try { action(); }
         finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
+        if (groups is not null)
+            foreach (var (sql, count) in groups.OrderBy(group => group.Key, StringComparer.Ordinal))
+                Console.WriteLine($"B214 SQL {traceLabel} count={count} {sql}");
         return statements;
     }
 

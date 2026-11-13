@@ -166,8 +166,11 @@ public static partial class CallBudgetChecks
                     rig.Wire.SeedFile(path, "content", BaseTime);
                 }
                 using (var baseline = rig.Log(root, "baseline"))
+                {
                     Check.Require((await rig.RunAsync(baseline, default)).Completed,
                         "B214-T1/T2 setup: the composed baseline completes");
+                    await rig.DrainWorkAsync(baseline, default);
+                }
                 var pairId = rig.Pair.PairId;
                 var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
                 var childIds = Enumerable.Range(0, children).Select(index =>

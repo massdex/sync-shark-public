@@ -75,7 +75,10 @@ public static class DropboxFeedChecks
                 rig.Wire.SeedFile(path, "content");
             }
             using (var baseline = rig.Log(folder.FullName, "baseline"))
+            {
                 Check.Require((await rig.RunAsync(baseline, default)).Completed, "B214-T5a: baseline completes");
+                await rig.DrainWorkAsync(baseline, default);
+            }
             var pairId = rig.Pair.PairId;
             var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
             var bindings = new[] { "A", "B" }.Select(path => rig.Store.SyncedByKey(pairId, Side.Local, PathNames.Key(path))!).ToArray();
