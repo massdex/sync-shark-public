@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "issues",
+    "scan-owner",
+    "rename"
+  ],
+  "core": [],
+  "ui": []
+}
