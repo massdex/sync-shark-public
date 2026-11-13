@@ -1586,7 +1586,7 @@ public static partial class EngineHostChecks
         try
         {
             rig.Owe();
-            await using (var repair = rig.HoldRepair(window: true))
+            await using (var repair = rig.HoldRepair(new TimeoutException("B-225 injected before-finish failure"), window: true))
             {
                 await repair.Finishing.WaitAsync(HookBound).ConfigureAwait(false);
                 repair.Proceed();
