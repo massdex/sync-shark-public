@@ -354,7 +354,7 @@ Category-change split clearing condition (class-size and file-size rows): splitt
 
 ## src/SyncShark.Core/V2/Adapters/AutoSyncProcess.cs
 
-<!-- spec-source: 090a0625b099~77aade19b4cc~12f7199dd5d9~f615eb204993~5113a4ff3d75~d6d7 -->
+<!-- spec-source: cca71378f97a~abdeeaafc422~6aca70b29ae5~5b3ad14bbee1~023b97ba4a37~6daa -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

@@ -98728,7 +98728,7 @@
         "SyncShark.Core:Massdex.SyncShark.V2.AutoSyncProcess",
         ""
       ],
-      "hash": "3a34f7267a46~5b89c08b43cd~8e6f8404a317~18e813740012~61b5002f8b2b~75b9",
+      "hash": "c6be9498044f~b67540bf9c5c~b935b208e0f6~94e550176eec~4995a27625c3~a3a2",
       "size": 447,
       "members": [
         "AutoSyncProcess.ChildProcess:ChildProcess(SafeProcessHandle,int)",
@@ -98843,7 +98843,7 @@
         "",
         ""
       ],
-      "hash": "090a0625b099~77aade19b4cc~12f7199dd5d9~f615eb204993~5113a4ff3d75~d6d7",
+      "hash": "cca71378f97a~abdeeaafc422~6aca70b29ae5~5b3ad14bbee1~023b97ba4a37~6daa",
       "size": 462,
       "members": [
         "AutoSyncProcess.ChildProcess:ChildProcess(SafeProcessHandle,int)",

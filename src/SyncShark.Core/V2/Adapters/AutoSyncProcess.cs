@@ -119,7 +119,7 @@ public static class AutoSyncProcess
     /// other and a healthy host keeps running; a failed clear is logged once.</summary>
     public static void ClearStartupNotices(string productRoot)
     {
-        foreach (var path in new[] { ExistingOwnerNoticePath, PersistentStartupNoticePath })
+        foreach (var path in new[] { ExistingOwnerNoticePathFor(productRoot), PersistentStartupNoticePath })
         {
             try { ClearExistingOwnerNotice(path); }
             catch (Exception error) { AutoSyncLog.Failure(productRoot, error); }
