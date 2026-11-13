@@ -352,33 +352,51 @@ def _scan_files(repo, base, head):
     return [path for path in candidates if '/bin/' not in path.as_posix() and '/obj/' not in path.as_posix()]
 
 
+def registration_inventory(repo, methods):
+    """Declarations and direct calls from registered entry points, parsed once."""
+    declarations, calls = [], collections.defaultdict(set)
+    by_cm = _by_class_method(methods)
+    for path in _scan_files(repo, None, None):
+        text = path.read_text(encoding='utf-8-sig')
+        masked = lex.mask(text)
+        regions = _type_regions(masked)
+        namespace = _namespace_last(masked)
+        for match in PUBLIC_STATIC_VOID.finditer(masked):
+            region = _innermost(regions, match.start())
+            if region is None or not region['name'].endswith('Checks'):
+                continue
+            owner, name = region['name'], match.group(1)
+            declarations.append((path, namespace, owner, name, text.count('\n', 0, match.start()) + 1))
+            if not _is_wired(by_cm, namespace, owner, name):
+                continue
+            body = _method_body(masked[match.start():region['closing']], name) or ''
+            groups = _witness_groups(by_cm, methods, namespace + '.' + owner + '.' + name)
+            # shortcut: one direct static call from a registered entry point, not arbitrary call graphs.
+            for token in re.findall(r'(?<![\w.])((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*Checks\.[A-Za-z_]\w*)\s*\(\s*\)', body):
+                if token.count('.') == 1:
+                    token = namespace + '.' + token
+                calls[token].update(groups)
+    return declarations, calls
+
+
 def check_tests(repo, base, head, registry_path, controls_path=None):
     findings = []
     methods = json.loads((Path(registry_path) if Path(registry_path).is_absolute()
                           else repo / registry_path).read_text(encoding='utf-8-sig'))
+    findings.extend(check_exemptions(repo, _by_class_method(methods)))
+    selected = set(_scan_files(repo, base, head))
+    declarations, calls = registration_inventory(repo, methods)
+    for token, groups in calls.items():
+        methods[token] = sorted(set(methods.get(token, [])) | groups)
     by_cm = _by_class_method(methods)
-    findings.extend(check_exemptions(repo, by_cm))
-    for path in _scan_files(repo, base, head):
-        text = path.read_text(encoding='utf-8-sig')
-        masked = lex.mask(text)
-        regions = _type_regions(masked)
-        namespace_last = _namespace_last(masked)
-        relative = path.relative_to(repo).as_posix()
-        for match in PUBLIC_STATIC_VOID.finditer(masked):
-            position = match.start()
-            name = match.group(1)
-            region = _innermost(regions, position)
-            if region is None or not region['name'].endswith('Checks'):
-                continue
-            owner = region['name']
-            if (owner, name) in REVIEWED_EXEMPTIONS:
-                continue
-            if _is_wired(by_cm, namespace_last, owner, name):
-                continue
-            line = text.count('\n', 0, position) + 1
-            findings.append('FAIL register ' + relative + ':' + str(line) + ' ' + owner + '.' + name
-                            + '() is not registered in CheckRegistry (add it to ' + CHECK_REGISTRY
-                            + ' as ' + owner + '.' + name + ', unless it is wired through an action list)')
+    for path, namespace, owner, name, line in declarations:
+        if path not in selected or (owner, name) in REVIEWED_EXEMPTIONS:
+            continue
+        if _is_wired(by_cm, namespace, owner, name):
+            continue
+        findings.append('FAIL register ' + path.relative_to(repo).as_posix() + ':' + str(line) + ' ' + owner + '.' + name
+                        + '() is not registered in CheckRegistry (add it to ' + CHECK_REGISTRY
+                        + ' as ' + owner + '.' + name + ', unless it is wired through an action list)')
     if controls_path:
         findings.extend(check_witness(by_cm, methods, controls_path))
     return findings
