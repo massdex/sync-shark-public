@@ -36,10 +36,13 @@ internal sealed class KeepRules(Analysis graph)
                 var product = nodes.Where(n => n.Product).ToArray();
                 if (product.Length != 0)
                 {
+                    var root = CSharpSyntaxTree.ParseText(source).GetRoot();
                     if (Reflection.IsMatch(source)) throw new InvalidOperationException($"Unmodelled reflection: {path}");
                     if (Interop.IsMatch(source) || graph.SemanticInterop.Contains(path))
                     {
-                        if (!graph.Config.InteropFiles.TryGetValue(path, out var hash) || hash != Analysis.Hash(source)) throw new InvalidOperationException($"Unreviewed interop file/site: {path}");
+                        // Directives keep the strict source hash so inactive code and conditional compilation cannot drift unseen.
+                        var reviewed = root.ContainsDirectives ? source : string.Join(" ", root.DescendantTokens().Select(t => t.Text));
+                        if (!graph.Config.InteropFiles.TryGetValue(path, out var hash) || hash != Analysis.Hash(reviewed)) throw new InvalidOperationException($"Unreviewed interop file/site: {path}");
                         foreach (var node in product)
                         {
                             node.Roots.Add("component:interop");
@@ -47,7 +50,7 @@ internal sealed class KeepRules(Analysis graph)
                             foreach (var other in product) node.Edges.Add(new(other.Id, "", -1, "component:interop"));
                         }
                     }
-                    foreach (var literal in CSharpSyntaxTree.ParseText(source).GetRoot().DescendantNodes().OfType<LiteralExpressionSyntax>().Where(s => s.IsKind(SyntaxKind.StringLiteralExpression)))
+                    foreach (var literal in root.DescendantNodes().OfType<LiteralExpressionSyntax>().Where(s => s.IsKind(SyntaxKind.StringLiteralExpression)))
                         TextRoots(literal.Token.ValueText, "component:text:" + path);
                     if (Regex.IsMatch(source, @"GetManifestResource(Stream|Names)|Application\.(GetResourceStream|LoadComponent)|pack://"))
                         foreach (var node in product) node.Roots.Add("component:resource-loader");
