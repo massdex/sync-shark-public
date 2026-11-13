@@ -1,0 +1,23 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "completion-containment",
+    "completion-containment-cost",
+    "containment",
+    "store",
+    "work-lifecycle",
+    "gone-identities",
+    "syncer",
+    "engine-host",
+    "dependencies",
+    "ancestor-retry",
+    "repair-held",
+    "repair-claims",
+    "repair-forgotten",
+    "pending-recovery"
+  ],
+  "core": [],
+  "ui": []
+}
