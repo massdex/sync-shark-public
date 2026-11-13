@@ -2,6 +2,8 @@
 import contextlib
 import importlib.util
 import io
+import hashlib
+import os
 import json
 from pathlib import Path
 import re
@@ -19,6 +21,22 @@ spec.loader.exec_module(ratchet)
 
 def long_method(name='Run', extra=0):
     return '    public void ' + name + '()\n    {\n' + '        Work();\n' * (41 + extra) + '    }\n'
+
+
+def artifact_rows(tree, root):
+    for path in ratchet.identity.source_files(root):
+        source = path.read_text(encoding='utf-8-sig')
+        spans = []
+        ratchet.lex.mask(source, spans)
+        sites, counts = [], {}
+        for start, end in sorted(spans):
+            line, text = source.count('\n', 0, start) + 1, source[start:end]
+            key = (line, text)
+            ordinal = counts.get(key, 0)
+            counts[key] = ordinal + 1
+            sites.append(dict(line=line, text=text, ordinal=ordinal, permitted=False))
+        yield dict(tree=tree, path=path.relative_to(root).as_posix(),
+                   hash=hashlib.sha256(source.encode()).hexdigest(), sites=sites)
 
 
 class RatchetChecks(unittest.TestCase):
@@ -44,6 +62,22 @@ class RatchetChecks(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             code = ratchet.compare(self.root, self.baseline)
         return code, output.getvalue()
+
+    def test_tunable_identifier_words(self):
+        for name, count in (('examined', 0), ('terminal', 0), ('minimum', 1), ('MinDelay', 1), ('max_min', 1), ('RetryMin', 1),
+                            ('RootVerifyAttempts', 1), ('RestoredEvidenceReleaseAttempts', 1),
+                            ('VerificationPublicationPages', 1), ('_ordinaryHistoryMaintenanceBatches', 1), ('pages', 1)):
+            with self.subTest(name=name):
+                self.assertEqual(count, ratchet.tunable_count('int ' + name + ' = 0;', Path('Example.cs')))
+
+    def test_utf8_suffix_is_token_text_not_display_text(self):
+        for suffix in ('u8', 'U8'):
+            with self.subTest(suffix=suffix):
+                source = 'class Example { object Message = "null"' + suffix + '; }'
+                spans = []
+                masked = ratchet.lex.mask(source, spans)
+                self.assertEqual(['"null"' + suffix], [source[a:b] for a, b in spans])
+                self.assertEqual(0, ratchet.text_count(source, masked, spans, Path('Example.cs')))
 
     def test_new_long_method_fails(self):
         self.put(long_method() + long_method('Added'))
@@ -729,7 +763,7 @@ class TrustedRatchetChecks(unittest.TestCase):
         self.source = self.root / 'src' / 'Example.cs'
         self.source.parent.mkdir()
         self.put('Shipped message one.')
-        for relative in ratchet.trust.ENFORCEMENT:
+        for relative in (*ratchet.trust.ENFORCEMENT, 'tests/SyncShark.Engine.Tests/Layout/LiteralsChecks.cs'):
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture\n', encoding='utf-8')
@@ -762,13 +796,93 @@ class TrustedRatchetChecks(unittest.TestCase):
                                ' '.join('Console.WriteLine(' + json.dumps(s) + ');' for s in messages) +
                                ' } }\n', encoding='utf-8')
 
-    def check(self, tag='v1.0.0', commit=None):
+    def artifact(self, tag='v1.0.0', commit=None):
+        with tempfile.TemporaryDirectory(prefix='literal-release-') as directory:
+            release = Path(directory) / 'release'
+            with contextlib.redirect_stdout(io.StringIO()):
+                ratchet.trust.snapshot(self.root, tag, commit or self.live, release)
+            return list(artifact_rows('release', release)) + list(artifact_rows('candidate', self.root))
+
+    def check(self, tag='v1.0.0', commit=None, artifact=True):
         output, error = io.StringIO(), io.StringIO()
         argv = ['check-spec-ratchet.py', '--root', str(self.root), '--live-tag', tag,
                 '--live-commit', commit or self.live]
-        with mock.patch.object(sys, 'argv', argv), contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+        if artifact is not False:
+            path = self.root / 'literal-sites.jsonl'
+            try:
+                rows = self.artifact(tag, commit) if artifact is True else artifact
+            except ValueError:
+                rows = []  # The entry point still diagnoses unavailable release evidence.
+            path.write_text(''.join(json.dumps(row) + '\n' for row in rows), encoding='utf-8')
+            argv += ['--literal-sites', str(path)]
+        with mock.patch.dict(os.environ), mock.patch.object(sys, 'argv', argv), contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+            os.environ.pop('RATCHET_LITERAL_SITES', None)
             code = ratchet.main()
         return code, output.getvalue() + error.getvalue()
+
+    def test_literal_producer_changes_require_policy_review(self):
+        for name in ('LiteralsChecks.cs', 'LiteralSites.cs'):
+            relative = 'tests/SyncShark.Engine.Tests/Layout/' + name
+            (self.root / relative).write_text('changed fixture\n', encoding='utf-8')
+        code, output = self.check()
+        self.assertEqual(0, code, output)
+        for name in ('LiteralsChecks.cs', 'LiteralSites.cs'):
+            self.assertIn('POLICY REVIEW changed tests/SyncShark.Engine.Tests/Layout/' + name, output)
+
+    def test_literal_artifact_missing_is_incomplete(self):
+        code, output = self.check(artifact=False)
+        self.assertEqual(2, code, output)
+        self.assertIn('INCOMPLETE: literal artifact: missing artifact', output)
+
+    def test_literal_artifact_incomplete_rows_both_trees(self):
+        for tree in ('candidate', 'release'):
+            for defect in ('hash', 'missing site', 'extra site', 'duplicate site', 'missing file', 'extra file'):
+                with self.subTest(tree=tree, defect=defect):
+                    rows = self.artifact()
+                    row = next(row for row in rows if row['tree'] == tree)
+                    if defect == 'hash':
+                        row['hash'] = 'stale'
+                    elif defect == 'missing site':
+                        row['sites'].pop()
+                    elif defect == 'extra site':
+                        row['sites'].append(dict(line=999, text='"extra"', ordinal=0, permitted=True))
+                    elif defect == 'duplicate site':
+                        row['sites'].append(row['sites'][0])
+                    elif defect == 'missing file':
+                        rows.remove(row)
+                    else:
+                        rows.append(dict(row, path='src/Extra.cs'))
+                    code, output = self.check(artifact=rows)
+                    self.assertEqual(2, code, output)
+                    self.assertIn('INCOMPLETE: literal artifact:', output)
+
+    def test_permitted_schema_fragments_are_excluded(self):
+        schema = self.root / 'src/SyncShark.Engine/Storage/StateSchema.cs'
+        schema.parent.mkdir(parents=True)
+        schema.write_text('class StateSchema { const string Bound = "SELECT 1 FROM synced_entry WHERE pair_id = $p"; }', encoding='utf-8')
+        rows = self.artifact()
+        row = next(row for row in rows if row['path'].endswith('/StateSchema.cs'))
+        self.assertEqual(1, len(row['sites']))
+        row['sites'][0]['permitted'] = True
+        self.assertEqual(0, self.check(artifact=rows)[0])
+        row['sites'][0]['permitted'] = False
+        code, output = self.check(artifact=rows)
+        self.assertEqual(1, code, output)
+        self.assertIn('NEW FINDING user-strings', output)
+
+    def test_occurrences_normalization_and_lexical_forms(self):
+        self.source.write_bytes(('﻿// non-BMP: \U0001f642\r\nclass Example { string A = "same sentence here"; '
+                                 'string B = "same sentence here"; string C = @"multi\r\nline sentence"; '
+                                 'string D = """raw sentence here"""; '
+                                 'object E = $"outer {Call("inner sentence here")} text"; '
+                                 'object F = "utf8 sentence here"u8; }').encode('utf-8'))
+        rows = self.artifact()
+        row = next(row for row in rows if row['tree'] == 'candidate')
+        self.assertEqual([0, 1], [site['ordinal'] for site in row['sites'][:2]])
+        self.assertEqual(7, len(row['sites']))
+        for site in row['sites']:
+            site['permitted'] = True
+        self.assertEqual(0, self.check(artifact=rows)[0])
 
     def test_live_measurement_not_committed_baseline(self):
         before = self.baseline.read_bytes()

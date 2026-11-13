@@ -1960,8 +1960,9 @@ public static class ScenarioChecks
                 inFlight.Set();
                 released.Wait(Scenario.Cancellation);
             }
-            if (message.Contains(Text.Get(TextKey.HumanStopped), StringComparison.Ordinal) ||
-                message.Contains(Text.Get(TextKey.HumanError), StringComparison.Ordinal)) diagnosed.Set();
+            // Only the old attempt's own outcome; a drained ordinary dispatch's stale refusal also writes an error line.
+            if (message.Contains(Text.Get(failure is null ? TextKey.HumanStopped : TextKey.HumanError),
+                    StringComparison.Ordinal)) diagnosed.Set();
         };
         try
         {

@@ -92,7 +92,7 @@ internal sealed class Scenario : IDisposable
     private LiveDropboxHandler? handlerForCase;
     private Massdex.SyncShark.PilotInstanceLock? authority;
     private EngineHost? host;
-    private string? failure;
+    private Exception? failure;
     private int runNumber;
     private string[]? cachedTree;
     private int callStart;
@@ -310,7 +310,7 @@ internal sealed class Scenario : IDisposable
     }
 
     /// <summary>Records the failure for the retained summary.</summary>
-    public void Fail(Exception error) => failure = error.ToString();
+    public void Fail(Exception error) => failure = error;
 
     /// <summary>Replaces the pair's exclusions and rebuilds the two sides on the new scope.</summary>
     public void SetExclusions(params Exclusion[] exclusions)
@@ -885,7 +885,13 @@ internal sealed class Scenario : IDisposable
         }
         finally
         {
-            Release();
+            // A teardown error after a failed case is reported with that failure, never in its place (§4.1).
+            try { Release(); }
+            catch (Exception teardown) when (failure is not null)
+            {
+                throw new AggregateException("the case and its teardown both failed (kept: " + Root + ")",
+                    failure, teardown);
+            }
             if (live is null && failure is null)
                 foreach (var data in new[] { LocalRoot, Recovery, Removed }.Concat(addedLocalRoots))
                 {

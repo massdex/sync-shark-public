@@ -392,6 +392,16 @@ public static class LiteralsChecks
             Fails(source, "nested/" + OwnerFiles[owner]);
         }
         Fails("class EngineHost { private const int QuietSeconds = 30; }", OwnerFiles["EngineHost"]);
+        const string schema = "class StateSchema { const string Fragment = \"EXISTS(SELECT 1 FROM synced_entry)\"; }";
+        Passes(schema, StateSchemaFile);
+        Fails(schema.Replace("const string", "static readonly string"), StateSchemaFile);
+        foreach (var (source, path, expected) in new[] {
+            (schema, StateSchemaFile, new[] { true }),
+            (schema.Replace("const string", "static readonly string"), StateSchemaFile, new[] { false }),
+            ("""class C { object M() => $"outer {Call("inner text")} text"; }""", "src/Example.cs", new[] { false, false }),
+            ("""class C { object M() => $"{x}"; }""", "src/Example.cs", new[] { true }) })
+            Check.Require(LiteralSites.Sites(source, path).Select(site => System.Text.Json.JsonSerializer.SerializeToElement(site)
+                .GetProperty("permitted").GetBoolean()).SequenceEqual(expected), "literal artifact permission mapping");
     }
 
     private static void DefaultArithmeticFixtures()
@@ -507,31 +517,9 @@ public static class LiteralsChecks
         var root = CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.CSharp12)).GetRoot();
         var offences = new List<(int Line, string What)>();
         SemanticModel? grammarModel = null;
-
-        // Text: "" anywhere; otherwise only a const field of an owner class in the owner's own file. Outside StateSchema
-        // (SQL) the literal holds no space, so no sentence can hide there (a tab or newline separator token is fine).
-        // Interpolated text has no const home, so any of it fails (a sentence must be a TextKey template).
         foreach (var token in root.DescendantTokens())
-        {
-            if (token.IsKind(SyntaxKind.InterpolatedStringTextToken))
-            {
-                if (token.Value is string interpolated && interpolated.Length > 0)
-                    offences.Add((Line(token), "interpolated text " + token.Text));
-                continue;
-            }
-            if (!token.Kind().ToString().Contains("StringLiteral", StringComparison.Ordinal)) continue;
-            if (token.Value is not string text || text.Length == 0) continue;
-            var owner = OwnerOf(token.Parent, relativePath);
-            if (owner is not null && (owner == "StateSchema" || !text.Contains(' '))) continue;
-            if (relativePath == DropboxEntriesFile &&
-                token.Parent is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.Utf8StringLiteralExpression) &&
-                literal.Parent is ArrowExpressionClauseSyntax { Parent: PropertyDeclarationSyntax })
-            {
-                grammarModel ??= GrammarModel(root.SyntaxTree);
-                if (IsNamedUtf8Grammar(token, grammarModel)) continue;
-            }
-            offences.Add((Line(token), "text literal " + token.Text));
-        }
+            if (StringViolation(token, relativePath, ref grammarModel) is { } what)
+                offences.Add((Line(token), what));
 
         // Numbers: zero anywhere; integral 1 only as a comparison or +/- operand or an index/range bound;
         // anything else only as an owner const or an enum member's explicit value (a frozen declaration).
@@ -563,6 +551,29 @@ public static class LiteralsChecks
 
         return offences;
     }
+
+    // The fence and artifact writer ask this same permission owner; the writer never classifies text.
+    internal static string? StringViolation(SyntaxToken token, string? relativePath, ref SemanticModel? grammarModel)
+    {
+        if (token.IsKind(SyntaxKind.InterpolatedStringTextToken))
+            return token.Value is string interpolated && interpolated.Length > 0 ? "interpolated text " + token.Text : null;
+        if (!IsStringLiteral(token) ||
+            token.Value is not string text || text.Length == 0) return null;
+        // Schema SQL owns its const fragments; other owners cannot hide sentences.
+        var owner = OwnerOf(token.Parent, relativePath);
+        if (owner is not null && (owner == "StateSchema" || !text.Contains(' '))) return null;
+        if (relativePath == DropboxEntriesFile &&
+            token.Parent is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.Utf8StringLiteralExpression) &&
+            literal.Parent is ArrowExpressionClauseSyntax { Parent: PropertyDeclarationSyntax })
+        {
+            grammarModel ??= GrammarModel(token.SyntaxTree!);
+            if (IsNamedUtf8Grammar(token, grammarModel)) return null;
+        }
+        return "text literal " + token.Text;
+    }
+
+    internal static bool IsStringLiteral(SyntaxToken token) =>
+        token.Kind().ToString().Contains("StringLiteral", StringComparison.Ordinal);
 
     /// <summary>The classes allowed to hold named literals, each for its own kind, and the file each must be declared
     /// in (design section 10).</summary>

@@ -1,6 +1,6 @@
 {
-  "status": "App calibration only; other builds retain prior bound",
-  "source": "Run 43500103993 measured 128.2378289 s; ceil(duration * 2) = 257 s. Run 43507617566 proved this insufficient for App. Calibration ceiling is 60 * 60 seconds, from spec-inventory's explicit timeout-minutes: 60, matching existing build-app/tests job policy. GitHub enforces the remaining job budget. Replace after a successful full App measurement.",
+  "status": "App build measured; other builds retain prior bound",
+  "source": "Run 43510809720 completed App build with exit 0 in 293.3468272 s; ceil(duration * 2) = 587 s, 100% margin. Other builds retain the prior 257 s bound (ceil(128.2378289 s * 2), run 43500103993); that earlier process was not a healthy full App build. Documentation debt is separately inventoried.",
   "buildSeconds": 257,
-  "appCalibrationSeconds": 3600
+  "appBuildSeconds": 587
 }

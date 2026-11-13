@@ -73,10 +73,6 @@ CALL = re.compile(r'\b(?:TimeSpan\s*\.\s*From\w+|new\s+TimeSpan|Delay|Sleep|Wait
                   r'Max|Min|Workers|Chunk|Rows|Size|Threshold|AddSeconds|AddMinutes|'
                   r'AddMilliseconds|AddHours|AddDays|SemaphoreSlim|CancellationTokenSource)\s*\(')
 NUMBER = re.compile(r'(?<![\w.])(?:0[xX][\da-fA-F_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?[fFdDmMlLuU]*)(?!\w)')
-SQL = re.compile(r'^(?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|PRAGMA|BEGIN|COMMIT|'
-                 r'ROLLBACK|WITH|VACUUM|ANALYZE|SAVEPOINT|RELEASE|ATTACH|DETACH|AND|OR|WHERE|'
-                 r'FROM|JOIN|LEFT|INNER|OUTER|LIMIT|OFFSET|GROUP|ORDER|CASE|WHEN|THEN|ELSE|'
-                 r'END|INDEXED|ON|USING|SET|VALUES|NOT|IS|COLLATE|RETURNING)\b', re.I)
 LOG = re.compile(r'RunLog\s*\.\s*Trace|RunTrace|\bTrace\s*\(|\.Trace\s*\(|'
                  r'RunOutput\s*\.\s*Observe|Diagnostics\.|Debug\.|_log\b|logger\b|\bLog\s*\(', re.I)
 DISPLAY = re.compile(r'throw\s+new|:\s*base\s*\(|new\s+\w*Exception\s*\(|'
@@ -118,18 +114,20 @@ def type_declarations(masked):
             yield match[1], 'delegate', match.start(), end, end
 
 
-def text_count(source, masked, spans, path, finding=None):
+def text_count(source, masked, spans, path, finding=None, permitted=()):
     count = 0
     for start, end in spans:
+        if start in permitted:
+            continue
         literal = source[start:end]
-        value = literal.lstrip('$@"').rstrip('"').strip()
+        value = literal.removesuffix('u8').removesuffix('U8').lstrip('$@"').rstrip('"').strip()
         if not value or not re.search(r'[A-Za-z]', value):
             continue
         prefix = masked[max(0, start - 250):start]
         line_start = source.rfind('\n', 0, start) + 1
         line_end = source.find('\n', end)
         line = masked[line_start:line_end if line_end >= 0 else len(source)]
-        if SQL.match(value) or LOG.search(line):
+        if LOG.search(line):
             continue
         if re.match(r'^[\^\\]|\(\?<', value) or value.startswith(('http://', 'https://')):
             continue
@@ -152,6 +150,12 @@ def text_count(source, masked, spans, path, finding=None):
     return count
 
 
+def tunable_name(name):
+    return any(TUNABLE.fullmatch(stem) for token in lex.IDENT.finditer(name)
+               for word in re.split(r'_|(?<=[a-z])(?=[A-Z])', token[0].lstrip('@'))
+               for stem in (word, re.sub(r'(?i)s$', '', word), re.sub(r'(?i)es$', '', word), re.sub(r'(?i)ies$', 'y', word)))
+
+
 def tunable_count(masked, path, finding=None):
     if path.name in ('V2Settings.cs', 'EngineSettings.cs'):
         return 0
@@ -162,7 +166,7 @@ def tunable_count(masked, path, finding=None):
         if NUMBER.search(masked[match.end():end]):
             sites[('call', match.start())] = end + 1
     for match in re.finditer(r'\b(\w+)\s*=\s*(?!=|>)([^;{}\n]*)', masked):
-        if TUNABLE.search(match[1]) and not NON_TUNABLE.search(match[1]) and NUMBER.search(match[2]):
+        if tunable_name(match[1]) and not NON_TUNABLE.search(match[1]) and NUMBER.search(match[2]):
             sites[('default', match.start())] = match.end()
     for match in re.finditer(r'\b(?:[\w]+\.)*(count|elapsed|entries|attempts|size|age|depth|bytes)\s*[<>]=?\s*(\d[\d_]*)', masked, re.I):
         if match[2] not in ('0', '1'):
@@ -295,7 +299,7 @@ def collect_review_units(source, masked, declarations, relative):
         yield make('file-size', '', '', size, 0, len(source), [key for _, key in all_members], first)
 
 
-def file_rows(path, relative, review_unit=None):
+def file_rows(path, relative, review_unit=None, permissions=None):
     source = path.read_text(encoding='utf-8-sig')
     spans = []
     masked = lex.mask(source, spans)
@@ -323,7 +327,7 @@ def file_rows(path, relative, review_unit=None):
         key = add(category, owner, signature, value)
         if review_unit is not None:
             review_unit(key, unit)
-    for category, value in (('user-strings', text_count(source, masked, spans, path)),
+    for category, value in (('user-strings', text_count(source, masked, spans, path, permitted=permissions(relative) if permissions else ())),
                             ('magic-tunables', tunable_count(masked, path))):
         if value:
             add(category, '', '', value)
@@ -334,7 +338,7 @@ def file_rows(path, relative, review_unit=None):
     yield from sorted(rows.items(), key=order_key)
 
 
-def scan(root, review_unit=None):
+def scan(root, review_unit=None, permissions=None):
     src = root / 'src'
     if not src.is_dir():
         raise ValueError('source directory missing')
@@ -347,7 +351,7 @@ def scan(root, review_unit=None):
             if child.is_dir() and child.name not in ('bin', 'obj', '.git'):
                 yield from walk(child)
             elif child.is_file() and child.suffix == '.cs':
-                yield from file_rows(child, child.relative_to(root).as_posix(), review_unit)
+                yield from file_rows(child, child.relative_to(root).as_posix(), review_unit, permissions)
     # safe_key splitting can change sort order, so sort by original path on both
     # sides via order_key; only rows for a single file are buffered.
     yield from walk(src)
@@ -417,7 +421,7 @@ def canonical_rows(rows, connection, table, renames=None):
         yield key, value, tuple(json.loads(original))
 
 
-def compare(root, baseline):
+def compare(root, baseline, permissions=None):
     ledger = reviews.read_ledger(root)
     register_failures = reviews.check_register(root, ledger, lex)
     with tempfile.TemporaryDirectory(prefix='spec-ratchet-index-') as directory:
@@ -431,7 +435,7 @@ def compare(root, baseline):
             def collect(key, unit):
                 unit['identity'] = canonical_key(key, renames)
                 connection.execute('INSERT INTO review_units VALUES (?, ?)', (json.dumps(key), json.dumps(unit)))
-            current = iter(canonical_rows(scan(root, collect), connection, 'current_rows', renames))
+            current = iter(canonical_rows(scan(root, collect, permissions), connection, 'current_rows', renames))
             old = iter(canonical_rows(baseline_rows(baseline), connection, 'old_rows'))
             return compare_rows(current, old, connection, verdicts, register_failures)
 
@@ -497,6 +501,7 @@ def compare_rows(current, old, connection, verdicts=None, register_failures=0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=HERE.parents[1])
+    parser.add_argument('--literal-sites', type=Path, default=os.environ.get('RATCHET_LITERAL_SITES'))
     parser.add_argument('--live-tag', default=os.environ.get('RATCHET_LIVE_TAG'))
     parser.add_argument('--live-commit', default=os.environ.get('RATCHET_LIVE_COMMIT'))
     parser.add_argument('--refresh-register', nargs='+', metavar='SOURCE_PATH',
@@ -506,7 +511,7 @@ def main():
         if args.refresh_register:
             reviews.refresh_register(args.root.resolve(), args.refresh_register, lex)
             return 0
-        return trust.check(args.root.resolve(), args.live_tag, args.live_commit, types.SimpleNamespace(**globals()))
+        return trust.check(args.root.resolve(), args.live_tag, args.live_commit, types.SimpleNamespace(**globals()), args.literal_sites)
     except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError, sqlite3.Error) as error:
         print('INCOMPLETE:', error, file=sys.stderr)
         return 2

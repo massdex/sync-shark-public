@@ -19,6 +19,17 @@ if (args is [CheckArguments.MeasurementFlag, CheckArguments.ItemWaitContention])
     return CheckArguments.Success;
 }
 
+if (args is [CheckArguments.LiteralSitesFlag, var candidate, var release, var output])
+{
+    try { Massdex.SyncShark.Engine.Tests.Layout.LiteralSites.Write(candidate, release, output); }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine("INCOMPLETE literal artifact: " + error.Message);
+        return CheckArguments.UsageExit;
+    }
+    return CheckArguments.Success;
+}
+
 // --engine-checks <name>: runs that check's files; exit 0 on success, 1 with the failure printed.
 if (args is not [var flag, var name] || flag != CheckArguments.Flag || !CheckRegistry.All.TryGetValue(name, out var checks))
 {

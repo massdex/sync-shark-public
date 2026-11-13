@@ -1,5 +1,6 @@
 """Release-owned inputs and measured inventory for the spec ratchet."""
 from contextlib import closing
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -8,6 +9,10 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+
+_spec = importlib.util.spec_from_file_location('spec_literal_sites', Path(__file__).with_name('spec_literal_sites.py'))
+literal_sites = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(literal_sites)
 
 BASELINE = 'tools/ci/spec-baseline.jsonl'
 MANIFEST = 'tools/ci/spec-baseline-files.jsonl'
@@ -36,7 +41,7 @@ def snapshot(root, tag, commit, target):
     archive = target.parent / 'release.tar'
     with archive.open('wb') as stream:
         result = subprocess.run(['git', '-C', str(root), 'archive', commit,
-                                 'src', 'tools/ci', '.github/workflows'], stdout=stream,
+                                 'src', 'tools/ci', '.github/workflows', 'tests/SyncShark.Engine.Tests/Layout'], stdout=stream,
                                 stderr=subprocess.PIPE)
     if result.returncode:
         raise ValueError('trusted release archive unavailable')
@@ -62,7 +67,8 @@ def policy_findings(root, trusted):
     for folder in ('tools/ci', '.github/workflows'):
         paths.update(p.relative_to(trusted).as_posix() for p in (trusted / folder).glob('*') if p.is_file())
         paths.update(p.relative_to(root).as_posix() for p in (root / folder).glob('*') if p.is_file())
-    paths.add('tools/Test-PreReview.ps1')
+    paths.update(('tools/Test-PreReview.ps1', 'tests/SyncShark.Engine.Tests/Layout/LiteralsChecks.cs',
+                  'tests/SyncShark.Engine.Tests/Layout/LiteralSites.cs'))
     for relative in sorted(paths):
         old, new = trusted / relative, root / relative
         if new.is_symlink():
@@ -99,7 +105,7 @@ def baseline_findings(root, trusted, connection, ratchet):
     return failures
 
 
-def findings(root, ratchet):
+def findings(root, ratchet, connection, tree):
     """Stream content-bound sites owned by enclosing type, never member spelling or line."""
     for path in ratchet.identity.source_files(root):
         relative = path.relative_to(root).as_posix()
@@ -113,7 +119,8 @@ def findings(root, ratchet):
             owner = prefix + '.'.join([t[0] for t in declarations if t[3] < start < t[4]] + [name])
             owners.append((start, end, owner))
         sites = []
-        ratchet.text_count(source, masked, spans, path, lambda a, b: sites.append(('user-strings', a, b)))
+        permitted = literal_sites.consume(connection, tree, relative, source, spans)
+        ratchet.text_count(source, masked, spans, path, lambda a, b: sites.append(('user-strings', a, b)), permitted)
         ratchet.tunable_count(masked, path, lambda a, b: sites.append(('magic-tunables', a, b)))
         if 'Storage' not in Path(relative).parts:
             sites.extend(('data-outside-storage', m.start(), m.end())
@@ -128,9 +135,10 @@ def findings(root, ratchet):
 def compare_findings(root, trusted, connection, ratchet):
     connection.execute('CREATE TABLE sites (category TEXT, owner TEXT, hash TEXT, path TEXT, delta INTEGER)')
     connection.execute('CREATE INDEX site_identity ON sites(category, owner, hash)')
-    for tree, delta in ((trusted, -1), (root, 1)):
+    for tree, label, delta in ((trusted, 'release', -1), (root, 'candidate', 1)):
         connection.executemany('INSERT INTO sites VALUES (?, ?, ?, ?, ?)',
-                               ((*row, delta) for row in findings(tree, ratchet)))
+                               ((*row, delta) for row in findings(tree, ratchet, connection, label)))
+    literal_sites.finish(connection)
     failures = 0
     for category, owner, digest, path, count in connection.execute(
             'SELECT category, owner, hash, MIN(path), SUM(delta) FROM sites '
@@ -140,14 +148,14 @@ def compare_findings(root, trusted, connection, ratchet):
     return failures
 
 
-def measured_baseline(trusted, path, ratchet):
+def measured_baseline(trusted, path, ratchet, permissions=None):
     """Measure the shipped tree without changing its committed baseline or ceilings."""
     with closing(sqlite3.connect(str(path.parent / 'measured.sqlite'))) as connection:
         connection.execute('CREATE TABLE rows (key TEXT PRIMARY KEY, value INTEGER, old INTEGER)')
         for key, value in ratchet.baseline_rows(trusted / BASELINE):
             connection.execute('INSERT INTO rows VALUES (?, ?, ?)', (json.dumps(key), value, value))
         connection.execute('UPDATE rows SET value=0')
-        for key, value in ratchet.scan(trusted):
+        for key, value in ratchet.scan(trusted, permissions=permissions):
             connection.execute('INSERT INTO rows VALUES (?, ?, 0) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                                (json.dumps(key), value))
         for key, value, old in connection.execute('SELECT key, value, old FROM rows ORDER BY key'):
@@ -168,19 +176,24 @@ def measured_baseline(trusted, path, ratchet):
                                    ratchet.lex, ratchet.type_declarations, ratchet.safe_key)
 
 
-def check(root, tag, commit, ratchet):
+def check(root, tag, commit, ratchet, artifact=None):
+    if artifact is None:
+        raise ValueError("literal artifact: missing artifact")
     with tempfile.TemporaryDirectory(prefix='spec-trusted-') as directory:
         home = Path(directory)
         trusted = home / 'release'
         snapshot(root, tag, commit, trusted)
         failures = policy_findings(root, trusted)
         with closing(sqlite3.connect(str(home / 'findings.sqlite'))) as connection:
+            literal_sites.load(connection, artifact)
             if (root / BASELINE).is_file():
                 failures += baseline_findings(root, trusted, connection, ratchet)
             failures += compare_findings(root, trusted, connection, ratchet)
-        measured = home / 'measured.jsonl'
-        measured_baseline(trusted, measured, ratchet)
-        comparison_failed = ratchet.compare(root, measured)
+            measured = home / 'measured.jsonl'
+            measured_baseline(trusted, measured, ratchet,
+                              lambda path: literal_sites.permitted(connection, 'release', path))
+            comparison_failed = ratchet.compare(root, measured,
+                                                lambda path: literal_sites.permitted(connection, 'candidate', path))
         failed = bool(failures or comparison_failed)
         print('FAIL' if failed else 'PASS', 'trusted findings=' + str(failures),
               'comparison=' + ('FAIL' if comparison_failed else 'PASS'))

@@ -26,6 +26,8 @@ function Invoke-InventoryTool($ToolName, $Version, $Format, $Reports, $Inputs, $
     } catch {
         $failure = "$ToolName INCOMPLETE after $($toolClock.Elapsed.TotalSeconds) seconds: $($_.Exception.Message)"
         $failure | Add-Content (Join-Path $Output "$ToolName.log")
+        $_.InvocationInfo | Format-List * -Force | Out-String | Add-Content (Join-Path $Output "$ToolName.log")
+        $_.ScriptStackTrace | Add-Content (Join-Path $Output "$ToolName.log")
     } finally {
         $env:SpecInventory, $env:SpecInventoryOutput = $previousInventory, $previousOutput
     }
@@ -54,8 +56,7 @@ foreach ($project in $projects) {
     if ($name -in @('SyncShark', 'SyncShark.UiFixture')) {
         $buildArguments += "-p:SyncSharkBuildRoot=$(Join-Path $env:GITHUB_WORKSPACE 'build/ci')"
     }
-    # Calibration only: GitHub's explicit job timeout limits App to the remaining job budget.
-    $buildSeconds = if ($name -eq 'SyncShark') { $timeouts.appCalibrationSeconds } else { $timeouts.buildSeconds }
+    $buildSeconds = if ($name -eq 'SyncShark') { $timeouts.appBuildSeconds } else { $timeouts.buildSeconds }
     # Deliberately do not disable TreatWarningsAsErrors. Inventory captures reports even on build failure.
     Invoke-InventoryTool "roslyn-$name" $analyzerVersions sarif @("$name.sarif") @() @(0) {
         & $processRunner -Executable dotnet -Arguments (@('build') + $buildArguments) -OutputPath "$Output/$name.build.log" -TimeoutSeconds $buildSeconds

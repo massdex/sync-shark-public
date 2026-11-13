@@ -3,8 +3,8 @@
 
 Read-only: never edits a tracked file. Imports the ratchet's own register,
 content-hash, type-declaration and unit-measurement code, and receives the
-CheckRegistry index from the gate's single parser, so no rule or parser is
-copied here. Run with python -I.
+CheckRegistry index from the gate's parser. Registration/witness analysis remains
+here; namespace parsing calls the shared identity owner. Run with python -I.
 
 Exit 0 when every selected check passes, 1 when any finding is printed, 2 on bad
 input. Findings are one FAIL line each, with a precise file:line where one
@@ -224,8 +224,7 @@ def _innermost(regions, position):
 
 
 def _namespace_last(masked):
-    match = re.search(r'\bnamespace\s+([\w.]+)\s*[;{]', masked)
-    return match.group(1).split('.')[-1] if match else ''
+    return ratchet.identity.type_prefix('', masked).partition(':')[2].rstrip('.').split('.')[-1]
 
 
 def _by_class_method(methods):

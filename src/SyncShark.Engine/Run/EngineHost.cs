@@ -458,8 +458,10 @@ internal sealed class EngineHost : IAsyncDisposable
                 current.Generation != generation) throw Stale();
             if (!CanAdmit(current))
             {
-                // A drain closes admission before cancellation is delivered; this is the same caller stop.
+                // A drain closes admission before cancellation is delivered: the same caller stop for the prerequisite's
+                // own work. An ordinary dispatch is stale here, as at admission, whatever the pair's Repair is doing.
                 if (current.State == RegistrationState.Draining && !_closed.Contains(pairId) &&
+                    (current.Kind != RegistrationKind.Dispatch || current.Prerequisite is not null) &&
                     _prerequisites.TryGetValue(pairId, out var pending) && pending.Generation == generation &&
                     IsCallerStopped(pending.Cause))
                     throw new OperationCanceledException(current.Cancellation.Token);

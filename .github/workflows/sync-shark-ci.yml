@@ -250,6 +250,8 @@ jobs:
           path: ${{ runner.temp }}/setup-mutants-*/**/*.log
 
   spec-ratchet:
+    needs: literal-sites
+    if: always()
     runs-on: windows-latest
     timeout-minutes: 10
     env:
@@ -276,6 +278,13 @@ jobs:
           git fetch --no-tags origin "refs/tags/$env:RATCHET_LIVE_TAG`:refs/tags/$env:RATCHET_LIVE_TAG"
           exit $LASTEXITCODE
 
+      - name: Download literal permissions
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          name: literal-sites
+          path: ${{ runner.temp }}
+
       - name: Check mandatory gate fixtures
         if: always()
         shell: pwsh
@@ -292,7 +301,7 @@ jobs:
         run: |
           python -I tools/ci/test-spec-ratchet.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -I tools/ci/check-spec-ratchet.py | Tee-Object -Variable ratchetOutput
+          python -I tools/ci/check-spec-ratchet.py --literal-sites "$env:RUNNER_TEMP/literal-sites.jsonl" | Tee-Object -Variable ratchetOutput
           $code = $LASTEXITCODE
           $ratchetOutput | Where-Object { $_ -match '^(POLICY REVIEW|TRUSTED RELEASE) ' } |
             ForEach-Object { "- $_" } | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
@@ -423,6 +432,43 @@ jobs:
         with:
           name: sync-shark-engine-usings
           path: src/SyncShark.Engine/obj/${{ env.CONFIGURATION }}/net8.0-windows/SyncShark.Engine.GlobalUsings.g.cs
+          if-no-files-found: error
+          retention-days: 7
+
+  literal-sites:
+    needs: build-engine
+    runs-on: windows-latest
+    env:
+      RATCHET_LIVE_TAG: ${{ vars.RATCHET_LIVE_TAG }}
+      RATCHET_LIVE_COMMIT: ${{ vars.RATCHET_LIVE_COMMIT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download engine test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-engine-tests
+          path: tests/SyncShark.Engine.Tests/bin/${{ env.CONFIGURATION }}/net8.0-windows
+
+      - name: Export literal permissions for candidate and pinned release
+        shell: pwsh
+        run: |
+          foreach ($name in @('HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY')) {
+            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+          }
+          git fetch --no-tags origin "refs/tags/$env:RATCHET_LIVE_TAG`:refs/tags/$env:RATCHET_LIVE_TAG"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I -c "import os, runpy; from pathlib import Path; runpy.run_path('tools/ci/spec_trust.py')['snapshot'](Path.cwd(), os.environ['RATCHET_LIVE_TAG'], os.environ['RATCHET_LIVE_COMMIT'], Path(os.environ['RUNNER_TEMP']) / 'literal-release')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "tests/SyncShark.Engine.Tests/bin/$env:CONFIGURATION/net8.0-windows/SyncShark.Engine.Tests.exe" --literal-sites $env:GITHUB_WORKSPACE "$env:RUNNER_TEMP/literal-release" "$env:RUNNER_TEMP/literal-sites.jsonl"
+          exit $LASTEXITCODE
+
+      - name: Upload literal permissions
+        uses: actions/upload-artifact@v4
+        with:
+          name: literal-sites
+          path: ${{ runner.temp }}/literal-sites.jsonl
           if-no-files-found: error
           retention-days: 7
 
