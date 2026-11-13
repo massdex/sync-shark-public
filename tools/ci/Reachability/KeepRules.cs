@@ -102,6 +102,7 @@ internal sealed class KeepRules(Analysis graph)
         if (className is null) throw new InvalidOperationException($"XAML without class anchor: {path}");
         var owners = graph.Types.Values.Where(t => t.Symbol.ToDisplayString() == className).ToArray();
         if (owners.Length == 0) throw new InvalidOperationException($"Unresolved XAML class: {path} {className}");
+        foreach (var owner in owners) owner.Roots.Add("component:xaml");
         void Name(string uri, string local)
         {
             if (!uri.StartsWith("clr-namespace:")) return;
@@ -115,7 +116,11 @@ internal sealed class KeepRules(Analysis graph)
                     .Where(a => assembly is null || a.Name == assembly)
                     .Select(a => a.GetTypeByMetadataName(name) ?? a.GetTypeByMetadataName(name + "Extension")).OfType<INamedTypeSymbol>().ToArray();
                 if (candidates.Length == 0) throw new InvalidOperationException($"Unresolved XAML name: {path} {name}");
-                foreach (var type in candidates) graph.Reference(owner, type, path, -1, "xaml");
+                foreach (var type in candidates)
+                {
+                    graph.Reference(owner, type, path, -1, "xaml");
+                    foreach (var target in graph.Resolve(type)) target.Roots.Add("component:xaml");
+                }
             }
         }
         foreach (var element in xml.Descendants())

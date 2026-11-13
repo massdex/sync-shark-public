@@ -30,7 +30,7 @@ internal sealed class Analysis(string root, Config config)
     internal readonly Dictionary<string, List<TypeNode>> Files = [];
     internal readonly Dictionary<string, Compilation> Compilations = [];
     internal readonly List<string> Diagnostics = [];
-    internal readonly HashSet<string> SemanticInterop = [];
+    internal readonly HashSet<string> SemanticInterop = [], WpfHelpers = [];
     internal readonly Dictionary<string, HashSet<string>> Components = [];
     internal string[] Tracked = [];
     internal readonly string Root = root;
@@ -60,8 +60,10 @@ internal sealed class Analysis(string root, Config config)
         try
         {
             await graph.LoadAsync();
+            WpfHelper.Validate(graph);
             graph.Bind();
             new KeepRules(graph).Apply();
+            WpfHelper.Close(graph);
             new Report(graph).Write(args[1], clock);
             return 0;
         }
@@ -153,7 +155,7 @@ internal sealed class Analysis(string root, Config config)
         if (symbol is null or ILabelSymbol) return;
         if (symbol is IAliasSymbol alias) symbol = alias.Target;
         var owner = symbol.ContainingType?.ToDisplayString();
-        if (from.Product && ((owner == "System.Type" && symbol.Name is "GetType" or "MakeGenericType" or "InvokeMember") ||
+        if (from.Product && !WpfHelpers.Contains(from.Id) && ((owner == "System.Type" && symbol.Name is "GetType" or "MakeGenericType" or "InvokeMember") ||
             (owner == "System.Reflection.Assembly" && (symbol.Name.StartsWith("Load") || symbol.Name == "GetTypes"))))
             throw new InvalidOperationException($"Unmodelled reflection: {path} {owner}.{symbol.Name}");
         if (from.Product && (symbol is ITypeSymbol { TypeKind: TypeKind.Dynamic } ||
@@ -259,7 +261,7 @@ internal sealed class Analysis(string root, Config config)
     }
     internal IEnumerable<Cut> CutsFor(Edge edge) => spans.Where(s => s.Key.Path == edge.Path && s.Value.Contains(edge.Position)).Select(s => s.Key);
     internal bool Allowed(Edge edge, string profile) => profile == "ALL" || !CutsFor(edge).Any(c => !(profile == "GUI" && c.Gui));
-    internal Dictionary<string, (string? Parent, string Reason)> Walk(string profile, IEnumerable<string>? extraRoots = null)
+    internal Dictionary<string, (string? Parent, string Reason)> Walk(string profile, IEnumerable<string>? extraRoots = null, bool ignoreWpfHelpers = false)
     {
         var reached = new Dictionary<string, (string?, string)>();
         var queue = new Queue<string>();
@@ -267,7 +269,7 @@ internal sealed class Analysis(string root, Config config)
             if (reached.TryAdd(node.Id, (null, node.Roots.FirstOrDefault() ?? "entry"))) queue.Enqueue(node.Id);
         foreach (var id in extraRoots ?? []) if (reached.TryAdd(id, (null, "route"))) queue.Enqueue(id);
         while (queue.TryDequeue(out var id))
-        foreach (var edge in Types[id].Edges.Where(e => Allowed(e, profile)))
+        foreach (var edge in Types[id].Edges.Where(e => Allowed(e, profile) && !(ignoreWpfHelpers && WpfHelpers.Contains(id))))
             if (Types[edge.Target].Product && reached.TryAdd(edge.Target, (id, CutsFor(edge).Select(c => "route:" + c.Route).FirstOrDefault() ?? reached[id].Item2))) queue.Enqueue(edge.Target);
         return reached;
     }
