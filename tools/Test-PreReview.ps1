@@ -185,18 +185,28 @@ function Get-RegistryEntries {
     param([string]$Text)
     # One owner of the CheckRegistry text format. Blank // and /* */ comments but
     # keep "..." string literals, so a URL or "/*" inside a string is not a comment.
-    # shortcut: text parse; upgrade if CheckRegistry stops using one ["name"] = [...] per group.
+    # shortcut: inline groups and the validated BudgetCatalog shape; upgrade for another registry expression.
     $clean = [regex]::Replace($Text, '"(?:[^"\\\n]|\\.)*"|//[^\n]*|/\*[\s\S]*?\*/', {
         param($match)
         if ($match.Value[0] -eq '"') { $match.Value } else { ' ' }
     })
     $entries = [System.Collections.Generic.List[object]]::new()
+    $catalog = [regex]::Match($clean, '\bBudgetCatalog\s*=\s*\[(?<entries>[\s\S]*?)\];')
+    $budget = [regex]::Matches($catalog.Groups['entries'].Value, '\(\s*(?<token>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\s*,\s*(?<shard>\d+)\s*\)')
     $starts = [regex]::Matches($clean, '(?m)^\s*\["(?<group>[^"]+)"\]\s*=')
     for ($i = 0; $i -lt $starts.Count; $i++) {
         $start = $starts[$i].Index
         $end = if ($i + 1 -lt $starts.Count) { $starts[$i + 1].Index } else { $clean.Length }
         $chunk = $clean.Substring($start, $end - $start)
         $group = $starts[$i].Groups['group'].Value
+        $catalogUse = [regex]::Match($chunk, '^\s*\["[^"]+"\]\s*=\s*(?:BudgetChecks\s*,|BudgetShard\(\s*(?<shard>\d+)\s*\)\s*,)')
+        if ($catalogUse.Success) {
+            foreach ($entry in $budget) {
+                if (-not $catalogUse.Groups['shard'].Success -or $entry.Groups['shard'].Value -eq $catalogUse.Groups['shard'].Value) {
+                    $entries.Add([pscustomobject]@{ Group = $group; Token = $entry.Groups['token'].Value })
+                }
+            }
+        }
         foreach ($entry in [regex]::Matches($chunk, '(?<![A-Za-z0-9_.])([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+(?:\(\))?)')) {
             $token = $entry.Groups[1].Value -replace '\(\)$', ''
             $entries.Add([pscustomobject]@{ Group = $group; Token = $token })
@@ -1280,6 +1290,51 @@ public static class CheckRegistry
         $regNoInline = New-RegistryJson -RegistryText $regNoInlineText -Path (Join-Path $temp 'registry-no-inline.json')
         $noInline = Invoke-Python -Root $r5 -Arguments ($testsBase + @('--registry', $regNoInline))
         Assert-True ($noInline.ExitCode -eq 1 -and $noInline.Output -like '*InlineChecks.Run*') 'tests: an in-file x.Run() call does not count as registered'
+        # C0: catalog-backed groups and a direct call from a registered entry point.
+        $catalogRegistry = @'
+namespace T;
+public static class CheckRegistry
+{
+    private static readonly (Action Run, int Shard)[] BudgetCatalog =
+    [
+        (Run.CallBudgetChecks.RunBudgetCommon, 4),
+        (Run.CallBudgetChecks.RunBudgetPair, 1),
+        (Executor.ActionExecutorChecks.FileSizedForgetCosts, 4),
+        // (Run.GhostChecks.Run, 1),
+    ];
+    private static readonly Action[] BudgetChecks = ValidateBudget();
+    public static readonly Dictionary<string, Action[]> All = new()
+    {
+        ["budget"] = BudgetChecks,
+        ["budget-1"] = BudgetShard(1),
+        ["budget-4"] = BudgetShard(4),
+    };
+}
+'@
+        $catalogIndex = Get-CheckRegistryIndex -Text $catalogRegistry
+        Assert-True (($catalogIndex.Methods['Run.CallBudgetChecks.RunBudgetCommon'] -join ',') -eq 'budget,budget-4') 'catalog: common is registered in its aggregate and exact shard'
+        Assert-True (($catalogIndex.Methods['Run.CallBudgetChecks.RunBudgetPair'] -join ',') -eq 'budget,budget-1') 'catalog: another shard is not conflated'
+        Assert-True ($catalogIndex.Methods.ContainsKey('Executor.ActionExecutorChecks.FileSizedForgetCosts')) 'catalog: explicit non-budget-class entry is registered'
+        Assert-True (-not $catalogIndex.Methods.ContainsKey('Run.GhostChecks.Run')) 'catalog: a commented tuple is not registered'
+        $unusedCatalog = Get-CheckRegistryIndex -Text ($catalogRegistry -replace 'BudgetChecks,', '[],' -replace 'BudgetShard\(\d+\),', '[],')
+        Assert-True ($unusedCatalog.Methods.Count -eq 0) 'catalog: an unused catalog grants no registration'
+        $catalogRoot = Join-Path $temp 'catalog-registration'
+        New-ExemptFile -Repo $catalogRoot -Methods $exemptNames
+        $callerPath = Join-Path $catalogRoot 'tests/SyncShark.Engine.Tests/Run/CallBudgetChecks.cs'
+        $callerText = 'namespace T.Run; public static class CallBudgetChecks { public static void RunBudgetCommon() { StorageCostChecks.Run(); } public static void RunBudgetPair() { } }'
+        Set-Content -LiteralPath $callerPath -Value $callerText
+        Set-Content -LiteralPath (Join-Path $catalogRoot 'tests/SyncShark.Engine.Tests/Run/StorageCostChecks.cs') -Value 'namespace T.Run; public static class StorageCostChecks { public static void Run() { } }'
+        Set-Content -LiteralPath (Join-Path $catalogRoot 'tests/SyncShark.Engine.Tests/ActionExecutorChecks.cs') -Value 'namespace T.Executor; public static class ActionExecutorChecks { public static void FileSizedForgetCosts() { } }'
+        $catalogJson = New-RegistryJson -RegistryText $catalogRegistry -Path (Join-Path $temp 'catalog-registry.json')
+        $catalogArgs = @($checkScript, '--check', 'tests', '--repo', $catalogRoot, '--registry', $catalogJson)
+        $catalogRun = Invoke-Python -Root $catalogRoot -Arguments $catalogArgs
+        Assert-True ($catalogRun.ExitCode -eq 0) ('catalog: registered entry points and their direct callee pass: ' + $catalogRun.Output)
+        $missingCatalogJson = New-RegistryJson -RegistryText ($catalogRegistry -replace '\(Run.CallBudgetChecks.RunBudgetCommon, 4\),', '') -Path (Join-Path $temp 'catalog-missing.json')
+        $missingCatalogRun = Invoke-Python -Root $catalogRoot -Arguments @($checkScript, '--check', 'tests', '--repo', $catalogRoot, '--registry', $missingCatalogJson)
+        Assert-True ($missingCatalogRun.ExitCode -eq 1 -and $missingCatalogRun.Output -like '*CallBudgetChecks.RunBudgetCommon*' -and $missingCatalogRun.Output -like '*StorageCostChecks.Run*') 'catalog: a removed entry and its now-unreachable callee both fail'
+        Set-Content -LiteralPath $callerPath -Value ($callerText.Replace('StorageCostChecks.Run();', '') -replace '\}\s*$', 'private static void Unregistered() { StorageCostChecks.Run(); } }')
+        $unregisteredCaller = Invoke-Python -Root $catalogRoot -Arguments $catalogArgs
+        Assert-True ($unregisteredCaller.ExitCode -eq 1 -and $unregisteredCaller.Output -like '*StorageCostChecks.Run*') 'catalog: a call only from an unregistered method still fails'
         # P2-4: a stale reviewed exemption fails.
         $regStaleText = @'
 namespace T;
