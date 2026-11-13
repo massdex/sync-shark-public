@@ -29,6 +29,8 @@ public static partial class ChangeTableChecks
         CheckCase(() => WithStore((_, database) => B210EpisodeBarrier(database)));
         foreach (var overlap in new[] { false, true }) CheckCase(() => WithStore(store => B210PendingScope(store, overlap)));
         foreach (var afterDelete in new[] { false, true }) CheckCase(() => WithStore(store => B210AtomicRollback(store, afterDelete)));
+        foreach (var rollbackFails in new[] { false, true })
+            CheckCase(() => WithStore(store => B210CompletionCertificate(store, rollbackFails)));
         CheckCase(() => WithStore((store, database) => B210RestartDrain(store, database)));
         foreach (var identified in new[] { false, true }) CheckCase(() => WithStore(store => B210CostGate(store, identified)));
         CheckCase(() => WithStore(B210CaseSpelling));
@@ -122,9 +124,10 @@ public static partial class ChangeTableChecks
         InstallWithoutObligations(store);
         B210Acquire(store, B210Notice() with { LocalContentDirty = true, Usn = unknown ? null : 9 });
         var newest = B210Acquire(store, B210Notice() with { LocalContentDirty = unknown, Usn = 4 });
-        var selected = B210Next(store)!;
-        var notice = store.ReadWork(selected).Single().Notice;
-        Check.Require(selected.AnchorWorkId == newest && notice.LocalContentDirty && notice.Usn == (unknown ? null : 9UL),
+        var selected = B210Next(store);
+        Check.Require(selected is not null, "B210-DirtyUnion: compatible debt remains selectable");
+        var notice = store.ReadWork(selected!).Single().Notice;
+        Check.Require(selected is not null && selected.AnchorWorkId == newest && notice.LocalContentDirty && notice.Usn == (unknown ? null : 9UL),
             "B210-DirtyUnion: retain earlier dirty evidence and unknown USN; unknown=" + unknown);
         Check.Require((long)B210Sql(store, "SELECT acquisition_work_id FROM change_work WHERE work_id=$id;", ("$id", newest))! == newest,
             "B210-MaxAcquisition: newest acquisition remains the evidence boundary");
@@ -140,7 +143,7 @@ public static partial class ChangeTableChecks
         if (different)
             B210Sql(store, "UPDATE change_work SET before_json=$before WHERE work_id=$id;", ("$before", before + " "), ("$id", second));
         var selection = B210Next(store)!;
-        Check.Require(selection.AnchorWorkId == (different ? first : second) && B210Count(store) == (different ? 2 : 1) &&
+        Check.Require(selection is not null && selection.AnchorWorkId == (different ? first : second) && B210Count(store) == (different ? 2 : 1) &&
             (string)B210Sql(store, "SELECT before_json FROM change_work WHERE work_id=$id;", ("$id", selection.AnchorWorkId))! == before,
             "B210-BeforeBytes: differing persisted bytes are a barrier; null carries shared bytes; different=" + different);
     }
@@ -189,7 +192,7 @@ public static partial class ChangeTableChecks
         }
         var selected = B210Next(store)!;
         // A rename at another primary key is not a member: its old-path footprint cannot consume either endpoint.
-        Check.Require(selected.AnchorWorkId == (guard == "OtherKey" ? middle : first) &&
+        Check.Require(selected is not null && selected.AnchorWorkId == (guard == "OtherKey" ? middle : first) &&
             B210Count(store) == (guard == "OtherKey" ? 2 : 3),
             "B210-Custody-" + guard + ": incompatible custody is a barrier, never filtered out");
     }
@@ -280,16 +283,52 @@ public static partial class ChangeTableChecks
     private static void B210AtomicRollback(StateStore store, bool afterDelete)
     {
         InstallWithoutObligations(store);
-        B210Acquire(store, B210Notice() with { LocalContentDirty = true }, B210Notice(), B210Notice());
+        var first = B210Acquire(store, B210Notice() with { LocalContentDirty = true });
+        B210Acquire(store, B210Notice(), B210Notice());
         var snapshot = B210Snapshot(store);
         B210Sql(store, afterDelete
             ? "CREATE TRIGGER b210_fault BEFORE DELETE ON change_work WHEN (SELECT count(*) FROM change_work)=2 BEGIN SELECT raise(ABORT,'b210 fault'); END;"
             : "CREATE TRIGGER b210_fault BEFORE DELETE ON change_work BEGIN SELECT raise(ABORT,'b210 fault'); END;");
-        var failed = false;
-        try { B210Next(store); }
-        catch (SqliteException) { failed = true; }
-        Check.Require(failed && B210Snapshot(store) == snapshot && !store.EndWorkPass(PairId),
+        WorkSelection? selected = null;
+        Exception? failure = null;
+        try { selected = B210Next(store); }
+        catch (Exception error) { failure = error; }
+        Check.Require(B210Snapshot(store) == snapshot && !store.EndWorkPass(PairId),
             "B210-AtomicRollback: update and prior deletes roll back with no published accounting; afterDelete=" + afterDelete);
+        Check.Require(failure is null && selected?.AnchorWorkId == first,
+            "B210-CertifiedRollback: a certified transaction failure still selects the original row; afterDelete=" + afterDelete);
+    }
+
+    private static void B210CompletionCertificate(StateStore store, bool rollbackFails)
+    {
+        InstallWithoutObligations(store);
+        var first = B210Acquire(store, B210Notice());
+        var selected = B210Selection(store, first);
+        var snapshot = B210Snapshot(store);
+        B210Sql(store, "CREATE TRIGGER b210_completion BEFORE DELETE ON change_work BEGIN SELECT raise(ABORT,'b210 fault'); END;");
+        var connection = B210Connection(store);
+        var denyRollback = rollbackFails;
+        // Deny only the certification rollback; disposal must still be able to roll the synthetic transaction back.
+        SQLitePCL.strdelegate_authorizer authorize = (_, action, operation, _, _, _) =>
+        {
+            if (denyRollback && action == SQLitePCL.raw.SQLITE_TRANSACTION && operation == "ROLLBACK")
+            {
+                denyRollback = false;
+                return SQLitePCL.raw.SQLITE_DENY;
+            }
+            return SQLitePCL.raw.SQLITE_OK;
+        };
+        SQLitePCL.raw.sqlite3_set_authorizer(connection.Handle, authorize, null);
+        Exception? failure = null;
+        try { store.CompleteWork(selected, null); }
+        catch (Exception error) { failure = error; }
+        finally { SQLitePCL.raw.sqlite3_set_authorizer(connection.Handle, (SQLitePCL.strdelegate_authorizer)null!, null); }
+        Check.Require(B210Snapshot(store) == snapshot && (rollbackFails
+            ? !denyRollback && failure is AggregateException aggregate && aggregate.InnerExceptions.Count == 2 &&
+                aggregate.InnerExceptions[0] is SqliteException { SqliteErrorCode: SQLitePCL.raw.SQLITE_CONSTRAINT } &&
+                aggregate.InnerExceptions[1] is SqliteException { SqliteErrorCode: SQLitePCL.raw.SQLITE_AUTH }
+            : failure is ItemStoreMutationException { Selection: var certified } && certified == selected),
+            "B210-CompletionCertificate: completion retains its exact-row certificate or both rollback errors; rollbackFails=" + rollbackFails);
     }
 
     private static void B210RestartDrain(StateStore store, string database)
@@ -316,9 +355,9 @@ public static partial class ChangeTableChecks
         finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
         var seeks = statements.Count(sql => sql.Contains("ORDER BY w.path_key,w.work_id LIMIT", StringComparison.Ordinal));
         var watermarks = statements.Count(sql => sql.TrimEnd(';') == StateSchema.WorkWatermark.TrimEnd(';'));
-        Check.Require(seeks == (identified ? 0 : 1) && watermarks == (identified ? 1 : 2) &&
+        Check.Require(seeks == (identified ? 0 : 1) && watermarks == 1 &&
             !statements.Any(sql => sql.StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase)),
-            "B210-CostGate: identified has zero extra reads; singleton pays seek plus observed watermark, no transaction; " +
+            "B210-CostGate: identified has zero extra reads; singleton reuses the pass watermark and pays one seek, no transaction; " +
             "identified=" + identified + "; seeks=" + seeks + "; watermarks=" + watermarks);
         Check.Require(B210Next(store) is null && !store.EndWorkPass(PairId), "B210-NoSpin: singleton has no repeat credit");
     }
@@ -360,7 +399,7 @@ public static partial class ChangeTableChecks
         B210Acquire(store, B210Notice(File.ToLowerInvariant()));
         var last = B210Acquire(store, B210Notice(File.ToUpperInvariant()));
         var selected = B210Next(store)!;
-        Check.Require(selected.AnchorWorkId == last && store.ReadWork(selected).Single().Notice.Path == File.ToUpperInvariant(),
+        Check.Require(selected is not null && selected.AnchorWorkId == last && store.ReadWork(selected).Single().Notice.Path == File.ToUpperInvariant(),
             "B210-CaseSpelling: newest observed name spelling survives the transfer");
     }
 

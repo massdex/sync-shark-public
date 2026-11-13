@@ -1548,9 +1548,10 @@ public static class JournalSourceChecks
         scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, next, Fences(scenario),
             Enumerable.Range(0, 3).SelectMany(_ => notices.Select(notice => (pair.PairId, notice))));
         var scope = new PathScope(pair, [pair]);
-        var selectedA = scenario.Store.SelectWork(pair.PairId, 0, scope)!;
-        var selectedB = scenario.Store.SelectWork(pair.PairId, 0, scope)!;
-        Check.Require(selectedA.Key != selectedB.Key && selectedA.Identity is null && selectedB.Identity is null &&
+        var selectedA = scenario.Store.SelectWork(pair.PairId, 0, scope);
+        var selectedB = scenario.Store.SelectWork(pair.PairId, 0, scope);
+        Check.Require(selectedA is not null && selectedB is not null &&
+            selectedA.Key != selectedB.Key && selectedA.Identity is null && selectedB.Identity is null &&
             scenario.Store.CountWork(pair.PairId, 0, scenario.Store.ReadWorkWatermark()).Local == 2,
             "B210-AliasIndependence: real hard-link names retain separate path-only obligations");
         scenario.Store.EndWorkPass(pair.PairId);

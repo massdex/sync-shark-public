@@ -270,10 +270,10 @@ internal sealed partial class ChangeTable
         {
             return null;
         }
-        var pass = _passes.GetValueOrDefault(pairId) is { } open && open.Generation == expectedGeneration
-            ? open.Scope is null ? open with { Scope = scope, Through = Watermark(null) } : open
-            : new Pass(expectedGeneration, BeforeFirstWork, Watermark(null), scope);
         long? observedThrough = null;
+        var pass = _passes.GetValueOrDefault(pairId) is { } open && open.Generation == expectedGeneration
+            ? open.Scope is null ? open with { Scope = scope, Through = observedThrough ??= Watermark(null) } : open
+            : new Pass(expectedGeneration, BeforeFirstWork, observedThrough ??= Watermark(null), scope);
         var merged = false;
         while (Rows(null, StateSchema.SelectWork, (StateSchema.ParamPairRow, pair.Row),
                    (StateSchema.ParamGeneration, expectedGeneration), (StateSchema.ParamAfter, pass.After),
@@ -317,23 +317,69 @@ internal sealed partial class ChangeTable
             TransferableWork(null, pair.Row, successor, null, pathOnly: true) is null ||
             candidate.Before is not null && successor.Before is not null &&
             !string.Equals(candidate.Before, successor.Before, StringComparison.Ordinal)) return 0;
-        using var transaction = _connection.BeginTransaction();
-        var selection = ToSelection(pairId, candidate, pass.Through);
-        pair = RequireCurrent(transaction, selection);
-        var first = RequireAnchor(transaction, pair.Row, selection);
+        try
+        {
+            using var transaction = _connection.BeginTransaction();
+            var selection = ToSelection(pairId, candidate, pass.Through);
+            pair = RequireCurrent(transaction, selection);
+            var first = RequireAnchor(transaction, pair.Row, selection);
+            if (TransferBound(transaction, pair, first, pass, through) is not { } bound) return 0;
+            through = bound;
+            ChangeNotice? notice = null;
+            string? before = null;
+            var acquisition = BeforeFirstWork;
+            var newest = first;
+            long validated = 0;
+            for (var row = first; row is not null && row.WorkId <= through; row = Next(transaction, row.WorkId))
+            {
+                if (TransferableWork(transaction, pair.Row, row, null, pathOnly: true) is not { } content ||
+                    before is not null && row.Before is not null && !string.Equals(before, row.Before, StringComparison.Ordinal)) break;
+                notice = notice is null ? content.Notice : MergeContent(notice, content.Notice);
+                before ??= row.Before;
+                acquisition = Math.Max(acquisition, row.Acquisition!.Value);
+                newest = row;
+                validated++;
+            }
+            if (newest.WorkId == first.WorkId) return 0;
+            long deleted = 0;
+            try
+            {
+                Require(Run(transaction, StateSchema.MergeTransferredWork, (StateSchema.ParamPairRow, pair.Row),
+                    (StateSchema.ParamWork, newest.WorkId), (StateSchema.ParamAcquisition, acquisition),
+                    (StateSchema.ParamBefore, before), (StateSchema.ParamNotice, StateEncoding.Envelope(notice!))));
+                for (var row = first; row is not null && row.WorkId < newest.WorkId; row = Next(transaction, row.WorkId))
+                {
+                    Require(Run(transaction, StateSchema.DeleteWork, (StateSchema.ParamPairRow, pair.Row),
+                        (StateSchema.ParamWork, row.WorkId)));
+                    deleted++;
+                }
+                if (deleted != validated - StateSchema.OneRow) throw new InvalidOperationException();
+                transaction.Commit();
+            }
+            catch (SqliteException error) when (error.SqliteErrorCode == SQLitePCL.raw.SQLITE_CONSTRAINT)
+            {
+                throw RollbackMutation(transaction, selection, error);
+            }
+            return deleted;
+        }
+        // Only a certified rollback permits ordinary selection; disposal and non-certified failures still escape.
+        catch (ItemStoreMutationException) { return 0; }
+    }
+
+    private long? TransferBound(SqliteTransaction transaction, PairRow pair, WorkRow first, Pass pass, long through)
+    {
         foreach (var episode in Read(transaction, StateSchema.ItemEpisodesAtPath,
             static reader => reader.GetInt64(StateSchema.EpisodePathWork),
             (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamSide, (int)Side.Local),
-            (StateSchema.ParamPath, candidate.Key)))
+            (StateSchema.ParamPath, first.Key)))
             if (episode >= first.WorkId) through = Math.Min(through, episode - StateSchema.OneRow);
         if (pass.Claims is { } claims)
             foreach (var claim in claims.Values)
                 if (FindAnchor(transaction, pair.Row, claim) is { } anchor &&
                     (Owned(claim, anchor, first) || claim.Side == Side.Local && claim.Key == first.Key ||
-                     claim.Side == Side.Dropbox && claim.Peer?.Key == first.Key)) return 0;
-        // Attempted and suspended ids are immutable for this ordered store call. They bound both walks alike.
+                     claim.Side == Side.Dropbox && claim.Peer?.Key == first.Key)) return null;
+        // EndSelection adds every suspended dependent to Attempted; only prerequisites need a separate walk.
         foreach (var protectedId in (pass.Attempted ?? Enumerable.Empty<long>())
-            .Concat(pass.Suspended?.Keys ?? Enumerable.Empty<long>())
             .Concat(pass.Suspended?.Values ?? Enumerable.Empty<long>()))
         {
             if (protectedId < first.WorkId || protectedId > through) continue;
@@ -346,36 +392,8 @@ internal sealed partial class ChangeTable
         if (first.WorkId > through || Read(transaction, StateSchema.LocalEchoPending,
             static reader => reader.GetBoolean(StateSchema.FirstColumn), (StateSchema.ParamPairRow, pair.Row),
             (StateSchema.ParamLocalKey, first.Key), (StateSchema.ParamDropboxKey, first.Key),
-            (StateSchema.ParamIsFolder, false)).First()) return 0;
-        ChangeNotice? notice = null;
-        string? before = null;
-        var acquisition = BeforeFirstWork;
-        var newest = first;
-        long validated = 0;
-        for (var row = first; row is not null && row.WorkId <= through; row = Next(transaction, row.WorkId))
-        {
-            if (TransferableWork(transaction, pair.Row, row, null, pathOnly: true) is not { } content ||
-                before is not null && row.Before is not null && !string.Equals(before, row.Before, StringComparison.Ordinal)) break;
-            notice = notice is null ? content.Notice : MergeContent(notice, content.Notice);
-            before ??= row.Before;
-            acquisition = Math.Max(acquisition, row.Acquisition!.Value);
-            newest = row;
-            validated++;
-        }
-        if (validated <= StateSchema.OneRow) return 0;
-        Require(Run(transaction, StateSchema.MergeTransferredWork, (StateSchema.ParamPairRow, pair.Row),
-            (StateSchema.ParamWork, newest.WorkId), (StateSchema.ParamAcquisition, acquisition),
-            (StateSchema.ParamBefore, before), (StateSchema.ParamNotice, StateEncoding.Envelope(notice!))));
-        long deleted = 0;
-        for (var row = first; row is not null && row.WorkId < newest.WorkId; row = Next(transaction, row.WorkId))
-        {
-            Require(Run(transaction, StateSchema.DeleteWork, (StateSchema.ParamPairRow, pair.Row),
-                (StateSchema.ParamWork, row.WorkId)));
-            deleted++;
-        }
-        if (deleted != validated - StateSchema.OneRow) throw new InvalidOperationException();
-        transaction.Commit();
-        return deleted;
+            (StateSchema.ParamIsFolder, false)).First()) return null;
+        return through;
     }
 
     /// <summary>Registers an endpoint unbound by a committed replacement in the caller's transaction, and asks the
@@ -1002,9 +1020,7 @@ internal sealed partial class ChangeTable
             }
             catch (SqliteException error) when (error.SqliteErrorCode == SQLitePCL.raw.SQLITE_CONSTRAINT)
             {
-                try { transaction.Rollback(); }
-                catch (Exception rollback) { throw new AggregateException(error, rollback); }
-                throw new ItemStoreMutationException(selection, error.SqliteErrorCode, error.SqliteExtendedErrorCode, error);
+                throw RollbackMutation(transaction, selection, error);
             }
         }
         if (_passes.TryGetValue(selection.PairId, out var pass))
@@ -1015,6 +1031,14 @@ internal sealed partial class ChangeTable
             pass.DirectDeletions?.Clear();
         }
         return true;
+    }
+
+    private static ItemStoreMutationException RollbackMutation(
+        SqliteTransaction transaction, WorkSelection selection, SqliteException error)
+    {
+        try { transaction.Rollback(); }
+        catch (Exception rollback) { throw new AggregateException(error, rollback); }
+        return new ItemStoreMutationException(selection, error.SqliteErrorCode, error.SqliteExtendedErrorCode, error);
     }
 
     private IEnumerable<WorkRow> OwnedPeers(SqliteTransaction transaction, PairRow pair,
