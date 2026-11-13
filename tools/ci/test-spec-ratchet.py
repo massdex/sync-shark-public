@@ -775,10 +775,10 @@ class TrustedRatchetChecks(unittest.TestCase):
     def git(self, *args):
         return ratchet.trust.git(self.root, *args)
 
-    def commit(self):
+    def commit(self, message='Fixture'):
         self.git('add', '-A')
         self.git('-c', 'user.name=Fixture', '-c', 'user.email=noreply', 'commit', '-qm',
-                 'Fixture\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>')
+                 message + '\n\nCo-Authored-By: Claude Code <noreply@anthropic.com>')
 
     def put(self, *messages):
         self.source.write_text('namespace Example;\nclass Example { void Text() { ' +
@@ -848,7 +848,8 @@ class TrustedRatchetChecks(unittest.TestCase):
 
     def test_unrelated_history_is_incomplete(self):
         self.git('checkout', '--orphan', 'unrelated')
-        self.commit()
+        self.commit('Unrelated fixture')
+        self.assertNotEqual(self.live, self.git('rev-parse', 'HEAD'))
         code, output = self.check()
         self.assertEqual(2, code, output)
         self.assertIn('merge-base --is-ancestor', output)
