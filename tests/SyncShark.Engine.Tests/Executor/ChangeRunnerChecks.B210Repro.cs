@@ -39,17 +39,23 @@ public static partial class ChangeRunnerChecks
         foreach (var covering in new[] { false, true })
         foreach (var atBaseline in new[] { false, true })
         foreach (var withSaved in new[] { false, true })
-        foreach (var during in new[] { false, true })
-            await B210VariantAsync(covering, atBaseline, withSaved, during);
+        foreach (var timing in B210Timings)
+            await B210VariantAsync(covering, atBaseline, withSaved, timing);
         // The notice shape itself: a Renamed notice in the same not-at-baseline, saved, during-pass shape.
-        await B210VariantAsync(covering: false, atBaseline: false, withSaved: true, during: true, renamed: true);
+        await B210VariantAsync(covering: false, atBaseline: false, withSaved: true, timing: "during", renamed: true);
     }
 
-    private static async Task B210VariantAsync(bool covering, bool atBaseline, bool withSaved, bool during,
+    // The newer acquisition's position against the pass watermark: before the pass, after the pass's first
+    // selection, or inside the Dropbox read that follows the early check (the read-granularity race).
+    private static readonly string[] B210Timings = ["before", "during", "midread"];
+
+    private static async Task B210VariantAsync(bool covering, bool atBaseline, bool withSaved, string timing,
         bool renamed = false)
     {
+        // The midread race only matters when every early gate holds, so the rest of the matrix stays at before/during.
+        if (timing == "midread" && (covering || atBaseline)) return;
         var label = $"cover={(covering ? "T" : "f")} base={(atBaseline ? "T" : "f")} saved={(withSaved ? "T" : "f")} " +
-            $"newer={(during ? "during" : "before")} notice={(renamed ? "renamed" : "changed")}";
+            $"newer={timing} notice={(renamed ? "renamed" : "changed")}";
         var attempt = Guid.NewGuid();
         using var fixture = new Fixture(realStore: true, registeredAttempt: attempt);
         ClearObligations(fixture);
@@ -78,8 +84,16 @@ public static partial class ChangeRunnerChecks
             $"current={current.Id} savedBinding={(withSaved ? "yes" : "no")} " +
             $"localMatchesBaseline={Decide.LocalMatchesBaseline(current, fixture.Inner.SelectionBaseline(oldWorks[0]))}");
         var dropbox = new CountingSide(fixture.Dropbox);
-        fixture.DropboxView = dropbox;
         var newerSeeded = false;
+        fixture.DropboxView = timing == "midread"
+            ? new HookedSide(dropbox, beforeRead: path =>
+            {
+                if (newerSeeded || !PathNames.Same(path, B210Path)) return;
+                SeedHeldNewerWork(fixture, current, attempt);
+                newerSeeded = true;
+                Console.WriteLine($"b210 variant {label} newer-work seeded inside the Dropbox read");
+            })
+            : dropbox;
         var selections = 0;
         var worksTried = new HashSet<long>();
         var (early, late, completed, unfinished, other) = (0, 0, 0, 0, 0);
@@ -92,7 +106,7 @@ public static partial class ChangeRunnerChecks
                 var selection = fixture.Inner.SelectWork(PairId, Generation,
                     new PathScope(fixture.Pair, [fixture.Pair]));
                 if (selection is null) break;
-                if (during && !newerSeeded)
+                if (timing == "during" && !newerSeeded)
                 {
                     SeedHeldNewerWork(fixture, current, attempt);
                     newerSeeded = true;
