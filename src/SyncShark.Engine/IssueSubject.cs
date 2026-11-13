@@ -44,13 +44,13 @@ public sealed record IssueSubject(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DuplicateFolders? Folders { get; init; }
 
-    /// <summary>The one duplicate-folder subject shape: X on side, then the other-side items of its first two bindings;
-    /// a settle's clash match passes only the dissolved binding, so it names X and that one endpoint.</summary>
+    /// <summary>The one duplicate-folder subject shape: X on side, then the other-side item of each given binding (the
+    /// group's two, or a settle's one dissolved binding for its clash match).</summary>
     internal static IssueSubject DuplicateFolderItems(Side side, IReadOnlyList<SyncedEntry> bindings)
     {
         var other = PathNames.Other(side);
         return new IssueSubject([new IssueItem(side, bindings[0].PathOn(side), bindings[0].IdOn(side)),
-            .. bindings.Take(2).Select(binding => new IssueItem(other, binding.PathOn(other), binding.IdOn(other)))], null);
+            .. bindings.Select(binding => new IssueItem(other, binding.PathOn(other), binding.IdOn(other)))], null);
     }
 
     /// <summary>The side of the endpoint a turn at path retains: the incoming side, else the item at that path.</summary>

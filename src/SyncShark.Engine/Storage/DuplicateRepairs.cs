@@ -67,7 +67,8 @@ internal static class DuplicateRepairs
     private static void LinksNotice(SqliteConnection connection, SqliteTransaction transaction, string pairId, Side side,
         IReadOnlyList<SyncedEntry> bindings, DateTimeOffset now, ICollection<Issue>? raised) =>
         IssueTable.Raise(connection, transaction, pairId, IssueKind.Failure, TextKey.FailDuplicateFolderLinks,
-            bindings[0].PathOn(side), IssueSubject.DuplicateFolderItems(side, bindings), now, raised);
+            bindings[0].PathOn(side), IssueSubject.DuplicateFolderItems(side, bindings.Take(StateSchema.DuplicateRepairPartners).ToArray()),
+            now, raised);
 
     private static void ReleaseClashes(SqliteConnection connection, SqliteTransaction transaction, string pairId,
         Side side, IReadOnlyList<SyncedEntry> bindings)

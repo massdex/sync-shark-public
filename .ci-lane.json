@@ -4,7 +4,8 @@
   ],
   "engine": [
     "duplicate-repair",
-    "issues"
+    "issues",
+    "literals"
   ],
   "core": [],
   "ui": []

@@ -99,7 +99,8 @@ public static partial class ChangeRunnerChecks
     }
 
     // E3: a saved descendant committed under the victim's key before completion is refused by the folder validation
-    // and the pre-forget P2 (-7 2): the victim stays bound, the operation is Retained, the obligation is kept.
+    // and the pre-forget P2 (-7 2): the victim stays bound, the operation is Retained (active, FailChanged, the existing
+    // refused-complete contract of FolderDeleteRunnerChecks), and the obligation is kept.
     private static async Task RepairLateDescendantAsync()
     {
         using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -117,8 +118,8 @@ public static partial class ChangeRunnerChecks
             .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         var operations = fixture.Inner.UnresolvedFolderRemovals(PairId, default).ToArray();
         Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew)) == RepairBinding(RepairNew, RepairE) &&
-            operations is [{ Active: false, Phase: FolderRemovalPhase.Retained, Authority: FolderRemovalAuthority.Repair }] &&
-            RepairRows(fixture) == 1,
+            operations is [{ Active: true, Phase: FolderRemovalPhase.Retained, Cause: TextKey.FailChanged,
+                Authority: FolderRemovalAuthority.Repair }] && RepairRows(fixture) == 1,
             "B212-E3: the late descendant refuses the settle; the victim stays bound and the operation is Retained: operations=" +
             string.Join(" | ", operations.Select(operation => operation.Phase + ":" + operation.Active + ":" + operation.Authority)) +
             "; obligations=" + RepairRows(fixture));
@@ -259,7 +260,8 @@ public static partial class ChangeRunnerChecks
             submits.Count + "; operations=" +
             string.Join(" | ", operations.Select(operation => operation.Phase + ":" + operation.Active + ":" + operation.Authority)) +
             "; obligations=" + RepairRows(fixture) + "; heldBy=" + RepairHeldBy(fixture) +
-            "; issues=" + string.Join(" | ", issues.Select(issue => issue.Cause + ":" + issue.Path)));
+            "; issues=" + string.Join(" | ", issues.Select(issue => issue.Cause + ":" + issue.Path)) +
+            "; rows=" + RepairOperationRows(fixture));
     }
 
     // The runner's own hold commit (-6 3.5.4), made directly: the Failure at A's shared-side path and the CAS hold.
@@ -327,6 +329,17 @@ public static partial class ChangeRunnerChecks
         var source = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
         return new WorkSelection(PairId, Generation, source.Epoch, Side.Local, VolumeKey, RepairX,
             PathNames.KeyFor(Side.Local, RepairNew), 0, 0);
+    }
+
+    // Diagnostic only: every folder_removal row's phase, active flag, cause, disposition and authority.
+    private static string RepairOperationRows(Fixture fixture)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + fixture.DatabasePath + ";Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT group_concat(phase||':'||active||':'||coalesce(cause,'')||':'||" +
+            "coalesce(retirement_disposition,'')||':'||authority,' | ') FROM folder_removal;";
+        return command.ExecuteScalar() as string ?? "none";
     }
 
     private static long? RepairHeldBy(Fixture fixture)
