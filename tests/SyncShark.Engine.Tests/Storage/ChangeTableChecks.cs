@@ -3239,9 +3239,12 @@ public static partial class ChangeTableChecks
                     "B1xA1: only the exact source-less episode row is gone");
             }
             store.EndWorkPass(PairId);
-            var releasedChild = store.SelectWork(PairId, generation, new PathScope(store.Pair(PairId)!, store.Pairs()));
-            Check.Require(releasedChild?.AnchorWorkId == childId,
-                "B1xA1: the transferred child is selectable as ordinary pending work");
+            // The child is now a top-level ordinary row (its parent episode row is gone). It stays readable as
+            // pending work across the pass boundary; it need not be the next selection's anchor because the fixture
+            // also holds the post-episode CLOSE and the unrelated member.
+            Check.Require(store.SelectWork(PairId, generation, new PathScope(store.Pair(PairId)!, store.Pairs())) is not null &&
+                store.ReadWork(child).Single() == transferred,
+                "B1xA1: the transferred child stays ordinary pending work across the pass boundary (notice and before intact)");
             return;
         }
         store.CompleteItemAttempt(episode, attempt, StateChange.Empty with { Close = [(File, IssueClosure.AfterEffect)] }, null, null);
