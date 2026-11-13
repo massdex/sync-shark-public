@@ -62,13 +62,18 @@ public static partial class ChangeRunnerChecks
             .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         fixture.Hooks.BeforeCall = null;
         var settled = calls.IndexOf(nameof(IStateStore.CompleteFolderRemoval));
+        // I-8, -7 7.2's exact E1 count (measured in run 43526845916): D2 reads both sides of both bindings (2 + 2), the
+        // send's EligibleAsync reads one per side (2), P6, D8 and the send's inventory list E once each (3), and one
+        // delete_batch; the in-memory provider completes synchronously, so there is no poll.
+        const string attemptCalls = "localReads=3 localListings=0 dropboxReads=3 dropboxListings=3 submits=1 ";
         var renamed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew));
         Check.Require(submits.Count == 1 && await fixture.Dropbox.ReadOneAsync(RepairNew, default) is { Id: RepairR } &&
             dropbox.Moves == 1 && LocalEffects(local) == 0 && fixture.Inner.Issues(PairId).Count == 0 &&
             RepairRows(fixture) == 0 && fixture.Inner.UnresolvedFolderRemovals(PairId, default).Count() == 0 &&
             renamed is { LocalId: RepairX, DropboxId: RepairR } &&
             settled >= 0 && settled < calls.IndexOf(nameof(IStateStore.BeginSelection)) &&
-            atFirstSelection is not null && atFirstSelection.Contains("victimBound=False", StringComparison.Ordinal) &&
+            atFirstSelection is not null && atFirstSelection.StartsWith(attemptCalls, StringComparison.Ordinal) &&
+            atFirstSelection.Contains("victimBound=False", StringComparison.Ordinal) &&
             atFirstSelection.Contains("preimage=True", StringComparison.Ordinal) &&
             fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0, 0),
             "B212-E1: E is deleted once, the obligation settles before W's first selection, and W moves R onto Renamed: " +
