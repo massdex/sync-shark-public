@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "path-only-coalescing",
+    "store",
+    "syncer",
+    "live-wake",
+    "local"
+  ],
+  "core": [],
+  "ui": []
+}
