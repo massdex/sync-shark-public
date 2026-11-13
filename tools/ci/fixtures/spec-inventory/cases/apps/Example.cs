@@ -16,6 +16,7 @@ public class Example
         await System.Threading.Tasks.Task.Delay(1);
         return pending.Result;
     }
+    public int Blocking(System.Threading.Tasks.Task<int> pending) => pending.Result;
     public void EmptyCatch()
     {
         try { Raise(); } catch (System.Exception) { }

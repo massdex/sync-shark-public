@@ -44,7 +44,8 @@ env:
 jobs:
   spec-inventory:
     name: spec inventory (non-gating)
-    runs-on: windows-latest
+    # shortcut: windows-2022 for Metrics 4.14 MSBuild compatibility; re-test on the rolling image when Metrics updates or 2022 is deprecated
+    runs-on: windows-2022
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

@@ -31,8 +31,9 @@ if (Test-Path $leaks) {
     $secrets = Join-Path $Output 'synthetic-secret-fixtures'
     New-Item -ItemType Directory $secrets | Out-Null
     # Synthetic token generated at runtime, never a credential or a tracked secret.
-    ('github_token = "ghp_' + (-join (65..90 | ForEach-Object { [char]$_ })) + '0123456789"') |
-        Set-Content "$secrets/positive.txt"
+    # Randomize unique bytes: fixed entropy, without gitleaks' alphabetical stopword.
+    $token = -join (([char[]]'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789') | Get-Random -Shuffle)
+    ('github_token = "ghp_' + $token + '"') | Set-Content "$secrets/positive.txt"
     & $leaks dir $secrets --redact=100 --report-format sarif --report-path "$Output/secret-positive.sarif" *> "$Output/secret-positive.log"
     if ($LASTEXITCODE -ne 1) { $failures.Add('gitleaks positive') }
     'public_value = "ordinary fixture"' | Set-Content "$secrets/positive.txt"
