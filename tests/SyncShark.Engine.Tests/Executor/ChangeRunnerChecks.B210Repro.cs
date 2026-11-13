@@ -109,7 +109,7 @@ public static partial class ChangeRunnerChecks
                 fixture.Inner.Issues(PairId).Any(issue => issue.Cause == TextKey.FailLocalInUse),
                 "B210 setup: the newer held work exists before the first selection: " + newer.AnchorWorkId);
             Console.WriteLine($"b210 variant {label} preflight newerWork={newer.AnchorWorkId} " +
-                $"preflightLaterProbe={B210LaterProbe(fixture, oldWorks[0])}");
+                $"preflightLaterProbe={B210LaterProbe(fixture, oldWorks[0] with { ThroughWorkId = fixture.Inner.ReadWorkWatermark() })}");
         }
         var selections = 0;
         var worksTried = new HashSet<long>();
@@ -170,13 +170,18 @@ public static partial class ChangeRunnerChecks
         catch (LiveAdmissionStaleException error)
         {
             return "stale " + error.Reason + " detail[" + error.Detail + "] wait[" + error.WaitKey + "] " +
-                "newerEpisode[" + (error.NewerEpisode is { } transfer ? transfer.Episode.Token.WorkId.ToString() : "none") + "]";
+                "newerEpisode[" + (error.NewerEpisode is { } transfer ? transfer.Episode.Token.WorkId.ToString() : "none") + "] " +
+                "at[" + FirstFrame(error) + "]";
         }
         catch (Exception error)
         {
             return "error " + error.GetType().Name + ": " + error.Message;
         }
     }
+
+    private static string FirstFrame(Exception error) =>
+        error.StackTrace?.Split('\n').Select(line => line.Trim())
+            .FirstOrDefault(line => line.StartsWith("at ", StringComparison.Ordinal)) ?? "?";
 
     // Diagnostic only, never inside a measured attempt: exactly the call RefuseSuperseded makes, against the same
     // selection watermark.
