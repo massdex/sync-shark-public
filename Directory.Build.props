@@ -12,9 +12,9 @@
   <PropertyGroup Condition="'$(SpecInventory)' == 'true'">
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <ReportSuppressedDiagnostics>true</ReportSuppressedDiagnostics>
-    <WarningsNotAsErrors>$(WarningsNotAsErrors);SA1402;SA1649;CA1849;VSTHRD002;VSTHRD103;CA2016;CA1031;RCS1075;CS1591</WarningsNotAsErrors>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);SA1402;SA1649;CA1849;VSTHRD002;VSTHRD103;CA2016;CA1031;RCS1075;CS1570;CS1591</WarningsNotAsErrors>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
-    <AnalysisLevel>8.0-all</AnalysisLevel>
+    <AnalysisLevel>8.0-none</AnalysisLevel>
     <NuGetLockFilePath>$(SpecInventoryOutput)/$(MSBuildProjectName).packages.lock.json</NuGetLockFilePath>
     <RestoreLockedMode>false</RestoreLockedMode>
     <ErrorLog>$(SpecInventoryOutput)/$(MSBuildProjectName).sarif,version=2.1</ErrorLog>

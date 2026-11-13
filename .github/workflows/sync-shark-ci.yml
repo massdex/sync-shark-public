@@ -104,14 +104,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $knownBuild = @('core', 'core-tests', 'fod-tests', 'engine-tests', 'app', 'ui-fixture')
+          $knownBuild = @('core', 'core-tests', 'fod-tests', 'engine-tests', 'app', 'ui-fixture', 'reachability')
           $registry = Get-Content -Raw 'tests/SyncShark.Engine.Tests/CheckRegistry.cs'
           $groups = @([regex]::Matches($registry, '\["([a-z0-9-]+)"\]\s*=') | ForEach-Object { $_.Groups[1].Value })
           if ($groups.Count -eq 0) { throw 'No engine groups found in CheckRegistry.' }
           $path = Join-Path $env:GITHUB_WORKSPACE '.ci-lane.json'
           if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             # No selection: today's full matrix. quick/** still skips the UI fixture and engine work.
-            $build = @('core', 'core-tests', 'fod-tests', 'app', 'ui-fixture')
+            $build = @('core', 'core-tests', 'fod-tests', 'app', 'ui-fixture', 'reachability')
             $engine = @()
             if ($env:GITHUB_REF -like 'refs/heads/quick/*') {
               $build = @('core', 'core-tests', 'fod-tests', 'app')
@@ -487,6 +487,20 @@ jobs:
           path: |
             build/ci/bin/SyncShark/${{ env.CONFIGURATION }}
             build/ci/bin/SyncShark.UiFixture/${{ env.CONFIGURATION }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Find conservative reachability candidates
+        if: ${{ contains(fromJson(needs.select.outputs.build), 'reachability') }}
+        shell: pwsh
+        run: ./tools/ci/run-reachability.ps1
+
+      - name: Upload reachability report
+        if: ${{ always() && contains(fromJson(needs.select.outputs.build), 'reachability') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reachability-report
+          path: ${{ runner.temp }}/reachability
           if-no-files-found: error
           retention-days: 7
 

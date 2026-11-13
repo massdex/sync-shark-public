@@ -105,10 +105,11 @@ def metrics(root, path):
         raise ValueError('Metrics report has no Target')
     for target in targets:
         for namespace in target.findall('.//Namespace'):
-            for kind in namespace.findall('./Types/NamedType'):
+            for kind in namespace.findall('.//NamedType'):
                 symbol = namespace.attrib['Name'] + '.' + kind.attrib['Name']
+                members = kind.findall('./Members/*') + kind.findall('./Members/*/Accessors/*')
                 for node, name in [(kind, symbol)] + [(m, symbol + '.' + m.attrib['Name'])
-                                                    for m in kind.findall('./Members/*')]:
+                                                    for m in members if m.tag != 'NamedType']:
                     file = relative(root, node.attrib.get('File', ''))
                     if file:
                         covered.add(file)
@@ -121,6 +122,18 @@ def metrics(root, path):
                         row['properties']['status'] = 'INCOMPLETE'
                     rows.append(row)
     return rows, covered
+
+
+def suppression(result):
+    row = finding('suppression/diagnostic', 'Native tool reported a suppressed diagnostic',
+                  suppressedRule=result['ruleId'], nativeSuppressions=result.get('suppressions', []))
+    row['locations'] = result.get('locations', [])
+    if result.get('partialFingerprints'):
+        row['partialFingerprints'] = result['partialFingerprints'] | {
+            'inventory.rule': row['ruleId'], 'inventory.suppressedRule': result['ruleId']}
+    else:
+        row['properties']['identityStatus'] = 'INCOMPLETE: native diagnostic is unbound'
+    return row
 
 
 def native_sarif(root, path):
@@ -144,11 +157,7 @@ def native_sarif(root, path):
             region_identity(root, result, run.get('columnKind', 'utf16CodeUnits'))
             rows.append(result)
             if result.get('suppressions'):
-                suppressed = finding('suppression/diagnostic', 'Native tool reported a suppressed diagnostic',
-                                     suppressedRule=result['ruleId'], suppressions=result['suppressions'])
-                suppressed['locations'] = result.get('locations', [])
-                region_identity(root, suppressed)
-                rows.append(suppressed)
+                rows.append(suppression(result))
     return rows, covered
 
 
@@ -156,10 +165,13 @@ def powershell(root, path):
     data = json.loads(path.read_text(encoding='utf-8-sig'))
     rows = []
     for row in data:
-        result = finding(row['RuleName'], row['Message'], relative(root, row['ScriptPath']), row['Line'],
-                         isSuppressed=row.get('IsSuppressed', False))
+        file = relative(root, row['ScriptPath'])
+        result = finding(row['RuleName'], row['Message'], file, row['Line'],
+                         isSuppressed=row.get('IsSuppressed', False), nativeSeverity=row['Severity'])
         region_identity(root, result)
         rows.append(result)
+        if row.get('IsSuppressed'):
+            rows.append(suppression(result))
     return rows, set()
 
 
@@ -219,15 +231,21 @@ def tool_run(root, output, tool, files):
                               if (p := relative(root, item['FullPath'])) in files]
         except (OSError, ValueError, KeyError, TypeError) as error:
             errors.append('Compile input inventory unavailable: ' + str(error))
+    if tool.get('failure'):
+        errors.append(tool['failure'])
     if not tool['reports'] or tool['exit'] not in tool['acceptedExits']:
         errors.append('Tool failed, was missing, or produced no reports')
-    if not errors:
+    if not errors and tool.get('inputCoverage') != 'offered-only':
         covered.update(tool.get('inputs', []))
     status = 'INCOMPLETE' if errors else 'COMPLETE'
+    detail = '; '.join(errors)
+    if tool.get('inputCoverage') == 'offered-only':
+        detail += ' Inputs offered to tool; native excludes/binary handling are not enumerated. CoveredFiles is a finding-location lower bound, not complete scan evidence.'
     run = {'tool': {'driver': {'name': tool['name'], 'version': tool['version']}},
            'results': results, 'invocations': [{'executionSuccessful': not errors}],
            'properties': {'status': status, 'errors': errors, 'inputFiles': tool.get('inputs', [])}}
-    return run, coverage(tool['name'], files, covered, status, '; '.join(errors))
+    coverage_status = 'INCOMPLETE' if tool.get('inputCoverage') == 'offered-only' else status
+    return run, coverage(tool['name'], files, covered, coverage_status, detail)
 
 
 def collect(root, output, baseline=None):
@@ -248,14 +266,15 @@ def collect(root, output, baseline=None):
     cover.extend(coverage('separate lambda metrics', files, [], 'NOT COVERED',
                           'Metrics exposes declaring members, not independent lambda units; initializers remain in native member metrics.'))
     result = {'$schema': SCHEMA, 'version': '2.1.0', 'runs': runs,
-              'properties': {'coverage': cover, 'status': 'INCOMPLETE', 'identityLimit': IDENTITY_LIMIT}}
+              'properties': {'coverage': cover, 'status': 'INCOMPLETE', 'identityLimit': IDENTITY_LIMIT,
+                             'coverageScope': 'Tracked files in this checkout only; source files omitted by a publication/export boundary are NOT COVERED.'}}
     if baseline:
         compare(result, json.loads(baseline.read_text(encoding='utf-8-sig')))
     (output / 'inventory.sarif').write_text(json.dumps(result, ensure_ascii=True), encoding='utf-8')
     (output / 'coverage.json').write_text(json.dumps(cover, indent=2), encoding='utf-8')
     summary = {'tools': {r['tool']['driver']['name']: len(r['results']) for r in runs},
                'findingsByToolLanguage': {r['tool']['driver']['name']: dict(Counter(
-                   language(x.get('locations', [{}])[0].get('physicalLocation', {}).get('artifactLocation', {}).get('uri', ''))
+                   language((x.get('locations') or [{}])[0].get('physicalLocation', {}).get('artifactLocation', {}).get('uri', ''))
                    for x in r['results'])) for r in runs},
                'languages': dict(Counter(language(p) for p in files)),
                'sarifBytes': (output / 'inventory.sarif').stat().st_size, 'status': 'INCOMPLETE'}

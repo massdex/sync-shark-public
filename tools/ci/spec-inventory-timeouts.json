@@ -1,0 +1,6 @@
+{
+  "status": "provisional, uncalibrated",
+  "source": "GitHub Actions jobs default timeout-minutes is 360; https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idtimeout-minutes . Replace with healthy native-process measurements after calibration.",
+  "buildSeconds": 21600,
+  "metricsSeconds": 21600
+}

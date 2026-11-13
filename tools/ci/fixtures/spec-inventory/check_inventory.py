@@ -24,6 +24,14 @@ def check_identity(root):
     inventory.compare(current, {'runs': [{'results': [old]}]})
     assert [r['baselineState'] for r in (old, moved, changed)] == ['unchanged', 'new', 'new']
     assert 'partialFingerprints' not in inventory.finding('R', 'unbound')
+    (root / 'Unicode.cs').write_text(chr(0x10400) + 'value', encoding='utf-8')
+    utf16 = inventory.finding('R', 'utf16', 'Unicode.cs')
+    codepoints = inventory.finding('R', 'codepoints', 'Unicode.cs')
+    utf16['locations'][0]['physicalLocation']['region'].update(startColumn=3, endColumn=8)
+    codepoints['locations'][0]['physicalLocation']['region'].update(startColumn=2, endColumn=7)
+    inventory.region_identity(root, utf16)
+    inventory.region_identity(root, codepoints, 'unicodeCodePoints')
+    assert utf16['partialFingerprints'] == codepoints['partialFingerprints']
     print('PASS 5a location identity: normalized region stable; moves and changed code new; semantic migration deferred')
 
 
@@ -40,7 +48,18 @@ def check_missing(root):
     tool['reports'] = ['empty.sarif']
     run, coverage = inventory.tool_run(root, root, tool, ['Old.cs'])
     assert run['properties']['status'] == 'COMPLETE' and coverage[0]['coveredFiles'] == 1
-    print('PASS missing executable/output remain incomplete; valid zero-findings report credits evaluated inputs')
+    tool['failure'] = 'missing INCOMPLETE after 1.25 seconds: native timeout'
+    run, coverage = inventory.tool_run(root, root, tool, ['Old.cs'])
+    assert run['properties']['status'] == 'INCOMPLETE' and tool['failure'] in run['properties']['errors']
+    assert coverage[0]['status'] == 'INCOMPLETE'
+    (root / 'powershell.json').write_text(json.dumps([
+        dict(RuleName='P', Message='locationless', ScriptPath=str(root / 'Old.cs'), Line=None, Severity=1),
+        dict(RuleName='P', Message='located', ScriptPath=str(root / 'Old.cs'), Line=1, Severity=1, IsSuppressed=True)]), encoding='utf-8')
+    rows, _ = inventory.powershell(root, root / 'powershell.json')
+    assert len(rows) == 3 and 'identityStatus' in rows[0]['properties']
+    assert 'partialFingerprints' in rows[1] and rows[2]['ruleId'] == 'suppression/diagnostic'
+    assert rows[1]['partialFingerprints']['inventory.regionHash'] == rows[2]['partialFingerprints']['inventory.regionHash']
+    print('PASS missing executable/output, zero findings, and native locationless diagnostics')
 
 
 def check_metrics(output):
@@ -58,9 +77,19 @@ def check_metrics(output):
     assert any('Factory' in f.attrib['Name'] for f in fields), 'Lambda-containing field missing'
     assert tree.findall('.//Event'), 'Event initializer metrics missing'
     rows, _ = inventory.metrics(output, output / 'Fixture.metrics.xml')
+    expected_units = sum(len(tree.findall('.//' + tag)) for tag in ('NamedType', 'Method', 'Field', 'Event', 'Property'))
+    assert len(rows) == expected_units, 'Every native type/member/accessor metric must survive normalization'
     symbols = [r['partialFingerprints']['inventory.symbol'] for r in rows]
     assert 'Fixture.Apps.Example' in symbols and 'Fixture.Tests.Example' in symbols
+    meaning = next(r['properties']['metrics'] for r in rows
+                   if 'LineMeaning.' in r['partialFingerprints']['inventory.symbol']
+                   and 'Count(' in r['partialFingerprints']['inventory.symbol'])
+    assert meaning['SourceLines'] == 7, 'SourceLines includes comments/blank lines in the declaration FullSpan'
+    assert meaning['ExecutableLines'] == 1, 'One return contributes one executable line'
     assert all('inventory.regionHash' not in r['partialFingerprints'] for r in rows)
+    moved = rows[0] | {'locations': inventory.finding('R', 'move', 'Moved.cs')['locations']}
+    inventory.compare({'runs': [{'results': [moved]}]}, {'runs': [{'results': [rows[0]]}]})
+    assert moved['baselineState'] == 'unchanged', 'Native metric symbol identity is independent of navigation location'
     (output / 'metric-calibration.json').write_text(json.dumps([
         {'symbol': r['partialFingerprints']['inventory.symbol'], 'metrics': r['properties']['metrics'],
          'missingMetrics': r['properties']['missingMetrics']} for r in rows], indent=2), encoding='utf-8')
@@ -71,8 +100,10 @@ def check_diagnostics(output):
     native = json.loads((output / 'Fixture.sarif').read_text(encoding='utf-8-sig'))
     results = [r for run in native['runs'] for r in run.get('results', [])]
     rules = {r['ruleId'] for r in results}
-    expected = {'SA1402', 'SA1649', 'CA1849', 'VSTHRD002', 'VSTHRD103', 'CA2016', 'CA1031', 'RCS1075', 'CS1591'}
+    expected = {'SA1402', 'SA1649', 'CA1849', 'VSTHRD002', 'VSTHRD103', 'CA2016', 'CA1031', 'RCS1075', 'CS1570', 'CS1591'}
     assert expected <= rules, 'Missing native diagnostics: ' + str(sorted(expected - rules))
+    suppressed = {r['ruleId'] for r in results if r.get('suppressions')}
+    assert {'CA1031', 'CS1591'} <= suppressed, 'Attribute and pragma suppression evidence must be retained'
     paths = [loc['physicalLocation']['artifactLocation']['uri'].replace('\\', '/')
              for r in results for loc in r.get('locations', [])]
     for area in ('apps', 'tests', 'tools'):

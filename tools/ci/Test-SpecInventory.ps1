@@ -7,6 +7,14 @@ $fixture = "$PSScriptRoot/fixtures/spec-inventory"
 New-Item -ItemType Directory -Force $Output | Out-Null
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $failures = [Collections.Generic.List[string]]::new()
+# A zero-wait probe must refuse a still-running child rather than report success.
+try {
+    & "$PSScriptRoot/Invoke-SpecInventoryProcess.ps1" -Executable pwsh -Arguments @('-NoProfile', '-Command', 'while ($true) {}') -OutputPath "$Output/timeout-probe.log" -TimeoutSeconds 0
+    $failures.Add('native timeout did not refuse')
+} catch [TimeoutException] {
+    $probe = Get-Content "$Output/timeout-probe.log.execution.json" -Raw | ConvertFrom-Json
+    if (-not $probe.timedOut -or $probe.elapsedSeconds -lt 0) { $failures.Add('native timeout evidence missing') }
+} catch { $failures.Add('native timeout probe: ' + $_.Exception.Message) }
 # Each declaration is below the adopted 300-line review trigger; together they exceed it.
 foreach ($part in @('Left', 'Right')) {
     $members = 1..151 | ForEach-Object { "    public int ${part}$_ => $_;" }

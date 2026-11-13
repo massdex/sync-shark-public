@@ -10,9 +10,13 @@ New-Item -ItemType Directory -Force $Output | Out-Null
 $records = [Collections.Generic.List[object]]::new()
 $files = @(& git -C $Root ls-files)
 $clock = [Diagnostics.Stopwatch]::StartNew()
+$timeouts = Get-Content "$PSScriptRoot/spec-inventory-timeouts.json" -Raw | ConvertFrom-Json
+$processRunner = "$PSScriptRoot/Invoke-SpecInventoryProcess.ps1"
 
 function Invoke-InventoryTool($ToolName, $Version, $Format, $Reports, $Inputs, $Accepted, [scriptblock]$Run) {
     $exit = -1
+    $failure = $null
+    $toolClock = [Diagnostics.Stopwatch]::StartNew()
     $previousInventory, $previousOutput = $env:SpecInventory, $env:SpecInventoryOutput
     try {
         # Metrics starts its own MSBuild workspace; environment properties cross that boundary.
@@ -21,19 +25,30 @@ function Invoke-InventoryTool($ToolName, $Version, $Format, $Reports, $Inputs, $
         & $Run *> (Join-Path $Output "$ToolName.log")
         $exit = $global:LASTEXITCODE
     } catch {
-        $_ | Out-String | Add-Content (Join-Path $Output "$ToolName.log")
+        $failure = "$ToolName INCOMPLETE after $($toolClock.Elapsed.TotalSeconds) seconds: $($_.Exception.Message)"
+        $failure | Add-Content (Join-Path $Output "$ToolName.log")
     } finally {
         $env:SpecInventory, $env:SpecInventoryOutput = $previousInventory, $previousOutput
     }
     $records.Add(@{ name = $ToolName; version = $Version; format = $Format; reports = @($Reports)
         inputs = @($Inputs); exit = $exit; acceptedExits = @($Accepted)
+        failure = $failure; elapsedSeconds = $toolClock.Elapsed.TotalSeconds; timeoutStatus = $timeouts.status
+        inputCoverage = $(if ($ToolName -in @('gitleaks', 'suppression-candidates')) { 'offered-only' } else { 'evaluated' })
         inputReport = $(if ($ToolName -match '^(roslyn|metrics)-(.+)$') { $Matches[2] + '.compile.json' } else { $null }) })
 }
 
 # The config's rule list has one owner; production projects never import this copy.
 $config = @(Get-Content "$Root/.editorconfig" | Where-Object { $_ -match '^dotnet_' })
-@('is_global = true', 'global_level = 999') + $config |
+@('is_global = true') + $config |
     Set-Content "$Output/inventory.globalconfig" -Encoding utf8
+$packages = @{}
+([xml](Get-Content "$Root/Directory.Build.props" -Raw)).Project.ItemGroup.PackageReference |
+    Where-Object Include | ForEach-Object { $packages[$_.Include] = $_.Version }
+$analyzerVersions = ($packages.GetEnumerator() | Where-Object Key -ne 'Microsoft.CodeAnalysis.Metrics' |
+    Sort-Object Key | ForEach-Object { "$($_.Key) $($_.Value)" }) -join '; '
+# Metrics.exe targets net472; locate desktop MSBuild once, not the dotnet host.
+$vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+$desktopMsbuild = if (Test-Path $vswhere) { & $vswhere -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1 }
 $projects = @($files | Where-Object { $_ -like '*.csproj' })
 foreach ($project in $projects) {
     $name = [IO.Path]::GetFileNameWithoutExtension($project)
@@ -41,40 +56,44 @@ foreach ($project in $projects) {
         "-p:SpecInventoryOutput=$Output", '-p:Configuration=Debug', '-p:RestoreLockedMode=false',
         '-p:EnableWindowsTargeting=true')
     # Deliberately do not disable TreatWarningsAsErrors. Inventory captures reports even on build failure.
-    Invoke-InventoryTool "roslyn-$name" 'NetAnalyzers 8.0.0; StyleCop 1.2.0-beta.556; Threading 17.12.19; Roslynator 4.12.9' sarif @("$name.sarif") @() @(0) {
-        & dotnet build @buildArguments
+    Invoke-InventoryTool "roslyn-$name" $analyzerVersions sarif @("$name.sarif") @() @(0) {
+        & $processRunner -Executable dotnet -Arguments (@('build') + $buildArguments) -OutputPath "$Output/$name.build.log" -TimeoutSeconds $timeouts.buildSeconds
         $buildExit = $LASTEXITCODE
-        & dotnet msbuild @buildArguments -getItem:Compile > "$Output/$name.compile.json"
+        & $processRunner -Executable dotnet -Arguments (@('msbuild') + $buildArguments + '-getItem:Compile') -OutputPath "$Output/$name.compile.json" -TimeoutSeconds $timeouts.buildSeconds
         if ($LASTEXITCODE -ne 0 -and $buildExit -eq 0) { $buildExit = $LASTEXITCODE }
         $global:LASTEXITCODE = $buildExit
     }
-    Invoke-InventoryTool "metrics-$name" '4.14.0' metrics @("$name.metrics.xml") @() @(0) {
-        & dotnet msbuild @buildArguments /t:Metrics -v:normal
+    Invoke-InventoryTool "metrics-$name" $packages['Microsoft.CodeAnalysis.Metrics'] metrics @("$name.metrics.xml") @() @(0) {
+        if (-not $desktopMsbuild) { throw 'Visual Studio MSBuild unavailable for native Metrics' }
+        & $processRunner -Executable $desktopMsbuild -Arguments ($buildArguments + @('/t:Metrics', '-v:normal')) -OutputPath "$Output/$name.metrics.log" -TimeoutSeconds $timeouts.metricsSeconds
     }
 }
 
-Invoke-InventoryTool ruff '0.8.6' sarif @('ruff.sarif') @($files | Where-Object { $_ -like '*.py' }) @(0, 1) {
-    & python -I -m pip install --disable-pip-version-check ruff==0.8.6
+$ruffVersion = '0.8.6'
+Invoke-InventoryTool ruff $ruffVersion sarif @('ruff.sarif') @($files | Where-Object { $_ -like '*.py' }) @(0, 1) {
+    & python -I -m pip install --disable-pip-version-check "ruff==$ruffVersion"
     if ($LASTEXITCODE) { throw 'ruff installation failed' }
     $pythonFiles = @($files | Where-Object { $_ -like '*.py' } | ForEach-Object { Join-Path $Root $_ })
     & python -I -m ruff check @pythonFiles --no-cache --ignore-noqa --no-respect-gitignore --output-format sarif --output-file "$Output/ruff.sarif"
 }
-Invoke-InventoryTool PSScriptAnalyzer '1.23.0' powershell @('powershell.json') @($files | Where-Object { $_ -match '\.ps(m)?1$' }) @(0) {
-    Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Scope CurrentUser -Force -Repository PSGallery
-    Import-Module PSScriptAnalyzer -RequiredVersion 1.23.0
+$pssaVersion = '1.23.0'
+Invoke-InventoryTool PSScriptAnalyzer $pssaVersion powershell @('powershell.json') @($files | Where-Object { $_ -match '\.ps(m)?1$' }) @(0) {
+    Install-Module PSScriptAnalyzer -RequiredVersion $pssaVersion -Scope CurrentUser -Force -Repository PSGallery
+    Import-Module PSScriptAnalyzer -RequiredVersion $pssaVersion
     $rows = @(foreach ($file in $files | Where-Object { $_ -match '\.ps(m)?1$' }) {
         Invoke-ScriptAnalyzer -Path (Join-Path $Root $file) -IncludeSuppressed |
             Select-Object RuleName, Message, ScriptPath, Line, Severity, IsSuppressed
     })
     ConvertTo-Json -InputObject $rows -Depth 6 | Set-Content "$Output/powershell.json" -Encoding utf8
 }
-Invoke-InventoryTool gitleaks '8.24.2' sarif @('gitleaks.sarif') $files @(0, 1) {
+$gitleaksVersion = '8.24.2'
+Invoke-InventoryTool gitleaks $gitleaksVersion sarif @('gitleaks.sarif') $files @(0, 1) {
     $download = Join-Path $Output 'gitleaks-download'
     New-Item -ItemType Directory $download | Out-Null
-    $release = 'https://github.com/gitleaks/gitleaks/releases/download/v8.24.2'
-    $archive = 'gitleaks_8.24.2_windows_x64.zip'
+    $release = "https://github.com/gitleaks/gitleaks/releases/download/v$gitleaksVersion"
+    $archive = "gitleaks_${gitleaksVersion}_windows_x64.zip"
     Invoke-WebRequest "$release/$archive" -OutFile "$download/package.zip"
-    Invoke-WebRequest "$release/gitleaks_8.24.2_checksums.txt" -OutFile "$download/checksums.txt"
+    Invoke-WebRequest "$release/gitleaks_${gitleaksVersion}_checksums.txt" -OutFile "$download/checksums.txt"
     $expected = @(Get-Content "$download/checksums.txt" | Where-Object { $_ -match "  $([regex]::Escape($archive))$" })
     if ($expected.Count -ne 1 -or (Get-FileHash "$download/package.zip" -Algorithm SHA256).Hash -ine ($expected[0] -split '\s+')[0]) {
         throw 'gitleaks release checksum mismatch or missing archive entry'
@@ -89,7 +108,7 @@ Invoke-InventoryTool gitleaks '8.24.2' sarif @('gitleaks.sarif') $files @(0, 1) 
     & "$download/extracted/gitleaks.exe" dir $snapshot --redact=100 --report-format sarif --report-path "$Output/gitleaks.sarif" --exit-code 1
 }
 Invoke-InventoryTool suppression-candidates 'git-native' suppressions @('suppressions.txt') $files @(0, 1) {
-    & git -C $Root grep -n -I -E 'NoWarn|WarningsNotAsErrors|pragma[[:space:]]+warning|nullable[[:space:]]+disable|SuppressMessage|noqa|pylint:[[:space:]]*disable|dotnet_diagnostic\..*severity[[:space:]]*=[[:space:]]*none|known.red|skip.*selector' -- . |
+    & git -C $Root grep -n -I -i -E 'NoWarn|WarningsNotAsErrors|pragma[[:space:]]+(warning|(GCC|clang)[[:space:]]+diagnostic)|nullable[[:space:]]+disable|SuppressMessage|noqa|pylint:[[:space:]]*disable|dotnet_(analyzer_)?diagnostic\..*severity[[:space:]]*=[[:space:]]*none|known.red|skip.*selector' -- . |
         Set-Content "$Output/suppressions.txt" -Encoding utf8
 }
 ConvertTo-Json -InputObject @($records) -Depth 8 | Set-Content "$Output/tools.json" -Encoding utf8
