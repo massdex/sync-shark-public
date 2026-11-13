@@ -52,12 +52,11 @@ internal static class WpfHelper
     {
         foreach (var id in graph.WpfHelpers)
         foreach (var target in graph.Types.Values.Where(t => t.Product && t.Roots.Contains("component:xaml")))
-            graph.Types[id].Edges.Add(new(target.Id, "", -1, "wpf-xaml"));
+            graph.Types[id].Edges.Add(new(target.Id, "", -1));
         var all = graph.Walk("ALL");
         var withoutHelper = graph.Walk("ALL", ignoreWpfHelpers: true);
         if (all.Keys.Except(withoutHelper.Keys).Any(id => !graph.WpfHelpers.Contains(id)) ||
             graph.WpfHelpers.SelectMany(id => graph.Types[id].Edges).Any(e => !graph.WpfHelpers.Contains(e.Target) && !graph.Types[e.Target].Roots.Contains("component:xaml")))
             throw new InvalidOperationException("WPF helper reaches a source type without independent XAML retention.");
-        graph.Diagnostics.Add("Standard WPF helper template validated; every modeled source target is independently XAML-rooted.");
     }
 }

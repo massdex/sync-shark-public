@@ -14,7 +14,7 @@ foreach ($project in $projects) {
     if ($LASTEXITCODE -ne 0) { throw "Workspace restore failed: $project" }
 }
 $toolRoot = Join-Path $env:RUNNER_TEMP 'reachability-tool'
-dotnet build (Join-Path $root 'tools/ci/Reachability/Reachability.csproj') -c $env:CONFIGURATION "-p:SyncSharkBuildRoot=$toolRoot" --nologo
+dotnet build (Join-Path $root 'tools/ci/Reachability/Reachability.csproj') -c $env:CONFIGURATION "-p:SyncSharkBuildRoot=$toolRoot" -p:RestoreLockedMode=true --nologo
 if ($LASTEXITCODE -ne 0) { throw 'Reachability tool compilation failed.' }
 $assembly = Join-Path $toolRoot "bin/Reachability/$env:CONFIGURATION/net8.0-windows/Reachability.dll"
 dotnet $assembly $root $output
