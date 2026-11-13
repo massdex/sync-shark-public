@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "local",
+    "path-only-coalescing"
+  ],
+  "core": [],
+  "ui": []
+}
