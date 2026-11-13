@@ -442,7 +442,6 @@ Category-change split clearing condition (class-size and file-size rows): splitt
 |---|---|---|---|---|
 | 7 | class-size | class-size (485) | Split by job | Current plan preparation/freeze and unfinished-map custody :17-134; follow-up/survivor/deferred completion :137-246; refused-survivor dependency-cycle diagnosis/reporting :248-289; settlement/group execution :291-317; exclusion/chosen/live/vacated/replacement routes :319-450; live-plan sequencing :452-490. Cycle diagnosis remains separate from unfinished-map custody, preserving the historical split obligation. B9 migrates item preparation/execution/rename calls to their owners. |
 | 1 | file-size | file-size (491) | Split by job | Same current jobs and retained split obligation as the class row; the file holds FolderSync alone. |
-| 361 | long-member | RemoveVacatedAsync :361-435 (75) | Split by job | Prior-operation recovery :365-374 is separable from fresh admission :375-396 and PrepareAsync validation :398-434. Clearing trigger: the cleanup-only 0.3.83 structural recheck; owner: FolderSync structural lane; destination: this register row and its split implementation in src/SyncShark.Engine/Executor/FolderSync.cs. Closure requires the split and fresh cross-family verdict; if the protocol/composition blocker persists, the row stays explicitly open at that release gate, not in an automatic product wait. |
 
 ## src/SyncShark.Engine/Planner/Decide.cs
 

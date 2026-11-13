@@ -133,12 +133,17 @@ public static class StateSchema
     public const int PublishedUsn = 1;
     public const string SelectSyncedByLocalId = "SELECT " + SyncedColumns + " FROM synced_entry INDEXED BY synced_local_id WHERE pair_id = " + PairRow + " AND local_id = $id;";
     public const string SelectSyncedByDropboxId = "SELECT " + SyncedColumns + " FROM synced_entry INDEXED BY synced_dropbox_id WHERE pair_id = " + PairRow + " AND dropbox_id = $id;";
-    private const string SyncedIdentityRows = "SELECT " + SyncedColumns + " FROM synced_entry INDEXED BY {0} WHERE pair_id=$pair AND {1}=$id";
-    internal static string SyncedBindingsByIdentity(Side side, bool foldersOnly) =>
-        string.Format(System.Globalization.CultureInfo.InvariantCulture, SyncedIdentityRows,
-            side == Side.Local ? "synced_local_id" : "synced_dropbox_id",
-            side == Side.Local ? "local_id" : "dropbox_id") +
-        (foldersOnly ? " AND is_folder=1" : string.Empty) + " LIMIT $take;";
+    private const string SyncedLocalIdentityRows = "SELECT " + SyncedColumns + " FROM synced_entry INDEXED BY synced_local_id WHERE pair_id=$pair AND local_id=$id";
+    private const string SyncedDropboxIdentityRows = "SELECT " + SyncedColumns + " FROM synced_entry INDEXED BY synced_dropbox_id WHERE pair_id=$pair AND dropbox_id=$id";
+    private const string FolderRowsOnly = " AND is_folder=1";
+    private const string TakeRows = " LIMIT $take;";
+    private const string SyncedLocalBindings = SyncedLocalIdentityRows + TakeRows;
+    private const string SyncedLocalFolderBindings = SyncedLocalIdentityRows + FolderRowsOnly + TakeRows;
+    private const string SyncedDropboxBindings = SyncedDropboxIdentityRows + TakeRows;
+    private const string SyncedDropboxFolderBindings = SyncedDropboxIdentityRows + FolderRowsOnly + TakeRows;
+    internal static string SyncedBindingsByIdentity(Side side, bool foldersOnly) => side == Side.Local
+        ? foldersOnly ? SyncedLocalFolderBindings : SyncedLocalBindings
+        : foldersOnly ? SyncedDropboxFolderBindings : SyncedDropboxBindings;
     public const string ForgetAllSynced = "DELETE FROM synced_entry WHERE pair_id = " + PairRow +
         "; UPDATE pair SET first_repair_done = 0 WHERE pair_id = $p;";
 
@@ -701,11 +706,11 @@ public static class StateSchema
          CHECK(authority IN ('Inferred','Chosen','Excluded','Vacate','Repair','Legacy'));
         """;
     public const string BackfillVacateAuthority = "UPDATE folder_removal SET authority='Vacate' WHERE rename_work_id IS NOT NULL;";
-    private const string DuplicateIdsFrom = "SELECT pair_id,{0} FROM synced_entry INDEXED BY {1} WHERE (pair_id,{0})>($afterPair,$after) GROUP BY pair_id,{0} HAVING count(*)>1 ORDER BY pair_id,{0} LIMIT 1;";
-    public static readonly string DuplicateLocalIds = string.Format(System.Globalization.CultureInfo.InvariantCulture,
-        DuplicateIdsFrom, "local_id", "synced_local_id");
-    public static readonly string DuplicateDropboxIds = string.Format(System.Globalization.CultureInfo.InvariantCulture,
-        DuplicateIdsFrom, "dropbox_id", "synced_dropbox_id");
+    // Column ordinals: DuplicateLocalIds and DuplicateDropboxIds.
+    internal const int DuplicateIdPair = 0;
+    internal const int DuplicateIdValue = 1;
+    public const string DuplicateLocalIds = "SELECT pair_id,local_id FROM synced_entry INDEXED BY synced_local_id WHERE (pair_id,local_id)>($afterPair,$after) GROUP BY pair_id,local_id HAVING count(*)>1 ORDER BY pair_id,local_id LIMIT 1;";
+    public const string DuplicateDropboxIds = "SELECT pair_id,dropbox_id FROM synced_entry INDEXED BY synced_dropbox_id WHERE (pair_id,dropbox_id)>($afterPair,$after) GROUP BY pair_id,dropbox_id HAVING count(*)>1 ORDER BY pair_id,dropbox_id LIMIT 1;";
     public const string PublishVersion = "PRAGMA user_version=15;";
     public const string LocalAccessRetryCauseFunction = "localaccessretrycause";
 
@@ -877,6 +882,8 @@ public static class StateSchema
     internal const int BeforeFirstRepairSide = -1;
     /// <summary>binding_repair records exactly two other-side ids (other_first, other_second).</summary>
     internal const int DuplicateRepairPartners = 2;
+    /// <summary>V2's probe size: one row past the recorded two proves X has exactly two.</summary>
+    internal const int DuplicateRepairProbe = DuplicateRepairPartners + 1;
     // Column ordinals: RepairColumns.
     internal const int RepairSide = 0;
     internal const int RepairIdentity = 1;

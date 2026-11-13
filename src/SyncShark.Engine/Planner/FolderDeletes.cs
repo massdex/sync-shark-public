@@ -22,6 +22,10 @@ public static class FolderDeletes
         entry is { IsFolder: true, SharedRoot: true } && authority is FolderRemovalAuthority.Inferred
             or FolderRemovalAuthority.Vacate or FolderRemovalAuthority.Repair or FolderRemovalAuthority.Legacy;
 
+    /// <summary>The Info notice that settles an inferred delete of a kept mount (D-1113-8).</summary>
+    public static SyncAction SharedFolderKept(Row row) =>
+        new(ActionKind.Notice, row, NoticeKind: IssueKind.Info, Cause: TextKey.InfoSharedFolderKept);
+
     /// <summary>True when an automatic folder removal may not reach the binding: it is excluded, or either side is a
     /// nested pair root (vacate, Repair P3a).</summary>
     public static bool OutOfScope(PathScope scope, SyncedEntry binding) =>

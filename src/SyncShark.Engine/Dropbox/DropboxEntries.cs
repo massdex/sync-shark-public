@@ -16,6 +16,8 @@ public static partial class DropboxEntries
     private const string EmptyObjectToken = "{}";
     private const string EmptyArrayToken = "[]";
     private const int NoField = -1;
+    // An item is the reply object at depth 1, so its sharing_info member object is at depth 2.
+    private const int SharingDepth = 2;
     // Unicode/UTF-8 encoding widths and ranges, not reply-size or depth policy.
     private const int HexLetterOffset = 10;
     private const int HexBits = 4;
@@ -488,7 +490,7 @@ public static partial class DropboxEntries
 
         /// <summary>The names the tokenizer matches next: the item's fields, or inside sharing_info its one member.</summary>
         internal ReadOnlySpan<string> Names =>
-            _depth == 1 && _rootObject ? Fields : _sharing && _depth == 2 ? SharingFields : ReadOnlySpan<string>.Empty;
+            _depth == 1 && _rootObject ? Fields : _sharing && _depth == SharingDepth ? SharingFields : ReadOnlySpan<string>.Empty;
 
         /// <summary>Whether the tokenizer keeps the next scalar: a selected field's value.</summary>
         internal bool Retain => (_depth == 1 && _rootObject && _field >= 0) || _sharingField;
@@ -523,7 +525,7 @@ public static partial class DropboxEntries
                     if (field >= Fields.Length || field < NoField) throw new JsonException();
                     _field = field;
                 }
-                else if (_sharing && _depth == 2) _sharingField = field == 0;
+                else if (_sharing && _depth == SharingDepth) _sharingField = field == 0;
                 return;
             }
             var container = token is JsonTokenType.StartObject or JsonTokenType.StartArray;
@@ -555,7 +557,7 @@ public static partial class DropboxEntries
             }
             if (container) _depth++;
             else if (token is JsonTokenType.EndObject or JsonTokenType.EndArray) _depth--;
-            if (_depth < 2) _sharing = false;
+            if (_depth < SharingDepth) _sharing = false;
             if (_depth == 0) _complete = true;
         }
 

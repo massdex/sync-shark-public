@@ -75,7 +75,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         var observed = request.Folder;
         try
         {
-            observed = await _items.Preparation.ReobserveAsync(request.Folder, new Observer(_context, _parents), ct);
+            observed = request.CounterpartPath is { } path ? await ObserveAtCounterpartAsync(request, path, ct)
+                : await _items.Preparation.ReobserveAsync(request.Folder, new Observer(_context, _parents), ct);
             // A live selection applies only its admitted evidence; a later acquisition waits for its own record.
             execution?.Revalidate();
             if (!AncestorsClear(observed, request.Route))
@@ -84,9 +85,10 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                     : (null, FolderRemovalCheck.Waiting, observed);
             if (request.ExpectedRootId is { } expected)
             {
-                // An absent root belongs to the route's own preconditions when it has them (D4, D4p).
+                // Repair's D4 arm and D4p own an absent endpoint, its state-only settle (-8 1).
                 var root = observed.EntryOn(request.DeletingFrom);
-                if (root is null && request.Preconditions is null) return (null, FolderRemovalCheck.Absent, observed);
+                if (root is null && request.Route != FolderRemovalRoute.Repair)
+                    return (null, FolderRemovalCheck.Absent, observed);
                 if (root is not null && root.Id != expected) return (null, FolderRemovalCheck.Replaced, observed);
             }
             if (!await JustifiedAsync(request, observed, ct)) return (null, FolderRemovalCheck.NotJustified, observed);
@@ -96,6 +98,18 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         {
             return await FailOwnAsync(request, observed, error, ct);
         }
+    }
+
+    // D2 for vacate (-8 2): the incoming folder at its moved path and the occupant at the destination binding's
+    // deleting-side path; nothing reads the binding's obsolete counterpart path.
+    private async Task<Row> ObserveAtCounterpartAsync(FolderRemovalRequest request, string path, CancellationToken ct)
+    {
+        var saved = request.Folder.Synced ?? throw new ArgumentException(null, nameof(request));
+        var counterpartSide = PathNames.Other(request.DeletingFrom);
+        var counterpart = await _context.For(counterpartSide).ReadOneAsync(path, ct);
+        var occupant = await _context.For(request.DeletingFrom).ReadOneAsync(saved.PathOn(request.DeletingFrom), ct);
+        return new Row(saved.LocalKey, counterpartSide == Side.Local ? counterpart : occupant,
+            counterpartSide == Side.Dropbox ? counterpart : occupant, saved, [], null, request.Folder.Context);
     }
 
     // Replacement, resolution and exclusion callers retain their own attempt; ordinary Repair owns this row here.
@@ -193,8 +207,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         {
             if (authority == FolderRemovalAuthority.Inferred)
             {
-                var kept = await _executor.ExecuteAsync(new SyncAction(ActionKind.Notice, observed,
-                    NoticeKind: IssueKind.Info, Cause: TextKey.InfoSharedFolderKept), null, ct, selection: request.Selection);
+                var kept = await _executor.ExecuteAsync(FolderDeletes.SharedFolderKept(observed), null, ct,
+                    selection: request.Selection);
                 request.Completed?.Invoke(observed, kept);
             }
             return (null, FolderRemovalCheck.Mount, observed);
@@ -568,63 +582,42 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             var operation = _context.Store.FolderRemoval(_context.Pair.PairId, existing);
             return operation.SavedRoot != destination.Synced ? null : await ContinueOwnAsync(operation, selection, ct);
         }
+        // No captured occupant: no root to remove and no identity to gate (-8 1).
+        if (destination.EntryOn(deletingFrom) is not { } occupant) return null;
         var paths = Row.Paths(destination);
         var footprint = LockKeys.ForLivePaths(_context.Pair,
             [(Side.Local, paths.Local), (Side.Dropbox, paths.Dropbox)], true)
             .Concat(LockKeys.ForRenamePaths(_context.Pair, [(incoming.Side, incoming.Moved.Path)], true)).ToArray();
-        string? operationId;
-        if (_context.Live)
+        var removal = await RemoveCheckedAsync(new FolderRemovalRequest(destination, deletingFrom, FolderRemovalRoute.Vacate)
         {
-            var coverage = (await _ports.Live.CaptureCoverageAsync(selection, footprint, ct)) with { Peer = selection.Peer };
-            operationId = await _ports.Live.ExecuteAsync([new LiveExecutionRequest(selection, coverage, footprint)],
-                (execution, token) => PrepareAsync(execution, token), ct);
-        }
-        else
-        {
-            await using var work = await _context.Admission.EnterWorkAsync(false, ct);
-            await using var permit = await _context.EnterOperationAsync(ct);
-            await using var hold = await PathLocks.Shared.EnterAsync(LockKeys.ForScopes(_context.Pair, footprint), ct);
-            operationId = await PrepareAsync(null, ct);
-        }
-        if (operationId is null) return null;
-        await RunPreparedFolderRemovalsAsync([operationId], ct);
-        return await FinishFolderRemovalAsync(operationId, selection, ct);
+            ExpectedRootId = occupant.Id, CounterpartPath = incoming.Moved.Path, Selection = selection,
+            Footprint = footprint, Live = true, Accepts = static (plan, _) => plan.DeleteWhole,
+            Preconditions = (observed, _, _) => Task.FromResult(VacatePreconditions(observed, incoming, selection))
+        }, ct);
+        return removal.Removal;
+    }
 
-        async Task<string?> PrepareAsync(IAdmittedExecution? execution, CancellationToken ct)
-        {
-            execution?.RequireScopes(_context.Pair.PairId, _context.ExpectedGeneration,
-                LockKeys.ForScopes(_context.Pair, footprint));
-            var saved = destination.Synced ?? throw new ArgumentException(null, nameof(destination));
-            var freshIncoming = await _context.For(incoming.Side).ReadOneAsync(incoming.Moved.Path, ct);
-            var occupant = await _context.For(deletingFrom).ReadOneAsync(saved.PathOn(deletingFrom), ct);
-            if (freshIncoming != incoming.Moved || occupant != destination.EntryOn(deletingFrom) ||
-                _context.Store.SyncedByKey(_context.Pair.PairId, Side.Local, incoming.Synced.LocalKey) != incoming.Synced ||
-                _context.Store.SyncedByKey(_context.Pair.PairId, Side.Local, saved.LocalKey) != saved ||
-                _context.For(incoming.Side) is not IIdentitySide identities) return null;
-            var after = SyncedEntries.RenameTarget(incoming, _parents.Destination(deletingFrom, incoming.Moved.Path));
-            var blockers = _context.Store.RenameDestinationOwners(_context.Pair.PairId, incoming.Synced, after);
-            if (blockers.Count != 1 || blockers[0].Binding != saved) return null;
-            var location = await identities.ReadByIdAsync(saved.IdOn(incoming.Side), ct);
-            if (location is { InScope: true }) return null;
-            var observed = new Row(saved.LocalKey,
-                incoming.Side == Side.Local ? freshIncoming : occupant,
-                incoming.Side == Side.Dropbox ? freshIncoming : occupant,
-                saved, [], null, destination.Context);
-            if (FolderDeletes.OutOfScope(_context.Scope, saved) || occupant?.Skip is not null ||
-                FolderDeletes.KeepsMount(occupant, FolderRemovalAuthority.Vacate)) return null;
-            var clash = _context.Store.ReadRenameContinuation(selection)?.Clash;
-            var currentClash = clash is null ? null : _context.Store.IssueById(_context.Pair.PairId, clash.Id);
-            if (clash is not null && (currentClash is null || !currentClash.Matches(clash) || currentClash.Ignored || currentClash.Dismissed)) return null;
-            if (clash is null ? _context.Store.HoldingIssue(_context.Pair.PairId, observed) is not null :
-                _context.Store.HeldByOtherIssue(_context.Pair.PairId, observed, clash.Id)) return null;
-            RequireAncestorsClear(observed);
-            using var plan = await new FolderPlanBuilder(_context).BuildAsync(observed, deletingFrom, NoRestoredItems, true, ct);
-            if (!plan.DeleteWhole) return null;
-            var id = _context.Store.BeginFolderRemoval(_context.Pair.PairId, plan, FolderRemovalAuthority.Vacate,
-                _context.Settings.StoragePageSize, ct, selection, Admission(execution));
-            RememberUnfinished(deletingFrom, observed, id);
-            return id;
-        }
+    // Vacate's own checks under the entry's admission (-7 1.5, -8 2): the counterpart read is the incoming folder,
+    // both bindings are unchanged, the destination binding is the rename's one blocker, the root is in scope and not
+    // skipped, and the captured clash still stands (or no issue holds the row).
+    private bool VacatePreconditions(Row observed, RenameCandidate incoming, WorkSelection selection)
+    {
+        var saved = observed.Synced!;
+        var deletingFrom = PathNames.Other(incoming.Side);
+        if (observed.EntryOn(incoming.Side) != incoming.Moved ||
+            _context.Store.SyncedByKey(_context.Pair.PairId, Side.Local, incoming.Synced.LocalKey) != incoming.Synced ||
+            _context.Store.SyncedByKey(_context.Pair.PairId, Side.Local, saved.LocalKey) != saved) return false;
+        var after = SyncedEntries.RenameTarget(incoming, _parents.Destination(deletingFrom, incoming.Moved.Path));
+        var blockers = _context.Store.RenameDestinationOwners(_context.Pair.PairId, incoming.Synced, after);
+        if (blockers.Count != 1 || blockers[0].Binding != saved) return false;
+        if (FolderDeletes.OutOfScope(_context.Scope, saved) || observed.EntryOn(deletingFrom)?.Skip is not null)
+            return false;
+        var clash = _context.Store.ReadRenameContinuation(selection)?.Clash;
+        var currentClash = clash is null ? null : _context.Store.IssueById(_context.Pair.PairId, clash.Id);
+        if (clash is not null && (currentClash is null || !currentClash.Matches(clash) || currentClash.Ignored ||
+            currentClash.Dismissed)) return false;
+        return clash is null ? _context.Store.HoldingIssue(_context.Pair.PairId, observed) is null
+            : !_context.Store.HeldByOtherIssue(_context.Pair.PairId, observed, clash.Id);
     }
 
     internal Task<FolderRemovalResult?> RemovePlannedReplacementAsync(Row folder, CancellationToken ct) =>

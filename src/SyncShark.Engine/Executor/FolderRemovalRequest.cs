@@ -1,3 +1,5 @@
+using Massdex.SyncShark.Engine.Storage;
+
 namespace Massdex.SyncShark.Engine.Executor;
 
 /// <summary>Route-specific inputs to the single checked folder-removal protocol.</summary>
@@ -18,5 +20,5 @@ internal sealed record FolderRemovalRequest(Row Folder, Side DeletingFrom, Folde
     internal Func<Side, string, string?, bool>? Temporary { get; init; }
 
     internal static bool EmptyPlan(FolderPlan plan, CancellationToken ct) =>
-        plan.DeleteWhole && !plan.FrozenEvidence(1, ct).Any();
+        plan.DeleteWhole && !plan.FrozenEvidence(StateSchema.OneRow, ct).Any();
 }

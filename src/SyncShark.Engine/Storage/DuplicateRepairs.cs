@@ -21,11 +21,11 @@ internal static class DuplicateRepairs
                 using (var reader = command.ExecuteReader())
                 {
                     if (!reader.Read()) break;
-                    afterPair = reader.GetInt64(0);
-                    after = reader.GetValue(1);
+                    afterPair = reader.GetInt64(StateSchema.DuplicateIdPair);
+                    after = reader.GetValue(StateSchema.DuplicateIdValue);
                 }
-                var bindings = Bindings(connection, transaction, afterPair, side, after, foldersOnly: true, take: 3);
-                if (bindings.Count < 2) continue;
+                var bindings = Bindings(connection, transaction, afterPair, side, after, foldersOnly: true, take: StateSchema.DuplicateRepairProbe);
+                if (bindings.Count < StateSchema.DuplicateRepairPartners) continue;
                 RecordGroup(connection, transaction, afterPair, side, after, bindings, now);
             }
         }
@@ -38,7 +38,7 @@ internal static class DuplicateRepairs
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamId, identity), (StateSchema.ParamTake, take));
         using var reader = command.ExecuteReader();
         var rows = new List<SyncedEntry>();
-        while (reader.Read()) rows.Add(StateEncoding.ReadSynced(reader, reader.GetString(0), 1));
+        while (reader.Read()) rows.Add(StateEncoding.ReadSynced(reader, reader.GetString(StateSchema.SyncedLocalKey), StateSchema.SyncedLocalPath));
         return rows.OrderBy(row => row.LocalKey, PathLocks.KeyComparer).ToArray();
     }
 
@@ -46,7 +46,7 @@ internal static class DuplicateRepairs
         Side side, object identity, IReadOnlyList<SyncedEntry> bindings, DateTimeOffset now)
     {
         var other = PathNames.Other(side);
-        var qualifies = bindings.Count == 2 && bindings[0].IdOn(other) != bindings[1].IdOn(other) &&
+        var qualifies = bindings.Count == StateSchema.DuplicateRepairPartners && bindings[0].IdOn(other) != bindings[1].IdOn(other) &&
             Validity(connection, transaction, pair, side, bindings, null) == DuplicateRepairProof.Valid;
         using var pairQuery = StorageCommand.Create(connection, transaction, StateSchema.PairIdByRow,
             (StateSchema.ParamPairRow, pair));
@@ -58,8 +58,8 @@ internal static class DuplicateRepairs
         }
         using (var insert = StorageCommand.Create(connection, transaction, StateSchema.InsertDuplicateRepair,
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamSide, (int)side), (StateSchema.ParamIdentity, identity),
-            ("$first", StateEncoding.IdFor(other, bindings[0].IdOn(other))),
-            ("$second", StateEncoding.IdFor(other, bindings[1].IdOn(other))))) insert.ExecuteNonQuery();
+            (StateSchema.ParamFirst, StateEncoding.IdFor(other, bindings[0].IdOn(other))),
+            (StateSchema.ParamSecond, StateEncoding.IdFor(other, bindings[1].IdOn(other))))) insert.ExecuteNonQuery();
         ReleaseClashes(connection, transaction, pairId, side, bindings);
     }
 
@@ -138,7 +138,7 @@ internal static class DuplicateRepairs
         else
         {
             var other = PathNames.Other(settle.Side);
-            current = Bindings(connection, transaction, pair, settle.Side, identity, foldersOnly: true, take: 3);
+            current = Bindings(connection, transaction, pair, settle.Side, identity, foldersOnly: true, take: StateSchema.DuplicateRepairProbe);
             foreach (var binding in current.Where(binding => StateEncoding.IdFor(other, binding.IdOn(other)) is { } id &&
                 (id.Equals(row.First) || id.Equals(row.Second))))
                 ReleaseClashes(connection, transaction, pairId, settle.Side, [binding]);
@@ -148,7 +148,7 @@ internal static class DuplicateRepairs
             IssueTable.CloseExact(connection, transaction, pairId, failure);
         if (settle.Handoff is { } handoff)
             changes.RegisterReleasedEndpoint(transaction, pairId, handoff.Side, handoff.Path, handoff.Id);
-        if (current.Count >= 2) LinksNotice(connection, transaction, pairId, settle.Side, current, now, raised);
+        if (current.Count >= StateSchema.DuplicateRepairPartners) LinksNotice(connection, transaction, pairId, settle.Side, current, now, raised);
     }
 
     /// <summary>The HoldRepair stage, after Raise (-6 3.5.4): binds the obligation to the Failure now at path, a CAS on
@@ -315,9 +315,9 @@ internal static class DuplicateRepairs
         long pair, Side side, object identity, (object First, object Second, long? Issue) row)
     {
         var other = PathNames.Other(side);
-        var bindings = Bindings(connection, transaction, pair, side, identity, foldersOnly: true, take: 3);
+        var bindings = Bindings(connection, transaction, pair, side, identity, foldersOnly: true, take: StateSchema.DuplicateRepairProbe);
         var ids = bindings.Select(binding => StateEncoding.IdFor(other, binding.IdOn(other))).ToArray();
-        return bindings.Count == 2 && ids.Contains(row.First) && ids.Contains(row.Second) ? bindings : null;
+        return bindings.Count == StateSchema.DuplicateRepairPartners && ids.Contains(row.First) && ids.Contains(row.Second) ? bindings : null;
     }
 
     // V3 for one binding: its other-side id is bound exactly once.
@@ -326,7 +326,7 @@ internal static class DuplicateRepairs
     {
         var other = PathNames.Other(side);
         return Bindings(connection, transaction, pair, other, StateEncoding.IdFor(other, binding.IdOn(other))!,
-            foldersOnly: false, take: 2).Count == 1;
+            foldersOnly: false, take: StateSchema.OneRow + 1).Count == 1;
     }
 
     private static SyncedEntry? BindingAt(SqliteConnection connection, SqliteTransaction transaction, string pairId,
