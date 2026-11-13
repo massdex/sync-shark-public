@@ -202,10 +202,9 @@ internal static class DuplicateRepairs
         IReadOnlyList<SyncedEntry> Bindings, FolderRemovalState? Own)> Page(SqliteConnection connection,
         SqliteTransaction transaction, string pairId, PathScope scope, DuplicateRepairKey? after, int take)
     {
-        var pair = IssueTable.PairFor(connection, transaction, pairId);
         var rows = new List<(DuplicateRepairKey Key, (object First, object Second, long? Issue) Row)>();
         using (var command = StorageCommand.Create(connection, transaction, StateSchema.DuplicateRepairPage,
-            (StateSchema.ParamPairRow, pair),
+            (StateSchema.ParamPair, pairId),
             (StateSchema.ParamSide, after is { } start ? (int)start.Side : StateSchema.BeforeFirstRepairSide),
             (StateSchema.ParamIdentity, after is { } key ? StateEncoding.IdFor(key.Side, key.Identity) : null),
             (StateSchema.ParamTake, take)))
@@ -213,6 +212,9 @@ internal static class DuplicateRepairs
             while (reader.Read())
                 rows.Add((new DuplicateRepairKey((Side)reader.GetInt32(StateSchema.RepairSide),
                     reader.GetString(StateSchema.RepairIdentity)), ReadRow(reader)));
+        // A pair with no obligation, the steady state, pays this one statement per lane iteration.
+        if (rows.Count == 0) return [];
+        var pair = IssueTable.PairFor(connection, transaction, pairId);
         var own = new Lazy<Dictionary<(Side Side, object? Identity, object? Other), FolderRemovalState>>(() =>
             OwnOperations(connection, transaction, pair, take));
         return rows.Select(row =>

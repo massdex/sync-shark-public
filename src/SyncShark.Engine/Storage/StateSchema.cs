@@ -877,7 +877,7 @@ public static class StateSchema
     /// <summary>V1, the obligation's primary-key probe.</summary>
     internal const string SelectDuplicateRepair = RepairColumns + RepairKeyFilter + ";";
     /// <summary>The keyset page of a pair's obligations in primary-key order (-6 3.5.2).</summary>
-    internal const string DuplicateRepairPage = RepairColumns + " WHERE pair_id=$pair AND (side,identity)>($side,$identity) ORDER BY side,identity LIMIT $take;";
+    internal const string DuplicateRepairPage = RepairColumns + " WHERE pair_id=" + PairRow + " AND (side,identity)>($side,$identity) ORDER BY side,identity LIMIT $take;";
     /// <summary>A first page's keyset start: below Side.Local, the lowest stored side, so the identity is never compared.</summary>
     internal const int BeforeFirstRepairSide = -1;
     /// <summary>binding_repair records exactly two other-side ids (other_first, other_second).</summary>
