@@ -365,7 +365,7 @@ internal sealed partial class ChangeTable
         if (validated <= StateSchema.OneRow) return 0;
         Require(Run(transaction, StateSchema.MergeTransferredWork, (StateSchema.ParamPairRow, pair.Row),
             (StateSchema.ParamWork, newest.WorkId), (StateSchema.ParamAcquisition, acquisition),
-            (StateSchema.ParamBefore, before), (StateSchema.ParamNotice, StateEncoding.Envelope(notice!))));
+            (StateSchema.ParamBefore, null), (StateSchema.ParamNotice, StateEncoding.Envelope(notice!))));
         long deleted = 0;
         for (var row = first; row is not null && row.WorkId < newest.WorkId; row = Next(transaction, row.WorkId))
         {
