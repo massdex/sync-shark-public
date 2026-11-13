@@ -1,0 +1,7 @@
+{
+  "build": ["core", "core-tests", "fod-tests", "engine-tests", "app", "ui-fixture", "reachability"],
+  "engine": [],
+  "core": [],
+  "ui": []
+}
+
