@@ -392,6 +392,9 @@ public static class LiteralsChecks
             Fails(source, "nested/" + OwnerFiles[owner]);
         }
         Fails("class EngineHost { private const int QuietSeconds = 30; }", OwnerFiles["EngineHost"]);
+        const string schema = "class StateSchema { const string Fragment = \"EXISTS(SELECT 1 FROM synced_entry)\"; }";
+        Passes(schema, StateSchemaFile);
+        Fails(schema.Replace("const string", "static readonly string"), StateSchemaFile);
     }
 
     private static void DefaultArithmeticFixtures()

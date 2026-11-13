@@ -17,7 +17,7 @@ internal static class LiteralSites
         foreach (var file in Files(Path.Combine(root, "src")))
         {
             var path = Path.GetRelativePath(root, file).Replace('\\', '/');
-            var source = File.ReadAllText(file).TrimStart('﻿').Replace("\r\n", "\n").Replace('\r', '\n');
+            var source = File.ReadAllText(file).Replace("\r\n", "\n").Replace('\r', '\n');
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(source))).ToLowerInvariant();
             stream.WriteLine(JsonSerializer.Serialize(new { tree, path, hash, sites = Sites(source, path) }));
         }
@@ -42,13 +42,19 @@ internal static class LiteralSites
     {
         // The lexical inventory includes inactive branches, but not directive lines.
         var options = new CSharpParseOptions(LanguageVersion.CSharp12);
-        var parsed = source.ToCharArray();
-        foreach (var directive in CSharpSyntaxTree.ParseText(source, options).GetRoot()
-            .DescendantTrivia(descendIntoTrivia: true).Where(trivia => trivia.IsDirective))
-            for (var i = directive.SpanStart; i < directive.Span.End; i++)
-                if (parsed[i] != '\n') parsed[i] = ' ';
-        var root = CSharpSyntaxTree.ParseText(new string(parsed), options).GetRoot();
+        var root = CSharpSyntaxTree.ParseText(source, options).GetRoot();
+        if (root.ContainsDirectives)
+        {
+            var parsed = source.ToCharArray();
+            foreach (var directive in root.DescendantTrivia(descendIntoTrivia: true).Where(trivia => trivia.IsDirective))
+                for (var i = directive.SpanStart; i < directive.Span.End; i++)
+                    if (parsed[i] != '\n') parsed[i] = ' ';
+            root = CSharpSyntaxTree.ParseText(new string(parsed), options).GetRoot();
+        }
         SemanticModel? model = null;
+        var forbidden = new HashSet<int>();
+        foreach (var token in root.DescendantTokens())
+            if (LiteralsChecks.StringViolation(token, path, ref model) is not null) forbidden.Add(token.SpanStart);
         var ordinals = new Dictionary<string, int>(StringComparer.Ordinal);
         var line = 1;
         var previous = 0;
@@ -62,9 +68,7 @@ internal static class LiteralSites
             var text = source.Substring(expression.SpanStart, expression.Span.Length);
             var ordinal = ordinals.GetValueOrDefault(text);
             ordinals[text] = ordinal + 1;
-            var permitted = true;
-            foreach (var token in expression.DescendantTokens())
-                if (LiteralsChecks.StringViolation(token, path, ref model) is not null) permitted = false;
+            var permitted = !expression.DescendantTokens().Any(token => forbidden.Contains(token.SpanStart));
             yield return new { line, text, ordinal, permitted };
         }
     }

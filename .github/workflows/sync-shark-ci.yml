@@ -216,7 +216,7 @@ jobs:
           path: ${{ runner.temp }}/setup-mutants-*/**/*.log
 
   spec-ratchet:
-    needs: build-engine
+    needs: literal-sites
     if: always()
     runs-on: windows-latest
     timeout-minutes: 10
@@ -350,9 +350,6 @@ jobs:
     needs: select
     runs-on: windows-latest
     timeout-minutes: 60
-    env:
-      RATCHET_LIVE_TAG: ${{ vars.RATCHET_LIVE_TAG }}
-      RATCHET_LIVE_COMMIT: ${{ vars.RATCHET_LIVE_COMMIT }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -403,6 +400,22 @@ jobs:
           path: src/SyncShark.Engine/obj/${{ env.CONFIGURATION }}/net8.0-windows/SyncShark.Engine.GlobalUsings.g.cs
           if-no-files-found: error
           retention-days: 7
+
+  literal-sites:
+    needs: build-engine
+    runs-on: windows-latest
+    env:
+      RATCHET_LIVE_TAG: ${{ vars.RATCHET_LIVE_TAG }}
+      RATCHET_LIVE_COMMIT: ${{ vars.RATCHET_LIVE_COMMIT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download engine test binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: sync-shark-engine-tests
+          path: tests/SyncShark.Engine.Tests/bin/${{ env.CONFIGURATION }}/net8.0-windows
 
       - name: Export literal permissions for candidate and pinned release
         shell: pwsh
