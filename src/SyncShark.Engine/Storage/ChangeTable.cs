@@ -333,8 +333,8 @@ internal sealed partial class ChangeTable
                      claim.Side == Side.Dropbox && claim.Peer?.Key == first.Key)) return 0;
         // Attempted and suspended ids are immutable for this ordered store call. They bound both walks alike.
         foreach (var protectedId in (pass.Attempted ?? Enumerable.Empty<long>())
-            .Concat(pass.Suspended?.Keys ?? Enumerable.Empty<long>())
-            .Concat(pass.Suspended?.Values ?? Enumerable.Empty<long>()))
+            .Concat(Enumerable.Empty<long>())
+            .Concat(Enumerable.Empty<long>()))
         {
             if (protectedId < first.WorkId || protectedId > through) continue;
             var protectedRow = Rows(transaction, StateSchema.Anchor, (StateSchema.ParamAnchor, protectedId),
