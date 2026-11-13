@@ -4,15 +4,17 @@ using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Executor;
 
-// B-210 measurement probe. Print-only: it asserts no verdict. One path holds several older pending works and a
-// newer acquisition of the same item, the newer work held in an in-use retry wait like the live pair. Several
-// finite selection passes run through the store's own ValidateLiveCoverage admission. Per selection it prints the
-// Dropbox reads paid, the work id attempted, the refusal reason, and whether the refusal came before the provider
-// read (early: SelectionObservation.RefuseSuperseded) or after it (late: selection admission), every
-// RefuseSuperseded eligibility condition, and the answer of the later-evidence probe those conditions call.
-// Variants: a covering NameClash at the path, the file at or off its saved baseline, with or without a saved
-// binding, and whether the newer acquisition predates the pass or lands after its watermark. One extra shape seeds
-// the older work as a Renamed notice so the notice/old-path conditions are measured too.
+// B-210 measurement probe. Print-only: it asserts no verdict (the only assertions are setup sanity checks). One path
+// holds several older pending works and a newer acquisition of the same item, the newer work held in an in-use retry
+// wait like the live pair. Several finite selection passes run through the store's own ValidateLiveCoverage
+// admission. Per selection it prints the Dropbox reads paid, the work id attempted, the refusal reason and whether
+// the refusal came before the provider read (early: SelectionObservation.RefuseSuperseded) or after it (late:
+// selection admission), and every RefuseSuperseded eligibility condition.
+//
+// Round 2: the "before" timings now seed the newer held work before the first selection and assert it exists; the
+// diagnostic later-evidence probe runs once per variant, outside the measured attempts; and an identified shape is
+// measured beside the path-only one (all old works carry the same file id as the newer acquisition), so the
+// same-identity episode transfer (B1) can be seen in the refusal's newerEpisode.
 public static partial class ChangeRunnerChecks
 {
     public static void RunB210Repro() => B210ReproAsync().GetAwaiter().GetResult();
@@ -34,6 +36,10 @@ public static partial class ChangeRunnerChecks
         private static string Flag(bool value) => value ? "T" : "f";
     }
 
+    // The newer acquisition's position against the pass watermark: before the pass's first selection, after it, or
+    // inside the Dropbox read that follows the early check (the read-granularity race).
+    private static readonly string[] B210Timings = ["before", "during", "midread"];
+
     private static async Task B210ReproAsync()
     {
         foreach (var covering in new[] { false, true })
@@ -43,19 +49,19 @@ public static partial class ChangeRunnerChecks
             await B210VariantAsync(covering, atBaseline, withSaved, timing);
         // The notice shape itself: a Renamed notice in the same not-at-baseline, saved, during-pass shape.
         await B210VariantAsync(covering: false, atBaseline: false, withSaved: true, timing: "during", renamed: true);
+        // The identified shape: every old work carries the same file id as the newer acquisition.
+        foreach (var timing in B210Timings)
+            await B210VariantAsync(covering: false, atBaseline: false, withSaved: true, timing, identified: true);
     }
 
-    // The newer acquisition's position against the pass watermark: before the pass, after the pass's first
-    // selection, or inside the Dropbox read that follows the early check (the read-granularity race).
-    private static readonly string[] B210Timings = ["before", "during", "midread"];
-
     private static async Task B210VariantAsync(bool covering, bool atBaseline, bool withSaved, string timing,
-        bool renamed = false)
+        bool renamed = false, bool identified = false)
     {
-        // The midread race only matters when every early gate holds, so the rest of the matrix stays at before/during.
+        // The mid-read race only matters when every early gate holds, so the rest of the matrix stays at before/during.
         if (timing == "midread" && (covering || atBaseline)) return;
-        var label = $"cover={(covering ? "T" : "f")} base={(atBaseline ? "T" : "f")} saved={(withSaved ? "T" : "f")} " +
-            $"newer={timing} notice={(renamed ? "renamed" : "changed")}";
+        var label = $"shape={(identified ? "id" : "path")} cover={(covering ? "T" : "f")} " +
+            $"base={(atBaseline ? "T" : "f")} saved={(withSaved ? "T" : "f")} newer={timing} " +
+            $"notice={(renamed ? "renamed" : "changed")}";
         var attempt = Guid.NewGuid();
         using var fixture = new Fixture(realStore: true, registeredAttempt: attempt);
         ClearObligations(fixture);
@@ -79,7 +85,8 @@ public static partial class ChangeRunnerChecks
         var oldWorks = new List<WorkSelection>();
         for (var index = 1; index <= B210OldWorks; index++)
             oldWorks.Add(Seed(fixture, new ChangeNotice(Side.Local,
-                renamed ? ChangeKind.Renamed : ChangeKind.Changed, B210Path, null, null, null, false, false), index));
+                renamed ? ChangeKind.Renamed : ChangeKind.Changed, B210Path, null,
+                identified ? current.Id : null, identified ? current : null, false, false), index));
         Console.WriteLine($"b210-variant start {label} oldWorks=[{string.Join(",", oldWorks.Select(work => work.AnchorWorkId))}] " +
             $"current={current.Id} savedBinding={(withSaved ? "yes" : "no")} " +
             $"localMatchesBaseline={Decide.LocalMatchesBaseline(current, fixture.Inner.SelectionBaseline(oldWorks[0]))}");
@@ -94,9 +101,19 @@ public static partial class ChangeRunnerChecks
                 Console.WriteLine($"b210 variant {label} newer-work seeded inside the Dropbox read");
             })
             : dropbox;
+        if (timing == "before")
+        {
+            var newer = SeedHeldNewerWork(fixture, current, attempt);
+            newerSeeded = true;
+            Check.Require(newer.AnchorWorkId > oldWorks[^1].AnchorWorkId &&
+                fixture.Inner.Issues(PairId).Any(issue => issue.Cause == TextKey.FailLocalInUse),
+                "B210 setup: the newer held work exists before the first selection: " + newer.AnchorWorkId);
+            Console.WriteLine($"b210 variant {label} preflight newerWork={newer.AnchorWorkId} " +
+                $"preflightLaterProbe={B210LaterProbe(fixture, oldWorks[0])}");
+        }
         var selections = 0;
         var worksTried = new HashSet<long>();
-        var (early, late, completed, unfinished, other) = (0, 0, 0, 0, 0);
+        var (early, late, completed, unfinished, other, newerEpisodes) = (0, 0, 0, 0, 0, 0);
         foreach (var pass in Enumerable.Range(1, B210Passes))
         {
             var attempted = new List<long>();
@@ -114,7 +131,6 @@ public static partial class ChangeRunnerChecks
                         $"through={selection.ThroughWorkId}");
                 }
                 var gates = B210GatesOf(fixture, selection, current);
-                var later = B210LaterProbe(fixture, selection);
                 var before = dropbox.Reads;
                 var outcome = await B210RunAsync(fixture, selection);
                 var paid = dropbox.Reads - before;
@@ -123,6 +139,9 @@ public static partial class ChangeRunnerChecks
                 selections++;
                 worksTried.Add(selection.AnchorWorkId);
                 var refused = outcome.StartsWith("stale", StringComparison.Ordinal);
+                var hasEpisode = outcome.Contains("newerEpisode[", StringComparison.Ordinal) &&
+                    !outcome.Contains("newerEpisode[none]", StringComparison.Ordinal);
+                if (hasEpisode) newerEpisodes++;
                 var where = refused ? paid == 0 ? "early" : "late" : "no-refusal";
                 if (refused && paid == 0) early++;
                 else if (refused) late++;
@@ -130,8 +149,7 @@ public static partial class ChangeRunnerChecks
                 else if (outcome == "completed=False") unfinished++;
                 else other++;
                 Console.WriteLine($"b210 variant {label} pass={pass} work={selection.AnchorWorkId} " +
-                    $"through={selection.ThroughWorkId} dropboxReads={paid} path={where} {gates} " +
-                    $"laterProbe={later} outcome={outcome}");
+                    $"through={selection.ThroughWorkId} dropboxReads={paid} path={where} {gates} outcome={outcome}");
             }
             fixture.Inner.EndWorkPass(PairId);
             Console.WriteLine($"b210-pass variant {label} pass={pass} attempted=[{string.Join(",", attempted)}] " +
@@ -139,7 +157,7 @@ public static partial class ChangeRunnerChecks
         }
         Console.WriteLine($"b210-variant end {label} newerSeeded={newerSeeded} dropboxReadsTotal={dropbox.Reads} " +
             $"selections={selections} distinctWorks={worksTried.Count} earlyRefusals={early} lateRefusals={late} " +
-            $"completed={completed} unfinished={unfinished} other={other}");
+            $"newerEpisodes={newerEpisodes} completed={completed} unfinished={unfinished} other={other}");
     }
 
     private static async Task<string> B210RunAsync(Fixture fixture, WorkSelection selection)
@@ -151,7 +169,8 @@ public static partial class ChangeRunnerChecks
         }
         catch (LiveAdmissionStaleException error)
         {
-            return "stale " + error.Reason + " detail[" + error.Detail + "] wait[" + error.WaitKey + "]";
+            return "stale " + error.Reason + " detail[" + error.Detail + "] wait[" + error.WaitKey + "] " +
+                "newerEpisode[" + (error.NewerEpisode is { } transfer ? transfer.Episode.Token.WorkId.ToString() : "none") + "]";
         }
         catch (Exception error)
         {
@@ -159,7 +178,8 @@ public static partial class ChangeRunnerChecks
         }
     }
 
-    // Exactly the call SelectionObservation.RefuseSuperseded makes, against the same selection watermark.
+    // Diagnostic only, never inside a measured attempt: exactly the call RefuseSuperseded makes, against the same
+    // selection watermark.
     private static string B210LaterProbe(Fixture fixture, WorkSelection selection)
     {
         try
@@ -192,7 +212,7 @@ public static partial class ChangeRunnerChecks
 
     // The live newer work: same item, acquired after the older works, held by an in-use retry wait so it is never
     // selected and never retires the older work.
-    private static void SeedHeldNewerWork(Fixture fixture, Entry current, Guid attempt)
+    private static WorkSelection SeedHeldNewerWork(Fixture fixture, Entry current, Guid attempt)
     {
         var newer = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, B210Path, null, current.Id,
             current, false, false), B210OldWorks + 1);
@@ -203,5 +223,6 @@ public static partial class ChangeRunnerChecks
         fixture.Inner.EndSelection(newer);
         Console.WriteLine($"b210 newer-work id={newer.AnchorWorkId} wait=in-use heldBy=" +
             (fixture.Inner.Issues(PairId) is [var issue] ? issue.Kind + ":" + issue.Cause : "none"));
+        return newer;
     }
 }
