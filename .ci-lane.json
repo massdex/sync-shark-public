@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "issues",
+    "scan-owner",
+    "syncer",
+    "mapped-holds",
+    "repair-held"
+  ],
+  "core": [],
+  "ui": []
+}
