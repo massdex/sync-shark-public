@@ -735,7 +735,8 @@ public static class StateSchema
 
     // Schema 5 statements. $pair is the integer row from PairFence, resolved once per operation. A mutation expected to
     // match one row must affect exactly 1 or its whole transaction rolls back; RetireCoveredWork alone may affect none.
-    private const string WorkEvidence = "SELECT " + WorkColumns + " FROM change_work w WHERE w.pair_id=$pair AND w.pair_generation=$generation AND w.side=$side AND w.source_epoch=$epoch AND w.domain=$domain AND ";
+    private const string WorkEvidenceWhere = " WHERE w.pair_id=$pair AND w.pair_generation=$generation AND w.side=$side AND w.source_epoch=$epoch AND w.domain=$domain AND ";
+    private const string WorkEvidence = "SELECT " + WorkColumns + " " + ClaimWorkFrom + WorkEvidenceWhere;
     private const string ItemWorkFence = "EXISTS(SELECT 1 FROM pair p JOIN change_work w ON w.pair_id=p.id JOIN source_state s ON s.pair_id=w.pair_id AND s.side=w.side JOIN issue_member m ON m.work_id=w.work_id AND m.issue_id=issue.issue_id AND m.pair_id=p.id WHERE p.id=$pair AND p.execution_generation=$generation AND w.work_id=$work AND w.pair_generation=$generation AND w.source_epoch=$epoch AND s.source_epoch=$epoch AND w.dispatch_kind=$dispatch AND w.pending_operation_id IS $pendingOperation AND w.pending_generation IS $pendingGeneration";
     private const string ItemPendingFence = " AND (w.dispatch_kind<>'LocalRecovery' OR (p.pending_json=$pendingJson AND coalesce(json_extract(p.pending_json,'$.Version'),0)=1 AND json_extract(p.pending_json,'$.OperationId')=w.pending_operation_id AND json_extract(p.pending_json,'$.Generation')=w.pending_generation)))";
     private const string WorkSelectionFence = "w.work_origin='Acquired' AND w.pair_id=$pair AND w.pair_generation=$generation AND w.side=$side AND w.source_epoch=$epoch AND w.domain=$domain AND w.work_id>=$anchor AND w.work_id<=$through AND w.parent_anchor IS $parent AND w.obligation_key IS $obligation AND (w.before_json IS NULL OR w.before_json IS $before) AND";
@@ -766,23 +767,29 @@ public static class StateSchema
     public const string AdvanceSource = "UPDATE source_state SET source_epoch=$nextEpoch,provenance_json=$provenance,cursor=$cursor,repair_reason=CASE WHEN side=0 AND (repair_reason=$gapReason OR ($nextEpoch>source_epoch AND " + CurrentLocalWork + ")) THEN $gapReason ELSE $reason END,repair_revision=$nextRevision WHERE pair_id=$pair AND side=$side AND source_epoch=$epoch AND provenance_json IS $expectedProvenance AND cursor IS $expectedCursor AND repair_revision=$revision AND $nextEpoch>=source_epoch AND ($nextEpoch=source_epoch OR $nextRevision=repair_revision+1) AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND execution_generation=$generation);";
     public const string FinishObligation = "UPDATE source_state SET repair_reason=NULL WHERE pair_id=$pair AND side=$side AND source_epoch=$epoch AND repair_revision=$revision AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND execution_generation=$generation);";
     public const string AdvancePair = "UPDATE pair SET def_json=$definition,execution_generation=$nextGeneration WHERE id=$pair AND execution_generation=$generation AND (NOT " + CurrentLocalWork + " OR EXISTS(SELECT 1 FROM source_state WHERE pair_id=$pair AND side=0 AND repair_reason=$gapReason));";
-    public const string WorkWatermark = "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='change_work'),0);";
+    private const string WorkWatermarkQuery = "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='change_work'),0)";
+    public const string WorkWatermark = WorkWatermarkQuery + ";";
     public const string InsertWork = "INSERT INTO change_work(" + WorkFields + ") VALUES($id,$pair,$generation,$epoch,$side,$domain,$path,$oldPath,$identity,$notice,$before,$acquisition,$parent,$obligation,0);";
     // The one eligibility rule and epoch lookup that selection and counting share, each declared once and
     // closed by its side value: pending Acquired rows of that side's current source. Selection reads the
     // source's epoch in the statement; counting binds the epochs it has already read.
-    private const string EligibilityPrefix = "w.pair_id=$pair AND w.pair_generation=$generation AND w.side=";
+    private const string EligibilityPair = "w.pair_id=";
+    private const string EligibilityGeneration = " AND w.pair_generation=$generation AND w.side=";
+    private const string EligibilityPrefix = EligibilityPair + ParamPairRow + EligibilityGeneration;
     private const string EligibilitySuffix = " AND w.work_origin='Acquired' AND w.source_epoch=";
-    private const string SourceEpochPrefix = "(SELECT source_epoch FROM source_state WHERE pair_id=$pair AND side=";
+    private const string SourceEpochPair = "(SELECT source_epoch FROM source_state WHERE pair_id=";
+    private const string SourceEpochSide = " AND side=";
+    private const string SourceEpochPrefix = SourceEpochPair + ParamPairRow + SourceEpochSide;
     private const string LocalEligibility = EligibilityPrefix + "0" + EligibilitySuffix;
     private const string RemoteEligibility = EligibilityPrefix + "1" + EligibilitySuffix;
     private const string LocalSourceEpoch = SourceEpochPrefix + "0)";
     private const string RemoteSourceEpoch = SourceEpochPrefix + "1)";
 
-    internal static readonly string EchoWorkPending =
+    internal const string EchoWorkPending =
         "SELECT EXISTS(SELECT 1 FROM pair p CROSS JOIN change_work w INDEXED BY work_source_order WHERE p.pair_id=$p AND " +
-        (RemoteEligibility + RemoteSourceEpoch).Replace(ParamPairRow, "p.id", StringComparison.Ordinal) +
-        " AND w.work_id>$after AND w.work_id<=coalesce($through,(" + WorkWatermark.TrimEnd(';') + ")));";
+        EligibilityPair + "p.id" + EligibilityGeneration + "1" + EligibilitySuffix +
+        SourceEpochPair + "p.id" + SourceEpochSide + "1)" +
+        " AND w.work_id>$after AND w.work_id<=coalesce($through,(" + WorkWatermarkQuery + ")));";
 
     public const string SelectWork = "WITH local_work AS MATERIALIZED (SELECT " + WorkColumns +
         " FROM change_work w INDEXED BY work_source_order WHERE " + LocalEligibility + LocalSourceEpoch +
@@ -843,9 +850,9 @@ public static class StateSchema
         "json_extract(pending_json,'$.Version') IS NOT 1 OR " + EchoOverlap + "json_extract(pending_json,'$.Path')) OR " +
         EchoOverlap + "json_extract(pending_json,'$.Saved.LocalPath')) OR " + EchoOverlap + "json_extract(pending_json,'$.Saved.DropboxPath'))));";
     private const string PeerOwnership = "w.path_key=$key AND w.work_id<=$through AND w.work_origin='Acquired' AND w.old_path_key IS NULL AND (w.parent_anchor IS NULL OR NOT EXISTS(SELECT 1 FROM change_work parent WHERE parent.pair_id=w.pair_id AND parent.work_id=w.parent_anchor)) AND (w.before_json IS NULL OR w.before_json=$before) AND NOT EXISTS(SELECT 1 FROM issue_member m WHERE m.work_id=w.work_id) AND NOT EXISTS(SELECT 1 FROM change_work child WHERE child.parent_anchor=w.work_id)";
-    private static readonly string WorkEvidenceByPath = WorkEvidence.Replace(ClaimWorkFrom, ClaimPeerFrom, StringComparison.Ordinal);
-    public static readonly string PeerPathPage = WorkEvidenceByPath + "w.path_key=$key AND w.work_id>$after AND w.work_id<=$through AND w.work_origin='Acquired' ORDER BY w.path_key,w.work_id LIMIT $take;";
-    public static readonly string OwnedPeerPathPage = WorkEvidenceByPath + PeerOwnership + " AND w.work_id>$after ORDER BY w.path_key,w.work_id LIMIT $take;";
+    private const string WorkEvidenceByPath = "SELECT " + WorkColumns + " " + ClaimPeerFrom + WorkEvidenceWhere;
+    public const string PeerPathPage = WorkEvidenceByPath + "w.path_key=$key AND w.work_id>$after AND w.work_id<=$through AND w.work_origin='Acquired' ORDER BY w.path_key,w.work_id LIMIT $take;";
+    public const string OwnedPeerPathPage = WorkEvidenceByPath + PeerOwnership + " AND w.work_id>$after ORDER BY w.path_key,w.work_id LIMIT $take;";
     private const string ClaimedWork = "SELECT w.work_id FROM change_work w INDEXED BY work_identity WHERE " + IdentitySelection + " UNION ALL SELECT w.work_id FROM change_work w WHERE " + PathSelection + " UNION ALL SELECT w.work_id FROM change_work w WHERE w.parent_anchor=$anchor";
     internal const int EchoSubject = 1;
     internal const int EchoSaved = 2;

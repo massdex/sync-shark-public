@@ -70,6 +70,9 @@ public static partial class ChangeTableChecks
             scope, SelectionObservation.SettlesDropboxEcho, count), $"deleted={deleted} rows={count}");
         Console.WriteLine($"B214-CR2 settled trace deleted={deleted} rows={count} statements={statements}");
         Check.Require(result == (count, true), "B214-CR2: the measured page retires only its exact echo rows");
+        // Twelve application statements plus three implicit SQLite callbacks per row; eleven fixed page callbacks.
+        Check.Require(statements == 11 + 15 * count,
+            "B214-CR2: entry and tombstone pages meet the absolute trace budget, including retirement freshness");
     }
 
     private static void EchoStagedEarliest(StateStore store)

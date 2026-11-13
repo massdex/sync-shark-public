@@ -395,6 +395,9 @@ public static partial class ChangeRunnerChecks
         using var fixture = new Fixture(realStore: true);
         var selected = SeedEchoBindings(fixture, 1);
         var remote = fixture.Dropbox.FindById(selected.Identity!)!;
+        var saved = fixture.Inner.SyncedById(PairId, Side.Dropbox, remote.Id)!;
+        // The unresolved Local edit keeps the hold real; echo eligibility reads only the saved Dropbox match.
+        fixture.Local.Seed(fixture.Local.FindById(saved.LocalId)! with { Size = 2 }, [1, 2]);
         var subject = new IssueSubject([new IssueItem(Side.Dropbox, remote.Path, remote.Id)], Side.Dropbox);
         fixture.Inner.Commit(PairId, StateChange.Empty with
             { Raise = [(IssueKind.NameClash, TextKey.ClashNameTaken, remote.Path, subject)] });
@@ -501,7 +504,8 @@ public static partial class ChangeRunnerChecks
                 "B214-T5: an unbound parent still takes ordinary work when a descendant is bound: " + explicitKey);
             return;
         }
-        Check.Require(counters.EchoesSettled == 0 && reads.Count(read => read == path) == 1 && readBeforeDelete &&
+        // Baseline 4, B-214 delta 0: SelectionBranches.EnumerateBranchesAsync, ItemExecution.RunAdmittedAsync/ItemPreparation.ReobserveAsync, FolderSync.RunLiveFolderPlanAsync, FolderDeleteRunner.EligibleAsync each observes under its own admission lifetime.
+        Check.Require(counters.EchoesSettled == 0 && reads.Count(read => read == path) == 4 && readBeforeDelete &&
             await fixture.Local.ReadOneAsync(local.Path, default) is null,
             "B214-T5: a bound descendant needs fresh Dropbox absence before Local removal: " + explicitKey);
     }

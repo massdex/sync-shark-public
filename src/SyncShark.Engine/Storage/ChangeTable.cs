@@ -271,7 +271,7 @@ internal sealed partial class ChangeTable
             return null;
         }
         var pass = OpenPass(pair, pairId, expectedGeneration, scope);
-        if (NextCandidate(pair, pairId, ref pass, null, out _) is not { } candidate) return null;
+        if (NextCandidate(pair, pairId, ref pass, null, out _, out _) is not { } candidate) return null;
         _passes[pairId] = pass;
         return Selected(pairId, candidate, pass.Through);
     }
@@ -282,9 +282,11 @@ internal sealed partial class ChangeTable
             : new Pass(pair.Generation, BeforeFirstWork, through ?? Watermark(null), scope);
 
     private WorkRow? NextCandidate(PairRow pair, string pairId, ref Pass pass,
-        IReadOnlySet<long>? staged, out bool flush)
+        IReadOnlySet<long>? staged, out bool flush,
+        out (RenameContinuation? Rename, bool Episode, long? Issue)? responsibility)
     {
         flush = false;
+        responsibility = null;
         while (Rows(null, StateSchema.SelectWork, (StateSchema.ParamPairRow, pair.Row),
                    (StateSchema.ParamGeneration, pass.Generation), (StateSchema.ParamAfter, pass.After),
                    (StateSchema.ParamThrough, pass.Through), (StateSchema.ParamTake, StateSchema.OneRow)).FirstOrDefault()
@@ -293,8 +295,8 @@ internal sealed partial class ChangeTable
             var after = pass.After;
             pass = pass with { After = candidate.WorkId };
             if (pass.Attempted?.Contains(candidate.WorkId) == true) continue;
-            BootstrapRename(pairId, pair, candidate, pass.Through);
-            if (Held(pair.Row, candidate.WorkId)) continue;
+            BootstrapRename(pairId, pair, candidate, pass.Through, out var known);
+            if (Held(pair.Row, candidate.WorkId, out responsibility, staged is null ? null : known)) continue;
             var first = Earliest(pair.Row, pairId, candidate, candidate.WorkId);
             if (first.WorkId != candidate.WorkId)
             {
@@ -341,13 +343,13 @@ internal sealed partial class ChangeTable
         while (work < pageSize)
         {
             var after = pass.After;
-            if (NextCandidate(pair, pairId, ref pass, staged, out var flush) is not { } row)
+            if (NextCandidate(pair, pairId, ref pass, staged, out var flush, out var responsibility) is not { } row)
             {
                 more = flush;
                 break;
             }
             var (selection, examined) = EchoSelection(pair, row, pass, claimed, settles, pageSize,
-                local!, localDomain, through);
+                local!, localDomain, through, responsibility);
             work += 1 + examined;
             if (selection is null)
             {
@@ -371,7 +373,8 @@ internal sealed partial class ChangeTable
     // Candidate eligibility is separate from walking and retirement; only the walker moves After.
     private (WorkSelection? Settle, int Examined) EchoSelection(PairRow pair, WorkRow row, Pass pass,
         PrefixSet claimed, Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize,
-        SourceRow local, string localDomain, long through)
+        SourceRow local, string localDomain, long through,
+        (RenameContinuation? Rename, bool Episode, long? Issue)? responsibility)
     {
         if (row.Side != Side.Dropbox || row.Obligation is not null || row.Notice is null ||
             row.Parent is not null || row.DiscoveryRequired || pass.Suspended?.ContainsValue(row.WorkId) == true) return (null, 0);
@@ -379,8 +382,9 @@ internal sealed partial class ChangeTable
         if (notice.OldPath is not null) return (null, 0);
         var selection = ToSelection(pair.Id, row, through: row.WorkId);
         var saved = SelectionBaseline(null, selection);
-        if (notice.Kind != ChangeKind.Deleted && !settles(notice, saved, false) || OwnsResponsibility(row.WorkId) ||
-            ReadRenameContinuation(null, pair.Row, row.WorkId) is not null ||
+        if (notice.Kind != ChangeKind.Deleted && !settles(notice, saved, false) ||
+            OwnsResponsibility(row.WorkId, responsibility is { } known ? known.Issue is not null : null) ||
+            (responsibility is { } read ? read.Rename : ReadRenameContinuation(null, pair.Row, row.WorkId)) is not null ||
             Read(null, StateSchema.ReadRenameRemoval, static reader => reader.GetString(StateSchema.FirstColumn),
                 (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamWork, row.WorkId)).Any()) return (null, 0);
         var entry = notice.Kind == ChangeKind.Changed;
@@ -495,14 +499,21 @@ internal sealed partial class ChangeTable
             null, workId, null, null);
     }
 
-    private void BootstrapRename(string pairId, PairRow pair, WorkRow work, long through)
+    private void BootstrapRename(string pairId, PairRow pair, WorkRow work, long through,
+        out (RenameContinuation? Rename, bool Episode, long? Issue)? responsibility)
     {
+        responsibility = null;
         if (work.Notice is null || work.Identity is null || ReadRenameContinuation(null, pair.Row, work.WorkId) is not null ||
             Read(null, StateSchema.ItemEpisodeByWork, static reader => reader.GetInt64(StateSchema.EpisodeByWorkIssueId),
                 (StateSchema.ParamWork, work.WorkId)).Any()) return;
         var issueId = Read(null, StateSchema.WorkIssue, static reader => Number(reader, StateSchema.WorkIssueId),
             (StateSchema.ParamWork, work.WorkId)).FirstOrDefault();
-        if (issueId is null || IssueTable.ById(_connection, pairId, issueId.Value) is not { } issue ||
+        if (issueId is null)
+        {
+            responsibility = (null, false, null);
+            return;
+        }
+        if (IssueTable.ById(_connection, pairId, issueId.Value) is not { } issue ||
             !IssuePolicy.RenameClashMatches(issue, work.Side, work.Key, work.Identity)) return;
         var notice = StateEncoding.DecodeEnvelope<ChangeNotice>(work.Notice)!;
         var selection = ToSelection(pairId, work, through);
@@ -705,7 +716,7 @@ internal sealed partial class ChangeTable
         {
             var owner = Earliest(row.PairRow, pairId, ParentOwner(row.PairRow, row), through);
             if (owner.WorkId <= through && seen.Add(owner.WorkId) &&
-                (coveredThrough is not null || !Held(owner.PairRow, owner.WorkId)))
+                (coveredThrough is not null || !Held(owner.PairRow, owner.WorkId, out _)))
                 yield return Selected(pairId, owner, through);
         }
     }
@@ -831,9 +842,9 @@ internal sealed partial class ChangeTable
         !OwesRepair(local) && !OwesRepair(dropbox) && dropbox is { Provenance: not null } &&
         !string.IsNullOrEmpty(dropbox.Cursor) ? Domain(roots, Side.Dropbox) : null;
 
-    private bool OwnsResponsibility(long workId) =>
-        Read(null, StateSchema.WorkIssue, static reader => reader.GetInt64(StateSchema.FirstColumn),
-            (StateSchema.ParamWork, workId)).Any() ||
+    private bool OwnsResponsibility(long workId, bool? hasIssue = null) =>
+        (hasIssue ?? Read(null, StateSchema.WorkIssue, static reader => reader.GetInt64(StateSchema.FirstColumn),
+            (StateSchema.ParamWork, workId)).Any()) ||
         Read(null, StateSchema.WorkHasChildren, static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
             (StateSchema.ParamParent, workId)).First();
 
@@ -1984,18 +1995,23 @@ internal sealed partial class ChangeTable
         (StateSchema.ParamWork, work), (StateSchema.ParamPairRow, pair)).Any();
 
     // An in-use lifecycle waits for its real opportunity; any other association follows the issue's own hold.
-    private bool Held(long pair, long work)
+    private bool Held(long pair, long work, out (RenameContinuation? Rename, bool Episode, long? Issue)? responsibility,
+        (RenameContinuation? Rename, bool Episode, long? Issue)? known = null)
     {
-        if (Read(null, StateSchema.ItemEpisodeByWork,
+        responsibility = null;
+        if (known?.Episode ?? Read(null, StateSchema.ItemEpisodeByWork,
                 static reader => reader.GetInt64(StateSchema.EpisodeByWorkIssueId),
                 (StateSchema.ParamWork, work)).Any())
             return true;
-        if (ReadRenameContinuation(null, pair, work) is { Clash: { } captured } &&
+        var rename = known is { } read ? read.Rename : ReadRenameContinuation(null, pair, work);
+        if (rename is { Clash: { } captured } &&
             Read(null, StateSchema.RenameClashCurrent, IssueTable.ReadIssue,
                 (StateSchema.ParamPairRow, pair), (StateSchema.ParamWork, work)).FirstOrDefault() is { } current &&
             !current.Ignored && !current.Dismissed && current.Matches(captured)) return false;
-        return Read(null, StateSchema.WorkIssue, static reader => Number(reader, StateSchema.WorkIssueId),
-                (StateSchema.ParamWork, work)).FirstOrDefault() is { } issue &&
+        var issueId = known is { } facts ? facts.Issue : Read(null, StateSchema.WorkIssue,
+            static reader => Number(reader, StateSchema.WorkIssueId), (StateSchema.ParamWork, work)).FirstOrDefault();
+        responsibility = (rename, false, issueId);
+        return issueId is { } issue &&
             Read(null, StateSchema.ValidateIssue, static reader => IssuePolicy.Holds(
                     (IssueKind)reader.GetInt32(StateSchema.ValidIssueKind),
                     StateEncoding.ReadEnum<TextKey>(reader, StateSchema.ValidIssueCause),
@@ -2012,7 +2028,7 @@ internal sealed partial class ChangeTable
         while (Rows(null, ReadIdentity(row), Membership(pair, group, row,
             (StateSchema.ParamAfter, after), (StateSchema.ParamTake, StateSchema.OneRow))).FirstOrDefault() is { } first)
         {
-            if (first.WorkId == row.WorkId || !Held(pair, first.WorkId)) return first;
+            if (first.WorkId == row.WorkId || !Held(pair, first.WorkId, out _)) return first;
             after = first.WorkId;
         }
         return row;
