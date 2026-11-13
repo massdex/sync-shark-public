@@ -39,7 +39,7 @@ internal static class DuplicateRepairs
         using var reader = command.ExecuteReader();
         var rows = new List<SyncedEntry>();
         while (reader.Read()) rows.Add(StateEncoding.ReadSynced(reader, reader.GetString(0), 1));
-        return rows.OrderBy(row => row.LocalKey, PathNames.Comparer).ToArray();
+        return rows.OrderBy(row => row.LocalKey, StringComparer.Ordinal).ToArray();
     }
 
     private static void RecordGroup(SqliteConnection connection, SqliteTransaction transaction, long pair,
