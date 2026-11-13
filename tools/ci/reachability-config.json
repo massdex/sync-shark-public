@@ -10,7 +10,12 @@
       "tools/ci/Reachability/Program.cs",
       "tools/ci/Reachability/Report.cs",
       "tools/ci/Reachability/WpfHelper.cs",
-      "tools/ci/reachability-config.json"
+      "tools/ci/reachability-config.json",
+      "VERSION-MAP.md",
+      ".gitattributes",
+      "CHANGELOG.md",
+      "tools/ci/Reachability/packages.lock.json",
+      "tools/ci/run-reachability.ps1"
     ]
   },
   "Cuts": [

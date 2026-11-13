@@ -261,12 +261,16 @@ internal sealed class Analysis(string root, Config config)
     }
     internal IEnumerable<Cut> CutsFor(Edge edge) => spans.Where(s => s.Key.Path == edge.Path && s.Value.Contains(edge.Position)).Select(s => s.Key);
     internal bool Allowed(Edge edge, string profile) => profile == "ALL" || !CutsFor(edge).Any(c => !(profile == "GUI" && c.Gui));
-    internal Dictionary<string, (string? Parent, string Reason)> Walk(string profile, IEnumerable<string>? extraRoots = null, bool ignoreWpfHelpers = false)
+    internal Dictionary<string, (string? Parent, string Reason)> Walk(string profile, IEnumerable<string>? extraRoots = null, bool ignoreWpfHelpers = false, ISet<string>? excludedRootReasons = null)
     {
         var reached = new Dictionary<string, (string?, string)>();
         var queue = new Queue<string>();
-        foreach (var node in Types.Values.Where(t => t.Product && (t.Symbol.ToDisplayString() == "Massdex.SyncShark.ProcessEntry" || profile == "ALL" && t.Roots.Count != 0)))
-            if (reached.TryAdd(node.Id, (null, node.Roots.FirstOrDefault() ?? "entry"))) queue.Enqueue(node.Id);
+        foreach (var node in Types.Values.Where(t => t.Product))
+        {
+            var reason = node.Roots.FirstOrDefault(r => excludedRootReasons?.Contains(r) != true);
+            if ((node.Symbol.ToDisplayString() == "Massdex.SyncShark.ProcessEntry" || profile == "ALL" && reason is not null) &&
+                reached.TryAdd(node.Id, (null, reason ?? "entry"))) queue.Enqueue(node.Id);
+        }
         foreach (var id in extraRoots ?? []) if (reached.TryAdd(id, (null, "route"))) queue.Enqueue(id);
         while (queue.TryDequeue(out var id))
         foreach (var edge in Types[id].Edges.Where(e => Allowed(e, profile) && !(ignoreWpfHelpers && WpfHelpers.Contains(id))))

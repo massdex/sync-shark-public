@@ -84,6 +84,15 @@ internal sealed class Report(Analysis graph)
         static string Quote(string value) => "\"" + value.Replace("\"", "\"\"") + "\"";
         File.WriteAllLines(Path.Combine(output, "reachability.csv"), new[] { "path,projects,type,label,reasons,risk,why,lines" }.Concat(rows.OrderBy(r => r.path).ThenBy(r => r.type).Select(r => string.Join(",", new[] { r.path, r.projects, r.type, r.label, r.reasons, r.risk, r.why, r.lines.ToString() }.Select(Quote)))));
         var files = rows.Where(r => r.type == "").ToArray();
+        var markdownReasons = graph.Types.Values.SelectMany(t => t.Roots).Where(reason => {
+            if (!reason.StartsWith("component:text:")) return false;
+            var path = reason["component:text:".Length..];
+            return path.EndsWith(".md", StringComparison.OrdinalIgnoreCase) &&
+                (path.StartsWith("docs/", StringComparison.Ordinal) || Path.GetFileName(path).StartsWith("README", StringComparison.OrdinalIgnoreCase));
+        }).ToHashSet();
+        var withoutMarkdown = graph.Walk("ALL", excludedRootReasons: markdownReasons);
+        var markdownOnly = files.Where(f => f.label is "LIVE" or "GUI-ONLY" or "ROUTE-ONLY" &&
+            graph.Files[f.path].Any(t => all.ContainsKey(t.Id)) && !graph.Files[f.path].Any(t => withoutMarkdown.ContainsKey(t.Id))).ToArray();
         var unknownFiles = files.Where(r => r.label == "UNKNOWN").Select(row => {
             var textLines = row.lines;
             if (!graph.Files.ContainsKey(row.path))
@@ -98,6 +107,10 @@ internal sealed class Report(Analysis graph)
             valid = true, candidateOnly = true, semantics = "LIVE means conservatively retained; DEAD is not deletion authority.",
             counts = files.GroupBy(r => r.label).ToDictionary(g => g.Key, g => new { files = g.Count(), lines = g.Sum(r => (long)r.lines) }),
             types = labels.Values.GroupBy(l => l).ToDictionary(g => g.Key, g => g.Count()),
+            markdownOnlyKeeps = new {
+                explanation = "Reporting-only ALL walk without docs/**/*.md and README*.md text root reasons; actual retention is unchanged. docs/ text was already outside the scan.",
+                rootReasons = markdownReasons.OrderBy(r => r), files = markdownOnly.Length, lines = markdownOnly.Sum(f => (long)f.lines),
+                topFiles = markdownOnly.OrderByDescending(f => f.lines).ThenBy(f => f.path).Take(10).Select(f => new { f.path, f.lines, f.reasons }) },
             unknownExplanation = "UNKNOWN retains tests or ineligible assets, not compiler errors (which fail the run). Reasons overlap. Text lines for assets are measured only in this breakdown; class totals retain their prior zero-line convention for assets. Binary assets report zero text lines.",
             unknownBreakdown = unknownFiles.SelectMany(f => f.row.reasons.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(reason => (reason, file: f)))
                 .GroupBy(x => x.reason).ToDictionary(g => g.Key, g => new {
