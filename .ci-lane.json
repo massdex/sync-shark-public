@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "engine-host",
+    "scenarios-offline"
+  ],
+  "core": [],
+  "ui": []
+}
