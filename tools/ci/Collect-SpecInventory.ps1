@@ -51,9 +51,14 @@ foreach ($project in $projects) {
     $buildArguments = @((Join-Path $Root $project), '-nologo', '-v:quiet', '-p:SpecInventory=true',
         "-p:SpecInventoryOutput=$Output", '-p:Configuration=Debug', '-p:RestoreLockedMode=false',
         '-p:EnableWindowsTargeting=true', "-p:SyncSharkZigPath=$env:ZIG_EXE")
+    if ($name -in @('SyncShark', 'SyncShark.UiFixture')) {
+        $buildArguments += "-p:SyncSharkBuildRoot=$(Join-Path $env:GITHUB_WORKSPACE 'build/ci')"
+    }
+    # Calibration only: GitHub's explicit job timeout limits App to the remaining job budget.
+    $buildSeconds = if ($name -eq 'SyncShark') { $timeouts.appCalibrationSeconds } else { $timeouts.buildSeconds }
     # Deliberately do not disable TreatWarningsAsErrors. Inventory captures reports even on build failure.
     Invoke-InventoryTool "roslyn-$name" $analyzerVersions sarif @("$name.sarif") @() @(0) {
-        & $processRunner -Executable dotnet -Arguments (@('build') + $buildArguments) -OutputPath "$Output/$name.build.log" -TimeoutSeconds $timeouts.buildSeconds
+        & $processRunner -Executable dotnet -Arguments (@('build') + $buildArguments) -OutputPath "$Output/$name.build.log" -TimeoutSeconds $buildSeconds
         $buildExit = $LASTEXITCODE
         & $processRunner -Executable dotnet -Arguments (@('msbuild') + $buildArguments + '-getItem:Compile') -OutputPath "$Output/$name.compile.json" -TimeoutSeconds $timeouts.buildSeconds
         if ($LASTEXITCODE -ne 0 -and $buildExit -eq 0) { $buildExit = $LASTEXITCODE }
