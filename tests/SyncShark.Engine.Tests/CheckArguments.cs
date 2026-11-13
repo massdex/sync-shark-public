@@ -4,6 +4,7 @@ namespace Massdex.SyncShark.Engine.Tests;
 public static class CheckArguments
 {
     public const string Flag = "--engine-checks";
+    public const string LiteralSitesFlag = "--literal-sites";
     /// <summary>Test-only: runs an engine CLI command through the same SyncCli call the app makes (live test pair).</summary>
     public const string CliFlag = "--cli";
     /// <summary>Test-only: runs one named measurement that no full CI run includes (its own dispatch workflow does).</summary>

@@ -92,7 +92,7 @@ internal sealed class Scenario : IDisposable
     private LiveDropboxHandler? handlerForCase;
     private Massdex.SyncShark.PilotInstanceLock? authority;
     private EngineHost? host;
-    private string? failure;
+    private Exception? failure;
     private int runNumber;
     private string[]? cachedTree;
     private int callStart;
@@ -310,7 +310,7 @@ internal sealed class Scenario : IDisposable
     }
 
     /// <summary>Records the failure for the retained summary.</summary>
-    public void Fail(Exception error) => failure = error.ToString();
+    public void Fail(Exception error) => failure = error;
 
     /// <summary>Replaces the pair's exclusions and rebuilds the two sides on the new scope.</summary>
     public void SetExclusions(params Exclusion[] exclusions)
@@ -885,7 +885,13 @@ internal sealed class Scenario : IDisposable
         }
         finally
         {
-            Release();
+            // A teardown error after a failed case is reported with that failure, never in its place (§4.1).
+            try { Release(); }
+            catch (Exception teardown) when (failure is not null)
+            {
+                throw new AggregateException("the case and its teardown both failed (kept: " + Root + ")",
+                    failure, teardown);
+            }
             if (live is null && failure is null)
                 foreach (var data in new[] { LocalRoot, Recovery, Removed }.Concat(addedLocalRoots))
                 {
@@ -1387,6 +1393,7 @@ internal sealed class Scenario : IDisposable
         {
             var retired = base.EndWorkPass(pairId);
             Interlocked.Increment(ref EndedWorkPasses);
+            SignalCompleted(pairId);
             PassEnded?.Invoke();
             return retired;
         }
@@ -1486,13 +1493,14 @@ internal sealed class Scenario : IDisposable
             }
         }
 
-        private void SignalCompleted(string pairId, string completedKey)
+        // A pending file's durable hash can become correct through any settlement route, so every completion call
+        // checks every registered key against the durable outcome instead of only the key that call named.
+        private void SignalCompleted(string pairId)
         {
             lock (gate)
             {
                 foreach (var (key, expected) in completions.ToArray())
-                    if (PathNames.IsSelfOrUnderKey(key, completedKey) &&
-                        Inner.SyncedByKey(pairId, Side.Local, key)?.DropboxContentHash == expected.Hash)
+                    if (Inner.SyncedByKey(pairId, Side.Local, key)?.DropboxContentHash == expected.Hash)
                     {
                         completions.Remove(key);
                         expected.Signal.TrySetResult(System.Diagnostics.Stopwatch.GetTimestamp());
@@ -1504,8 +1512,7 @@ internal sealed class Scenario : IDisposable
         {
             var completed = base.CompleteWork(selection, peer);
             if (completed) WorkCompleted?.Invoke(selection);
-            var saved = Inner.SyncedByKey(selection.PairId, selection.Side, selection.Key);
-            if (saved is not null) SignalCompleted(selection.PairId, saved.LocalKey);
+            SignalCompleted(selection.PairId);
             return completed;
         }
 
@@ -1517,8 +1524,7 @@ internal sealed class Scenario : IDisposable
         {
             base.CompleteItemAttempt(expected, registeredAttemptId, change, completedPending, selection, committedIssue,
                 settledIssue);
-            foreach (var saved in change.Record)
-                SignalCompleted(expected.PairId, saved.LocalKey);
+            SignalCompleted(expected.PairId);
         }
     }
 

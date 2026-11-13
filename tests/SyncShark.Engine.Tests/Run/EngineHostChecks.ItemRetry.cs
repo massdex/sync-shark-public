@@ -57,6 +57,8 @@ public static partial class EngineHostChecks
                 await OrdinaryRepairItemWaitAsync(root, memory, shape).ConfigureAwait(false);
         }
         await RepairAdmissionRefusalPropagatesAsync(root).ConfigureAwait(false);
+        await DrainedOrdinaryDispatchIsStaleAsync(root, stop: false).ConfigureAwait(false);
+        await DrainedOrdinaryDispatchIsStaleAsync(root, stop: true).ConfigureAwait(false);
         await ExplicitRepairBesideRunningRepairAsync(root, afterFinish: false).ConfigureAwait(false);
         await ExplicitRepairBesideRunningRepairAsync(root, afterFinish: true).ConfigureAwait(false);
     }
@@ -302,6 +304,54 @@ public static partial class EngineHostChecks
             drain.Release();
         }
         await pausing.WaitAsync(HookBound).ConfigureAwait(false);
+    }
+
+    // B-220: a pause or stop drain refuses an ordinary dispatch beside a caller-stopped Repair as stale, before the drain
+    // delivers cancellation; an uncancelled OperationCanceledException here escaped AutoSync's stop classification.
+    private static async Task DrainedOrdinaryDispatchIsStaleAsync(string root, bool stop)
+    {
+        var cause = stop ? "stop" : "pause";
+        await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "drained-dispatch-" + cause), turn: false)
+            .ConfigureAwait(false);
+        rig.Owe();
+        await using var repair = rig.HoldRepair();
+        await repair.Finishing.WaitAsync(HookBound).ConfigureAwait(false);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var go = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var uncancelled = false;
+        var dispatch = rig.Host.DispatchAsync(rig.PairId, async (registration, _, generation, token) =>
+        {
+            entered.TrySetResult();
+            await go.Task.ConfigureAwait(false);
+            uncancelled = !token.IsCancellationRequested;
+            rig.Host.RequireGeneration(registration, rig.PairId, generation);
+            return true;
+        }, default);
+        await entered.Task.WaitAsync(HookBound).ConfigureAwait(false);
+        var drain = new DeferredSynchronizationContext();
+        var previous = SynchronizationContext.Current;
+        Task draining;
+        SynchronizationContext.SetSynchronizationContext(drain);
+        try { draining = stop ? rig.Host.DisposeAsync().AsTask() : rig.Host.PauseAsync(rig.PairId, default); }
+        finally { SynchronizationContext.SetSynchronizationContext(previous); }
+        try
+        {
+            go.TrySetResult();
+            Exception? refusal = null;
+            try { await dispatch.WaitAsync(HookBound).ConfigureAwait(false); }
+            catch (Exception error) { refusal = error; }
+            Check.Require(refusal is LiveAdmissionStaleException && uncancelled,
+                $"B-220 a {cause} drain refuses an ordinary dispatch beside a caller-stopped Repair as stale before " +
+                $"cancellation (refusal {refusal?.GetType().Name ?? "none"}, token uncancelled {uncancelled})");
+        }
+        finally
+        {
+            go.TrySetResult();
+            drain.Release();
+            // The held Repair is the drain's other registration; it must end before the drain can complete.
+            await repair.DisposeAsync().ConfigureAwait(false);
+        }
+        await draining.WaitAsync(HookBound).ConfigureAwait(false);
     }
 
     // C1: a Repair with no temporary turn clears a pre-Repair item row, and its success Kick dispatches at once. A first
@@ -1189,6 +1239,7 @@ public static partial class EngineHostChecks
             private readonly TaskCompletionSource _turned = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private readonly TaskCompletionSource _completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
             private int _proceeds;
+            private volatile string _phase = "before FinishRepair hook";
 
             internal HeldRepair(ItemRig rig, Exception? failure, bool window)
             {
@@ -1196,8 +1247,10 @@ public static partial class EngineHostChecks
                 {
                     rig.BeforeFinish = null;
                     rig.MarkAttempts();
+                    _phase = "before-finish hold entered";
                     _finishing.TrySetResult();
                     rig.Hold(_turned.Task, "the held Repair reaches FinishRepair");
+                    _phase = "before-finish hold returned; store call next";
                     if (failure is not null) throw failure;
                 };
                 // A FinishRepair failure ends the window wait with that error, not a timeout.
@@ -1206,7 +1259,9 @@ public static partial class EngineHostChecks
                 {
                     rig.AfterFinish = null;
                     // Changed after the Repair's scans, so only the retained turn's later work carries it.
+                    _phase = "after-finish hook entered; retained write next";
                     rig.WriteRetained();
+                    _phase = "retained write returned; window signal next";
                     if (!window) return;
                     _window.TrySetResult();
                     rig.Hold(_completed.Task, "the held Repair completes after FinishRepair");
@@ -1215,6 +1270,7 @@ public static partial class EngineHostChecks
 
             internal Task Finishing => _finishing.Task;
             internal Task Window => _window.Task;
+            internal string Phase => _phase;
 
             // The first call lets FinishRepair run; the second ends the window after it.
             internal void Proceed() => (Interlocked.Increment(ref _proceeds) == 1 ? _turned : _completed).TrySetResult();
@@ -1584,7 +1640,15 @@ public static partial class EngineHostChecks
             {
                 await repair.Finishing.WaitAsync(HookBound).ConfigureAwait(false);
                 repair.Proceed();
-                await repair.Window.WaitAsync(HookBound).ConfigureAwait(false);
+                try
+                {
+                    await repair.Window.WaitAsync(HookBound).ConfigureAwait(false);
+                }
+                catch (TimeoutException error)
+                {
+                    throw new TimeoutException(
+                        $"B-141 completed Repair window {what}; last phase: {repair.Phase}; {error.Message}", error);
+                }
                 rig.BeforeFinish = () =>
                 {
                     rig.BeforeFinish = null;

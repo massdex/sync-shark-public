@@ -23,6 +23,12 @@
       6. requires ratchet, Core layout and Engine dependencies/literals/strings
          evidence; missing or skipped checks print INCOMPLETE and exit 2.
 
+    Run this gate on a checkout of the CI run's exact public head, not the private tree.
+    The mirror changes source hashes; its temporary export is removed after publication.
+      gh run download <run> -R <ci-repository> -n literal-sites --dir <artifact-dir>
+      $env:RATCHET_LITERAL_SITES = '<artifact-dir>/literal-sites.jsonl'
+    CI is authoritative. Use its same-run artifact; missing/mismatched evidence is INCOMPLETE. Do not build locally.
+
     This is a helper, not a replacement for review: it reports lines to look at.
 
 .PARAMETER Base
