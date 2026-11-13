@@ -1,0 +1,10 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "b210-repro"
+  ],
+  "core": [],
+  "ui": []
+}
