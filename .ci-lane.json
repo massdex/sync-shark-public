@@ -1,0 +1,17 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "dependencies",
+    "literals",
+    "paths",
+    "strings",
+    "transport"
+  ],
+  "core": [
+    "--cli-checks"
+  ],
+  "ui": []
+}
