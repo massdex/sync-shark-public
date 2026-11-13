@@ -93,6 +93,12 @@ public static class CheckRegistry
             Run.LiveContextChecks.Run],
         ["random-sequence"] = [Run.RandomSequenceChecks.Run],
         ["budget"] = [Run.CallBudgetChecks.Run, Run.StorageCostChecks.Run, Executor.ActionExecutorChecks.FileSizedForgetCosts],
+        // The public workflow validates that a full run can shard the budget group; this probe branch supplies the
+        // numeric keys it expects over the same actions.
+        ["budget-1"] = [Run.CallBudgetChecks.Run],
+        ["budget-2"] = [Run.StorageCostChecks.Run],
+        ["budget-3"] = [Executor.ActionExecutorChecks.FileSizedForgetCosts],
+        ["budget-4"] = [Run.CallBudgetChecks.RunSpeed],
         // Its own key: the integrated budget catalog replaces this literal budget entry.
         ["projection-cost"] = [Storage.ChangeTableChecks.SelectionProjectionCosts, Storage.ChangeTableChecks.ReplacedRetirementCosts, Storage.ChangeTableChecks.B198MemberCostProbe,
             Executor.ChangeRunnerChecks.VanishedWaitCosts, Executor.ChangeRunnerChecks.RunB179Costs],
