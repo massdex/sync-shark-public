@@ -149,7 +149,6 @@ public sealed partial class StateStore : IStateStore
             _isRegisteredItemAttempt?.Invoke(Guid.Empty, pairId, episode.Token.PairGeneration, episode.Token.Subject,
                 episode.Token) == true || ResponsibilityRetained(transaction, pair, issue, episode) ||
             IssueTable.ClearItemEpisode(_connection, transaction, pair, episode.Token) == 0) return false;
-        SettleEpisodeWork(transaction, pair, episode);
         return true;
     }
 
