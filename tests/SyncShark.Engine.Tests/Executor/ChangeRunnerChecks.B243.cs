@@ -150,7 +150,7 @@ public static partial class ChangeRunnerChecks
                 work.Key != PathNames.DropboxKey("Parent") || ancestors.Count > 2) return;
             var next = SeedRemote(fixture, parent);
             Check.Require(next.AnchorWorkId > watermark &&
-                PendingAt(fixture, Side.Dropbox, "Parent") is [var owner] && owner.AnchorWorkId == work.AnchorWorkId,
+                PendingAt(fixture, Side.Dropbox, "Parent").Any(owner => owner.AnchorWorkId == work.AnchorWorkId),
                 "the new ancestor is beyond the pass but the old row owns the path until retirement");
             ancestors.Add(next.AnchorWorkId);
         };

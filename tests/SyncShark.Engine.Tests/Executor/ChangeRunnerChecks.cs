@@ -2104,7 +2104,7 @@ public static partial class ChangeRunnerChecks
     }
 
     // HARD-3b (HARD-R2-1): a deferred folder plan freezes and keeps an edited Local child as a released survivor whose
-    // first observation fails with proven no effect. The plan records its root selection, and the end-of-run released
+    // first Dropbox write fails with proven no effect. The plan records its root selection, and the end-of-run released
     // follow-up pass honours that record at the operation's saved root, so the survivor is observed once in the run
     // (red: drop the root check in ContinueReleasedFollowUpsAsync -> a second observation in the same run). Both stores.
     private static async Task TemporarySurvivorOncePerRunAsync()
@@ -2129,16 +2129,23 @@ public static partial class ChangeRunnerChecks
             if (real) RepairDone(fixture);
             else fixture.Hooks.RepairDone = true;
             ClearObligations(fixture);
-            // Only reads after the plan froze are survivor observations; the first one fails.
+            // Count survivor observations after the plan froze; only its first Dropbox write fails.
             var observations = 0;
+            var writes = 0;
             fixture.LocalView = new ProxySide(fixture.Local)
             {
-                ReadFault = path =>
+                OnRead = path =>
                 {
-                    if (path != Plain || !fixture.Inner.ActiveFolderRemovals(PairId, default).Any()) return null;
-                    return ++observations != 1 ? null : new ItemFailedException(Plain, TextKey.ReadLocalFailed, null)
-                        { Disposition = FailureDisposition.TemporaryNoEffect };
+                    if (path == Plain && fixture.Inner.ActiveFolderRemovals(PairId, default).Any()) observations++;
                 }
+            };
+            fixture.DropboxView = new ProxySide(fixture.Dropbox)
+            {
+                BlockPublish = (path, _) =>
+                    path == Plain && fixture.Inner.ActiveFolderRemovals(PairId, default).Any() && ++writes == 1
+                        ? Task.FromException(new ItemFailedException(Plain, TextKey.DropboxRefused, null)
+                            { Disposition = FailureDisposition.TemporaryNoEffect })
+                        : Task.CompletedTask
             };
             var pending = new HashSet<long> { 5 };
             var attempts = new TemporaryAttempts { Pending = pending.Contains };
