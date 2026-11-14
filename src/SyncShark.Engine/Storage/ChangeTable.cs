@@ -2116,7 +2116,7 @@ internal sealed partial class ChangeTable
                 static reader => reader.GetInt64(StateSchema.EpisodeByWorkIssueId),
                 (StateSchema.ParamWork, work)).Any())
             return true;
-        var rename = known is { } read ? read.Rename : ReadRenameContinuation(null, pair, work);
+        var rename = ReadRenameContinuation(null, pair, work);
         if (rename is { Clash: { } captured } &&
             Read(null, StateSchema.RenameClashCurrent, IssueTable.ReadIssue,
                 (StateSchema.ParamPairRow, pair), (StateSchema.ParamWork, work)).FirstOrDefault() is { } current &&
