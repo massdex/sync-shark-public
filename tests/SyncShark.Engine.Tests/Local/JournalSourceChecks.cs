@@ -3,6 +3,8 @@ using System.Runtime.InteropServices;
 using Massdex.SyncShark;
 using Massdex.SyncShark.Engine;
 using Massdex.SyncShark.Engine.Local;
+using Massdex.SyncShark.Engine.Storage;
+using Massdex.SyncShark.Engine.Tests.TestDoubles;
 using RunLog = Massdex.SyncShark.Engine.Run.RunLog;
 using EngineHost = Massdex.SyncShark.Engine.Run.EngineHost;
 
@@ -85,6 +87,10 @@ public static class JournalSourceChecks
             AliasPageClassification(baseRoot.FullName);
             await RetainedPageRaceAsync(baseRoot.FullName);
             await FailedCatchUpResumesWithoutDebtAsync(baseRoot.FullName);
+            await ResumeStoreWorkFollowsTheIntervalAsync(baseRoot.FullName);
+            SavedLookupShapesIgnoreSavedSize(baseRoot.FullName);
+            await ShortResumeDoesNotConfirmAsync(baseRoot.FullName, false);
+            await ShortResumeDoesNotConfirmAsync(baseRoot.FullName, true);
             await FailedResumeRebasesWithDebtAsync(baseRoot.FullName);
             foreach (var kind in new[] { "JournalChanged", "BelowRetention", "AheadOfEnd" })
                 await FailedSourceOutsideRetentionRebasesAsync(baseRoot.FullName, kind);
@@ -1526,13 +1532,147 @@ public static class JournalSourceChecks
             return (member.PairId, (long)0, source.Epoch, source.Revision, false);
         }).ToArray();
 
-    private static async Task FailRetainedPageAsync(Scenario scenario, string name, bool finite)
+    private static async Task ShortResumeDoesNotConfirmAsync(string baseRoot, bool staleAgain)
     {
-        var path = Path.Combine(scenario.Root, name);
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "short-resume-" + staleAgain, "A", "B");
+        RequireRetainedSpan(scenario);
+        await FailRetainedPageAsync(scenario, "first.txt", finite: true, scenario.RootOf("A"));
+        var outside = Directory.CreateDirectory(Path.Combine(scenario.Root, "outside")).FullName;
+        File.Move(Path.Combine(scenario.RootOf("A"), "first.txt"), Path.Combine(outside, "pending.txt"));
+        var lower = NtfsUsnJournal.ReadCheckpoint(scenario.Root).NextUsn;
+        var attempts = 0;
+        var readbacks = 0;
+        var refreshes = scenario.Host.RefreshCalls;
+        var reads = scenario.Host.RefreshReads;
+        scenario.StoreHook.Before = method =>
+        {
+            if (method.Name == nameof(IStateStore.ReadJournal)) readbacks++;
+            if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+            attempts++;
+            if (attempts > 1 && !staleAgain) return;
+            var source = scenario.StoreHook.Inner.ReadSource("B", Side.Local)!.Value;
+            scenario.StoreHook.Inner.AdvanceSource("B", Side.Local, 0, source.Epoch, source.Revision,
+                source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
+                source.Provenance, source.Cursor, source.Obligation);
+        };
+        LocalCatchUp? returned = null;
+        Exception? caught = null;
+        try { returned = await scenario.Source.CatchUpForPairAsync("A", 0, default); }
+        catch (Exception error) { caught = error; }
+        scenario.StoreHook.Before = null;
+        Check.Require(staleAgain ? caught is LiveAdmissionStaleException : caught is null &&
+            returned is not null && returned.Checkpoint.NextUsn < lower,
+            "a stale terminal publication either returns short or refuses, never confirms the captured end");
+        Check.Require(attempts == 2 && readbacks == 1 && scenario.Host.RefreshCalls - refreshes == 1 &&
+            scenario.Host.RefreshReads - reads == 2,
+            "short capture makes two publications, one readback and one two-member refresh");
+        // Bring the fixture's member fence current after the deliberately refused second publication.
+        if (staleAgain) scenario.Host.Refresh(scenario.Host.Snapshot(), null);
+        var revision = Revision(scenario, "A");
+        await FailRetainedPageAsync(scenario, "fresh.txt", finite: false, scenario.RootOf("A"));
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap && Revision(scenario, "A") == revision + 1,
+            "a failure after a short or refused resume still forces a replacement base");
+    }
+
+    private sealed class JournalProgress : IProgress<RunEvent>
+    {
+        internal long Records;
+        internal int Reports;
+        public void Report(RunEvent value)
+        {
+            if (value.StageKey != TextKey.StageJournal) return;
+            Records = value.Count ?? 0;
+            if (value.InProgress) Reports++;
+        }
+    }
+
+    private static void SeedUnrelatedSaved(Scenario scenario, int count)
+    {
+        using var probe = new CostProbe(scenario.Database);
+        probe.Execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<$count) " +
+            "INSERT INTO synced_entry(pair_id,local_path,is_folder,local_id,local_size,local_mtime,dropbox_id,dropbox_hash) " +
+            "SELECT (SELECT id FROM pair WHERE pair_id=$p),'background/'||i,0,'l'||i,1,0,'d'||i,'hash' FROM n;",
+            ("$count", count), ("$p", "A"));
+    }
+
+    private static async Task ResumeStoreWorkFollowsTheIntervalAsync(string baseRoot)
+    {
+        Dictionary<string, int>? previous = null;
+        foreach (var saved in new[] { 5_110, 20_440 })
+        {
+            using var scenario = new Scenario(baseRoot, "resume-cost-" + saved, "A");
+            SeedUnrelatedSaved(scenario, saved);
+            File.WriteAllText(Path.Combine(scenario.Root, "first.txt"), "first");
+            await FailRetainedPageAsync(scenario, "second.txt", finite: true);
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            scenario.StoreHook.Before = method => counts[method.Name] = counts.GetValueOrDefault(method.Name) + 1;
+            var progress = new JournalProgress();
+            await scenario.Source.CatchUpForPairAsync("A", 0, default, progress);
+            scenario.StoreHook.Before = null;
+            var lookups = counts.GetValueOrDefault(nameof(IStateStore.SyncedById)) +
+                counts.GetValueOrDefault(nameof(IStateStore.SyncedBindingsById));
+            var publications = counts.GetValueOrDefault(nameof(IStateStore.AcquireJournalPage));
+            Check.Require(progress.Records + 1 < 5_110,
+                "resume-cost setup needs fewer delivered records than the smallest saved history; R=" + progress.Records);
+            Check.Require(lookups <= progress.Records && publications <= progress.Records + 1,
+                "resume lookups and publications follow delivered interval records, not saved history");
+            // The confirmed finite capture ends with a Progress page, so every page invocation reports progress.
+            Check.Require(progress.Reports > 0 && progress.Reports <= progress.Records,
+                "the finite resume reports each nonempty delivered page");
+            foreach (var method in new[] { nameof(IStateStore.SyncedById), nameof(IStateStore.SyncedBindingsById),
+                nameof(IStateStore.AcquireJournalPage) }) counts.Remove(method);
+            Check.Require(previous is null || counts.Count == previous.Count &&
+                counts.All(item => previous.GetValueOrDefault(item.Key) == item.Value),
+                "all other source store calls are independent of unrelated saved history");
+            previous = counts;
+            Console.WriteLine($"B229 C1a saved={saved}; R={progress.Records}; reports={progress.Reports}; lookups={lookups}; publications={publications}");
+        }
+    }
+
+    private static void SavedLookupShapesIgnoreSavedSize(string baseRoot)
+    {
+        var previous = new Dictionary<string, StatementCost>();
+        foreach (var saved in new[] { 5_110, 20_440, 1_000_000 })
+        {
+            using var scenario = new Scenario(baseRoot, "lookup-cost-" + saved, "A");
+            SyncedEntry Binding(string path, string id) => new(PathNames.Key(path), path,
+                PathNames.DropboxKey(path), path, false, id, 1, 0, "remote-" + path, "hash");
+            scenario.Store.Commit("A", StateChange.Empty with
+            {
+                Record = [Binding("one.txt", "one"), Binding("many-one.txt", "many"),
+                    Binding("many-two.txt", "many"), Binding("many-three.txt", "many")]
+            });
+            SeedUnrelatedSaved(scenario, saved);
+            using var probe = new CostProbe(scenario.Database);
+            var one = default(StatementCost);
+            foreach (var id in new[] { "absent", "one", "many" })
+            {
+                var cost = id == "many"
+                    ? probe.Execute(StateSchema.SelectSyncedByLocalId, ("$p", "A"), ("$id", id))
+                    : probe.ExecuteFirst(StateSchema.SelectSyncedByLocalId, ("$p", "A"), ("$id", id));
+                Check.Require(cost.ProbePrepares == 1 && (!previous.TryGetValue(id, out var before) ||
+                    cost.VmSteps == before.VmSteps && cost.PathKeyCalls == before.PathKeyCalls),
+                    "saved lookup statement work stays fixed for each shape across all saved sizes: " + id);
+                if (id == "one") one = cost;
+                if (id == "many") Check.Require(cost.VmSteps > one.VmSteps, "the alias probe consumes all three bindings");
+                previous[id] = cost;
+                Console.WriteLine($"B229 C1b saved={saved}; shape={id}; {cost}");
+            }
+            Check.Require(scenario.Store.SyncedBindingsById("A", Side.Local, "many").Count() == 3 &&
+                scenario.Store.SyncedById("A", Side.Local, "absent") is null,
+                "production consumers observe the same three-binding and absent shapes after bulk seeding");
+        }
+    }
+
+    private static async Task FailRetainedPageAsync(Scenario scenario, string name, bool finite, string? root = null)
+    {
+        root ??= scenario.Root;
+        var path = Path.Combine(root, name);
         File.WriteAllText(path, "uncommitted");
-        var id = unchecked((ulong)WindowsDirectoryListing.List(scenario.Root).Single(entry => entry.Name == name).FileId);
+        var id = unchecked((ulong)WindowsDirectoryListing.List(root).Single(entry => entry.Name == name).FileId);
         var races = 0;
-        var paths = scenario.Host.Snapshot().Single().Paths;
+        var paths = scenario.Host.Snapshot().Single(member => member.Pair.PairId == "A").Paths;
         paths.BeforeIdentityRead = identity =>
         {
             if (identity == id)
@@ -1747,6 +1887,7 @@ public static class JournalSourceChecks
     private sealed class Scenario : IDisposable
     {
         private readonly string _database;
+        internal string Database => _database;
         private readonly bool _separateRoots;
         public string Root { get; }
         public string VolumeKey { get; }

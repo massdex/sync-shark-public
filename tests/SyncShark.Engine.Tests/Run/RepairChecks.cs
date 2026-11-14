@@ -4970,7 +4970,8 @@ public static class RepairChecks
         Func<IStateStore, HookStore>? decorate = null, int level = 3,
         Func<PairConfig, PairConfig>? configure = null, TimeProvider? time = null, EngineSettings? settings = null,
         Action<string>? progress = null, Massdex.SyncShark.Engine.Run.Monitor? monitor = null,
-        Func<string, RunLog?>? openLog = null, EngineHost.Mode mode = EngineHost.Mode.Direct, DropboxWire? wire = null)
+        Func<string, RunLog?>? openLog = null, EngineHost.Mode mode = EngineHost.Mode.Direct, DropboxWire? wire = null,
+        bool composeBeforeStart = true)
     {
         var root = Path.Combine(folder, "local");
         Directory.CreateDirectory(root);
@@ -5006,8 +5007,11 @@ public static class RepairChecks
             host.Store.SaveLimiterLevel(connection, level);
             // The host keys the account limiter by account id; the case checks the connection-keyed save.
             host.Store.SaveLimiterLevel("account-id", level);
-            await host.RecomposeCurrentAsync(pair.PairId, CancellationToken.None);
-            if (enabled) await host.EnsureSourceBasesAsync(pair.PairId, CancellationToken.None);
+            if (composeBeforeStart)
+            {
+                await host.RecomposeCurrentAsync(pair.PairId, CancellationToken.None);
+                if (enabled) await host.EnsureSourceBasesAsync(pair.PairId, CancellationToken.None);
+            }
             return new ComposedRig(pair, (HookStore)host.Store, wire, transport, host, instance, http);
         }
         catch

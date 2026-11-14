@@ -31,6 +31,7 @@ internal static class LoggingRepairChecks
             await SourceRetryWaitAsync(Path.Combine(folder.FullName, "source-wait"));
             await SourceLossPublishesAllMembersAsync(Path.Combine(folder.FullName, "source-members"));
             await SourceLossPublishesAllMembersAsync(Path.Combine(folder.FullName, "source-members-several"), several: true);
+            await ReplacementBaseAfterRestartWakesRepairAsync(Path.Combine(folder.FullName, "replacement-wake"));
             await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "source-before"), afterCommit: false);
             await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "source-after"), afterCommit: true);
             foreach (var afterCommit in new[] { false, true })
@@ -919,6 +920,91 @@ internal static class LoggingRepairChecks
         }
     }
 
+    private static bool MonitorIdle(Massdex.SyncShark.Engine.Run.Monitor monitor, string pairId)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var type = monitor.GetType();
+        lock (type.GetField("_gate", flags)!.GetValue(monitor)!)
+            return !((HashSet<string>)type.GetField("_opportunities", flags)!.GetValue(monitor)!).Contains(pairId) &&
+                !((HashSet<string>)type.GetField("_runningPairs", flags)!.GetValue(monitor)!).Contains(pairId);
+    }
+
+    private static async Task ReplacementBaseAfterRestartWakesRepairAsync(string folder)
+    {
+        var clock = new FakeTimeProvider();
+        clock.Advance(DateTimeOffset.UtcNow - clock.GetUtcNow());
+        var logs = new ConcurrentQueue<string>();
+        RunLog OpenLog(string id)
+        {
+            var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
+            logs.Enqueue(log.Path);
+            return log;
+        }
+        IStateStore raw = null!;
+        SourceFinishStore firstStore = null!;
+        var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
+        var rig = await RepairChecks.ComposeRigAsync(folder, time: clock, monitor: monitor,
+            mode: EngineHost.Mode.Persistent, openLog: OpenLog,
+            decorate: store => { raw = store; return new HookStore(firstStore = new SourceFinishStore(store, false)); });
+        var pairId = rig.Pair.PairId;
+        var firstWait = TimeSpan.FromSeconds(rig.Host.Settings.Backoff.InitialBackoffSeconds);
+        try
+        {
+            Check.Require(MonitorIdle(monitor, pairId), "the first base queues no replacement recovery wake");
+            using (var log = rig.Log(folder, "initial"))
+                Check.Require((await rig.RunAsync(log, default)).Completed && !raw.Obligated(pairId),
+                    "the restart fixture begins with a completed Repair and no debt");
+            await rig.Host.StartAsync(default);
+            await rig.Host.CatchUpLocalAsync(pairId, raw.ReadPairExecution(pairId)!.Value.Generation, default);
+            while (logs.TryDequeue(out _)) { }
+            firstStore.ArmPageFault(SourceFault.Resumed);
+            File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "trigger.txt"), "pending");
+            await UntilAsync(() => raw.ReadPrerequisiteRetry(pairId) is { Attempts: 1 } && logs.SelectMany(Lines)
+                .Any(fields => fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry)));
+            Check.Require(!raw.Obligated(pairId) && raw.ReadPrerequisiteRetry(pairId)!.Value.RetryAfter == clock.GetUtcNow() + firstWait,
+                "the first source failure leaves a debt-free first retry");
+        }
+        finally
+        {
+            await monitor.StopAsync();
+            await rig.DisposeAsync();
+        }
+        clock.Advance(firstWait);
+        SourceFinishStore restarted = null!;
+        RestartFinishStore finishes = null!;
+        var secondMonitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
+        await using var after = await RepairChecks.ComposeRigAsync(folder, time: clock, monitor: secondMonitor,
+            mode: EngineHost.Mode.Persistent, wire: rig.Wire, openLog: OpenLog, composeBeforeStart: false,
+            decorate: store =>
+            {
+                raw = store;
+                var pair = store.Pair(pairId)!;
+                var generation = store.ReadPairExecution(pairId)!.Value.Generation;
+                var source = store.ReadSource(pairId, Side.Local)!.Value;
+                var volume = pair.Roots!.LocalVolumeKey();
+                var saved = store.ReadJournal(volume)!;
+                Check.Require(store.AcquireJournalPage(volume, saved, saved with { JournalId = saved.JournalId ^ 1UL },
+                    [(pairId, generation, source.Epoch, source.Revision, false)], []) is not null,
+                    "downtime changes only the saved journal identity");
+                restarted = new SourceFinishStore(finishes = new RestartFinishStore(store), false);
+                restarted.HoldLostInterval();
+                return new HookStore(restarted);
+            });
+        try
+        {
+            await after.Host.StartAsync(default).WaitAsync(TimeSpan.FromSeconds(30));
+            await restarted.LostIntervalEntered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await UntilAsync(() => raw.ReadPrerequisiteRetry(pairId) is null && restarted.ItemCompletions(pairId) == 1 &&
+                !raw.Obligated(pairId) && finishes.Finishes(pairId) == 0 && MonitorIdle(secondMonitor, pairId));
+            restarted.LostIntervalRelease.TrySetResult();
+            await UntilAsync(() => finishes.Finishes(pairId) == 1 && !raw.Obligated(pairId) &&
+                raw.ReadPrerequisiteRetry(pairId) is null && raw.LastRepair(pairId) is { Completed: true });
+            Check.Require(restarted.ItemCompletions(pairId) == 1,
+                "only the replacement-base wake reaches Repair after startup retired the item-only retry");
+        }
+        finally { restarted.LostIntervalRelease.TrySetResult(); }
+    }
+
     private static async Task SourceFailureAttemptsAsync(string folder, bool afterCommit, SourceFault kind,
         bool failedResume)
     {
@@ -1034,6 +1120,18 @@ internal static class LoggingRepairChecks
     private sealed class SourceFinishStore(IStateStore inner, bool afterCommit) : ForwardingStateStore(inner)
     {
         internal Action? AtFinish;
+        private int _holdLostInterval;
+        internal readonly TaskCompletionSource LostIntervalEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource LostIntervalRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ConcurrentDictionary<string, int> _itemCompletions = new();
+        internal int ItemCompletions(string pairId) => _itemCompletions.GetValueOrDefault(pairId);
+        internal void HoldLostInterval() => Interlocked.Exchange(ref _holdLostInterval, 1);
+        public override bool CompleteItemRetry(string pairId, long expectedGeneration, FailureRetryOwner.State expected)
+        {
+            var completed = base.CompleteItemRetry(pairId, expectedGeneration, expected);
+            _itemCompletions.AddOrUpdate(pairId, 1, (_, count) => count + 1);
+            return completed;
+        }
         private Tuple<SourceFault, IOException>? _pageFault;
         internal IOException ArmPageFault(SourceFault kind)
         {
@@ -1045,6 +1143,11 @@ internal static class LoggingRepairChecks
             IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision, bool LostInterval)> members,
             IEnumerable<(string PairId, ChangeNotice Notice)> notices)
         {
+            if (members.Any(member => member.LostInterval) && Interlocked.Exchange(ref _holdLostInterval, 0) != 0)
+            {
+                LostIntervalEntered.TrySetResult();
+                LostIntervalRelease.Task.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+            }
             if (Interlocked.Exchange(ref _pageFault, null) is { } fault)
             {
                 var (kind, error) = fault;

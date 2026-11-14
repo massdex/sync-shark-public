@@ -1622,7 +1622,7 @@ public static partial class EngineHostChecks
     }
 
     // AutoSync has no opportunity running or queued for the pair, so every earlier hold decision has completed.
-    private static bool AutoSyncIdle(EngineHost host, string pairId)
+    internal static bool AutoSyncIdle(EngineHost host, string pairId)
     {
         const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
         var auto = typeof(EngineHost).GetField("_auto", Private)!.GetValue(host)!;
