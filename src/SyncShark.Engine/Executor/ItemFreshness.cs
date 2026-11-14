@@ -22,7 +22,7 @@ internal readonly struct ItemFreshness(ExecutorContext _context, ItemSync items)
         var dropboxBinding = _context.Store.SyncedByKey(_context.Pair.PairId, Side.Dropbox, dropboxKey);
         // A new-item upload commits create-only (ISide: expected null needs a free path), so an occupant is refused at the
         // commit and mapped to D20 there; a Restated ancestor or a binding at the target keeps the read.
-        var createOnly = action.Kind == ActionKind.Upload && !restated && dropboxBinding is null && action.CreatesNewItem();
+        var createOnly = action.Kind == ActionKind.Upload && !restated;
         var dropbox = storeOnly || createOnly ? row.Dropbox : await _context.Dropbox.ReadOneAsync(paths.Dropbox, ct);
         var localBinding = _context.Store.SyncedByKey(_context.Pair.PairId, Side.Local, localKey);
         // A binding of this new row's identity committed since preparation is a move-in: reobserve, the seam leaves it.
