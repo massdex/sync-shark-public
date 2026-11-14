@@ -1,0 +1,13 @@
+{
+  "engine": [
+    "ancestor-retry",
+    "dependencies",
+    "literals",
+    "point-reads",
+    "safety",
+    "strings",
+    "syncer"
+  ],
+  "core": [],
+  "ui": []
+}
