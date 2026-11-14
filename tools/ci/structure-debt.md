@@ -151,7 +151,7 @@ ValidateLiveCoverage :1557-1581 retains main's freshness obligation. ValidateSel
 
 SettleEchoes :326-382 (57): the earlier REASON-RECORDED verdict needs current-delta confirmation; reason :325 keeps one page's walk, staged predecessors, budget and post-commit publication together. EchoSelection :385-421 is 37 lines; RetireEchoPage :441-462 is one atomic page. CoalescePathWork :466-528 and TransferBound :530-558 retain main's coalescing responsibility; only ordinary NextCandidate :285-322 reaches it. IntegrityRefusal :1211-1212 and RollbackMutation :1214-1220 remain single owners. These units add no new class job.
 
-<!-- spec-source: 01930d9398df~0a8ac549adab~4df5689199cb~99876109d75b~36ac039a0b79~4fd3 -->
+<!-- spec-source: 509cf22a43b6~26f35fb853f1~5337d525b294~a320d96abdcf~971cad49ae8e~3ccc -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -868,7 +868,7 @@ Current catalogue: class :6-1532 (1527), file 1532; B-214 adds only declarations
 
 Category-change scope: Public page, count and keyset statements reuse one bound SQL expression. The catalogue still contains declarations only, without execution or transaction policy, so arbitrary catalogue splitting does not separate a runtime job. Absence-retirement scope changes the index access directives of PairItemEpisodes and ReadIssueRetryViews and adds HeldFolderMembers with its saved-binding column ordinal; these are declarations, not execution or transaction policy. The existing catalogue reason remains subject to content-bound review.
 
-<!-- spec-source: bc1c64aa7407~9ed5391c7db9~eafcb4dd4294~ae02600ef648~286e532b6cf9~e33b -->
+<!-- spec-source: bd2acaeb6596~dd2017a00186~1babd5e719d9~baba6518a84e~170b032961fd~f7d7 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
