@@ -1220,7 +1220,8 @@ public sealed partial class StateStore : IStateStore
         var endEpisode = AbsentEpisodeEnd(transaction, RequirePairRow(transaction, pairId), pairId, ended);
         var closed = false;
         foreach (var issue in expected)
-            closed |= IssueTable.CloseExact(_connection, transaction, pairId, issue, endEpisode: endEpisode);
+            closed |= IssueTable.Close(_connection, transaction, pairId, issue.Path, [issue.Kind],
+                only: current => current.Id == issue.Id, endEpisode: endEpisode);
         if (closed) CommitClosure(transaction, pairId, ended.Value);
     });
 
