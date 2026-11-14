@@ -205,7 +205,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                     await ReportCyclesAsync(operation, group.Blocker, group.Side, members, selection!, ct, completed, retainUnfinished);
         }
         operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
-        await _folderDelete.ResumeAsync(operation, selection, ct);
+        await _folderDelete.ResumeAsync(operation, selection, ct, absent);
         operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
         if (!operation.Active) ForgetUnfinished(operation.DeletingSide, operation.RootEntry.Path);
         return new FolderRemovalResult(operationId, operation.RootEntry.Path,
