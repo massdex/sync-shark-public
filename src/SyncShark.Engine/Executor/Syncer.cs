@@ -198,7 +198,7 @@ public sealed class Syncer
             // Retirement or a newly released endpoint justifies another pass; re-registering failure does not.
             if (alone) LeaveSerial();
             // Alone refusals are not competition; any refused remainder lane of a serial-started pass is.
-            var competed = (serial || lanes > 1) && Volatile.Read(ref refused) > refusedAlone;
+            var competed = !serial && lanes > 1 && Volatile.Read(ref refused) > refusedAlone;
             repeat = competed || retired;
             serialOnly = !retired && (serialOnly || serial && competed);
             serial = competed && Volatile.Read(ref progress0) == 0;
