@@ -1,0 +1,9 @@
+{
+  "engine": [
+    "dependencies",
+    "literals",
+    "strings"
+  ],
+  "core": [],
+  "ui": []
+}
