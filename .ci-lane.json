@@ -1,0 +1,13 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "budget-4",
+    "store",
+    "literals",
+    "dependencies"
+  ],
+  "core": [],
+  "ui": []
+}
