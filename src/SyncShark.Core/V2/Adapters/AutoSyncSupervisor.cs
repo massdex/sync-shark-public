@@ -61,7 +61,6 @@ public sealed class AutoSyncSupervisor
                 {
                     Trace(EdgeMessages.Text("startup-refused-log",
                         exit.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-                    RecordStartupRefusalNotice(exit);
                     return exit;
                 }
             }
