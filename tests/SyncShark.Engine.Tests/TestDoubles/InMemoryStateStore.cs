@@ -2899,7 +2899,6 @@ public sealed class InMemoryStateStore : IStateStore
             if (ReadScan(pairId, scanId).Scope is not null) throw new InvalidOperationException();
             if (!_scanIssues[(pairId, scanId)].Contains(expected) || !IssueRows(pairId).Contains(expected)) return false;
             // A refused close keeps first-run provenance, as the store's rollback does.
-            if (HoldsResponsibility(pairId, expected)) return false;
             ApplyAtomic(pairId, StateChange.Empty with
             {
                 FirstRunAcknowledged = expected.Subject.FirstRunDeletion == IssueSubject.FirstRunDeletionKind.None
