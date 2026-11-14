@@ -1,4 +1,5 @@
 using Massdex.SyncShark.Engine.Executor;
+using Massdex.SyncShark.Engine.Planner;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Executor;
@@ -27,7 +28,8 @@ public static partial class ChangeRunnerChecks
         foreach (var witness in new Func<Task>[]
         {
             RepairDropboxVictimAsync, RepairHandDeletedVictimAsync, RepairLateDescendantAsync, RepairObsoleteHeldAsync,
-            RepairChangedShapeAsync, RepairLinkedElsewhereAsync, RepairHeldThenRetryAsync, RepairOwnRetainedAsync
+            RepairChangedShapeAsync, RepairLinkedElsewhereAsync, RepairHeldThenRetryAsync, RepairOwnRetainedAsync,
+            RepairRefusedCompleteCostAsync, RepairOtherCustodyAsync, RepairAncestorWaitAsync
         })
         {
             try { await witness(); }
@@ -239,8 +241,10 @@ public static partial class ChangeRunnerChecks
             "; obligations=" + RepairRows(fixture) + "; issues=" + fixture.Inner.Issues(PairId).Count + "; renamed=" + renamed);
     }
 
-    // E2b (T15): a child appears in E after the freeze, so the send refuses and the Repair operation is Retained with
-    // its own notice; row 3 (Own, inactive) then does nothing, so no FailDuplicateFolderBinding is raised.
+    // E2b (T15, coordinator ruling 1 on writer-7): a child appears in E after the freeze, so the send refuses before
+    // anything is sent and the Repair operation retires as no-effect with its own FailChanged notice. The binding stays
+    // duplicated, so the next opportunity holds it with one FailDuplicateFolderBinding (History, NotEmpty) offering
+    // Retry and Ignore; a later opportunity raises no second duplicate-folder notice.
     private static async Task RepairOwnRetainedAsync()
     {
         using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -252,21 +256,187 @@ public static partial class ChangeRunnerChecks
             fixture.Hooks.AfterCall = null;
             fixture.Dropbox.Seed(RemoteEntry(RepairNew + "/added", "added-dropbox"), [1]);
         };
-        for (var opportunity = 0; opportunity < 2; opportunity++)
+        var notices = new List<string>();
+        for (var opportunity = 0; opportunity < 3; opportunity++)
+        {
             await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
                 .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
-        var operations = fixture.Inner.UnresolvedFolderRemovals(PairId, default).ToArray();
+            notices.Add(string.Join(" | ", fixture.Inner.Issues(PairId)
+                .Select(issue => issue.Id + ":" + issue.Cause + ":" + issue.Path + ":" + issue.Subject.Folders)));
+        }
         var issues = fixture.Inner.Issues(PairId);
-        Check.Require(submits.Count == 0 &&
-            operations is [{ Active: false, Phase: FolderRemovalPhase.Retained, Authority: FolderRemovalAuthority.Repair }] &&
-            RepairRows(fixture) == 1 && RepairHeldBy(fixture) is null && issues.Count >= 1 &&
-            issues.All(issue => issue.Cause != TextKey.FailDuplicateFolderBinding),
-            "B212-E2b: the changed endpoint retains the own operation and raises no duplicate-folder Failure: submits=" +
-            submits.Count + "; operations=" +
-            string.Join(" | ", operations.Select(operation => operation.Phase + ":" + operation.Active + ":" + operation.Authority)) +
-            "; obligations=" + RepairRows(fixture) + "; heldBy=" + RepairHeldBy(fixture) +
-            "; issues=" + string.Join(" | ", issues.Select(issue => issue.Cause + ":" + issue.Path)) +
+        var changed = issues.Where(issue => issue.Cause == TextKey.FailChanged).ToArray();
+        var duplicates = issues.Where(issue => issue.Cause == TextKey.FailDuplicateFolderBinding).ToArray();
+        Check.Require(submits.Count == 0 && !fixture.Inner.UnresolvedFolderRemovals(PairId, default).Any() &&
+            RepairRows(fixture) == 1 && issues.Count == 2 &&
+            changed is [{ Kind: IssueKind.Failure, Path: RepairNew }] &&
+            !notices[0].Contains(nameof(TextKey.FailDuplicateFolderBinding), StringComparison.Ordinal) &&
+            duplicates is [{ Kind: IssueKind.Failure, Path: RepairOld } duplicate] &&
+            duplicate.Subject.Folders == new IssueSubject.DuplicateFolders(TextKey.ReasonHistory, TextKey.ReasonNotEmpty) &&
+            Resolutions.Allows(duplicate.Kind, duplicate.Cause, ResolutionChoice.Retry) &&
+            Resolutions.Allows(duplicate.Kind, duplicate.Cause, ResolutionChoice.Ignore) &&
+            RepairHeldBy(fixture) == duplicate.Id && notices[1] == notices[2],
+            "B212-E2b: the refused operation's FailChanged, then one held duplicate-folder Failure offering Retry and " +
+            "Ignore, and no second one: submits=" + submits.Count + "; obligations=" + RepairRows(fixture) +
+            "; heldBy=" + RepairHeldBy(fixture) + "; perOpportunity=" + string.Join(" || ", notices) +
             "; rows=" + RepairOperationRows(fixture));
+        Console.WriteLine("B212-E2b notices: " + notices[^1]);
+    }
+
+    // Coordinator ruling 3 on writer-7: E3's operation stays active and Retained while the late descendant keeps
+    // refusing its complete, so row 3 resumes it at every opportunity. That resume must be flat in store size and make
+    // no provider call while its inputs are unchanged. Two store sizes (8 and 32 unrelated synced files); per
+    // opportunity, every provider call (reads, listings, content, effects, submissions, cursor captures and change
+    // windows) and the store calls by member, each store call being one fixed SQL recipe (paged reads are calls).
+    private static async Task RepairRefusedCompleteCostAsync()
+    {
+        const int smaller = 8;
+        var profiles = new List<(int Size, int Provider, string Store)>();
+        foreach (var size in new[] { smaller, smaller * 4 })
+        {
+            using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var fixture = RepairFixture(victimPresent: true);
+            fixture.Inner.Commit(PairId, StateChange.Empty with
+            {
+                Record = Enumerable.Range(0, size).Select(index => SyncedEntries.From(
+                    LocalEntry("Unrelated/f" + index, "unrelated-local-" + index),
+                    RemoteEntry("Unrelated/f" + index, "unrelated-dropbox-" + index))).ToArray()
+            });
+            var (local, dropbox, submits) = RepairViews(fixture);
+            var windows = 0;
+            ExecutorContext Counted(ExecutorContext context) => context with
+            {
+                CaptureFolderCursorAsync = _ =>
+                {
+                    windows++;
+                    return Task.FromResult(Cursor);
+                },
+                ReadFolderChangesAsync = (_, token) =>
+                {
+                    windows++;
+                    return NoFolderChangesAsync(token);
+                }
+            };
+            fixture.Hooks.BeforeCall = method =>
+            {
+                if (method.Name != nameof(IStateStore.CompleteFolderRemoval)) return;
+                fixture.Hooks.BeforeCall = null;
+                fixture.Inner.Commit(PairId, StateChange.Empty with
+                {
+                    Record = [SyncedEntries.From(LocalEntry(RepairNew + "/late", "late-local"),
+                        RemoteEntry(RepairNew + "/late", "late-dropbox"))]
+                });
+            };
+            await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [], configure: Counted)
+                .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            var calls = new List<string>();
+            fixture.Hooks.BeforeCall = method =>
+            {
+                lock (calls) calls.Add(method.Name);
+            };
+            for (var opportunity = 0; opportunity < 2; opportunity++)
+            {
+                calls.Clear();
+                var before = ProviderCalls(local, dropbox, submits) + windows;
+                await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [], configure: Counted)
+                    .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+                profiles.Add((size, ProviderCalls(local, dropbox, submits) + windows - before, string.Join(",",
+                    calls.GroupBy(name => name).OrderBy(group => group.Key, StringComparer.Ordinal)
+                        .Select(group => group.Key + "=" + group.Count()))));
+            }
+            fixture.Hooks.BeforeCall = null;
+            Check.Require(fixture.Inner.UnresolvedFolderRemovals(PairId, default).ToArray() is
+                [{ Active: true, Phase: FolderRemovalPhase.Retained, Authority: FolderRemovalAuthority.Repair }] &&
+                RepairRows(fixture) == 1, "B212-E3 cost: the refused complete keeps the operation active and Retained; size=" + size);
+        }
+        var described = string.Join(" ; ", profiles.Select(profile =>
+            "size=" + profile.Size + " provider=" + profile.Provider + " store=" + profile.Store));
+        Check.Require(profiles.All(profile => profile.Provider == 0 && profile.Store == profiles[0].Store),
+            "B212-E3 cost: each resume of the refused Retained operation makes no provider call and the same store " +
+            "calls at both store sizes: " + described);
+        Console.WriteLine("B212-E3 per-opportunity resume cost: " + described);
+    }
+
+    // E-busy (T14): an unrelated Inferred removal over R's subtree is Retained without a disposition, so the
+    // obligation waits on that custody (row 6): no notice, no delete, W held. After the user's recovery choice retires
+    // that operation, the next opportunity repairs as E1.
+    private static async Task RepairOtherCustodyAsync()
+    {
+        const string sub = RepairOld + "/sub";
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var fixture = RepairFixture(victimPresent: true);
+        var nested = SyncedEntries.From(FolderEntry(sub, "sub-local"), FolderEntry(sub, "sub-dropbox"));
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [nested] });
+        fixture.Dropbox.Seed(FolderEntry(sub, "sub-dropbox"), null);
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Renamed, RepairNew, RepairOld,
+            RepairX, null, false, false));
+        string foreign;
+        using (var plan = await new FolderPlanBuilder(fixture.Context(selection)).BuildAsync(Row.ForOneSide(Side.Dropbox,
+            nested.LocalKey, FolderEntry(sub, "sub-dropbox"), nested, [], null, RowContext.Neutral), Side.Dropbox,
+            new HashSet<string>(), live: true, guard.Token))
+            foreign = fixture.Inner.BeginFolderRemoval(PairId, plan, FolderRemovalAuthority.Inferred,
+                fixture.Settings.StoragePageSize, guard.Token);
+        var frozen = fixture.Inner.FolderRemoval(PairId, foreign);
+        fixture.Inner.AdvanceFolderRemoval(PairId, foreign, frozen.Generation, frozen.Phase, frozen with
+            { Generation = frozen.Generation + 1, Phase = FolderRemovalPhase.Retained, Cause = TextKey.FailChanged });
+        var (local, dropbox, submits) = RepairViews(fixture);
+        var begun = fixture.Hooks.Count(nameof(IStateStore.BeginFolderRemoval));
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        Check.Require(submits.Count == 0 && local.Deletes == 0 && dropbox.Moves == 0 &&
+            fixture.Inner.Issues(PairId).Count == 0 && RepairRows(fixture) == 1 && RepairHeldBy(fixture) is null &&
+            fixture.Hooks.Count(nameof(IStateStore.BeginFolderRemoval)) == begun &&
+            fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) != (0, 0),
+            "B212-E-busy: other custody over R makes the obligation wait silently, with W held: submits=" + submits.Count +
+            "; issues=" + fixture.Inner.Issues(PairId).Count + "; obligations=" + RepairRows(fixture) +
+            "; begun=" + (fixture.Hooks.Count(nameof(IStateStore.BeginFolderRemoval)) - begun));
+        var retained = fixture.Inner.FolderRemoval(PairId, foreign);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
+            .RecoverAsync(new RecoveryTarget(foreign, retained.Generation, null, null), RecoveryChoice.AcceptCurrent,
+                guard.Token).WaitAsync(guard.Token);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        var renamed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew));
+        Check.Require(submits.Count == 1 && dropbox.Moves == 1 && LocalEffects(local) == 0 && RepairRows(fixture) == 0 &&
+            renamed is { LocalId: RepairX, DropboxId: RepairR } &&
+            fixture.Inner.FolderRemoval(PairId, foreign) is { Active: false, RetirementDisposition: not null },
+            "B212-E-busy: after the recovery choice the next opportunity repairs: submits=" + submits.Count +
+            "; dropboxMoves=" + dropbox.Moves + "; obligations=" + RepairRows(fixture) + "; renamed=" + renamed +
+            "; rows=" + RepairOperationRows(fixture));
+    }
+
+    // T16 (E-anc, B5-4): E's parent folder has pending ordinary work that the lanes settle state-only. The first lane
+    // iteration's attempt waits on that ancestor (D3); the lanes retire its work, the existing retired repeat runs the
+    // cleanup again, and the same SyncWorkAsync call deletes E once and moves R onto Parent/Renamed.
+    private static async Task RepairAncestorWaitAsync()
+    {
+        const string parent = "Parent";
+        var renamedPath = PathNames.Child(parent, RepairNew);
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var fixture = RepairFixture(victimPresent: true, parent);
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, parent, null, "parent-local",
+            FolderEntry(parent, "parent-local"), false, false));
+        var (local, dropbox, submits) = RepairViews(fixture);
+        var calls = new List<string>();
+        fixture.Hooks.BeforeCall = method =>
+        {
+            lock (calls) calls.Add(method.Name);
+        };
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        fixture.Hooks.BeforeCall = null;
+        var firstPass = calls.IndexOf(nameof(IStateStore.EndWorkPass));
+        var frozen = calls.IndexOf(nameof(IStateStore.BeginFolderRemoval));
+        var renamed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(renamedPath));
+        Check.Require(submits.Count == 1 && dropbox.Moves == 1 && LocalEffects(local) == 0 && RepairRows(fixture) == 0 &&
+            fixture.Inner.Issues(PairId).Count == 0 && renamed is { LocalId: RepairX, DropboxId: RepairR } &&
+            await fixture.Dropbox.ReadOneAsync(renamedPath, default) is { Id: RepairR } &&
+            firstPass >= 0 && frozen > firstPass &&
+            fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0, 0),
+            "B212-T16: the ancestor wait clears in the same SyncWorkAsync call, then E is deleted once and R moves: " +
+            "submits=" + submits.Count + "; dropboxMoves=" + dropbox.Moves + "; obligations=" + RepairRows(fixture) +
+            "; renamed=" + renamed + "; firstPass=" + firstPass + "; frozenAt=" + frozen +
+            "; issues=" + string.Join(" | ", fixture.Inner.Issues(PairId).Select(issue => issue.Cause + ":" + issue.Path)));
     }
 
     // The runner's own hold commit (-6 3.5.4), made directly: the Failure at A's shared-side path and the CAS hold.
@@ -285,19 +455,26 @@ public static partial class ChangeRunnerChecks
 
     // The T1 store: the two duplicate bindings and A's saved child, committed and then made a genuine version-14 file
     // (the two v15 additions removed), so reopening runs the one-time step. Its own schema check refuses any other shape.
-    private static Fixture RepairFixture(bool victimPresent)
+    // With a parent, D sits at parent/Renamed under a synced parent folder (T16).
+    private static Fixture RepairFixture(bool victimPresent, string? parent = null)
     {
+        var renamed = parent is null ? RepairNew : PathNames.Child(parent, RepairNew);
         var fixture = new Fixture(realStore: true);
-        fixture.Inner.Commit(PairId, StateChange.Empty with
+        var records = new List<SyncedEntry> { RepairBinding(RepairOld, RepairR), RepairBinding(renamed, RepairE),
+            SyncedEntries.From(LocalEntry(RepairChild, "child-local"), RemoteEntry(RepairChild, "child-dropbox")) };
+        if (parent is not null)
+            records.Add(SyncedEntries.From(FolderEntry(parent, "parent-local"), FolderEntry(parent, "parent-dropbox")));
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = records });
+        if (parent is not null)
         {
-            Record = [RepairBinding(RepairOld, RepairR), RepairBinding(RepairNew, RepairE),
-                SyncedEntries.From(LocalEntry(RepairChild, "child-local"), RemoteEntry(RepairChild, "child-dropbox"))]
-        });
-        fixture.Local.Seed(FolderEntry(RepairNew, RepairX), null);
-        fixture.Local.Seed(LocalEntry(RepairNew + "/child", "child-local"), [1]);
+            fixture.Local.Seed(FolderEntry(parent, "parent-local"), null);
+            fixture.Dropbox.Seed(FolderEntry(parent, "parent-dropbox"), null);
+        }
+        fixture.Local.Seed(FolderEntry(renamed, RepairX), null);
+        fixture.Local.Seed(LocalEntry(renamed + "/child", "child-local"), [1]);
         fixture.Dropbox.Seed(FolderEntry(RepairOld, RepairR), null);
         fixture.Dropbox.Seed(RemoteEntry(RepairChild, "child-dropbox"), [1]);
-        if (victimPresent) fixture.Dropbox.Seed(FolderEntry(RepairNew, RepairE), null);
+        if (victimPresent) fixture.Dropbox.Seed(FolderEntry(renamed, RepairE), null);
         using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + fixture.DatabasePath + ";Pooling=False"))
         {
             connection.Open();
@@ -327,6 +504,11 @@ public static partial class ChangeRunnerChecks
 
     private static int LocalEffects(CountingSide local) =>
         local.Stages + local.Publishes + local.Ensures + local.Deletes + local.Moves;
+
+    // Every counted provider call on both sides: reads, listings, content reads, effects and folder submissions.
+    private static int ProviderCalls(CountingSide local, CountingSide dropbox, List<int> submits) =>
+        local.Reads + local.Listings + local.ContentReads + local.Work +
+        dropbox.Reads + dropbox.Listings + dropbox.ContentReads + dropbox.Work + submits.Count;
 
     // The context's opportunity only; a witness with no seeded notice selects nothing through it.
     private static WorkSelection RepairOpportunity(Fixture fixture)
