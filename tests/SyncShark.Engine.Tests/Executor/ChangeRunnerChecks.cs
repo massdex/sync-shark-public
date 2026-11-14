@@ -1793,7 +1793,7 @@ public static partial class ChangeRunnerChecks
             var jobs = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(), boundary,
                 RefusingExecutionBoundary.Instance, 0));
             var pass = new SelectionPass(context, jobs.Items, jobs.Ancestors, boundary, jobs.Actions, jobs.Items.Rows,
-                (_, _) => { }, recordTemporary: recorded.Add);
+                (_, _) => { }, recordTemporary: (selection, _) => recorded.Add(selection));
             var result = await pass.RunAsync(selected, default);
             Check.Require(result.Completed == false && moves == 1 && attempts.Reported == 1 &&
                 recorded is [var owner] && owner.AnchorWorkId == selected.AnchorWorkId && owner.Identity == DropboxId &&

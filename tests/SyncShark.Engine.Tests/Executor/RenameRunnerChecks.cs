@@ -1654,7 +1654,7 @@ public static class RenameRunnerChecks
             using var f = new Fixture(realStore: real);
             var moved = await f.MoveAsync(Side.Local, "New");
             var local = moved.Moved;
-            var attempts = new TemporaryAttempts { Result = accepted };
+            var attempts = new TemporaryAttempts { Result = (accepted.Item1, accepted.Item2, null) };
             var context = f.Context with { ItemAttempts = attempts };
             var descriptor = new IssueSubject.UnknownMove(f.DropboxOld.Id, "Old", "New", null, false);
             var error = new ItemFailedException("New", TextKey.DropboxRefused, null)
