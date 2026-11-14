@@ -1,0 +1,15 @@
+{
+  "build": [
+    "core-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
+  ],
+  "engine": [],
+  "core": [
+    "--v2-autosync-checks"
+  ],
+  "ui": [
+    "engine-startup-readiness-checks"
+  ]
+}
