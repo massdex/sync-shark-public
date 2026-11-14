@@ -322,11 +322,14 @@ public static partial class CallBudgetChecks
                     var expected = edited ? 2 : 0;
                     var downloads = rig.Wire.Calls.Select((route, index) => (route, index))
                         .Where(call => call.route.EndsWith("/download", StringComparison.Ordinal)).ToArray();
-                    Check.Require(rig.Wire.MetadataPaths.Count == expected &&
-                        rig.Wire.MetadataPaths.All(path => path == rig.Pair.DropboxRoot + "/" + paths[0]) &&
+                    var changedPath = rig.Pair.DropboxRoot + "/" + paths[0];
+                    Check.Require((edited ? rig.Wire.MetadataPaths.Count(path => path == changedPath) :
+                            rig.Wire.MetadataPaths.Count) == expected &&
+                        rig.Wire.MetadataPaths.All(path => !targets.Contains(path) || path == changedPath) &&
                         downloads.Length == (edited ? 1 : 0) && (!edited || rig.Wire.Calls
                             .Select((route, index) => (route, index)).Where(call => call.route.EndsWith("/get_metadata", StringComparison.Ordinal))
-                            .All(call => call.index < downloads[0].index)) &&
+                            .Zip(rig.Wire.MetadataPaths).Where(call => call.Second == changedPath)
+                            .All(call => call.First.index < downloads[0].index)) &&
                         rig.Store.CountWork(rig.Pair.PairId, session.Context.ExpectedGeneration, rig.Store.ReadWorkWatermark()) == (0L, 0L) &&
                         rig.Store.Issues(rig.Pair.PairId).Count == 0,
                         "Own echoes settle without reads; an edited echo keeps two target reads before its one download.");

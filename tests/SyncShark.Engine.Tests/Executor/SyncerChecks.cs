@@ -1618,8 +1618,8 @@ public static class SyncerChecks
             // A fresh upload stays direct: it takes the upload admission and reports no ordinary completion.
             var direct = side == Side.Local && !stale;
             Check.Require(((FakeAdmission)context.Admission).Admitted == (direct ? 0 : 1) &&
-                ((FakeAdmission)context.Admission).Completed == 0,
-                $"The occupied target is rejected before an effect, without an extra completion: {side} {stale}");
+                ((FakeAdmission)context.Admission).Completed == (side == Side.Local && stale ? 1 : 0),
+                $"An occupied create has no effect; an ordinary upload reports its commit failure once: {side} {stale}");
         }
     }
 

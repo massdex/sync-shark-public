@@ -1648,13 +1648,13 @@ public static class ExclusionRunnerChecks
             (copiedRoot is not null), nameof(IStateStore.SyncedByKey));
         Check.Require((store.SyncedByKey(context.Pair.PairId, side, Key(side, path)) is not null) ==
             (copiedChild is not null), nameof(IStateStore.SyncedByKey));
-        // Root reads complete no actions; a child freshness failure follows only the root copy. A removal
-        // failure follows both copies and the folder's own admission, before any submission.
+        // Root reads complete no actions. A child upload staging failure follows the root copy; each action
+        // reports its own completion. A removal failure follows both copies and the folder's own admission.
         var admission = (FakeAdmission)context.Admission;
         Check.Require(admission.Admitted ==
                 (operation == nameof(ISide.DeleteAsync) ? 2 : 1) &&
             admission.Completed == (operation == nameof(ISide.ReadOneAsync) ? 0 :
-                operation == nameof(ISide.DeleteAsync) ? 2 : 1),
+                operation == nameof(ISide.DeleteAsync) || operation == nameof(ISide.StageAsync) && side == Side.Local ? 2 : 1),
             nameof(IAdmission.ActionCompleted) + " admitted=" + admission.Admitted +
             " completed=" + admission.Completed);
 

@@ -6740,8 +6740,8 @@ public static partial class ChangeRunnerChecks
                 PendingAt(fixture, side, Item).Count == 1 && calls.Work + targetCalls.Work == 0 &&
                 fixture.Inner.SyncedByKey(PairId, side, PathNames.KeyFor(side, Item)) is null,
                 "Unchanged stale evidence raises one notice and retains responsibility without effects.");
-            Check.Require(reads == 4 && targetCalls.Reads == 4,
-                "Stale diagnosis reuses the branch observation, then reobserves once with two freshness checks.");
+            Check.Require(reads == 4 && targetCalls.Reads == (side == Side.Local ? 2 : 4),
+                "Stale diagnosis keeps both observations and source freshness checks, omitting only admission create-target reads.");
             var sibling = LocalEntry("sibling", "sibling-id");
             fixture.Local.Seed(sibling, [1]);
             var other = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, sibling.Path, null,
@@ -7326,7 +7326,8 @@ public static partial class ChangeRunnerChecks
             Console.WriteLine($"execution freshness live={live} {side} {mode}: stages={stages}, reads={sourceCalls.Reads}/{targetCalls.Reads}, notices={issues.Count}, waits={waits}");
             Check.Require(stages == (mode == "ordinary" ? 1 : 2), "Execution gets its original attempt and only one diagnostic retry.");
             Check.Require(sourceCalls.Reads == (live ? 2 : 1) + (mode == "ordinary" ? 0 : 2) &&
-                targetCalls.Reads == sourceCalls.Reads, "Exception-only reobservation adds two point reads per side, no ordinary-row work.");
+                targetCalls.Reads == sourceCalls.Reads - (side == Side.Local ? mode == "ordinary" ? 1 : 2 : 0),
+                "Exception-only reobservation keeps source reads, omitting only admission create-target reads.");
             Check.Require(waits == (mode == "ordinary" ? 0 : 1), "Each deliberate retry emits one output/log wait, not a notice.");
             if (mode is "ordinary" or "once")
                 Check.Require(ready && stale is null && issues.Count == 0 && await SyncedAsync(fixture, Item),
@@ -10615,7 +10616,7 @@ public static partial class ChangeRunnerChecks
             "The provider-free notice registers its effective subject.");
     }
 
-    // The occupant read is itself fallible; its failure still commits an Issue that the continuation must register.
+    // Admission failure needs a kept target read; an eligible create has only its observation read.
     private static async Task SelectedReadFailuresAsync()
     {
         foreach (var side in new[] { Side.Local, Side.Dropbox })
@@ -10623,7 +10624,17 @@ public static partial class ChangeRunnerChecks
         {
             using var fixture = new Fixture();
             var entry = LocalEntry(Item, LocalId);
-            fixture.Local.Seed(entry, [1]);
+            Entry? remote = null;
+            SyncedEntry? saved = null;
+            if (side == Side.Dropbox && ordinal == 2)
+            {
+                remote = RemoteEntry(Item, DropboxId);
+                fixture.Dropbox.Seed(remote, [1]);
+                saved = SyncedEntries.From(entry, remote);
+                fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
+                entry = entry with { Size = 2, Modified = Stamp.AddSeconds(1) };
+            }
+            fixture.Local.Seed(entry, remote is null ? [1] : [1, 2]);
             var reads = 0;
             var cause = Text.ReadFailedOn(side);
             var faulted = new HookedSide(side == Side.Local ? fixture.Local : fixture.Dropbox,
@@ -10642,8 +10653,10 @@ public static partial class ChangeRunnerChecks
                 "A selected branch read failure is retained without faulting the run.");
             Check.Require(fixture.Inner.Issues(PairId).Single().Cause == cause &&
                 fixture.Hooks.Count(nameof(IStateStore.AttachIssueWork)) == 1 &&
-                await fixture.Dropbox.ReadOneAsync(Item, default) is null,
-                "Prewalk, observation and admitted reads preserve the item and attach its exact Failure.");
+                await fixture.Local.ReadOneAsync(Item, default) == entry &&
+                await fixture.Dropbox.ReadOneAsync(Item, default) == remote &&
+                fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Item)) == saved,
+                "Prewalk, observation and admitted reads preserve the items and binding and attach their exact Failure.");
         }
     }
 

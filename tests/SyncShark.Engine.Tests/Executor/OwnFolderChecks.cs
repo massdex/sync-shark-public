@@ -359,7 +359,7 @@ public static class OwnFolderChecks
             scenario.LocalFile("made/a.txt", "a");
             scenario.LocalFolder("made/sub");
             scenario.AcquireFeedAfterFolder();
-            scenario.AfterFreshRead(Side.Dropbox, "made/sub", () =>
+            scenario.AfterFreshRead(Side.Local, "made/sub", () =>
             {
                 scenario.DropboxFolder("made/sub");
                 scenario.DropboxFile("made/sub/kept.txt", "kept");
@@ -382,7 +382,7 @@ public static class OwnFolderChecks
             scenario.LocalFile("made/a.txt", "a");
             scenario.LocalFolder("made/sub");
             scenario.AcquireFeedAfterFolder();
-            scenario.AfterFreshRead(Side.Dropbox, "made/sub", () => scenario.DropboxFile("made/sub", "late"));
+            scenario.AfterFreshRead(Side.Local, "made/sub", () => scenario.DropboxFile("made/sub", "late"));
             scenario.RepairAsync(requireCompleted: false);
             var issues = scenario.Store.Issues(scenario.Pair.PairId)
                 .Select(issue => issue.Kind + ":" + issue.Cause + "@" + issue.Path).ToArray();
