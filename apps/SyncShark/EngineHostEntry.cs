@@ -403,8 +403,7 @@ internal static class EngineHostEntry
         catch (SyncCliException) { return null; }
         if (!EngineCliCatalog.Owns(invocation.Command) ||
             EngineCliCatalog.CommandKey(invocation.Command) != EngineCommandKey.HostStatus) return null;
-        try { return AutoSyncProcess.ReadPersistentStartupNotice(); }
-        catch (Exception) { return null; }
+        return null;
     }
 
     // A retained notice explains why no host answers; an unreadable notice never hides the refusal.
