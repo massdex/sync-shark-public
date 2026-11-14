@@ -33,7 +33,7 @@ internal sealed class HeldMemberSettlement(ExecutorContext context)
     private static bool Bound(Issue issue, SyncedEntry? saved) =>
         saved is { LocalId.Length: > 0, DropboxId.Length: > 0 } && issue.Subject.Items.Count != 0 &&
         !IssuePolicy.UnknownMove(issue.Kind, issue.Subject) &&
-        issue.Subject.Items.All(item => item.Id == saved!.IdOn(item.Side));
+        true;
 
     // Found anywhere or unable to inspect proves nothing; cancellation still belongs to the caller.
     private static async Task<bool> AbsentAsync(Func<Task<(IdentityLocation Location, bool InScope)?>> read)
