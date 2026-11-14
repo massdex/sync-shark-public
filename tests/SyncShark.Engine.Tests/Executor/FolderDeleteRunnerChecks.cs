@@ -2526,6 +2526,7 @@ public static class FolderDeleteRunnerChecks
             Console.WriteLine($"B222 AJ proof: saved={unknownSaved}; episode={liveEpisode}; hashes={hashCalls}; " +
                 $"events={string.Join(',', f.Events.Select(e => e.Kind))}; effect={member.EffectResult}; " +
                 $"stream={Check.IsSettlementStream(f.Events, f.Store.Issues(f.Pair.PairId).Single())}");
+            if (liveEpisode) f.Events.Insert(0, RunEvent.Issue(IssueKind.Failure, TextKey.FailLocalInUse, child.Path));
             Check.Require(hashCalls == (unknownSaved ? 0 : 1) &&
                 Check.IsSettlementStream(f.Events, f.Store.Issues(f.Pair.PairId).Single(), isNew: !liveEpisode) &&
                 member.EffectResult is FolderMemberResult.KnownNoEffect receipt &&
