@@ -1,0 +1,13 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "dropbox-echo",
+    "work-lifecycle",
+    "path-only-coalescing",
+    "syncer"
+  ],
+  "core": [],
+  "ui": []
+}
