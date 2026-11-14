@@ -134,8 +134,7 @@ public sealed partial class StateStore : IStateStore
     private bool ResponsibilityRetained(SqliteTransaction transaction, long pair, Issue issue,
         ItemRetryCandidate replaced)
     {
-        if (issue.Subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None ||
-            IssueTable.IsRecoveryNotice(issue) ||
+        if (IssueTable.IsRecoveryNotice(issue) ||
             IssueTable.AtPendingPath(issue, IssueTable.PendingPath(_connection, transaction, pair))) return true;
         return replaced.Dispatch == ItemRetryDispatch.LocalRecovery || replaced.PendingOperationId is not null ||
             IssuePolicy.UnknownMove(issue.Kind, issue.Subject);
