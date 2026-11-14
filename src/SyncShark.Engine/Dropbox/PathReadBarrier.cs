@@ -37,7 +37,7 @@ internal sealed class PathReadBarrier(Func<string, CancellationToken, Task<Entry
             }
             if (mine) await ProduceAsync(path, current, ct).ConfigureAwait(false);
             // A read registered before this caller asked only holds it back; one registered after is its answer.
-            var result = await AwaitReadAsync(current, current.Started > asked, ct).ConfigureAwait(false);
+            var result = await AwaitReadAsync(current, current.Started > asked || current.Done.Task.IsCompletedSuccessfully, ct).ConfigureAwait(false);
             if (!result.Again) return result.Value;
         }
     }
@@ -66,7 +66,7 @@ internal sealed class PathReadBarrier(Func<string, CancellationToken, Task<Entry
         // owner's outcome for the path, even when the producer's token has been cancelled since.
         current.ProducerCancelled = IsProducerCancellation(failure, ct);
         // Unregistered before completion: a caller released by this read never finds it still running.
-        lock (_running) _running.Remove(path);
+        if (failure is not null) lock (_running) _running.Remove(path);
         if (failure is null) current.Done.SetResult(value);
         else current.Done.SetException(failure);
     }
