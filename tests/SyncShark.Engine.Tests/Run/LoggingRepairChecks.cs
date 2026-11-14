@@ -1196,7 +1196,26 @@ internal static class LoggingRepairChecks
         clock.Advance(firstWait);
         if (failedResume)
         {
-            await UntilAsync(() => Accounted(2));
+            // Diagnostic only: each member's half of Accounted(2), its Repair finishes, debt and pending attempt.
+            string AccountedEvidence()
+            {
+                var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                var registry = (System.Collections.IDictionary)typeof(EngineHost).GetField("_prerequisites", flags)!.GetValue(rig.Host)!;
+                var hostGate = typeof(EngineHost).GetField("_gate", flags)!.GetValue(rig.Host)!;
+                return string.Join("; ", members.Select(id =>
+                {
+                    var waits = logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
+                        .Count(fields => fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry));
+                    var row = raw.ReadPrerequisiteRetry(id);
+                    object? pending;
+                    lock (hostGate) pending = registry[id];
+                    return $"member={id}, accounted={row?.Attempts == 2 && waits == 2}, rowAttempts={row?.Attempts.ToString() ?? "none"}, " +
+                        $"retryWaits={waits}, finishes={finishes.Finishes(id)}, obligated={raw.Obligated(id)}, " +
+                        $"localObligation={raw.ReadSource(id, Side.Local)?.Obligation?.ToString() ?? "none"}, " +
+                        $"pending={(pending is null ? "none" : "sourceFailed=" + pending.GetType().GetField("SourceFailed", flags)!.GetValue(pending))}";
+                }));
+            }
+            await UntilAsync(() => Accounted(2), AccountedEvidence);
             Check.Require(members.All(raw.Obligated), "the unconfirmed failed resume immediately obligates every member");
             var next = members.Select(id => raw.ReadPrerequisiteRetry(id)!.Value.RetryAfter).Min() - clock.GetUtcNow();
             await UntilAsync(() => clock.NextDueIn == next);
