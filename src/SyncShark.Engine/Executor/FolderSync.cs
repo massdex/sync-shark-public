@@ -10,6 +10,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
     private readonly Dictionary<(Side Side, string Key), string> _unfinished = [];
     private readonly object _unfinishedGate = new();
     private bool _unfinishedLoaded;
+    private ISet<string>? _rememberedAbsent;
     private static readonly IReadOnlySet<string> NoRestoredItems = new HashSet<string>();
     private enum RemovalRoute { Ordinary, PlannedReplacement, SelectedReplacement, Chosen }
 
@@ -187,7 +188,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         Func<Side, string, string?, bool>? temporary = null, ISet<string>? absent = null)
     {
         var operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
-        await _folderDelete.ResumeAsync(operation, selection, ct, absent);
+        await _folderDelete.ResumeAsync(operation, selection, ct, absent ?? _rememberedAbsent);
         operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
         if (_folderDelete.FollowUpsReady(operation, ct) &&
             _context.Store.RenameRemovalWork(_context.Pair.PairId, operationId) is null)
@@ -205,7 +206,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                     await ReportCyclesAsync(operation, group.Blocker, group.Side, members, selection!, ct, completed, retainUnfinished);
         }
         operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
-        await _folderDelete.ResumeAsync(operation, selection, ct);
+        await _folderDelete.ResumeAsync(operation, selection, ct, _rememberedAbsent);
         operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
         if (!operation.Active) ForgetUnfinished(operation.DeletingSide, operation.RootEntry.Path);
         return new FolderRemovalResult(operationId, operation.RootEntry.Path,
@@ -327,8 +328,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             !operation.Active && operation.Cause is null && operation.RetirementDisposition is not null;
     }
 
-    internal Task<ISet<string>> RunPreparedFolderRemovalsAsync(IEnumerable<string> operationIds, CancellationToken ct) =>
-        _folderDelete.RunPreparedAsync(Pages(operationIds), ct);
+    internal async Task<ISet<string>> RunPreparedFolderRemovalsAsync(IEnumerable<string> operationIds, CancellationToken ct) =>
+        _rememberedAbsent = await _folderDelete.RunPreparedAsync(Pages(operationIds), ct);
 
     // Supplies ready effects one stored page at a time; the batch owner streams them into provider-legal batches.
     private IEnumerable<IReadOnlyList<FolderRemovalEffect>> Pages(IEnumerable<string> operationIds)
