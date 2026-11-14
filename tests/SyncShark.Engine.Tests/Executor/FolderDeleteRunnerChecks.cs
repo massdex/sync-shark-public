@@ -663,9 +663,12 @@ public static class FolderDeleteRunnerChecks
                 var expected = new List<Issue>();
                 foreach (var (target, saved) in targets)
                 {
-                    var subject = new IssueSubject([new IssueItem(Side.Local,
-                        scenario == "T4e" ? "Elsewhere" : target.Path,
+                    var subject = new IssueSubject([new IssueItem(Side.Local, target.Path,
                         scenario == "T4c" ? "other-id" : saved.LocalId)], null);
+                    if (scenario == "T4e") subject = subject with
+                    {
+                        Items = [.. subject.Items, new IssueItem(Side.Dropbox, "Elsewhere", saved.DropboxId)]
+                    };
                     if (scenario == "T4f") subject = subject with { Items = [] };
                     if (scenario == "T4g") subject = subject with
                     {

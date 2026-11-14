@@ -124,11 +124,13 @@ public static partial class EngineHostChecks
             var repairs = 0;
             rig.AfterFinish = () => Interlocked.Increment(ref repairs);
             FolderRemovalItem? frozenChild = null;
-            if (survivor) rig.AfterDispatch = () =>
+            // The delete request observes the frozen operation before the same dispatch can retire it.
+            if (survivor) rig.Rig.Wire.RequestException = _ =>
             {
-                frozenChild = rig.Store.ActiveFolderRemovals(rig.PairId, default)
+                frozenChild ??= rig.Store.ActiveFolderRemovals(rig.PairId, default)
                     .SelectMany(operation => rig.Store.FolderRemovalItems(rig.PairId, operation.OperationId, -1, int.MaxValue))
-                    .Single(item => item.Path == path && item.Provenance == FolderRemovalItem.ProvenanceKind.Planned);
+                    .SingleOrDefault(item => item.Path == path && item.Provenance == FolderRemovalItem.ProvenanceKind.Planned);
+                return null;
             };
             await rig.StartAsync();
             await UntilAsync(() => rig.Opportunities > 0 && rig.AutoSyncIdle(),
@@ -141,6 +143,8 @@ public static partial class EngineHostChecks
                 PathNames.IsSelfOrUnderKey(PathNames.Key(entry.Path), PathNames.Key("Parent"))).ToArray();
             if (survivor)
             {
+                Check.Require(frozenChild is not null,
+                    "B222 D4b: the request observer captured the frozen Planned child");
                 Check.Require(frozenChild?.EffectKind == FolderEffectKind.ConditionalFile,
                     "B222 D4b: the survivor makes the held child its own conditional-file effect");
                 Check.Require(retained is null && !notice && saved is null && repairs == 0,
