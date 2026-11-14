@@ -964,7 +964,6 @@ RunLanesAsync :115-206 (92): one finite-pass scheduling job, now switching from 
 
 Current merged delta: ranges above are descriptive, not a new semantic verdict. The existing dispositions remain; current grown-unit clearance awaits independent review.
 
-
 ## src/SyncShark.Engine/Executor/ExclusionRunner.cs
 
 <!-- spec-source: 6a4de93d0b02~e649c3286bc2~5d52f90009e9~84d7b91e1357~c333b2924576~d4a7 -->

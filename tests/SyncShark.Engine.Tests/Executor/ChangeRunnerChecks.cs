@@ -2103,10 +2103,9 @@ public static partial class ChangeRunnerChecks
         }
     }
 
-    // HARD-3b (HARD-R2-1): a deferred folder plan freezes and keeps an edited Local child as a released survivor whose
-    // first Dropbox write fails with proven no effect. The plan records its root selection, and the end-of-run released
-    // follow-up pass honours that record at the operation's saved root, so the survivor is observed once in the run
-    // (red: drop the root check in ContinueReleasedFollowUpsAsync -> a second observation in the same run). Both stores.
+    // An edited survivor's first publication fails with proven no effect. A selected root keeps it to one attempt
+    // in the run; a prepared removal with only the survivor selected permits a second attempt when its wait is due.
+    // Both stores keep the edit, and the next run completes exactly the second publication attempt if still owed.
     private static async Task TemporarySurvivorOncePerRunAsync()
     {
         foreach (var real in new[] { false, true })
@@ -2123,12 +2122,30 @@ public static partial class ChangeRunnerChecks
                 Record = [SyncedEntries.From(localFolder, remoteFolder), SyncedEntries.From(child, remoteChild)]
             });
             fixture.Local.Seed(localFolder, null);
-            fixture.Local.Seed(child with { Size = 2, Modified = Stamp.AddMinutes(1) }, [2, 2]);
-            // B-214 settles exact saved echoes before selection; a case-change hint keeps the folder plan selectable.
-            var selected = SeedRemote(fixture, remoteFolder with { Path = remoteFolder.Path.ToUpperInvariant() });
+            var edited = child with { Size = 2, Modified = Stamp.AddMinutes(1) };
+            fixture.Local.Seed(edited, [2, 2]);
+            // A case-change hint keeps the once-mode folder plan selectable after exact saved echoes settle.
+            var selected = mode == "once"
+                ? SeedRemote(fixture, remoteFolder with { Path = remoteFolder.Path.ToUpperInvariant() })
+                : Selected(fixture, Plain, edited, 2);
             if (real) RepairDone(fixture);
             else fixture.Hooks.RepairDone = true;
             ClearObligations(fixture);
+            if (mode == "due")
+            {
+                // A prepared removal has no pending root selection to fence the released continuation.
+                var jobs = SyncJobs.Create(fixture.Context(selected), new SyncPorts(new RecoveryBoundary(),
+                    new Boundary(_ => new Lease()), RefusingExecutionBoundary.Instance, 0));
+                var saved = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Folder))!;
+                string id;
+                using (var plan = await new FolderPlanBuilder(fixture.Context(selected)).BuildAsync(
+                    Row.ForOneSide(Side.Local, saved.LocalKey, localFolder, saved, [], null, RowContext.Neutral),
+                    Side.Local, new HashSet<string>(), live: true, default))
+                    id = fixture.Inner.BeginFolderRemoval(PairId, plan, fixture.Settings.StoragePageSize, default);
+                await jobs.Items.Folders.RunPreparedFolderRemovalsAsync([id], default);
+                Check.Require(fixture.Inner.ActiveFolderRemovals(PairId, default).Count() == 1,
+                    "the prepared removal retains its survivor before the selected attempt");
+            }
             // Count survivor publication attempts after the plan froze; only its first Dropbox write fails.
             var writes = 0;
             fixture.DropboxView = new ProxySide(fixture.Dropbox)

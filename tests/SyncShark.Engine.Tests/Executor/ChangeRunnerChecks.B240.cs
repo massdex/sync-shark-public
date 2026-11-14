@@ -16,6 +16,7 @@ public static partial class ChangeRunnerChecks
             await HeldKeyNotExtendedAsync(real);
             await WaitTravelsWithTurnAsync(real);
             await PerProbeEligibilityAsync(real);
+            await SkippedAdmissionStaysTemporaryAsync(real);
         }
         RecordRules();
     }
@@ -214,6 +215,35 @@ public static partial class ChangeRunnerChecks
         };
         await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], attempts: attempts).SyncWorkAsync(default);
         Check.Require(syncedInSecond && ends == 3, "eligibility is fresh at each probe within the pass; real=" + real);
+    }
+
+    private static async Task SkippedAdmissionStaysTemporaryAsync(bool real)
+    {
+        using var fixture = new Fixture(realStore: real);
+        ClearObligations(fixture);
+        fixture.Local.Seed(FolderEntry(Folder, FolderId), null);
+        var child = LocalEntry(Plain, LocalId);
+        fixture.Local.Seed(child, [1]);
+        fixture.Dropbox.Seed(FolderEntry(Folder, DropboxId), null);
+        var selected = Selected(fixture, Plain, child);
+        var ancestor = SeedRemote(fixture, FolderEntry(Folder, DropboxId));
+        var attempts = new TemporaryAttempts();
+        var held = false;
+        fixture.Hooks.BeforeCall = method =>
+        {
+            if (method.Name == nameof(IStateStore.BeginSelection) && !held)
+            {
+                held = true;
+                attempts.Held.Add((ancestor.Side, ancestor.Key));
+            }
+            if (method.Name == nameof(IStateStore.EndSelection)) attempts.Held.Clear();
+        };
+        var events = new List<RunEvent>();
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts).SyncWorkAsync(default);
+        Check.Require(held && fixture.Hooks.BegunSelections.Any(work => work.Key == ancestor.Key) &&
+            events.All(item => item.Error is not LiveAdmissionStaleException) && fixture.Inner.Issues(PairId).Count == 0 &&
+            PendingAt(fixture, Side.Local, Plain).Any(),
+            "a wait ending after admission's skip retains its dependent without a false refusal; real=" + real);
     }
 
     private static void RecordRules()

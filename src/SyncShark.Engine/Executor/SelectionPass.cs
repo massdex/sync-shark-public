@@ -55,6 +55,7 @@ internal sealed class SelectionPass
 
 
     internal bool Refused { get; private set; }
+    internal bool Skipped { get; private set; }
     // Admission asks scope only where its answer is read: folder admission (the batch and walk gates) and the
     // unbound Local settle. Every other primary — a Dropbox-origin file, a bound notice, a delete or a rename —
     // pays no exclusion evaluation, so the in-scope repeat is exactly B-10's accepted Local Changed file.
@@ -78,13 +79,13 @@ internal sealed class SelectionPass
         _rows.ForSelection();
         if (_context.Store.BeginSelection(selection) is not { } begun) return (null, null);
         Begun = selection = begun;
-        Refused = false;
+        Refused = Skipped = false;
         RefusedRow = null;
         _ancestors.RunSelection(selection, () => Refused = true);
         try
         {
             // Admission can refresh the key to one that already ended temporarily in this run; it is not run again.
-            if (_temporaryThisRun?.Invoke(selection) == true) return (false, null);
+            if (Skipped = _temporaryThisRun?.Invoke(selection) == true) return (false, null);
             return (await RunSelectionAsync(selection, ct).ConfigureAwait(false), Prerequisite);
         }
         catch (ChangedUnderneathException)

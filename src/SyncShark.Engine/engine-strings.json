@@ -446,5 +446,5 @@
   "FailRecycledLate": "{Path} was added or changed while its folder was being deleted, so it was moved to the Recycle Bin with that folder and was not synced. Recover it from the Recycle Bin if you need it, then dismiss this notice.",
   "RecycleUnchecked": "{Path} was moved to the Recycle Bin, but Sync Shark could not check it for changes that were not synced. Check that folder in the Recycle Bin.",
   "LanesSerial": "Running items one at a time, because parallel attempts were refused without progress",
-  "LanesParallel": "Running items in parallel again"
+  "LanesParallel": "Finished running items one at a time"
 }

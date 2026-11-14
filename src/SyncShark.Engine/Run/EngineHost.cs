@@ -1074,8 +1074,7 @@ internal sealed class EngineHost : IAsyncDisposable
             if (_prerequisites.TryGetValue(operation.PairId, out var repair) &&
                 repair.Retained?.Contains((side, key)) == true) return true;
             if (!_itemWaits.TryGetValue(operation.PairId, out var known) || !known.Keys.Contains((side, key))) return false;
-            return LiveItemWait(operation.PairId, operation) is { } wait &&
-                _monitor.ItemWaitPending(operation.PairId, operation.Generation, wait.State);
+            return LivePending(operation, out _);
         }
     }
 
@@ -1089,6 +1088,13 @@ internal sealed class EngineHost : IAsyncDisposable
             return wait == live.Id ? _monitor.ItemWaitPending(operation.PairId, operation.Generation, live.State)
                 : wait < live.DueFrom || wait > live.Id;
         }
+    }
+
+    // Callers hold _gate so the wait identity and Monitor's answer describe the same live state.
+    private bool LivePending(Registration operation, out ItemWait? live)
+    {
+        live = LiveItemWait(operation.PairId, operation);
+        return live is not null && _monitor.ItemWaitPending(operation.PairId, operation.Generation, live.State);
     }
 
     /// <summary>True when the pending wait being admitted is the one the host recorded keys for, so only those keys
@@ -1582,8 +1588,7 @@ internal sealed class EngineHost : IAsyncDisposable
             lock (_gate)
             {
                 // Read Monitor's monotonic answer once, before this turn writes the row.
-                var live = LiveItemWait(owner.PairId, owner);
-                var pending = live is not null && _monitor.ItemWaitPending(owner.PairId, owner.Generation, live.State);
+                var pending = LivePending(owner, out var live);
                 var repair = owner.Prerequisite;
                 FailureRetryOwner.State? joined = owner.ItemRetry is not { } prior ? null
                     : pending ? live!.State : live is null ? prior : null;

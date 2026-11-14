@@ -334,7 +334,7 @@ public sealed class Syncer
                 {
                     // A prerequisite or ancestor that just ended temporarily is neither a clash nor a stale refusal;
                     // a branch the selection itself refused still counts.
-                    if (_temporary.Skips(next, out var endedUntil))
+                    if (_temporary.Skips(next, out var endedUntil) || pass.Skipped)
                     {
                         _temporary.Retain(next, endedUntil, pending);
                         if (pass.Refused) refused();
