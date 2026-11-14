@@ -164,7 +164,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         };
         return (justified && !(AuthorityOf(request.Route, request.Exclusion) is FolderRemovalAuthority.Inferred
             or FolderRemovalAuthority.Vacate && await FolderIdentity.KeptElsewhereAsync(_context, observed.Synced,
-                deletingFrom, ct, preRestoreId, null)), preRestoreId);
+                deletingFrom, ct, preRestoreId, observed.EntryOn(absent)?.Path)), preRestoreId);
     }
 
     // D4's Repair arm (-7 1.2): the reobserved binding is the request's, X is absent or itself at its shared-side path
@@ -313,7 +313,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             var pageSize = _context.Settings.StoragePageSize;
             operationId = renameWork is null
                 ? _context.Store.BeginFolderRemoval(_context.Pair.PairId, plan, authority, pageSize, ct, Admission(execution),
-                    preRestoreId)
+                    null)
                 : _context.Store.BeginFolderRemoval(_context.Pair.PairId, plan, authority, pageSize, ct, renameWork,
                     Admission(execution), preRestoreId);
         }
