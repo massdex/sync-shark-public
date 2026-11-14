@@ -1610,6 +1610,7 @@ public static partial class CallBudgetChecks
                 SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, text) =>
                 {
                     var sql = text.utf8_to_string().TrimStart();
+                    Console.WriteLine("B222 B3 SQL E=" + count + " present=" + present + " distinct=" + distinct + " " + sql);
                     statements++;
                     if (sql.StartsWith("COMMIT", StringComparison.OrdinalIgnoreCase)) commits++;
                     if (sql.StartsWith(StateSchema.SelectScanEntry[..StateSchema.SelectScanEntry.IndexOf('$')],
