@@ -72,6 +72,5 @@ internal sealed class PathReadBarrier(Func<string, CancellationToken, Task<Entry
     }
 
     internal static bool IsProducerCancellation(Exception? failure, CancellationToken producer) =>
-        failure is OperationCanceledException stopped && stopped.CancellationToken == producer &&
-        producer.IsCancellationRequested;
+        failure is OperationCanceledException && producer.IsCancellationRequested;
 }
