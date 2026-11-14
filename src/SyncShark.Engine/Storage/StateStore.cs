@@ -2818,7 +2818,7 @@ public sealed partial class StateStore : IStateStore
                 continue;
             }
             ApplyFolderSettlement(transaction, pair, pairId, operationId, current, generation, next, change, settling,
-                settling && change.CloseProvenAbsent
+                settling
                     ? endEpisode ??= AbsentEpisodeEnd(transaction, pair, pairId, ended = new()) : null);
             if (settling && operation.DeletingSide == Side.Local &&
                 current.EffectState == FolderRemovalItem.EffectStatus.Verified &&
