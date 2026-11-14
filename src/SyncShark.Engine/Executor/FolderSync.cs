@@ -187,7 +187,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         Func<Side, string, string?, bool>? temporary = null, ISet<string>? absent = null)
     {
         var operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
-        await _folderDelete.ResumeAsync(operation, selection, ct, absent);
+        await _folderDelete.ResumeAsync(operation, selection, ct);
         operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
         if (_folderDelete.FollowUpsReady(operation, ct) &&
             _context.Store.RenameRemovalWork(_context.Pair.PairId, operationId) is null)
