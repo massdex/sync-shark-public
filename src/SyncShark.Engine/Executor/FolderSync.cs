@@ -163,7 +163,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                 request.Exclusion is not null || request.Route == FolderRemovalRoute.Chosen || restored)
         };
         return (justified && !(AuthorityOf(request.Route, request.Exclusion) is FolderRemovalAuthority.Inferred
-            or FolderRemovalAuthority.Vacate && preRestoreId is null && await FolderIdentity.KeptElsewhereAsync(_context, observed.Synced,
+            or FolderRemovalAuthority.Vacate && await FolderIdentity.KeptElsewhereAsync(_context, observed.Synced,
                 deletingFrom, ct, preRestoreId, observed.EntryOn(absent)?.Path)), preRestoreId);
     }
 

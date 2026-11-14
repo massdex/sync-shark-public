@@ -838,7 +838,7 @@ public sealed class FolderDeleteRunner
                 FolderRemovalAuthority.Legacy)) continue;
             try
             {
-                if (await FolderIdentity.KeptElsewhereAsync(_context, operation.SavedRoot, operation.DeletingSide, ct,
+                if (operation.PreRestoreId is null && await FolderIdentity.KeptElsewhereAsync(_context, operation.SavedRoot, operation.DeletingSide, ct,
                         operation.PreRestoreId, operation.CounterpartPath))
                     refused.Add(id);
             }
