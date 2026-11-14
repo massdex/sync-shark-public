@@ -1184,6 +1184,7 @@ internal static class LoggingRepairChecks
             "source recovery never retires an item-only retry; lost continuity repairs the observed normal debt; " +
             $"variant={nameof(SourceRecoversAtDeadlineAsync)}; kind={kind}; members={memberCount}; failedResume={failedResume}; continuity={(repair ? "lost" : "healthy")}; " +
             string.Join("; ", members.Select(id => $"member={id}, CompleteItemRetry={observed.ItemCompletions(id)}, " +
+                $"CompleteItemRetryLastResult={observed.ItemCompletionResult(id)?.ToString() ?? "none recorded"}, " +
                 $"observedDebtKinds={(normalDebt.ContainsKey(id) ? nameof(SourceObligation.NormalRepair) : "none recorded")}")));
         if (!repair)
         {
@@ -1412,11 +1413,15 @@ internal static class LoggingRepairChecks
         internal readonly TaskCompletionSource LostIntervalEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource LostIntervalRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly ConcurrentDictionary<string, int> _itemCompletions = new();
+        private readonly ConcurrentDictionary<string, bool> _itemCompletionResults = new();
         internal int ItemCompletions(string pairId) => _itemCompletions.GetValueOrDefault(pairId);
+        internal bool? ItemCompletionResult(string pairId) =>
+            _itemCompletionResults.TryGetValue(pairId, out var completed) ? completed : null;
         internal void HoldLostInterval() => Interlocked.Exchange(ref _holdLostInterval, 1);
         public override bool CompleteItemRetry(string pairId, long expectedGeneration, FailureRetryOwner.State expected)
         {
             var completed = base.CompleteItemRetry(pairId, expectedGeneration, expected);
+            _itemCompletionResults[pairId] = completed;
             _itemCompletions.AddOrUpdate(pairId, 1, (_, count) => count + 1);
             return completed;
         }
