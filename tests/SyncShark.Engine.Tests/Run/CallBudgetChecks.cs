@@ -359,7 +359,6 @@ public static partial class CallBudgetChecks
             void Occupy()
             {
                 rig.Wire.AfterListingCaptured = null;
-                rig.Wire.UploadSessionStarted = null;
                 if (kind == "folder") rig.Wire.SeedFolder("a");
                 else rig.Wire.SeedFile("a", kind == "identical" ? "content" : "occupant", BaseTime);
                 before = JsonSerializer.Serialize(rig.Wire.ChangeExistingFile("a"));
@@ -367,9 +366,18 @@ public static partial class CallBudgetChecks
                 occupantId = metadata.RootElement.GetProperty("id").GetString();
             }
             if (early) rig.Wire.AfterListingCaptured = Occupy;
-            else rig.Wire.UploadSessionStarted = Occupy;
+            else rig.Wire.RequestException = route =>
+            {
+                if (route is "/2/files/upload" or "/2/files/upload_session/start")
+                {
+                    rig.Wire.RequestException = null;
+                    Occupy();
+                }
+                return null;
+            };
             using var log = rig.Log(root, "occupied");
             Check.Require((await rig.RunAsync(log, default)).Completed, "An occupied create does not stop its Repair.");
+            Console.WriteLine($"Occupied create early={early} kind={kind} routes={string.Join(",", rig.Wire.Calls.Where(route => route is "/2/files/upload" or "/2/files/upload_session/start"))}");
             var issue = rig.Store.Issues(rig.Pair.PairId).Single(item => item.Kind == IssueKind.NameClash);
             var occupant = rig.Wire.Snapshot().Single(item => item.Path == "a");
             Check.Require(before is not null && occupantId is not null && JsonSerializer.Serialize(rig.Wire.ChangeExistingFile("a")) == before &&
