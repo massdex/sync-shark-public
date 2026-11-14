@@ -276,7 +276,7 @@ public static class IssuePolicy
     {
         if (!IssueClosure.AfterHeldInSync.Contains(issue.Kind)) return false;
         // A live wait yields only to trustworthy absence, never to a change of configured scope.
-        if (liveEpisode) return !UnknownMove(issue.Kind, issue.Subject) && AbsentOnBothSides();
+        if (liveEpisode) return AbsentOnBothSides();
         if (retainedByOwner) return false;
         // Asked only for an issue that can retire; the scope derives it once and keeps it.
         var configuredScope = scope.Configured;
