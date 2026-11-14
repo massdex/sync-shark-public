@@ -796,12 +796,13 @@ internal static class LoggingRepairChecks
         }
     }
 
-    private static async Task UntilAsync(Func<bool> condition)
+    private static async Task UntilAsync(Func<bool> condition, Func<string>? evidence = null)
     {
         var bound = Environment.TickCount64 + 30_000;
         while (!condition())
         {
-            Check.Require(Environment.TickCount64 < bound, "the awaited host state arrives");
+            if (Environment.TickCount64 >= bound)
+                Check.Require(false, "the awaited host state arrives" + (evidence is null ? "" : "; " + evidence()));
             await Task.Yield();
         }
     }
@@ -1099,8 +1100,32 @@ internal static class LoggingRepairChecks
         members = memberCount == 1 ? [rig.Pair.PairId] : [rig.Pair.PairId, "pair-b"];
         if (memberCount == 2)
         {
-            raw.SavePair(rig.Pair with { PairId = members[1], Drive = null });
+            // One Local journal source, not one root: a sibling Local root on the same volume and a Dropbox root that
+            // pair-a's scope holds out as nested (the ScenarioFixture.AddSecondPair topology; the wire has one tree).
+            var local = Path.Combine(folder, members[1] + "-local");
+            Directory.CreateDirectory(local);
+            rig.Wire.SeedFolder(members[1]);
+            var dropboxRoot = rig.Pair.DropboxRoot + "/" + members[1];
+            var other = rig.Pair with
+            {
+                PairId = members[1], Drive = null, LocalRoot = local, DropboxRoot = dropboxRoot,
+                Roots = rig.Pair.Roots! with
+                {
+                    LocalRoot = local, DropboxRoot = dropboxRoot, Local = WindowsDirectoryListing.ReadIdentity(local)
+                }
+            };
+            raw.SavePair(other);
             await rig.Host.RecomposeCurrentAsync(members[1], default);
+            var identity = await rig.Host.DispatchAsync(members[1], (registration, pair, generation, _) =>
+                rig.Host.BorrowGeneration(registration, pair.PairId, generation).Dropbox.ReadRootIdentityAsync(default),
+                default);
+            raw.SavePair(other with { Roots = other.Roots! with { Dropbox = identity } });
+            // Both generations recompose against the saved pairs, so pair-a's scope now holds pair-b's root out.
+            foreach (var id in members)
+            {
+                await rig.Host.DrainGenerationAsync(id, default);
+                await rig.Host.RecomposeCurrentAsync(id, default);
+            }
             await rig.Host.EnsureSourceBasesAsync(members[1], default);
         }
         foreach (var id in members)
@@ -1189,10 +1214,22 @@ internal static class LoggingRepairChecks
         if (!repair)
         {
             var before = raw.ReadWorkWatermark();
-            File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "after.txt"), "later");
+            foreach (var id in members) File.WriteAllText(Path.Combine(raw.Pair(id)!.LocalRoot, "after.txt"), "later");
+            // Diagnostic only: each conjunct of the wait below, per member, with its binding, notices and retry row.
+            string AfterEvidence() =>
+                $"watermarkAdvanced={raw.ReadWorkWatermark() > before} (before={before}, now={raw.ReadWorkWatermark()}); " +
+                $"wireHasAfter={rig.Wire.Snapshot().Any(item => item.Path == "after.txt" && !item.Folder && Encoding.UTF8.GetString(item.Bytes) == "later")}; " +
+                "wire=[" + string.Join(", ", rig.Wire.Snapshot().Where(item => item.Path.EndsWith("after.txt", StringComparison.Ordinal))
+                    .Select(item => item.Path + (item.Folder ? " folder" : "=" + Encoding.UTF8.GetString(item.Bytes)))) + "]; " +
+                $"hostStatus={rig.Host.Status()}; " + string.Join("; ", members.Select(id =>
+                    $"member={id}, bound={raw.SyncedByKey(id, Side.Local, PathNames.Key("after.txt")) is not null}, " +
+                    $"binding={raw.SyncedByKey(id, Side.Local, PathNames.Key("after.txt"))?.ToString() ?? "none"}, " +
+                    $"retry={(raw.ReadPrerequisiteRetry(id) is { } row ? row.Attempts + "@" + row.RetryAfter.UtcTicks : "none")}, " +
+                    $"obligated={raw.Obligated(id)}, issues=[" +
+                    string.Join(", ", raw.Issues(id).Select(issue => issue.Kind + "/" + issue.Cause + "/" + issue.Path)) + "]"));
             await UntilAsync(() => raw.ReadWorkWatermark() > before && members.All(id =>
                 raw.SyncedByKey(id, Side.Local, PathNames.Key("after.txt")) is not null) && rig.Wire.Snapshot()
-                .Any(item => item.Path == "after.txt" && !item.Folder && Encoding.UTF8.GetString(item.Bytes) == "later"));
+                .Any(item => item.Path == "after.txt" && !item.Folder && Encoding.UTF8.GetString(item.Bytes) == "later"), AfterEvidence);
         }
     }
 
