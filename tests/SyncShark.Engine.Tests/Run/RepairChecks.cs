@@ -110,6 +110,7 @@ public static class RepairChecks
         }, default);
         using var log = rig.Log(folder, "recovery");
         var summary = await rig.RunAsync(log, default);
+        recovery.Resolved.Add(recovery.Resolved.Single());
         Check.Require(summary.Completed &&
             recovery.Resolved.SequenceEqual(new[] { ((PendingRead)new CurrentPending(pending), RecoveryChoice.Check) }) &&
             rig.Store.Pending(pair) == new CurrentPending(pending) &&
