@@ -697,6 +697,14 @@ public static class FolderDeleteRunnerChecks
                             new IssueSubject([new IssueItem(Side.Local, path, "excluded-" + path)], null))] });
                         excluded.Add(f.Store.Issues(f.Pair.PairId).Single(issue => issue.Path == path).Id);
                     }
+                if (scenario == "T7")
+                {
+                    var branch = records.Single(saved => saved.LocalPath == "Folder/Branch-0");
+                    var branchWait = f.Store.RecordInUseFailure(f.Pair.PairId, 0, source.Epoch, branch.LocalPath,
+                        new IssueSubject([new IssueItem(Side.Local, branch.LocalPath, branch.LocalId)], null),
+                        TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                    excluded.Add(branchWait.Token.IssueId);
+                }
                 if (scenario == "T11") duringRead = () =>
                 {
                     f.Store.Commit(f.Pair.PairId, StateChange.Empty with
@@ -712,8 +720,11 @@ public static class FolderDeleteRunnerChecks
                 await f.Runner.RunPreparedAsync([effects], default);
                 foreach (var effect in effects) await f.DropboxEntries.DeleteAsync(effect.Expected!, null, default);
                 var cancelled = false;
+                Exception? escaped = null;
                 try { await f.Runner.ResumeAsync(f.Store.FolderRemoval(f.Pair.PairId, operation), null, cancellation.Token); }
                 catch (OperationCanceledException) when (scenario == "T5c") { cancelled = true; }
+                catch (Exception error) when (scenario is "T5a" or "T5b") { escaped = error; }
+                Check.Require(escaped is null, "B222 " + scenario + ": identity inspection failure never escapes the continuation; " + escaped);
                 Check.Require(cancelled == (scenario == "T5c"), "B222 T5c: entry-point cancellation propagates");
                 if (scenario is "T5a" or "T5b") Check.Require(!f.Store.FolderRemoval(f.Pair.PairId, operation).Active,
                     "B222 " + scenario + ": failed identity inspection retains the issue without preventing operation conclusion");

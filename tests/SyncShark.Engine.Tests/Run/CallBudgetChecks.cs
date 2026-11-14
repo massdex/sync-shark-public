@@ -1933,7 +1933,7 @@ public static partial class CallBudgetChecks
             {
                 Capture = (selection, _, _) =>
                 {
-                    var journal = store.ReadJournal(domain)!.Value;
+                    var journal = store.ReadJournal(domain)!;
                     var remote = store.ReadSource(pair, Side.Dropbox)!.Value;
                     return Task.FromResult(store.CaptureLiveCoverage(selection,
                         new LocalCatchUp(pair, selection.PairGeneration, source.Epoch,

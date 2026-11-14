@@ -67,7 +67,7 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/StateStore.cs
 
-B-222 disposition: existing split/reason obligations remain open under their recorded structural owners and clearing triggers. The absence-retirement fix extends the existing retirement, closing or checked-removal job, not a new workflow. No debt row is cleared by this change; transactional ordering and proof forwarding remain with their current owners.
+B-222 disposition: existing split/reason obligations remain open under their recorded structural owners and clearing triggers. The absence-retirement fix extends the existing retirement, closing or checked-removal job, not a new workflow. No debt row is cleared by this change; transactional ordering and proof forwarding remain with their current owners. D4 adds a folder-member page and exact-close transaction to those existing persistence jobs; CommitClosure shares the existing commit/publication tail without changing either caller's retirement argument.
 
 Category-change split clearing condition (class-size and file-size rows, and the FinishRepair row that cites this condition): splitting StateStore is deferred beyond 0.3.82, whose scope is serious sync-reliability fixes only. Clearing trigger: the 0.3.83 refactor unit split (owner-approved 10 Nov), at its cleanup-only structural recheck. Owner: storage structural lane. Destination: this register section and the extracted owners under src/SyncShark.Engine/Storage/. Closure requires the completed extraction preserving transaction, locking and publication semantics, plus a fresh cross-family verdict; if the coupled storage, runner and Host interfaces are still changing then, the obligation stays visibly open at that release gate and is not treated as cleared.
 
@@ -810,6 +810,8 @@ No open §1.3 size obligation. Since 07ff9d097 (3b9d021a9, 36efd4772, cb637f88a)
 
 ## src/SyncShark.Engine/IStateStore.cs
 
+B-222 D4 disposition: HeldFolderMembers and CloseIdentityAbsent extend the existing folder-removal persistence group; no new group or split verdict is introduced, and the file-size split obligation remains open.
+
 Category-change split clearing condition: the 0.3.83 structure pass clears these SPLIT-PENDING jobs once the storage, runner and Host interfaces they depend on are stable; splitting them while those interfaces change would conflict with that change.
 
 <!-- spec-source: cecbc92074e9~8015f6d4423f~8245f65b1f71~df42d45002f0~650c5d311d90~05a2 -->
@@ -838,7 +840,7 @@ Category-change split clearing condition: the 0.3.83 structure pass clears these
 
 ## src/SyncShark.Engine/Storage/StateSchema.cs
 
-Category-change scope: Public page, count and keyset statements reuse one bound SQL expression. The catalogue still contains declarations only, without execution or transaction policy, so arbitrary catalogue splitting does not separate a runtime job. Absence-retirement scope changes only the index access directives of PairItemEpisodes and ReadIssueRetryViews; the existing catalogue reason remains subject to content-bound review.
+Category-change scope: Public page, count and keyset statements reuse one bound SQL expression. The catalogue still contains declarations only, without execution or transaction policy, so arbitrary catalogue splitting does not separate a runtime job. Absence-retirement scope changes the index access directives of PairItemEpisodes and ReadIssueRetryViews and adds HeldFolderMembers with its saved-binding column ordinal; these are declarations, not execution or transaction policy. The existing catalogue reason remains subject to content-bound review.
 
 <!-- spec-source: a5947f1be144~dc830364aa06~a5907d71e161~21ab40c74699~a1ea19609984~5358 -->
 
