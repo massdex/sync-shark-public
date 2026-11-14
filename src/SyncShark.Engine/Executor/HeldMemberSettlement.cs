@@ -39,6 +39,6 @@ internal sealed class HeldMemberSettlement(ExecutorContext context)
     private static async Task<bool> AbsentAsync(Func<Task<(IdentityLocation Location, bool InScope)?>> read)
     {
         try { return await read() is null; }
-        catch (Exception error) when (error is not OperationCanceledException) { return false; }
+        catch (Exception error) when (error is not OperationCanceledException) { throw; }
     }
 }
