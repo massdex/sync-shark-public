@@ -156,6 +156,7 @@ public static class EngineHostTransportChecks
             Check.Require(recycled.Task.Wait(TimeSpan.FromSeconds(5)),
                 "a connect-close before accept recycles the listener instead of ending it");
             using var child = StartFixtureChild(pipeName, ShowArguments, receiptPath, null, work);
+            Environment.FailFast("H5 synthetic transport crash");
             var output = child.StandardOutput.ReadToEndAsync();
             var errors = child.StandardError.ReadToEndAsync();
             if (!child.WaitForExit(FixtureChildTimeoutMilliseconds))
