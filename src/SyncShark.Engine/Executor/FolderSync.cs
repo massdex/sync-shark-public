@@ -152,7 +152,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         var (folder, deletingFrom) = (request.Folder, request.DeletingFrom);
         var absent = PathNames.Other(deletingFrom);
         var restored = request.RestoredAncestors?.Contains(folder.Key) == true;
-        var preRestoreId = folder.Synced?.IdOn(absent);
+        var preRestoreId = restored ? folder.Synced?.IdOn(absent) : null;
         var justified = request.Route switch
         {
             FolderRemovalRoute.SelectedReplacement => observed.Local == folder.Local && observed.Dropbox == folder.Dropbox,
@@ -164,7 +164,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         };
         return (justified && !(AuthorityOf(request.Route, request.Exclusion) is FolderRemovalAuthority.Inferred
             or FolderRemovalAuthority.Vacate && await FolderIdentity.KeptElsewhereAsync(_context, observed.Synced,
-                deletingFrom, ct, preRestoreId, observed.EntryOn(absent)?.Path)), preRestoreId);
+                deletingFrom, ct, preRestoreId, observed.Synced?.PathOn(absent))), preRestoreId);
     }
 
     // D4's Repair arm (-7 1.2): the reobserved binding is the request's, X is absent or itself at its shared-side path
