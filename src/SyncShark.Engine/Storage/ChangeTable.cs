@@ -1594,10 +1594,10 @@ internal sealed partial class ChangeTable
 
     /// <summary>Deletes source-less work after its episode clears, releasing children even if an ordinary Failure remains.</summary>
     internal void SettleIssueWork(SqliteTransaction transaction, ItemRetryCandidate expected) =>
-        Require(Run(transaction, StateSchema.DeleteSettledIssueWork,
+        Run(transaction, StateSchema.DeleteSettledIssueWork,
             (StateSchema.ParamPairRow, RequirePair(transaction, expected.PairId).Row),
             (StateSchema.ParamWork, expected.Token.WorkId),
-            (StateSchema.ParamJoinKey, StateEncoding.IssueWorkKey(expected.Token.IssueId, expected.Token.Subject))));
+            (StateSchema.ParamJoinKey, StateEncoding.IssueWorkKey(expected.Token.IssueId, expected.Token.Subject)));
 
     /// <summary>Settles only the candidate's Acquired row after verified completion and association clearance;
     /// later arrivals remain pending. Retained or transferred responsibility must not call this method.</summary>
