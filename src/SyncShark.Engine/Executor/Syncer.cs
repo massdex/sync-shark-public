@@ -130,12 +130,10 @@ public sealed class Syncer
             var progress0 = 0;
             var alone = serial;
             var progressed = false;
-            var refusedAlone = 0;
             if (alone) _context.Events(RunEvent.Snapshot(TextKey.LanesSerial, Text.Get(TextKey.LanesSerial)));
             void LeaveSerial()
             {
                 alone = false;
-                refusedAlone = Volatile.Read(ref refused);
                 _context.Events(RunEvent.Snapshot(TextKey.LanesParallel, Text.Get(TextKey.LanesParallel)));
             }
             using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -198,7 +196,7 @@ public sealed class Syncer
             // Retirement or a newly released endpoint justifies another pass; re-registering failure does not.
             if (alone) LeaveSerial();
             // Alone refusals are not competition; any refused remainder lane of a serial-started pass is.
-            var competed = (serial || lanes > 1) && Volatile.Read(ref refused) > refusedAlone;
+            var competed = (serial || lanes > 1) && Volatile.Read(ref refused) > 0;
             repeat = competed || retired;
             serialOnly = !retired && (serialOnly || serial && competed);
             serial = competed && Volatile.Read(ref progress0) == 0;
