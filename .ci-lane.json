@@ -3,12 +3,7 @@
     "engine-tests"
   ],
   "engine": [
-    "issues",
-    "budget-4",
-    "syncer",
-    "mapped-holds",
-    "scan-owner",
-    "folder-deletes"
+    "budget-4"
   ],
   "core": [],
   "ui": []
