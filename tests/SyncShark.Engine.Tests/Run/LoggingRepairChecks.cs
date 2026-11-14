@@ -671,7 +671,7 @@ internal static class LoggingRepairChecks
     }
 
     // J1 (-11 §3): P1's accounting fails, yet P2 gets its row, Monitor wait, log and the status tail; after a
-    // restart past P2's deadline the startup wake alone runs each member's Repair once. Several failures aggregate.
+    // restart past P2's deadline its due wake recovers without Repair. Several failures aggregate.
     private static async Task SourceLossPublishesAllMembersAsync(string folder, bool several = false)
     {
         var clock = new FakeTimeProvider();
@@ -1181,7 +1181,10 @@ internal static class LoggingRepairChecks
         await UntilAsync(() => members.All(id => raw.ReadPrerequisiteRetry(id) is null && !raw.Obligated(id) &&
             finishes.Finishes(id) == (repair ? 2 : 1)));
         Check.Require(members.All(id => observed.ItemCompletions(id) == 0 && (!repair || normalDebt.ContainsKey(id))),
-            "source recovery never retires an item-only retry; lost continuity repairs the observed normal debt");
+            "source recovery never retires an item-only retry; lost continuity repairs the observed normal debt; " +
+            $"variant={nameof(SourceRecoversAtDeadlineAsync)}; kind={kind}; members={memberCount}; failedResume={failedResume}; continuity={(repair ? "lost" : "healthy")}; " +
+            string.Join("; ", members.Select(id => $"member={id}, CompleteItemRetry={observed.ItemCompletions(id)}, " +
+                $"observedDebtKinds={(normalDebt.ContainsKey(id) ? nameof(SourceObligation.NormalRepair) : "none recorded")}")));
         if (!repair)
         {
             var before = raw.ReadWorkWatermark();

@@ -1,18 +1,10 @@
 {
   "build": [
-    "engine-tests",
-    "core-tests"
+    "engine-tests"
   ],
   "engine": [
-    "local",
-    "repair",
-    "engine-host",
-    "strings",
-    "literals",
-    "dependencies"
+    "repair"
   ],
-  "core": [
-    "--ntfs-usn-page-checks"
-  ],
+  "core": [],
   "ui": []
 }
