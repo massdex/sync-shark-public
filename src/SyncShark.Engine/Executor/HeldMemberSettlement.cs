@@ -25,6 +25,7 @@ internal sealed class HeldMemberSettlement(ExecutorContext context)
                         await AbsentAsync(() => local.ReadByIdDocumentedAsync(saved!.LocalId, ct)) &&
                         await AbsentAsync(() => dropbox.ReadByIdAsync(saved!.DropboxId, ct))) proven.Add(issue);
                 if (proven.Count != 0) context.Store.CloseIdentityAbsent(context.Pair.PairId, proven);
+                break;
             }
         }
     }
