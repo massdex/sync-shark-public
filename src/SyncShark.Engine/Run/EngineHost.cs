@@ -947,7 +947,8 @@ internal sealed class EngineHost : IAsyncDisposable
         }
     }
 
-    internal async Task EnsureSourceBasesAsync(string pairId, CancellationToken ct, RunLog? log = null)
+    internal async Task EnsureSourceBasesAsync(string pairId, CancellationToken ct, RunLog? log = null,
+        bool prerequisite = false)
     {
         await AcquireAsync(pairId, async (registration, pair, generation, token) =>
         {
@@ -966,7 +967,7 @@ internal sealed class EngineHost : IAsyncDisposable
                 await resources.Feed.EnsureSourceBaseAsync(token).ConfigureAwait(false);
                 log?.Event(RunEvent.Stage(TextKey.StageSourceBase, ended: true, count: RunLog.CompletedOperation));
                 if (pair.Roots is null) throw new EngineRequestException(TextKey.RootUnbound);
-                await CatchUpLocalAsync(pairId, generation, token, log).ConfigureAwait(false);
+                await CatchUpLocalAsync(pairId, generation, token, log, prerequisite).ConfigureAwait(false);
                 return pair;
             }
             finally { lock (_gate) ((Registration)registration).Log = null; }
@@ -974,14 +975,23 @@ internal sealed class EngineHost : IAsyncDisposable
     }
 
     internal async Task<LocalCatchUp> CatchUpLocalAsync(string pairId, long generation, CancellationToken ct,
-        RunLog? log = null)
+        RunLog? log = null, bool prerequisite = false)
     {
         var pair = Store.ReadPairExecution(pairId) ?? throw Stale();
         if (pair.Generation != generation || pair.Pair.Roots is null) throw Stale();
         var key = pair.Pair.Roots.LocalVolumeKey();
         if (!_volumes.TryGetValue(key, out var volume)) throw Stale();
-        return await WithVolumeStoppedAsync(volume,
-            token => volume.Source.CatchUpForPairAsync(pairId, generation, token, log), ct, log).ConfigureAwait(false);
+        return await WithVolumeStoppedAsync(volume, async token =>
+        {
+            var caughtUp = await volume.Source.CatchUpForPairAsync(pairId, generation, token, log).ConfigureAwait(false);
+            // The attempt's own catch-up discharges a source failure that reached it earlier; the stopped reader and
+            // held serial keep any later failure after this point, where JournalFailed sets the flag again.
+            if (prerequisite)
+                lock (volume.Gate)
+                lock (_gate)
+                    if (_prerequisites.TryGetValue(pairId, out var pending)) pending.SourceFailed = false;
+            return caughtUp;
+        }, ct, log).ConfigureAwait(false);
     }
 
     /// <summary>The one stop/run/restart sequence for a volume: holds its serial, stops and joins acquisition,
@@ -1203,7 +1213,7 @@ internal sealed class EngineHost : IAsyncDisposable
             log ??= ownedLog;
             await RecomposeCurrentAsync(pairId, ct, log).ConfigureAwait(false);
             if (expected is not null) Store.ReadPrerequisiteRetry(pairId, expected);
-            await EnsureSourceBasesAsync(pairId, ct, log).ConfigureAwait(false);
+            await EnsureSourceBasesAsync(pairId, ct, log, prerequisite: true).ConfigureAwait(false);
             if (!Store.Obligated(pairId))
             {
                 var local = Store.ReadSource(pairId, Side.Local) ?? throw Stale();

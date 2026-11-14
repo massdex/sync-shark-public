@@ -1058,7 +1058,7 @@ internal static class LoggingRepairChecks
         var snapshot = new TaskCompletionSource<Dictionary<string, int>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var members = Array.Empty<string>();
         var normalDebt = new ConcurrentDictionary<string, bool>();
-        // H2's pinned finish (RULINGS-B229-16 item 2): each member's first recovery FinishRepair, with its row and log counts.
+        // H2's pinned finish (B-229): each member's first recovery FinishRepair, with its row and log counts.
         var pinning = false;
         var finished = new Dictionary<string, int>(StringComparer.Ordinal);
         var atFinish = new Dictionary<string, (bool RowNull, int Waits, int Failures)>(StringComparer.Ordinal);
@@ -1242,7 +1242,7 @@ internal static class LoggingRepairChecks
                         $"monitorIdle={MonitorIdle(monitor, id)}";
                 }));
             }
-            // Amended H2-m (RULINGS-B229-16 item 1): after the failed resume each member is obligated and accounted twice,
+            // Amended H2-m (B-229): after the failed resume each member is obligated and accounted twice,
             // or, with another member on the source, already repaired by the restart a member's catch-up ran. Monitor idle
             // means no restart wake or attempt is still on its way for it.
             bool Owed(string id) => raw.Obligated(id) && raw.ReadPrerequisiteRetry(id)?.Attempts == 2 && Waits(id) == 2;
@@ -1255,7 +1255,7 @@ internal static class LoggingRepairChecks
                 await UntilAsync(() => clock.NextDueIn == next);
                 clock.Advance(next);
             }
-            // Pinned (x) (RULINGS-B229-16 item 2): a member's whole-pair Repair ends with its row null, and once its
+            // Pinned (x) (B-229): a member's whole-pair Repair ends with its row null, and once its
             // attempt has completed (Monitor idle) that completion has added no retry wait and no failure.
             await UntilAsync(() =>
             {
@@ -1431,6 +1431,10 @@ internal static class LoggingRepairChecks
             "the first finish preserves its approved journal fence outcome: " + kind);
         Check.Require(raw.Obligated(pairId) == refused && raw.ReadPrerequisiteRetry(pairId) is { Attempts: 1 } &&
             observed.Accountings == 1, "the source failure is accounted once, preserving only the existing debt");
+        // Inverse of the own-catch-up discharge (B-229): this failure arrived after the attempt's own catch-up.
+        Check.Require(paths.SelectMany(Lines).Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Wait) &&
+            fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry)) == 1,
+            "a source failure after the attempt's own catch-up still records its source-retry wait");
         var armedResume = failedResume ? observed.ArmPageFault(SourceFault.Resumed) : null;
         var previousLogs = paths.Count;
         lock (counterGate) counting = kind == SourceFault.Resumed;
