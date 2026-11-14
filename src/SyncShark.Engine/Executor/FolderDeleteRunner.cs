@@ -293,7 +293,7 @@ public sealed class FolderDeleteRunner
             Advance(operation, FolderRemovalPhase.Checking, operation.Cause, null);
         // Recursive receipts cover the effect, not the identities of descendants that may have escaped.
         foreach (var item in verified)
-            if (completed.Contains(item.Ordinal) && item.EffectKind == FolderEffectKind.RecursiveFolder)
+            if (proven && completed.Contains(item.Ordinal) && item.EffectKind == FolderEffectKind.RecursiveFolder)
                 await _held.SettleAsync(operation, item, ct);
     }
 
