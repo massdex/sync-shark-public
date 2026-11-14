@@ -736,7 +736,7 @@ public sealed class FolderDeleteRunner
             return eligible;
         }
         // Valid only for this opportunity's first continuation, never a later recovery or deferred settlement.
-        if (operation.SourceEvidence is null && PathNames.Same(opposite, root.Path)) absent?.Add(operation.OperationId);
+        absent?.Add(operation.OperationId);
         foreach (var effect in effects)
         {
             if (effect is not { Kind: FolderEffectKind.RecursiveFolder or FolderEffectKind.ConditionalFile,
