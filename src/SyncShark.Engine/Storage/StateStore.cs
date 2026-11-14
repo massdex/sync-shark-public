@@ -1229,7 +1229,6 @@ public sealed partial class StateStore : IStateStore
     {
         transaction.Commit();
         _closureKeys?.Remove(pairId);
-        if (retired) _changes.RecordRetirement(pairId);
     }
 
     public bool CloseScanIssue(string pairId, Guid scanId, Issue expected) => Ordered(() =>
