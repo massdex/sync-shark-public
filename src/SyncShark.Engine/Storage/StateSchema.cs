@@ -198,6 +198,7 @@ public static class StateSchema
     private const string SpendSynced = "INSERT INTO discovery_deleted_delta(pair_id,path_key,spent) SELECT pair_id,historykey(local_path),1 FROM synced_entry WHERE ";
     private const string SpendRetired = " AND ($retained='[]' OR " + KeyOf + "local_path) NOT IN (SELECT value FROM json_each($retained))) ON CONFLICT(pair_id,path_key) DO UPDATE SET spent=1 WHERE spent=0;";
     public const string ParamRetained = "$retained";
+    public const string ParamClaimed = "$claimed";
     public const string HistoryKeyFunction = "historykey";
     public const string DeleteSyncedSubtreeLocal = SpendSynced + SyncedLocalSelf + SpendRetired +
         SpendSynced + SyncedLocalDescendants + SpendRetired +
@@ -957,12 +958,13 @@ public static class StateSchema
     private const string ParameterPrefix = "$";
     private const string PeerParameterPrefix = "$peer_";
     private const string UnionAll = " UNION ALL ";
+    private const string StatementEnd = ";";
     private static readonly string ClaimedPeers = (WorkEvidenceByPath.Replace(WorkColumns, ClaimWorkColumn, StringComparison.Ordinal) + PeerOwnership)
         .Replace(ParameterPrefix, PeerParameterPrefix, StringComparison.Ordinal);
 
     internal static string PeerParameter(string parameter) => PeerParameterPrefix + parameter[1..];
 
-    internal static readonly string ReadClaimedWork = ClaimedWork + UnionAll + ClaimedPeers + ";";
+    internal static readonly string ReadClaimedWork = ClaimedWork + UnionAll + ClaimedPeers + StatementEnd;
     public const string EvidencePathBelow = WorkEvidence + "w.path_key>=$low AND w.path_key<$high AND w.acquisition_work_id>$watermark AND w.work_origin='Acquired' ORDER BY w.path_key,w.work_id;";
     public const string EvidenceOldPathExact = WorkEvidence + "w.old_path_key IS NOT NULL AND w.old_path_key=$key AND w.acquisition_work_id>$watermark AND w.work_origin='Acquired' ORDER BY w.old_path_key,w.work_id;";
     public const string EvidenceOldPathBelow = WorkEvidence + "w.old_path_key IS NOT NULL AND w.old_path_key>=$low AND w.old_path_key<$high AND w.acquisition_work_id>$watermark AND w.work_origin='Acquired' ORDER BY w.old_path_key,w.work_id;";

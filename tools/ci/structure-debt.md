@@ -860,7 +860,7 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 ## src/SyncShark.Engine/Storage/StateSchema.cs
 
-Claim-retirement fix: ReadClaimedWork :965 composes the existing claim fragments; RetireCoveredWork :1125 excludes their ids through one bound JSON set. SQL declaration remains this type's only job, with execution and transaction policy in ChangeTable. Removing the per-claim statement builder and its parameter-renaming constants adds no independent job to split. This records the current-delta reason; the catalogue row remains pending the stronger independent confirmation required by section 1.3.
+Claim-retirement fix: ReadClaimedWork :967 composes the existing claim fragments; RetireCoveredWork :1127 excludes their ids through one bound JSON set. SQL declaration remains this type's only job, with execution and transaction policy in ChangeTable. Removing the per-claim statement builder and its parameter-renaming constants adds no independent job to split. This records the current-delta reason; the catalogue row remains pending the stronger independent confirmation required by section 1.3.
 
 B-222 disposition: StateSchema class-size and file-size catalogue rows - accepted; declarative SQL only (held-member statement :940, the episode-query access directives :1027 and :1041, and the saved-binding ordinal :1281); no execution or transaction policy added.
 

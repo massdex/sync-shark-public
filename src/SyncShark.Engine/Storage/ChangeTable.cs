@@ -1092,7 +1092,7 @@ internal sealed partial class ChangeTable
         }
         using var retire = StorageCommand.Create(_connection, transaction, StateSchema.RetireCoveredWork,
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamGeneration, generation), (StateSchema.ParamThrough, through),
-            ("$claimed", JsonSerializer.Serialize(claimed)),
+            (StateSchema.ParamClaimed, JsonSerializer.Serialize(claimed)),
             (StateSchema.ParamSide, (int)Side.Local), (StateSchema.ParamEpoch, localEpoch));
         retire.ExecuteNonQuery();
         retire.Parameters[StateSchema.ParamSide].Value = (int)Side.Dropbox;
