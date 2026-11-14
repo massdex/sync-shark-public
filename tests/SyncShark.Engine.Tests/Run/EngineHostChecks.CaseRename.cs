@@ -41,7 +41,7 @@ public static partial class EngineHostChecks
                 Check.Require(Stale(() => host.CommitItemRename(registration, attemptId, reported, respelling, null)),
                     "43a: a reported attempt commits no respelling");
                 return Task.FromResult(true);
-            }, token), CancellationToken.None).ConfigureAwait(false);
+            }, token), CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
         var candidate = inner.ReadItemRetryForSubject(PairId, inner.ReadPairExecution(PairId)!.Value.Generation, Path,
             subject) ?? throw new InvalidOperationException();
         var continued = await host.DispatchAsync(PairId, async (registration, pair, generation, token) =>
@@ -66,7 +66,7 @@ public static partial class EngineHostChecks
                     "43a: a completed attempt commits no respelling");
                 return Task.FromResult(true);
             }, token).ConfigureAwait(false);
-        }, CancellationToken.None).ConfigureAwait(false);
+        }, CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
         Check.Require(continued && store.Renames == 1 && inner.Issues(PairId, [IssueKind.Failure]).Count == 1,
             "43a: after the respelling the content attempt on the same wait is admitted in the same opportunity");
 
@@ -88,7 +88,7 @@ public static partial class EngineHostChecks
                     "43a: the Local-origin rename follows");
                 return await renameHost.ExecuteItemAttemptAsync(registration, registration, null, counterpart,
                     (_, _) => Task.FromResult(true), token).ConfigureAwait(false);
-            }, CancellationToken.None).ConfigureAwait(false);
+            }, CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
             Check.Require(held == true, "43a: a running Local-origin rename holds its saved Dropbox counterpart");
             Check.Require(admitted, "43a: the counterpart's own attempt is admitted once the rename attempt ends");
         }).ConfigureAwait(false);
