@@ -137,8 +137,7 @@ public sealed partial class StateStore : IStateStore
         if (issue.Subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None ||
             IssueTable.IsRecoveryNotice(issue) ||
             IssueTable.AtPendingPath(issue, IssueTable.PendingPath(_connection, transaction, pair))) return true;
-        return replaced.Dispatch == ItemRetryDispatch.LocalRecovery || replaced.PendingOperationId is not null ||
-            IssuePolicy.UnknownMove(issue.Kind, issue.Subject);
+        return replaced.Dispatch == ItemRetryDispatch.LocalRecovery || replaced.PendingOperationId is not null;
     }
 
     // Both absence triggers end exactly this wait inside the issue-close transaction; other responsibilities stay.
