@@ -646,7 +646,7 @@ public static class FolderDeleteRunnerChecks
                     effects.All(effect => Item(f, operation, effect.ItemOrdinal).EffectKind == FolderEffectKind.RecursiveFolder),
                     "B222 " + scenario + ": only maximal recursive effects enclose the held descendants");
                 WorkSelection? acquired = null;
-                if (scenario.StartsWith("T1", StringComparison.Ordinal))
+                if (scenario.StartsWith("T1-", StringComparison.Ordinal))
                 {
                     Check.Require(f.Store.AcquireJournalPage(
                         f.Pair.Roots!.Local.VolumeSerialNumber.ToString(CultureInfo.InvariantCulture),
@@ -681,7 +681,7 @@ public static class FolderDeleteRunnerChecks
                         TextKey.FailLocalInUse, expected.Count == 0 ? acquired : null,
                         ItemRetryDispatch.OrdinaryItem, null, null, attempt));
                     expected.Add(f.Store.Issues(f.Pair.PairId).Single(issue => issue.Path == target.Path));
-                    if (scenario.StartsWith("T1", StringComparison.Ordinal) || scenario == "T5c")
+                    if (scenario.StartsWith("T1-", StringComparison.Ordinal) || scenario == "T5c")
                     {
                         var variant = target.Path.ToLowerInvariant();
                         f.Store.Commit(f.Pair.PairId, StateChange.Empty with
@@ -731,7 +731,7 @@ public static class FolderDeleteRunnerChecks
                 Check.Require(cancelled == (scenario == "T5c"), "B222 T5c: entry-point cancellation propagates");
                 if (scenario is "T5a" or "T5b") Check.Require(!f.Store.FolderRemoval(f.Pair.PairId, operation).Active,
                     "B222 " + scenario + ": failed identity inspection retains the issue without preventing operation conclusion");
-                var closes = scenario.StartsWith("T1", StringComparison.Ordinal) || scenario == "T7";
+                var closes = scenario.StartsWith("T1-", StringComparison.Ordinal) || scenario == "T7";
                 foreach (var issue in expected)
                     Check.Require(f.Store.Issues(f.Pair.PairId).Any(row => row.Id == issue.Id) != closes,
                         "B222 " + scenario + ": only trustworthy frozen-identity absence closes the exact held issue");
@@ -752,7 +752,7 @@ public static class FolderDeleteRunnerChecks
                         targets.SelectMany(target => new[] { target.Saved.LocalId, target.Saved.DropboxId })
                             .OrderBy(id => id, StringComparer.Ordinal)),
                         "B222 T7: delegates receive exactly the eligible frozen IDs, never excluded IDs");
-                if (scenario.StartsWith("T1", StringComparison.Ordinal))
+                if (scenario.StartsWith("T1-", StringComparison.Ordinal))
                 {
                     Check.Require(f.RawStore.EndWorkPass(f.Pair.PairId), "B222 T1: identity retirement requests the repeat pass");
                     var drain = f.RawStore.SelectWork(f.Pair.PairId, 0, f.Context.Scope);
