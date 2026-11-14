@@ -189,7 +189,7 @@ Category-change split clearing condition (class-size and file-size rows): splitt
 
 ## src/SyncShark.Engine/Run/RunLog.cs
 
-<!-- spec-source: e5622f3e4554~a8da79daf4fc~9195c880c144~5d67b61d38c9~1f03d400111b~6b0a -->
+<!-- spec-source: 1134cfaf43a0~496a3459eff1~91d70726da1a~6f5defafa57b~53b33d552e4b~72ba -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -852,7 +852,7 @@ Category-change scope: Public page, count and keyset statements reuse one bound 
 
 ## src/SyncShark.Engine/Local/JournalSource.cs
 
-<!-- spec-source: 4dfe65a39c9c~dc936c1d91e1~07a3c1598b00~5d8944b3ddd6~031d150950f3~5af8 -->
+<!-- spec-source: e7d002927023~ee11f9fe5979~aa40e676801a~d00bdb140ff4~12e49acd69e8~6e13 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

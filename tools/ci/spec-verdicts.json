@@ -99065,6 +99065,18 @@
       "family": "anthropic",
       "source_revision": "54f471414",
       "reason": "Merged tree: partial class (:8); FinishRepair keeps an item-only wait through completion and clears it when no pair work is left (:1378-1396), through the one ItemOnly answer :1857 shared with ReadItemRetry. Retry custody inside the fenced completion; every StateStore SPLIT-PENDING obligation stands."
+    },
+    {
+      "path": "src/SyncShark.Engine/Run/RunLog.cs",
+      "hash": "1134cfaf43a0~496a3459eff1~91d70726da1a~6f5defafa57b~53b33d552e4b~72ba",
+      "family": "openai",
+      "reason": "This feature-freeze diagnostic correction adds one classified journal-failure case to the existing FailureReason presentation owner and introduces no new job. RunLog still combines canonical codec/grammar, mutable progress and summary accounting, writer/flush lifetime, and ordered subscriber delivery; the existing class, file and Event split findings remain valid and open. This change does not perform their behavior-preserving extraction, which remains separate from the diagnostic behavior change under section 7.1. The logging owner retains the recorded codec-first, then progress-state split plan, destination and closure checks. The existing ReportProgress recorded reason is unchanged. FailureReason being 40 lines is not structural clearance."
+    },
+    {
+      "path": "src/SyncShark.Engine/Local/JournalSource.cs",
+      "hash": "e7d002927023~ee11f9fe5979~aa40e676801a~d00bdb140ff4~12e49acd69e8~6e13",
+      "family": "openai",
+      "reason": "This feature-freeze diagnostic correction changes only Unavailable's exception construction to preserve already-classified status and native-error evidence. Invalidation, public IOException compatibility, message construction, acquisition, publication, checkpoint ordering and host recovery behavior are unchanged, and no job is added. JournalSource still has the seven jobs recorded in this section; the class, file, CaptureFiniteAsync and ReadPageAsync split findings remain valid and open. Their behavior-preserving extraction is separate from this diagnostic behavior change under section 7.1. The journal-source structural lane retains ownership, with publication and candidate adoption first, and the recorded destination, clearing trigger and current-source review requirements remain in force."
     }
   ]
 }

@@ -1181,22 +1181,22 @@ public static class JournalSourceChecks
         Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) == scenario.Start,
             "An unavailable page never advances the last saved journal position.");
         // A page read that fails at the volume handle carries the native error it was classified from.
-        if (FreeDriveRoot() is { } driveRoot)
+        var driveRoot = FreeDriveRoot()
+            ?? throw new InvalidOperationException(
+                "The native-error regression requires an unmounted drive letter.");
+        var unreadable = new JournalSource(scenario.VolumeKey, driveRoot, scenario.Store, scenario.Start,
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
+        try
         {
-            var unreadable = new JournalSource(scenario.VolumeKey, driveRoot, scenario.Store, scenario.Start,
-                scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
-            try
-            {
-                await unreadable.RunAsync(default);
-                throw new InvalidOperationException("An unreadable volume must not complete as healthy.");
-            }
-            catch (IOException error)
-            {
-                Check.Require(!unreadable.Available &&
-                    error is JournalSourceException { Status: NtfsUsnPageStatus.Unavailable } failed &&
-                    failed.NativeError is > 0,
-                    "A page read that fails at the volume handle carries its native error.");
-            }
+            await unreadable.RunAsync(default);
+            throw new InvalidOperationException("An unreadable volume must not complete as healthy.");
+        }
+        catch (IOException error)
+        {
+            Check.Require(!unreadable.Available &&
+                error is JournalSourceException { Status: NtfsUsnPageStatus.Unavailable } failed &&
+                failed.NativeError is > 0,
+                "A page read that fails at the volume handle carries its native error.");
         }
     }
 
