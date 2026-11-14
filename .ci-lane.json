@@ -1,0 +1,16 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "issues",
+    "budget-4",
+    "dropbox-echo",
+    "work-lifecycle",
+    "duplicate-repair",
+    "dropbox",
+    "folder-deletes"
+  ],
+  "core": [],
+  "ui": []
+}
