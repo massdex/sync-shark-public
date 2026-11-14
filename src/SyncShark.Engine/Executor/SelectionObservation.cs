@@ -9,7 +9,7 @@ internal readonly struct SelectionObservation(SelectionPass pass, ExecutorContex
     internal static bool SettlesDropboxEcho(ChangeNotice notice, SyncedEntry? saved, bool boundAtOrUnder) => notice.Kind switch
     {
         ChangeKind.Deleted => !boundAtOrUnder,
-        ChangeKind.Changed => Decide.DropboxMatchesBaseline(notice.Observed, saved),
+        ChangeKind.Changed => false,
         _ => false,
     };
 
