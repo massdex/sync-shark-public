@@ -179,7 +179,7 @@ public sealed class FolderDeleteRunner
             if (await SendAndJoinAsync(eligible, execution, ct)) return true;
         }
         if (progress.Ready) progress.Refused(TextKey.FailChanged);
-        var proven = absent?.Contains(operationId) == true;
+        var proven = operation.SourceEvidence is null;
         await CloseWindowAsync(operation, progress, ct, proven);
         await RecoverMembersAsync(operation, progress, ct);
         await ConcludeAsync(Read(operationId), progress, selection, ct, proven);
