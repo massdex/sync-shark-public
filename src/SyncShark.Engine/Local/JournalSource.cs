@@ -107,7 +107,7 @@ public sealed class JournalSource
     private IOException Unavailable(NtfsUsnPageStatus status, int? nativeError)
     {
         Invalidate();
-        return new JournalSourceException(status, nativeError, Text.Get(TextKey.JournalSourceFailed,
+        return new JournalSourceException(status, null, Text.Get(TextKey.JournalSourceFailed,
             (TextArg.Reason, status.ToString()),
             (TextArg.Value, nativeError?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty)));
     }
