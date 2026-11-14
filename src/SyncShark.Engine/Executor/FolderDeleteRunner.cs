@@ -839,7 +839,7 @@ public sealed class FolderDeleteRunner
             try
             {
                 if (await FolderIdentity.KeptElsewhereAsync(_context, operation.SavedRoot, operation.DeletingSide, ct,
-                        operation.PreRestoreId, null))
+                        operation.PreRestoreId, operation.CounterpartPath))
                     refused.Add(id);
             }
             catch (Exception error) when (ItemFailures.IsItemError(error))
