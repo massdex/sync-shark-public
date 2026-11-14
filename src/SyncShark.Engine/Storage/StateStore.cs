@@ -2817,6 +2817,12 @@ public sealed partial class StateStore : IStateStore
             {
                 continue;
             }
+            if (settling && change.CloseProvenAbsent)
+                change = change with { Close = [.. change.Close, .. ReadPage(transaction, StateSchema.SelectIssues,
+                    IssueTable.ReadIssue, (StateSchema.ParamPair, pairId))
+                    .Where(issue => issue.Kind == IssueKind.Failure && PathNames.IsSelfOrUnderKey(
+                        PathNames.Key(issue.Path), PathNames.Key(operation.RootEntry.Path)))
+                    .Select(issue => (issue.Path, (IReadOnlyList<IssueKind>)new[] { IssueKind.Failure }))] };
             ApplyFolderSettlement(transaction, pair, pairId, operationId, current, generation, next, change, settling,
                 settling && change.CloseProvenAbsent
                     ? endEpisode ??= AbsentEpisodeEnd(transaction, pair, pairId, ended = new()) : null);
