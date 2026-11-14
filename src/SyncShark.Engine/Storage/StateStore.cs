@@ -157,9 +157,6 @@ public sealed partial class StateStore : IStateStore
     private Func<Issue, bool> AbsentEpisodeEnd(SqliteTransaction transaction, long pair, string pairId,
         System.Runtime.CompilerServices.StrongBox<bool> ended, Issue? scanned = null) => issue =>
     {
-        if (scanned is null)
-            for (var index = 0; index < issue.Subject.Items.Count; index++)
-                if (!PathNames.Same(issue.Subject.Items[index].Path, issue.Path)) return false;
         if (!EndAbsentEpisode(transaction, pair, pairId, scanned ?? issue)) return false;
         ended.Value = true;
         return true;
