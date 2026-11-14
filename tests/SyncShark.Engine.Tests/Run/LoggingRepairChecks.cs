@@ -33,7 +33,8 @@ internal static class LoggingRepairChecks
             await SourceLossPublishesAllMembersAsync(Path.Combine(folder.FullName, "source-members-several"), several: true);
             await ReplacementBaseAfterRestartWakesRepairAsync(Path.Combine(folder.FullName, "replacement-wake"));
             await BootstrapDebtSurvivesRecoverableLossAsync(Path.Combine(folder.FullName, "bootstrap-recovery"));
-            await ExplicitRepairClearedRowStillRecoversAsync(Path.Combine(folder.FullName, "explicit-recovery"));
+            await ExplicitRepairClearedRowStillRecoversAsync(Path.Combine(folder.FullName, "explicit-recovery"), false);
+            await ExplicitRepairClearedRowStillRecoversAsync(Path.Combine(folder.FullName, "explicit-recovery-available"), true);
             foreach (var members in new[] { 1, 2 })
             {
                 foreach (var kind in Enum.GetValues<SourceFault>())
@@ -974,7 +975,9 @@ internal static class LoggingRepairChecks
             raw.ReadPrerequisiteRetry(pairId) is null);
     }
 
-    private static async Task ExplicitRepairClearedRowStillRecoversAsync(string folder)
+    // With sourceAvailable, a non-attempt catch-up resumes the source right after the explicit finish clears the row,
+    // so only the member's retained recovery purpose admits the next prerequisite attempt.
+    private static async Task ExplicitRepairClearedRowStillRecoversAsync(string folder, bool sourceAvailable)
     {
         var clock = new FakeTimeProvider();
         clock.Advance(DateTimeOffset.UtcNow - clock.GetUtcNow());
@@ -984,6 +987,7 @@ internal static class LoggingRepairChecks
         RestartFinishStore finishes = null!;
         var afterFinish = false;
         var rowCleared = false;
+        Action? afterCleared = null;
         string pairId = string.Empty;
         await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock, mode: EngineHost.Mode.Persistent,
             decorate: store =>
@@ -996,6 +1000,7 @@ internal static class LoggingRepairChecks
                         if (!afterFinish) return;
                         rowCleared = raw.ReadPrerequisiteRetry(pairId) is null;
                         afterFinish = false;
+                        afterCleared?.Invoke();
                     }
                 };
             }, openLog: id =>
@@ -1013,6 +1018,11 @@ internal static class LoggingRepairChecks
         await UntilAsync(() => EngineHostChecks.AutoSyncIdle(rig.Host, pairId));
         while (logs.TryDequeue(out _)) { }
         var now = clock.GetUtcNow();
+        if (sourceAvailable)
+            afterCleared = () => rig.Host.CatchUpLocalAsync(pairId, generation, default)
+                .WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+        int SourceBaseStages() => logs.SelectMany(Lines).Count(fields =>
+            fields[RunLog.FieldWhat] == nameof(TextKey.StageSourceBase) && fields[RunLog.FieldOutcome] == nameof(RunEvent.Ended));
         observed.AtFinish = () =>
         {
             observed.AtFinish = null;
@@ -1029,10 +1039,15 @@ internal static class LoggingRepairChecks
         var operations = new EngineOperations(rig.Instance.StateAuthority.ProductRoot, _ => { }, rig.Host);
         Check.Require(await operations.RepairAsync(pairId, default) is { Completed: true } && rowCleared,
             "explicit Repair commits and clears the debt-free source retry");
+        if (sourceAvailable) await UntilAsync(() => SourceBaseStages() != 0);
         await UntilAsync(() => rig.Host.Status().Status == AutoStatus.Idle);
         Check.Require(finishes.Finishes(pairId) == 2 && !raw.Obligated(pairId) &&
             raw.ReadPrerequisiteRetry(pairId) is null && clock.GetUtcNow() == now,
             "operation wake alone resumes the source without another Repair or clock advance");
+        if (sourceAvailable)
+            Check.Require(SourceBaseStages() == 1,
+                "with no row, no debt and an available source, the retained recovery purpose admits one prerequisite " +
+                "attempt, whose own log records the source-base stage once; stages=" + SourceBaseStages());
     }
 
     // One Local journal source, not one root: a sibling Local root on the same volume and a Dropbox root that
