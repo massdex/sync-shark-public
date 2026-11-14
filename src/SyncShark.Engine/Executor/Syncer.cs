@@ -177,7 +177,7 @@ public sealed class Syncer
                         if (alone)
                         {
                             await RunLaneAsync(serialPass ??= CreatePass(), selection, null);
-                            if (!serialOnly && Volatile.Read(ref progressed)) LeaveSerial();
+                            if (!serialOnly) LeaveSerial();
                         }
                         else
                         {
