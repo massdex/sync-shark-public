@@ -1,0 +1,5 @@
+{
+  "source": "Run 43510809720 completed the App build with exit 0 in 293.3468272 s; ceil(duration * 2) = 587 s. Run 43507617566 completed the longest successful non-App build (Core.Tests) in 186.4600788 s; ceil(duration * 2) = 373 s. Both use the same 100% margin. Documentation debt is separately inventoried.",
+  "buildSeconds": 373,
+  "appBuildSeconds": 587
+}
