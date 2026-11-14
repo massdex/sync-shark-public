@@ -31,6 +31,8 @@ internal sealed class EngineHost : IAsyncDisposable
     private readonly HashSet<string> _closed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Volume> _volumes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Prerequisite> _prerequisites = new(StringComparer.Ordinal);
+    // Source recovery remains prerequisite-owned after another member makes the shared source available.
+    private readonly Dictionary<string, long> _sourceRetries = new(StringComparer.Ordinal);
     // The item wait the host last wrote for each pair, with the keys its turns recorded (IR-1). Every host write of a
     // pair's retry row updates or removes its entry in the same locked step; nothing else sets a row.
     private readonly Dictionary<string, ItemWait> _itemWaits = new(StringComparer.Ordinal);
@@ -120,6 +122,7 @@ internal sealed class EngineHost : IAsyncDisposable
             foreach (var member in members)
             {
                 var pairId = member.Pair.PairId;
+                _sourceRetries[pairId] = member.Generation;
                 if (lost) Store.RequireRepairAfterLoss(pairId, member.Generation);
                 if (_prerequisites.TryGetValue(pairId, out var pending))
                 {
@@ -801,6 +804,8 @@ internal sealed class EngineHost : IAsyncDisposable
             lock (_gate)
             {
                 if (_stopping) throw Stale();
+                if (_sourceRetries.TryGetValue(id, out var sourceGeneration) && current?.Generation != sourceGeneration)
+                    _sourceRetries.Remove(id);
                 _resources.Remove(id, out old);
                 if (replacement is not null) _resources.Add(id, replacement);
             }
@@ -1059,10 +1064,17 @@ internal sealed class EngineHost : IAsyncDisposable
     private bool LocalSourceStopped(PairConfig pair) => pair.Roots is { } roots &&
         _volumes.TryGetValue(roots.LocalVolumeKey(), out var volume) && !volume.Source.Available;
 
-    // Compose the store-owned durable classification with the source-owned running state.
-    private FailureRetryOwner.State? ItemRetry(string pairId) =>
-        Store.ReadItemRetry(pairId) is { } row && Store.ReadPairExecution(pairId) is { } current &&
-        !LocalSourceStopped(current.Pair) ? row : null;
+    // Compose durable classification with source availability and the member's retained recovery purpose.
+    private FailureRetryOwner.State? ItemRetry(string pairId)
+    {
+        lock (_gate)
+            return Store.ReadItemRetry(pairId) is { } row && Store.ReadPairExecution(pairId) is { } current &&
+                !SourceRecoveryPending(pairId, current.Generation) && !LocalSourceStopped(current.Pair) ? row : null;
+    }
+
+    // Callers hold _gate; purpose belongs to the failed member's generation, not the volume's availability.
+    private bool SourceRecoveryPending(string pairId, long generation) =>
+        _sourceRetries.TryGetValue(pairId, out var failedGeneration) && failedGeneration == generation;
 
     /// <summary>The item-only state this dispatch is admitted with; true when a pre-deadline wait must hold the
     /// pair's ordinary dispatch.</summary>
@@ -1169,7 +1181,8 @@ internal sealed class EngineHost : IAsyncDisposable
                 if (retry is not null && ItemRetry(pairId) is not null) itemOnly = true;
                 else
                 {
-                    if (!Store.Obligated(pairId) && retry is null && !LocalSourceStopped(current.Value.Pair)) return null;
+                    if (!Store.Obligated(pairId) && retry is null &&
+                        !SourceRecoveryPending(pairId, current.Value.Generation) && !LocalSourceStopped(current.Value.Pair)) return null;
                     attempt = new Prerequisite(current.Value.Pair, current.Value.Generation);
                     generation = current.Value.Generation;
                     _prerequisites.Add(pairId, attempt);
@@ -1311,6 +1324,7 @@ internal sealed class EngineHost : IAsyncDisposable
                         if (!pending.SourceFailed &&
                             (succeeded || error is EngineRequestException { Key: TextKey.ResolveStale }))
                         {
+                            if (succeeded) _sourceRetries.Remove(pairId);
                             // The Repair no longer owns the row: its own temporary turn starts the item wait now,
                             // printed as a wait (retry is output, not a notice).
                             if (pending.ItemTurn is { } turn)
