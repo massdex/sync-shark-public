@@ -694,7 +694,7 @@ public sealed class FolderDeleteRunner
         try
         {
             _context.Store.CompleteFolderRemoval(PairId, operation.OperationId, operation.Generation,
-                Forget(operation.DeletingSide, root.Path, operation.SavedRoot, FolderEffectKind.RecursiveFolder, proven), selection);
+                Forget(operation.DeletingSide, root.Path, operation.SavedRoot, FolderEffectKind.RecursiveFolder), selection);
         }
         catch (FolderStateRefusedException)
         {
