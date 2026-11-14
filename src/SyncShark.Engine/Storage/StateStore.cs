@@ -2803,7 +2803,6 @@ public sealed partial class StateStore : IStateStore
         var operation = ReadFolder(transaction, pair, operationId);
         var settled = new bool[items.Count];
         System.Runtime.CompilerServices.StrongBox<bool>? ended = null;
-        Func<Issue, bool>? endEpisode = null;
         for (var index = 0; index < items.Count; index++)
         {
             var (generation, next, change) = items[index];
@@ -2818,8 +2817,7 @@ public sealed partial class StateStore : IStateStore
                 continue;
             }
             ApplyFolderSettlement(transaction, pair, pairId, operationId, current, generation, next, change, settling,
-                settling && change.CloseProvenAbsent
-                    ? endEpisode ??= AbsentEpisodeEnd(transaction, pair, pairId, ended = new()) : null);
+                null);
             if (settling && operation.DeletingSide == Side.Local &&
                 current.EffectState == FolderRemovalItem.EffectStatus.Verified &&
                 current.EffectKind != FolderEffectKind.StateOnly)
