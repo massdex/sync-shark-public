@@ -4297,6 +4297,11 @@ public sealed class InMemoryStateStore : IStateStore
             ? invalid : HoldsResponsibility(pairId, issue))) return false;
         issues.Remove(issue);
         _items.Remove(issue.Id);
+        foreach (var row in _work.Where(row => row.PairId == pairId && row.IssueId == issue.Id))
+        {
+            row.IssueId = 0;
+            row.AttachedSubject = null;
+        }
         if (invalid) ReconcileInvalidFolderJob(pairId, issue.Path, null, issues, issue.At);
         return true;
     }

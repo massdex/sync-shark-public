@@ -2129,16 +2129,8 @@ public static partial class ChangeRunnerChecks
             if (real) RepairDone(fixture);
             else fixture.Hooks.RepairDone = true;
             ClearObligations(fixture);
-            // Count survivor observations after the plan froze; only its first Dropbox write fails.
-            var observations = 0;
+            // Count survivor publication attempts after the plan froze; only its first Dropbox write fails.
             var writes = 0;
-            fixture.LocalView = new ProxySide(fixture.Local)
-            {
-                OnRead = path =>
-                {
-                    if (path == Plain && fixture.Inner.ActiveFolderRemovals(PairId, default).Any()) observations++;
-                }
-            };
             fixture.DropboxView = new ProxySide(fixture.Dropbox)
             {
                 BlockPublish = (path, _) =>
@@ -2160,21 +2152,21 @@ public static partial class ChangeRunnerChecks
             var events = new List<RunEvent>();
             var boundary = new Boundary(_ => new Lease());
             await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).SyncWorkAsync(default);
-            var label = "; mode=" + mode + "; real=" + real + "; observations=" + observations + "; reported=" + attempts.Reported +
+            var label = "; mode=" + mode + "; real=" + real + "; writes=" + writes + "; reported=" + attempts.Reported +
                 "; events=" + string.Join(" | ", events.Select(item => item.Path + ":" + item.Error?.GetType().Name));
             if (mode == "once")
-                Check.Require(observations == 1 && attempts.Reported == 1 &&
+                Check.Require(writes == 1 && attempts.Reported == 1 &&
                     fixture.Inner.ActiveFolderRemovals(PairId, default).Any() &&
                     await fixture.Local.ReadOneAsync(Plain, default) is not null && fixture.Inner.Issues(PairId).Count == 0,
-                    "a temporary survivor is observed once in its run and kept without a notice" + label);
+                    "a temporary survivor is attempted once in its run and kept without a notice" + label);
             else
-                Check.Require(fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)) == 1 && observations == 2 &&
+                Check.Require(fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)) == 1 && writes == 2 &&
                     attempts.Reported == 1 && await fixture.Local.ReadOneAsync(Plain, default) is not null &&
                     fixture.Inner.Issues(PairId) is [{ Kind: IssueKind.Info, Cause: TextKey.InfoEditBeatsDelete } kept] &&
-                    kept.Path == Plain, "the released continuation re-observes the due survivor and keeps the edit" + label);
+                    kept.Path == Plain, "the released continuation retries the due survivor and keeps the edit" + label);
             await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).SyncWorkAsync(default);
-            Check.Require(observations >= 2,
-                "§6.3: the next run reaches the survivor again; real=" + real + "; observations=" + observations);
+            Check.Require(writes == 2,
+                "§6.3: the survivor completes its second attempt by the next run; real=" + real + "; writes=" + writes);
         }
     }
 
