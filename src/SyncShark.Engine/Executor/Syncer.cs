@@ -248,7 +248,7 @@ public sealed class Syncer
                 if (_ancestors.PendingAncestor(next, _parents) is { } found)
                 {
                     // The lookup still finds later blockers, but this pass never executes beyond its watermark.
-                    if (found.Ancestor.AnchorWorkId > selection.ThroughWorkId || _context.Store.WorkAttempted(found.Ancestor))
+                    if (_context.Store.WorkAttempted(found.Ancestor))
                         return;
                     if (_temporary.Skips(found.Ancestor, out var ancestorUntil))
                     {
@@ -302,11 +302,6 @@ public sealed class Syncer
                 }
                 if (result.Prerequisite is { } prerequisite)
                 {
-                    if (prerequisite.AnchorWorkId > selection.ThroughWorkId)
-                    {
-                        foreach (var dependent in pending) _context.Store.EndSelection(dependent.Work);
-                        return;
-                    }
                     if (!visited.Add(prerequisite.AnchorWorkId))
                     {
                         foreach (var dependent in pending) pass.RenameWork.RefusePrerequisite(dependent.Work);
