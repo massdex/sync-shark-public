@@ -38,7 +38,7 @@ internal sealed class HeldMemberSettlement(ExecutorContext context)
     // Found anywhere or unable to inspect proves nothing; cancellation still belongs to the caller.
     private static async Task<bool> AbsentAsync(Func<Task<(IdentityLocation Location, bool InScope)?>> read)
     {
-        try { return await read() is null; }
+        try { return await read() is not { InScope: true }; }
         catch (Exception error) when (error is not OperationCanceledException) { return false; }
     }
 }
