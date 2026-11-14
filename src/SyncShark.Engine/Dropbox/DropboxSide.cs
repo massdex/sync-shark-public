@@ -60,7 +60,7 @@ public sealed partial class DropboxSide : IIdentitySide
             RequestAttempt attempt, CancellationToken ct) => owner.ReadFolderRemovalAsync(jobId, expectedCount, attempt, ct);
     }
     /// <summary>Reads the entry at path, or null when it is absent.</summary>
-    public Task<Entry?> ReadOneAsync(string path, CancellationToken ct) => _reads.ReadAsync(path, ct);
+    public Task<Entry?> ReadOneAsync(string path, CancellationToken ct) => _listing.ReadOneAsync(path, ct);
     /// <summary>Opens a stream of exactly this version; the caller disposes it.</summary>
     public Task<Stream> OpenReadAsync(Entry entry, RequestAttempt? attempt, CancellationToken ct) => _writer.OpenReadAsync(entry, attempt, ct);
     /// <summary>Returns the entry's stored Dropbox content hash without downloading it.</summary>
