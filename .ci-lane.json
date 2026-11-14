@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "resolutions",
+    "duplicate-repair",
+    "issues",
+    "syncer",
+    "containment"
+  ],
+  "core": [],
+  "ui": []
+}
