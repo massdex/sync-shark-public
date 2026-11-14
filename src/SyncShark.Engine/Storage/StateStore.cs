@@ -2831,7 +2831,6 @@ public sealed partial class StateStore : IStateStore
             settled[index] = true;
         }
         transaction.Commit();
-        if (ended?.Value == true) _changes.RecordRetirement(pairId);
         for (var index = 0; index < items.Count; index++)
             if (settled[index]) UpdateClosures(pairId, items[index].Change);
         return settled;
