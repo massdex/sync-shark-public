@@ -298,11 +298,9 @@ public static class IssuePolicy
 
         bool AbsentOnBothSides()
         {
-            if (Untrusted(Side.Local, issue.Path) || Untrusted(Side.Dropbox, issue.Path) ||
-                scanEntry(Side.Local, issue.Path) is not null || scanEntry(Side.Dropbox, issue.Path) is not null) return false;
+            if (scanEntry(Side.Local, issue.Path) is not null || scanEntry(Side.Dropbox, issue.Path) is not null) return false;
             for (var index = 0; index < issue.Subject.Items.Count; index++)
-                if (Untrusted(issue.Subject.Items[index].Side, issue.Subject.Items[index].Path) ||
-                    scanEntry(issue.Subject.Items[index].Side, issue.Subject.Items[index].Path) is not null) return false;
+                if (scanEntry(issue.Subject.Items[index].Side, issue.Subject.Items[index].Path) is not null) return false;
             return true;
         }
 
