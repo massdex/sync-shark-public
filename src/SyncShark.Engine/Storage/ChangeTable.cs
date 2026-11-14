@@ -951,7 +951,7 @@ internal sealed partial class ChangeTable
 
     // Issue deletion removes its members in the same transaction, so issue-id presence and member-row presence are equivalent.
     private bool OwnsResponsibility(long workId, bool? hasIssue = null) =>
-        (hasIssue ?? Read(null, StateSchema.WorkIssue, static reader => reader.GetInt64(StateSchema.FirstColumn),
+        (hasIssue != true && Read(null, StateSchema.WorkIssue, static reader => reader.GetInt64(StateSchema.FirstColumn),
             (StateSchema.ParamWork, workId)).Any()) ||
         Read(null, StateSchema.WorkHasChildren, static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
             (StateSchema.ParamParent, workId)).First();
