@@ -1058,6 +1058,10 @@ internal static class LoggingRepairChecks
         var snapshot = new TaskCompletionSource<Dictionary<string, int>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var members = Array.Empty<string>();
         var normalDebt = new ConcurrentDictionary<string, bool>();
+        // H2's pinned finish (RULINGS-B229-16 item 2): each member's first recovery FinishRepair, with its row and log counts.
+        var pinning = false;
+        var finished = new Dictionary<string, int>(StringComparer.Ordinal);
+        var atFinish = new Dictionary<string, (bool RowNull, int Waits, int Failures)>(StringComparer.Ordinal);
         await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock, monitor: monitor,
             mode: EngineHost.Mode.Persistent, openLog: id =>
             {
@@ -1093,6 +1097,18 @@ internal static class LoggingRepairChecks
                             if (!counting) return;
                             counting = false;
                             snapshot.TrySetResult(new Dictionary<string, int>(counts));
+                        }
+                    },
+                    AfterFinishRepair = () =>
+                    {
+                        lock (gate)
+                        {
+                            if (!pinning) return;
+                            foreach (var id in members)
+                            {
+                                if (finishes.Finishes(id) <= finished[id] || atFinish.ContainsKey(id)) continue;
+                                atFinish[id] = (raw.ReadPrerequisiteRetry(id) is null, Waits(id), Failures(id));
+                            }
                         }
                     }
                 };
@@ -1177,9 +1193,12 @@ internal static class LoggingRepairChecks
             foreach (var method in measured.Keys)
                 Check.Require(expected.ContainsKey(method), "unexpected background recovery method " + method + ": " + evidence);
         }
+        int Waits(string id) => logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
+            .Count(fields => fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry));
+        int Failures(string id) => logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
+            .Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Failed));
         bool Accounted(int attempts) => members.All(id => raw.ReadPrerequisiteRetry(id)?.Attempts == attempts &&
-            logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
-                .Count(fields => fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry)) == attempts);
+            Waits(id) == attempts);
         await UntilAsync(() => Accounted(1));
         foreach (var id in members)
         {
@@ -1190,13 +1209,21 @@ internal static class LoggingRepairChecks
                 !rig.Host.ItemRetryHolds(id, raw.ReadPairExecution(id)!.Value.Generation, out var admitted) && admitted is null,
                 "the stopped source excludes the durable retry from item-only admission");
         }
-        if (failedResume) observed.ArmPageFault(SourceFault.Resumed);
+        if (failedResume)
+        {
+            observed.ArmPageFault(SourceFault.Resumed);
+            lock (gate)
+            {
+                foreach (var id in members) finished[id] = finishes.Finishes(id);
+                pinning = true;
+            }
+        }
         var firstWait = TimeSpan.FromSeconds(rig.Host.Settings.Backoff.InitialBackoffSeconds);
         await UntilAsync(() => clock.NextDueIn == firstWait);
         clock.Advance(firstWait);
         if (failedResume)
         {
-            // Diagnostic only: each member's half of Accounted(2), its Repair finishes, debt and pending attempt.
+            // Diagnostic only: each member's accounting, its Repair finishes, debt, pending attempt and Monitor state.
             string AccountedEvidence()
             {
                 var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
@@ -1204,22 +1231,48 @@ internal static class LoggingRepairChecks
                 var hostGate = typeof(EngineHost).GetField("_gate", flags)!.GetValue(rig.Host)!;
                 return string.Join("; ", members.Select(id =>
                 {
-                    var waits = logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
-                        .Count(fields => fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry));
+                    var waits = Waits(id);
                     var row = raw.ReadPrerequisiteRetry(id);
                     object? pending;
                     lock (hostGate) pending = registry[id];
                     return $"member={id}, accounted={row?.Attempts == 2 && waits == 2}, rowAttempts={row?.Attempts.ToString() ?? "none"}, " +
-                        $"retryWaits={waits}, finishes={finishes.Finishes(id)}, obligated={raw.Obligated(id)}, " +
+                        $"retryWaits={waits}, failures={Failures(id)}, finishes={finishes.Finishes(id)}, obligated={raw.Obligated(id)}, " +
                         $"localObligation={raw.ReadSource(id, Side.Local)?.Obligation?.ToString() ?? "none"}, " +
-                        $"pending={(pending is null ? "none" : "sourceFailed=" + pending.GetType().GetField("SourceFailed", flags)!.GetValue(pending))}";
+                        $"pending={(pending is null ? "none" : "sourceFailed=" + pending.GetType().GetField("SourceFailed", flags)!.GetValue(pending))}, " +
+                        $"monitorIdle={MonitorIdle(monitor, id)}";
                 }));
             }
-            await UntilAsync(() => Accounted(2), AccountedEvidence);
-            Check.Require(members.All(raw.Obligated), "the unconfirmed failed resume immediately obligates every member");
-            var next = members.Select(id => raw.ReadPrerequisiteRetry(id)!.Value.RetryAfter).Min() - clock.GetUtcNow();
-            await UntilAsync(() => clock.NextDueIn == next);
-            clock.Advance(next);
+            // Amended H2-m (RULINGS-B229-16 item 1): after the failed resume each member is obligated and accounted twice,
+            // or, with another member on the source, already repaired by the restart a member's catch-up ran. Monitor idle
+            // means no restart wake or attempt is still on its way for it.
+            bool Owed(string id) => raw.Obligated(id) && raw.ReadPrerequisiteRetry(id)?.Attempts == 2 && Waits(id) == 2;
+            bool Restarted(string id) => members.Length > 1 && !raw.Obligated(id) && finishes.Finishes(id) == 2;
+            await UntilAsync(() => members.All(id => (Owed(id) || Restarted(id)) && MonitorIdle(monitor, id)), AccountedEvidence);
+            var owed = members.Where(Owed).ToArray();
+            if (owed.Length != 0)
+            {
+                var next = owed.Select(id => raw.ReadPrerequisiteRetry(id)!.Value.RetryAfter).Min() - clock.GetUtcNow();
+                await UntilAsync(() => clock.NextDueIn == next);
+                clock.Advance(next);
+            }
+            // Pinned (x) (RULINGS-B229-16 item 2): a member's whole-pair Repair ends with its row null, and once its
+            // attempt has completed (Monitor idle) that completion has added no retry wait and no failure.
+            await UntilAsync(() =>
+            {
+                lock (gate) if (!members.All(atFinish.ContainsKey)) return false;
+                return members.All(id => MonitorIdle(monitor, id));
+            }, AccountedEvidence);
+            foreach (var id in members)
+            {
+                (bool RowNull, int Waits, int Failures) at;
+                lock (gate) at = atFinish[id];
+                var row = raw.ReadPrerequisiteRetry(id);
+                Check.Require(at.RowNull && row is null && Waits(id) == at.Waits && Failures(id) == at.Failures,
+                    "a completed whole-pair Repair leaves its member's row null and its completion records no failure; " +
+                    $"member={id}, rowNullAtFinish={at.RowNull}, rowAttemptsNow={row?.Attempts.ToString() ?? "none"}, " +
+                    $"waitsAtFinish={at.Waits}, waitsNow={Waits(id)}, failuresAtFinish={at.Failures}, failuresNow={Failures(id)}; " +
+                    AccountedEvidence());
+            }
         }
         var repair = kind != SourceFault.Resumed || failedResume;
         await UntilAsync(() => members.All(id => raw.ReadPrerequisiteRetry(id) is null && !raw.Obligated(id) &&
