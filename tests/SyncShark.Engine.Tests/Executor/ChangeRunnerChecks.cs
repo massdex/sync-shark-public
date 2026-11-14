@@ -8820,7 +8820,7 @@ public static partial class ChangeRunnerChecks
             // DropboxFeed.Notices: a deletion is path-only and a change carries its observed entry.
             // B-214 settles exact saved echoes before selection; a case-change hint still needs the fresh absence read.
             var observed = parent == "changed" ? remoteFolder with { Path = remoteRoot.ToUpperInvariant() } : remoteFolder;
-            var notice = parent == "plain"
+            var notice = parent is "plain" or "echo-deleted"
                 ? new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, remoteRoot, null, null, null, false, false)
                 : new ChangeNotice(Side.Dropbox, ChangeKind.Changed, observed.Path, null, DropboxId, observed, false, false);
             // A live pair always holds a Local journal position before admission (CaptureLiveCoverage).
