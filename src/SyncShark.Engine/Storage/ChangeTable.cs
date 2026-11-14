@@ -2259,15 +2259,6 @@ internal sealed partial class ChangeTable
 
     private int Retire(SqliteTransaction transaction, long pair, WorkSelection selection, WorkRow anchor)
     {
-        if (ReadRenameContinuation(transaction, pair, anchor.WorkId) is { } continuation)
-        {
-            if (continuation.Clash is not null || Read(transaction, StateSchema.ReadRenameRemoval,
-                    static reader => reader.GetString(StateSchema.FirstColumn),
-                    (StateSchema.ParamPairRow, pair), (StateSchema.ParamWork, anchor.WorkId)).Any()) return 0;
-            Require(Run(transaction, StateSchema.ClearRenameContinuation,
-                (StateSchema.ParamPairRow, pair), (StateSchema.ParamWork, anchor.WorkId),
-                (StateSchema.ParamNotice, StateEncoding.Envelope(continuation))));
-        }
         var retired = Run(transaction, selection.Identity is null ? StateSchema.CompletePathSelection
             : CompleteIdentity(anchor), Membership(pair, selection, anchor));
         RequireSome(retired);
