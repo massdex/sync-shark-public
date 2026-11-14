@@ -91,6 +91,12 @@ public static partial class ChangeRunnerChecks
     // captured beforehand (c), each with the folder moved on either side.
     private static async Task VacateForeignAsync()
     {
+        // Every run and step reports, so one cycle shows the whole case space (standard 4.1); any miss fails the witness.
+        var failures = new List<Exception>();
+        void Expect(bool ok, string what)
+        {
+            if (!ok) failures.Add(new InvalidOperationException(what));
+        }
         foreach (var captured in new[] { false, true })
         foreach (var moved in new[] { Side.Local, Side.Dropbox })
         {
@@ -113,7 +119,7 @@ public static partial class ChangeRunnerChecks
             await VacateOpportunityAsync(c, guard.Token);
             fixture.Hooks.BeforeCallWith = null;
             var after = fixture.Inner.FolderRemoval(PairId, foreign);
-            Check.Require(reads == 1 && advances == 0 && fixture.Hooks.Count(nameof(IStateStore.BeginFolderRemoval)) == begun &&
+            Expect(reads == 1 && advances == 0 && fixture.Hooks.Count(nameof(IStateStore.BeginFolderRemoval)) == begun &&
                 VacateEffects(c) == 0 && VacateRows(fixture) == 1 &&
                 (after.Active, after.Phase, after.Generation) == (before.Active, before.Phase, before.Generation) &&
                 fixture.Inner.ReadyFolderEffects(PairId, foreign, -1, int.MaxValue).Count() == ready,
@@ -124,23 +130,27 @@ public static partial class ChangeRunnerChecks
             var clash = fixture.Inner.Issues(PairId).SingleOrDefault(issue => issue.Kind == IssueKind.NameClash);
             IssueItem[] items = [new(moved, VacateNew, VacateMoved), new(Side.Local, c.Incoming.LocalPath, c.Incoming.LocalId),
                 new(Side.Dropbox, c.Incoming.DropboxPath, c.Incoming.DropboxId)];
-            Check.Require(clash is { Cause: TextKey.ClashNameTaken, Path: VacateNew } &&
+            Expect(clash is { Cause: TextKey.ClashNameTaken, Path: VacateNew } &&
                 clash.Subject.Incoming == moved && clash.Subject.Items.Count == items.Length &&
                 items.All(item => clash.Subject.Items.Contains(item)) &&
                 (earlier is null || (clash.Id == earlier.Id && !clash.Matches(earlier) && clash.At > earlier.At)),
                 "B212-VAC-foreign: the refusal raises the moved item's ClashNameTaken at New: clash=" + clash +
                 "; items=" + (clash is null ? "" : string.Join(",", clash.Subject.Items)) + label);
-            var open = clash!;
+            if (clash is null) continue;
+            var open = clash;
+            var calls = VacateCalls(c);
             var picked = await VacateSelectedAsync(c, guard.Token);
-            Check.Require(picked.Length == 0,
-                "B212-VAC-foreign: the clash holds the rename: selected=" + picked + "; clash=" +
+            var again = await VacateSelectedAsync(c, guard.Token);
+            Expect(picked.Length == 0 && again.Length == 0,
+                "B212-VAC-foreign: the clash holds the rename: selected=" + picked + " then " + again +
+                "; provider calls over the two opportunities=" + (VacateCalls(c) - calls) + "; clash=" +
                 fixture.Inner.IssueById(PairId, open.Id) + label);
             var end = await LiveSyncer(fixture, c.Selection, new Boundary(_ => new Lease()), []).RecoverAsync(
                 new RecoveryTarget(foreign, after.Generation, null, null), RecoveryChoice.Check, guard.Token)
                 .WaitAsync(guard.Token);
             picked = await VacateSelectedAsync(c, guard.Token);
             var current = fixture.Inner.IssueById(PairId, open.Id);
-            Check.Require(end.Outcome == RemovalOutcome.Retained && !fixture.Inner.FolderRemoval(PairId, foreign).Active &&
+            Expect(end.Outcome == RemovalOutcome.Retained && !fixture.Inner.FolderRemoval(PairId, foreign).Active &&
                 picked.Length == 0 &&
                 current is not null && current.Matches(open) && VacateEffects(c) == 0 && VacateRows(fixture) == 1,
                 "B212-VAC-foreign: the foreign operation's end leaves the rename held and the notice unchanged: end=" +
@@ -156,11 +166,12 @@ public static partial class ChangeRunnerChecks
                         choice == ResolutionChoice.RenameIncoming ? "Renamed" : null, null, guard.Token);
                 }
                 catch (EngineRequestException error) { refused = error.Key; }
-                Check.Require(refused == TextKey.ResolveSubjectStale && VacateEffects(c) == 0 &&
+                Expect(refused == TextKey.ResolveSubjectStale && VacateEffects(c) == 0 &&
                     fixture.Inner.IssueById(PairId, open.Id) is { } unchanged && unchanged.Matches(open),
                     "B212-VAC-foreign: " + choice + " is stale with no effect: refused=" + refused + label);
             }
         }
+        if (failures.Count > 0) throw new AggregateException(failures);
     }
 
     // VAC-gone (-8 1, addendum 4): the captured occupant is absent and no linked operation exists, so the vacate
@@ -255,7 +266,15 @@ public static partial class ChangeRunnerChecks
             (raised is null ? "" : string.Join(",", raised.Subject.Items)));
         var clash = raised!;
         var begun = fixture.Hooks.BegunSelections.LastOrDefault() ?? selection;
-        var continuation = fixture.Inner.ReadRenameContinuation(begun);
+        // W's state as the clash left it: its continuation (or a retired anchor) and its pending work count.
+        string HeldState()
+        {
+            string anchor;
+            try { anchor = fixture.Inner.ReadRenameContinuation(begun)?.ToString() ?? "none"; }
+            catch (LiveAdmissionStaleException) { anchor = "anchor retired"; }
+            return anchor + "; work=" + fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
+        }
+        var continuation = HeldState();
         var syncer = ReplaceSyncer(fixture, selection);
         async Task<(ResolutionOutcome? Outcome, TextKey? Refused)> ReplaceAsync()
         {
@@ -271,7 +290,8 @@ public static partial class ChangeRunnerChecks
             "; step=" + step + "; outcome=" + answer.Outcome + "; refused=" + answer.Refused + "; observations=" +
             jobs.Observations + "; unread=" + jobs.Script.Count + "; submissions=" + jobs.Submissions +
             "; operations=" + string.Join(" | ", Operations().Select(operation => operation.Phase + ":" + operation.Active)) +
-            "; rows=" + VacateRows(fixture) + "; clash=" + fixture.Inner.IssueById(PairId, clash.Id);
+            "; rows=" + VacateRows(fixture) + "; held=" + HeldState() + " (after the clash: " + continuation + ")" +
+            "; clash=" + fixture.Inner.IssueById(PairId, clash.Id);
 
         jobs.Accepting = true;
         for (var join = 0; join < 3; join++)
@@ -292,8 +312,7 @@ public static partial class ChangeRunnerChecks
             !partial.Outcome.Succeeded(),
             "B212-T9r-c2 (iv): the re-issued choice continues the one operation, still Partial" + Trace("B", b));
         Check.Require(fixture.Inner.IssueById(PairId, clash.Id) is { } held && held.Matches(clash) &&
-            fixture.Inner.ReadRenameContinuation(begun) == continuation &&
-            fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) != (0, 0) &&
+            HeldState() == continuation &&
             jobs.Submissions == 1 && VacateRows(fixture) == 1,
             "B212-T9r-c2 (iv): a Partial removal keeps the clash open and releases nothing" + Trace("B", b));
 

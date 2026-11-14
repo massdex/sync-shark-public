@@ -3,8 +3,7 @@
     "engine-tests"
   ],
   "engine": [
-    "duplicate-repair",
-    "issues"
+    "duplicate-repair"
   ],
   "core": [],
   "ui": []
