@@ -131,12 +131,10 @@ public sealed class Syncer
             var alone = serial;
             var progressed = false;
             var refusedAlone = 0;
-            if (alone) _context.Events(RunEvent.Snapshot(TextKey.LanesSerial, Text.Get(TextKey.LanesSerial)));
             void LeaveSerial()
             {
                 alone = false;
                 refusedAlone = Volatile.Read(ref refused);
-                _context.Events(RunEvent.Snapshot(TextKey.LanesParallel, Text.Get(TextKey.LanesParallel)));
             }
             using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var tasks = new TaskSet(cancel);
