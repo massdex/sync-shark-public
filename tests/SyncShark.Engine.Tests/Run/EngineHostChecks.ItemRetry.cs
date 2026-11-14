@@ -40,51 +40,51 @@ public static partial class EngineHostChecks
     private static async Task ItemRetryChecksAsync(string root)
     {
         // G0c first: the B-161 checks below take their unrelated work from this explicit local delivery.
-        await LocalDeliveryUploadsAsync(root).ConfigureAwait(false);
-        await ItemWaitHeldThroughEventsAsync(root).ConfigureAwait(false);
-        await JoinedTurnHeldWithWaitAsync(root).ConfigureAwait(false);
-        await ConsumedWaitReleasesSyncedFileAsync(root).ConfigureAwait(false);
-        await StaleWaitHoldsNothingAsync(root).ConfigureAwait(false);
-        await RowClearedDuringDispatchAsync(root).ConfigureAwait(false);
-        await ConcurrentItemsAccountOnceAsync(root).ConfigureAwait(false);
-        await StaleRefreshKeepsObservedWaitAsync(root).ConfigureAwait(false);
-        await ItemWaitFiresWithoutEventAsync(root).ConfigureAwait(false);
-        await ItemWaitAcrossRestartAsync(root).ConfigureAwait(false);
-        await ItemWaitWallClockStepAsync(root, forward: false).ConfigureAwait(false);
-        await ItemWaitWallClockStepAsync(root, forward: true).ConfigureAwait(false);
-        await EventAfterDeadlineAttemptsOnceAsync(root).ConfigureAwait(false);
-        await DueDispatchFailureAsync(root, fatal: true).ConfigureAwait(false);
-        await DueDispatchFailureAsync(root, fatal: false).ConfigureAwait(false);
-        await PausedDueDispatchKeepsRowAsync(root).ConfigureAwait(false);
-        await RepairWithoutTurnReleasesRowAsync(root).ConfigureAwait(false);
+        await StepAsync(nameof(LocalDeliveryUploadsAsync), () => LocalDeliveryUploadsAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitHeldThroughEventsAsync), () => ItemWaitHeldThroughEventsAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(JoinedTurnHeldWithWaitAsync), () => JoinedTurnHeldWithWaitAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ConsumedWaitReleasesSyncedFileAsync), () => ConsumedWaitReleasesSyncedFileAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(StaleWaitHoldsNothingAsync), () => StaleWaitHoldsNothingAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RowClearedDuringDispatchAsync), () => RowClearedDuringDispatchAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ConcurrentItemsAccountOnceAsync), () => ConcurrentItemsAccountOnceAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(StaleRefreshKeepsObservedWaitAsync), () => StaleRefreshKeepsObservedWaitAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitFiresWithoutEventAsync), () => ItemWaitFiresWithoutEventAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitAcrossRestartAsync), () => ItemWaitAcrossRestartAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitWallClockStepAsync), () => ItemWaitWallClockStepAsync(root, forward: false)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitWallClockStepAsync), () => ItemWaitWallClockStepAsync(root, forward: true)).ConfigureAwait(false);
+        await StepAsync(nameof(EventAfterDeadlineAttemptsOnceAsync), () => EventAfterDeadlineAttemptsOnceAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, fatal: true)).ConfigureAwait(false);
+        await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, fatal: false)).ConfigureAwait(false);
+        await StepAsync(nameof(PausedDueDispatchKeepsRowAsync), () => PausedDueDispatchKeepsRowAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RepairWithoutTurnReleasesRowAsync), () => RepairWithoutTurnReleasesRowAsync(root)).ConfigureAwait(false);
         // N-161 before C2-C5: their settles after a Repair turn also cross its window, so N-161 owns that protection.
-        await RepairTurnHoldsOnlyRetainedAsync(root, afterFinish: false).ConfigureAwait(false);
-        await RepairTurnHoldsOnlyRetainedAsync(root, afterFinish: true).ConfigureAwait(false);
-        await CancelledRepairHandsBackRetainedAsync(root).ConfigureAwait(false);
-        await TransitionRefusalWakesRefusedPairAsync(root).ConfigureAwait(false);
-        await PauseRetiresKeysAsync(root).ConfigureAwait(false);
-        await RepairTurnStartsItemWaitAsync(root).ConfigureAwait(false);
-        await FailedRepairTurnAdvancesOnceAsync(root).ConfigureAwait(false);
-        await PausedRepairCompletionAccountsNothingAsync(root, providerWait: false).ConfigureAwait(false);
-        await PausedRepairCompletionAccountsNothingAsync(root, providerWait: true).ConfigureAwait(false);
-        await ResolveRunsBesideItemWaitAsync(root).ConfigureAwait(false);
-        await RefreshInterleavingKeepsSignalAsync(root).ConfigureAwait(false);
+        await StepAsync(nameof(RepairTurnHoldsOnlyRetainedAsync), () => RepairTurnHoldsOnlyRetainedAsync(root, afterFinish: false)).ConfigureAwait(false);
+        await StepAsync(nameof(RepairTurnHoldsOnlyRetainedAsync), () => RepairTurnHoldsOnlyRetainedAsync(root, afterFinish: true)).ConfigureAwait(false);
+        await StepAsync(nameof(CancelledRepairHandsBackRetainedAsync), () => CancelledRepairHandsBackRetainedAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(TransitionRefusalWakesRefusedPairAsync), () => TransitionRefusalWakesRefusedPairAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PauseRetiresKeysAsync), () => PauseRetiresKeysAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RepairTurnStartsItemWaitAsync), () => RepairTurnStartsItemWaitAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(FailedRepairTurnAdvancesOnceAsync), () => FailedRepairTurnAdvancesOnceAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PausedRepairCompletionAccountsNothingAsync), () => PausedRepairCompletionAccountsNothingAsync(root, providerWait: false)).ConfigureAwait(false);
+        await StepAsync(nameof(PausedRepairCompletionAccountsNothingAsync), () => PausedRepairCompletionAccountsNothingAsync(root, providerWait: true)).ConfigureAwait(false);
+        await StepAsync(nameof(ResolveRunsBesideItemWaitAsync), () => ResolveRunsBesideItemWaitAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RefreshInterleavingKeepsSignalAsync), () => RefreshInterleavingKeepsSignalAsync(root)).ConfigureAwait(false);
         foreach (var memory in new[] { false, true })
         {
             foreach (var liveFirst in new[] { false, true })
             foreach (var outcome in new[] { LiveOutcome.Succeeds, LiveOutcome.Fails })
-                await RepairCollisionFailsItemAsync(root, memory, liveFirst, outcome).ConfigureAwait(false);
-            await RepairCollisionFailsItemAsync(root, memory, liveFirst: false, LiveOutcome.Stale).ConfigureAwait(false);
-            await RepairCaptureRefusalFailsItemAsync(root, memory).ConfigureAwait(false);
-            await CompletedRepairBesideNewDebtAsync(root, memory).ConfigureAwait(false);
+                await StepAsync(nameof(RepairCollisionFailsItemAsync), () => RepairCollisionFailsItemAsync(root, memory, liveFirst, outcome)).ConfigureAwait(false);
+            await StepAsync(nameof(RepairCollisionFailsItemAsync), () => RepairCollisionFailsItemAsync(root, memory, liveFirst: false, LiveOutcome.Stale)).ConfigureAwait(false);
+            await StepAsync(nameof(RepairCaptureRefusalFailsItemAsync), () => RepairCaptureRefusalFailsItemAsync(root, memory)).ConfigureAwait(false);
+            await StepAsync(nameof(CompletedRepairBesideNewDebtAsync), () => CompletedRepairBesideNewDebtAsync(root, memory)).ConfigureAwait(false);
             foreach (var shape in new[] { "own", "older", "concurrent", "settled" })
-                await OrdinaryRepairItemWaitAsync(root, memory, shape).ConfigureAwait(false);
+                await StepAsync(nameof(OrdinaryRepairItemWaitAsync), () => OrdinaryRepairItemWaitAsync(root, memory, shape)).ConfigureAwait(false);
         }
-        await RepairAdmissionRefusalPropagatesAsync(root).ConfigureAwait(false);
-        await DrainedOrdinaryDispatchIsStaleAsync(root, stop: false).ConfigureAwait(false);
-        await DrainedOrdinaryDispatchIsStaleAsync(root, stop: true).ConfigureAwait(false);
-        await ExplicitRepairBesideRunningRepairAsync(root, afterFinish: false).ConfigureAwait(false);
-        await ExplicitRepairBesideRunningRepairAsync(root, afterFinish: true).ConfigureAwait(false);
+        await StepAsync(nameof(RepairAdmissionRefusalPropagatesAsync), () => RepairAdmissionRefusalPropagatesAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(DrainedOrdinaryDispatchIsStaleAsync), () => DrainedOrdinaryDispatchIsStaleAsync(root, stop: false)).ConfigureAwait(false);
+        await StepAsync(nameof(DrainedOrdinaryDispatchIsStaleAsync), () => DrainedOrdinaryDispatchIsStaleAsync(root, stop: true)).ConfigureAwait(false);
+        await StepAsync(nameof(ExplicitRepairBesideRunningRepairAsync), () => ExplicitRepairBesideRunningRepairAsync(root, afterFinish: false)).ConfigureAwait(false);
+        await StepAsync(nameof(ExplicitRepairBesideRunningRepairAsync), () => ExplicitRepairBesideRunningRepairAsync(root, afterFinish: true)).ConfigureAwait(false);
     }
 
     // A1: quiet pair, item-only row; events before the deadline attempt nothing, and the deadline attempts once.

@@ -90,7 +90,7 @@ public static partial class EngineHostChecks
         await StepAsync(nameof(ItemRenameAuthorityAsync), () => ItemRenameAuthorityAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(ItemRetryHostCasesAsync), () => ItemRetryHostCasesAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(ItemRetryWaitValuesAsync), () => ItemRetryWaitValuesAsync(root)).ConfigureAwait(false);
-        await StepAsync(nameof(ItemRetryChecksAsync), () => ItemRetryChecksAsync(root)).ConfigureAwait(false);
+        await ItemRetryChecksAsync(root).ConfigureAwait(false);
         await StepAsync(nameof(ReservationWorkAsync), () => ReservationWorkAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(SelectedOpportunityAuthorityAsync), () => SelectedOpportunityAuthorityAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(RequestAttemptIsNotRetriedAsync), () => RequestAttemptIsNotRetriedAsync(root)).ConfigureAwait(false);
