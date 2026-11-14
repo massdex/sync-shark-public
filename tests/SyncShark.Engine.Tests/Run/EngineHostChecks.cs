@@ -34,6 +34,7 @@ public static partial class EngineHostChecks
         {
             using var productRoot = OverrideProductRoot(root);
             RunAsync(root).GetAwaiter().GetResult();
+            Console.WriteLine(FormattableString.Invariant($"engine-host slowest step {SlowestStep.Name} {SlowestStep.Elapsed.TotalSeconds:F3}"));
         }
         finally
         {
@@ -53,71 +54,79 @@ public static partial class EngineHostChecks
                 .All(constructor => constructor.IsPrivate),
             "AutoSync opportunities and session construction remain private to their owners");
         // First, so a wake-retention control fails here rather than in an earlier settle-based check.
-        await FinalRewriteWakeSettlesAsync(root).ConfigureAwait(false);
-        await QuietWorkingStatusHasNoEmptyNameAsync(root).ConfigureAwait(false);
-        await HostStartupReadsSavedPreferencesBeforeReadyAsync(root).ConfigureAwait(false);
-        await HostStartupWithoutPreferencesReturnsDefaultsWithoutSeedingAsync(root).ConfigureAwait(false);
-        await HostPreferenceFailureKeepsReadyAndPreservesFailureAsync(root).ConfigureAwait(false);
-        await HostPreferenceFailureKeepsAdmittedWorkAndStopAsync(root).ConfigureAwait(false);
-        await PreferenceOperationsDoNoPairWorkAsync(root).ConfigureAwait(false);
-        HostCompositionFailurePreventsReady(root);
-        await DispatchRegistrationIsVisiblyRunningAndCancellableAsync(root).ConfigureAwait(false);
-        await BackgroundFailureLeavesSupervisionAsync(root).ConfigureAwait(false);
-        await AcceptedStopSignalsSupervisionBeforeDrainAsync(root).ConfigureAwait(false);
-        await RejectedStopDoesNotSignalSupervisionAsync(root).ConfigureAwait(false);
-        await PageWaitFirstFailureRaisesOneNoticeWithoutPairAccountingAsync(root).ConfigureAwait(false);
-        await PageWaitRepeatedFailuresKeepOneNoticeAsync(root).ConfigureAwait(false);
-        await PageWaitSuccessClosesOnlyPageWaitNoticeAsync(root).ConfigureAwait(false);
-        await PageWaitCancelClosesContributionAsync(root).ConfigureAwait(false);
-        await PageWaitStaleIdentityRefusesAsync(root).ConfigureAwait(false);
-        await PageWaitPreservesIndependentFailedRepairDebtAsync(root).ConfigureAwait(false);
-        await PageWaitStoreFailureSurfacesErrorAsync(root).ConfigureAwait(false);
-        await FailedRepairRecordsOnePrerequisiteFailureAsync(root).ConfigureAwait(false);
-        await SelectedPrerequisiteScheduleIsRevalidatedAsync(root);
-        await PrerequisiteAccountingFailureReleasesAsync(root);
-        await RefusedPrerequisiteOpportunitiesAsync(root, scheduled: false);
-        await RefusedPrerequisiteOpportunitiesAsync(root, scheduled: true);
-        await RefusedUnchangedScheduleAsync(root, remove: false);
-        await RefusedUnchangedScheduleAsync(root, remove: true);
-        await WaitingEligibilityAsync(root);
-        await WholeDropboxPairIsAffectedAsync(root);
-        await ItemAttemptAuthorityAsync(root).ConfigureAwait(false);
-        await ItemRenameAuthorityAsync(root).ConfigureAwait(false);
-        await ItemRetryHostCasesAsync(root).ConfigureAwait(false);
-        await ItemRetryWaitValuesAsync(root).ConfigureAwait(false);
-        await ItemRetryChecksAsync(root).ConfigureAwait(false);
-        await ReservationWorkAsync(root).ConfigureAwait(false);
-        await SelectedOpportunityAuthorityAsync(root).ConfigureAwait(false);
-        await RequestAttemptIsNotRetriedAsync(root).ConfigureAwait(false);
-        await TransferRetryRequiresProofAsync(root).ConfigureAwait(false);
-        await PauseAdmissionRoutingAsync(root).ConfigureAwait(false);
+        await StepAsync(nameof(FinalRewriteWakeSettlesAsync), () => FinalRewriteWakeSettlesAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(QuietWorkingStatusHasNoEmptyNameAsync), () => QuietWorkingStatusHasNoEmptyNameAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostStartupReadsSavedPreferencesBeforeReadyAsync), () => HostStartupReadsSavedPreferencesBeforeReadyAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostStartupWithoutPreferencesReturnsDefaultsWithoutSeedingAsync), () => HostStartupWithoutPreferencesReturnsDefaultsWithoutSeedingAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostPreferenceFailureKeepsReadyAndPreservesFailureAsync), () => HostPreferenceFailureKeepsReadyAndPreservesFailureAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostPreferenceFailureKeepsAdmittedWorkAndStopAsync), () => HostPreferenceFailureKeepsAdmittedWorkAndStopAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PreferenceOperationsDoNoPairWorkAsync), () => PreferenceOperationsDoNoPairWorkAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostCompositionFailurePreventsReady), () =>
+        {
+            HostCompositionFailurePreventsReady(root);
+            return Task.CompletedTask;
+        }).ConfigureAwait(false);
+        await StepAsync(nameof(DispatchRegistrationIsVisiblyRunningAndCancellableAsync), () => DispatchRegistrationIsVisiblyRunningAndCancellableAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(BackgroundFailureLeavesSupervisionAsync), () => BackgroundFailureLeavesSupervisionAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(AcceptedStopSignalsSupervisionBeforeDrainAsync), () => AcceptedStopSignalsSupervisionBeforeDrainAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RejectedStopDoesNotSignalSupervisionAsync), () => RejectedStopDoesNotSignalSupervisionAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitFirstFailureRaisesOneNoticeWithoutPairAccountingAsync), () => PageWaitFirstFailureRaisesOneNoticeWithoutPairAccountingAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitRepeatedFailuresKeepOneNoticeAsync), () => PageWaitRepeatedFailuresKeepOneNoticeAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitSuccessClosesOnlyPageWaitNoticeAsync), () => PageWaitSuccessClosesOnlyPageWaitNoticeAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitCancelClosesContributionAsync), () => PageWaitCancelClosesContributionAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitStaleIdentityRefusesAsync), () => PageWaitStaleIdentityRefusesAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitPreservesIndependentFailedRepairDebtAsync), () => PageWaitPreservesIndependentFailedRepairDebtAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitStoreFailureSurfacesErrorAsync), () => PageWaitStoreFailureSurfacesErrorAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(FailedRepairRecordsOnePrerequisiteFailureAsync), () => FailedRepairRecordsOnePrerequisiteFailureAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(SelectedPrerequisiteScheduleIsRevalidatedAsync), () => SelectedPrerequisiteScheduleIsRevalidatedAsync(root));
+        await StepAsync(nameof(PrerequisiteAccountingFailureReleasesAsync), () => PrerequisiteAccountingFailureReleasesAsync(root));
+        await StepAsync(nameof(RefusedPrerequisiteOpportunitiesAsync), () => RefusedPrerequisiteOpportunitiesAsync(root, scheduled: false));
+        await StepAsync(nameof(RefusedPrerequisiteOpportunitiesAsync), () => RefusedPrerequisiteOpportunitiesAsync(root, scheduled: true));
+        await StepAsync(nameof(RefusedUnchangedScheduleAsync), () => RefusedUnchangedScheduleAsync(root, remove: false));
+        await StepAsync(nameof(RefusedUnchangedScheduleAsync), () => RefusedUnchangedScheduleAsync(root, remove: true));
+        await StepAsync(nameof(WaitingEligibilityAsync), () => WaitingEligibilityAsync(root));
+        await StepAsync(nameof(WholeDropboxPairIsAffectedAsync), () => WholeDropboxPairIsAffectedAsync(root));
+        await StepAsync(nameof(ItemAttemptAuthorityAsync), () => ItemAttemptAuthorityAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemRenameAuthorityAsync), () => ItemRenameAuthorityAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemRetryHostCasesAsync), () => ItemRetryHostCasesAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemRetryWaitValuesAsync), () => ItemRetryWaitValuesAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemRetryChecksAsync), () => ItemRetryChecksAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ReservationWorkAsync), () => ReservationWorkAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(SelectedOpportunityAuthorityAsync), () => SelectedOpportunityAuthorityAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RequestAttemptIsNotRetriedAsync), () => RequestAttemptIsNotRetriedAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(TransferRetryRequiresProofAsync), () => TransferRetryRequiresProofAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PauseAdmissionRoutingAsync), () => PauseAdmissionRoutingAsync(root)).ConfigureAwait(false);
         foreach (var real in new[] { true, false })
-            await FailedRepairPauseAndFloorAsync(root, real).ConfigureAwait(false);
-        await PausedPrerequisiteLogsAnAdmissionErrorAsync(root).ConfigureAwait(false);
-        StoppedPrerequisiteLogKeepsDistinctFailures(root);
-        await ExternalClientOwnershipAsync(root).ConfigureAwait(false);
-        await ExternalClientFailureAsync(root).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: false, opportunity: false).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: false).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false, shared: true).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: true).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false, paused: true).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: true, startup: true).ConfigureAwait(false);
-        await InProgressFolderJobRepollsToTerminalUnknownAsync(root);
-        await InProgressFolderJobSettlesWithoutWakeAsync(root);
-        await InProgressFolderJobSettlesWithoutWakeAsync(root, itemWait: true);
+            await StepAsync(nameof(FailedRepairPauseAndFloorAsync), () => FailedRepairPauseAndFloorAsync(root, real)).ConfigureAwait(false);
+        await StepAsync(nameof(PausedPrerequisiteLogsAnAdmissionErrorAsync), () => PausedPrerequisiteLogsAnAdmissionErrorAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(StoppedPrerequisiteLogKeepsDistinctFailures), () =>
+        {
+            StoppedPrerequisiteLogKeepsDistinctFailures(root);
+            return Task.CompletedTask;
+        }).ConfigureAwait(false);
+        await StepAsync(nameof(ExternalClientOwnershipAsync), () => ExternalClientOwnershipAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ExternalClientFailureAsync), () => ExternalClientFailureAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: false, opportunity: false)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: false)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false, shared: true)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: true)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false, paused: true)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: true, startup: true)).ConfigureAwait(false);
+        await StepAsync(nameof(InProgressFolderJobRepollsToTerminalUnknownAsync), () => InProgressFolderJobRepollsToTerminalUnknownAsync(root));
+        await StepAsync(nameof(InProgressFolderJobSettlesWithoutWakeAsync), () => InProgressFolderJobSettlesWithoutWakeAsync(root));
+        await StepAsync(nameof(InProgressFolderJobSettlesWithoutWakeAsync), () => InProgressFolderJobSettlesWithoutWakeAsync(root, itemWait: true));
         foreach (var memory in new[] { false, true })
         foreach (var ordinaryFirst in new[] { true, false })
-            await InProgressFolderJobSettlesWithoutWakeAsync(root, itemWait: true, ordinaryFirst, memory);
-        await RepairHeldSurvivorPollAsync(root);
-        await FolderPollLifecycleAsync(root, "pause");
-        await FolderPollLifecycleAsync(root, "disable");
-        await FolderPollLifecycleAsync(root, "restart");
-        await FolderPollLifecycleAsync(root, "stop");
+            await StepAsync(nameof(InProgressFolderJobSettlesWithoutWakeAsync), () => InProgressFolderJobSettlesWithoutWakeAsync(root, itemWait: true, ordinaryFirst, memory));
+        await StepAsync(nameof(RepairHeldSurvivorPollAsync), () => RepairHeldSurvivorPollAsync(root));
+        await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "pause"));
+        await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "disable"));
+        await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "restart"));
+        await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "stop"));
         try
         {
-            await StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: true).ConfigureAwait(false);
+            await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: true)).ConfigureAwait(false);
             throw new Exception("background storage failure was lost at shutdown");
         }
         catch (AggregateException error) when (error.InnerExceptions.Count == 1 &&
@@ -131,7 +140,7 @@ public static partial class EngineHostChecks
         await new UiPreferencesStore(instance.StateAuthority)
             .SaveAsync(new UiPreferences(UiPreferencesStore.DarkTheme)).ConfigureAwait(false);
         await using var host = Compose(instance.StateAuthority, new InMemoryStateStore());
-        await host.StartAsync(CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+        await host.StartAsync(CancellationToken.None).ConfigureAwait(false);
         Check.Require(host.Status().Status == AutoStatus.Idle,
             "a started host with no pairs is ready and idle");
         var read = await host.ReadPreferencesAsync(CancellationToken.None).ConfigureAwait(false);
@@ -145,7 +154,7 @@ public static partial class EngineHostChecks
         using var instance = Lock(root, "prefs-absent");
         var state = instance.StateAuthority.StateRoot;
         await using var host = Compose(instance.StateAuthority, new InMemoryStateStore());
-        await host.StartAsync(CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+        await host.StartAsync(CancellationToken.None).ConfigureAwait(false);
         var read = await host.ReadPreferencesAsync(CancellationToken.None).ConfigureAwait(false);
         Check.Require(read.Theme == UiPreferencesStore.SystemTheme,
             "an absent preference state reads as the normalized default in memory");
@@ -164,7 +173,7 @@ public static partial class EngineHostChecks
         var corruptBytes = Encoding.UTF8.GetBytes("not a saved preference slot");
         File.WriteAllBytes(corrupt, corruptBytes);
         await using var host = Compose(instance.StateAuthority, new InMemoryStateStore());
-        await host.StartAsync(CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+        await host.StartAsync(CancellationToken.None).ConfigureAwait(false);
         Check.Require(host.Status().Status == AutoStatus.Idle,
             "a corrupt saved preference never fails Engine readiness");
 
@@ -197,13 +206,13 @@ public static partial class EngineHostChecks
             Encoding.UTF8.GetBytes("not a saved preference slot"));
         var store = new InMemoryStateStore();
         await using var host = Compose(instance.StateAuthority, store);
-        await host.StartAsync(CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+        await host.StartAsync(CancellationToken.None).ConfigureAwait(false);
         const string PairId = "independent-admitted";
         store.SavePair(Pair(PairId));
         var worked = await host.AcquireAsync(PairId, (registration, pair, generation, token) => Task.FromResult(true),
             CancellationToken.None).ConfigureAwait(false);
         Check.Require(worked, "independent admitted work stays valid while preferences are unavailable");
-        await TeardownAsync(host.StopAsync(CancellationToken.None), "HostPreferenceFailureKeepsAdmittedWorkAndStopAsync host stop");
+        await host.StopAsync(CancellationToken.None).ConfigureAwait(false);
         Check.Require(host.Status().Status == AutoStatus.Off,
             "an explicit host stop still completes while preferences are unavailable");
     }
@@ -215,7 +224,7 @@ public static partial class EngineHostChecks
         const string PairId = "prefs-cost-pair";
         var store = new InMemoryStateStore();
         await using var host = Compose(instance.StateAuthority, store);
-        await host.StartAsync(CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+        await host.StartAsync(CancellationToken.None).ConfigureAwait(false);
         store.SavePair(Pair(PairId));
         var generation = store.ReadPairExecution(PairId)?.Generation;
         var local = store.ReadSource(PairId, Side.Local);
@@ -265,32 +274,28 @@ public static partial class EngineHostChecks
         const string PairId = "status-pair";
         var store = new InMemoryStateStore();
         store.SavePair(Pair(PairId));
-        var host = Compose(instance.StateAuthority, store);
-        try
-        {
-            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            using var cancel = new CancellationTokenSource();
-            var running = host.DispatchAsync(PairId, async (registration, pair, generation, token) =>
-                {
-                    entered.TrySetResult();
-                    using var registrationToken = token.Register(() => release.TrySetCanceled(token));
-                    await release.Task.ConfigureAwait(false);
-                    return pair;
-                }, cancel.Token);
-            await entered.Task.WaitAsync(HookBound).ConfigureAwait(false);
-            Check.Require(host.Status().Status == AutoStatus.Running,
-                "an admitted Dispatch registration is visibly running");
-            cancel.Cancel();
-            try { await running.WaitAsync(HookBound).ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
-            Check.Require(host.Status().Status is null,
-                "a cancelled client operation leaves no Running status behind");
-            var again = await host.AcquireAsync(PairId, (registration, pair, generation, token) => Task.FromResult(true),
-                CancellationToken.None).ConfigureAwait(false);
-            Check.Require(again, "the host remains usable after a client operation is cancelled");
-        }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "DispatchRegistrationIsVisiblyRunningAndCancellableAsync host disposal"); }
+        await using var host = Compose(instance.StateAuthority, store);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancel = new CancellationTokenSource();
+        var running = host.DispatchAsync(PairId, async (registration, pair, generation, token) =>
+            {
+                entered.TrySetResult();
+                using var registrationToken = token.Register(() => release.TrySetCanceled(token));
+                await release.Task.ConfigureAwait(false);
+                return pair;
+            }, cancel.Token);
+        await entered.Task.ConfigureAwait(false);
+        Check.Require(host.Status().Status == AutoStatus.Running,
+            "an admitted Dispatch registration is visibly running");
+        cancel.Cancel();
+        try { await running.ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        Check.Require(host.Status().Status is null,
+            "a cancelled client operation leaves no Running status behind");
+        var again = await host.AcquireAsync(PairId, (registration, pair, generation, token) => Task.FromResult(true),
+            CancellationToken.None).ConfigureAwait(false);
+        Check.Require(again, "the host remains usable after a client operation is cancelled");
     }
 
     private static async Task BackgroundFailureLeavesSupervisionAsync(string root)
@@ -303,23 +308,21 @@ public static partial class EngineHostChecks
         var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var registration = acceptStop.Token.Register(() => stopped.TrySetResult());
         await using var status = host.SubscribeStatusAsync(CancellationToken.None).GetAsyncEnumerator();
-        Check.Require(await status.MoveNextAsync().AsTask().WaitAsync(HookBound),
-            "A status subscriber receives the initial host status.");
+        Check.Require(await status.MoveNextAsync(), "A status subscriber receives the initial host status.");
         var failure = new IOException("background-fixture");
         host.BackgroundFailed(failure);
-        Check.Require(await status.MoveNextAsync().AsTask().WaitAsync(HookBound) &&
-            status.Current.Status == AutoStatus.Held,
+        Check.Require(await status.MoveNextAsync() && status.Current.Status == AutoStatus.Held,
             "A background failure publishes Held before ending status subscriptions.");
-        Check.Require(!await status.MoveNextAsync().AsTask().WaitAsync(HookBound),
+        Check.Require(!await status.MoveNextAsync(),
             "A failed host ends its status stream before disposal so open clients cannot prevent exit.");
         await using var lateStatus = host.SubscribeStatusAsync(CancellationToken.None).GetAsyncEnumerator();
-        Check.Require(!await lateStatus.MoveNextAsync().AsTask().WaitAsync(HookBound),
+        Check.Require(!await lateStatus.MoveNextAsync(),
             "A subscriber arriving after background failure ends immediately without waiting for disposal.");
-        await stopped.Task.WaitAsync(HookBound);
+        await stopped.Task;
         Check.Require(acceptStop.IsCancellationRequested && !signalled,
             "A background failure ends host acceptance without stopping its supervisor.");
         AggregateException? reported = null;
-        try { await TeardownAsync(host.DisposeAsync().AsTask(), "BackgroundFailureLeavesSupervisionAsync host disposal"); }
+        try { await host.DisposeAsync(); }
         catch (AggregateException error) { reported = error; }
         Check.Require(reported?.InnerExceptions.Contains(failure) == true && !signalled,
             "Host disposal reports the original failure for a failed exit and preserves supervision.");
@@ -343,15 +346,15 @@ public static partial class EngineHostChecks
                 finally { order.Add("drained"); }
                 return pair;
             }, CancellationToken.None);
-        await entered.Task.WaitAsync(HookBound).ConfigureAwait(false);
-        await TeardownAsync(host.StopAsync(CancellationToken.None), "AcceptedStopSignalsSupervisionBeforeDrainAsync host stop");
-        try { await running.WaitAsync(HookBound).ConfigureAwait(false); }
+        await entered.Task.ConfigureAwait(false);
+        await host.StopAsync(CancellationToken.None).ConfigureAwait(false);
+        try { await running.ConfigureAwait(false); }
         catch (OperationCanceledException) { }
         Check.Require(order.SequenceEqual(["supervision", "drained"]),
             "an accepted stop signals supervision before it drains admitted work (observed: " +
             string.Join(",", order) + ")");
         Check.Require(host.Status().Status == AutoStatus.Off, "the stopped host reports Off");
-        await TeardownAsync(host.DisposeAsync().AsTask(), "AcceptedStopSignalsSupervisionBeforeDrainAsync host disposal");
+        await host.DisposeAsync().ConfigureAwait(false);
         Check.Require(host.Status().Status == AutoStatus.Off, "disposal is idempotent after an accepted stop");
     }
 
@@ -366,11 +369,11 @@ public static partial class EngineHostChecks
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         var refused = false;
-        try { await TeardownAsync(host.StopAsync(cancelled.Token), "RejectedStopDoesNotSignalSupervisionAsync host stop"); }
+        try { await host.StopAsync(cancelled.Token).ConfigureAwait(false); }
         catch (OperationCanceledException) { refused = true; }
         Check.Require(refused, "a rejected stop surfaces its cancellation");
         Check.Require(!signalled, "a rejected stop never signals supervision");
-        await TeardownAsync(host.DisposeAsync().AsTask(), "RejectedStopDoesNotSignalSupervisionAsync host disposal");
+        await host.DisposeAsync().ConfigureAwait(false);
     }
 
     // V16-Q5: the first transient prerequisite-page failure raises one notice without pair accounting.
@@ -546,22 +549,24 @@ public static partial class EngineHostChecks
         Check.Require(RetryNotices(store, PairId) == 0, "the failed notice write raised nothing");
     }
 
-    public static void ReviewedPrerequisiteRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: true);
-    public static void ReviewedObligationRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: false);
-    public static void ReviewedRecoveryRetry() => ReviewedRetryCase(prerequisite: false, hasRetry: false);
-    public static void ReviewedSourceWaitRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: true, secondWait: true);
-    public static void ReviewedDispatchWaitRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: false, secondWait: true);
+    public static void ReviewedPrerequisiteRetry() => ReviewedRetryCase(nameof(ReviewedPrerequisiteRetry), prerequisite: true, hasRetry: true);
+    public static void ReviewedObligationRetry() => ReviewedRetryCase(nameof(ReviewedObligationRetry), prerequisite: true, hasRetry: false);
+    public static void ReviewedRecoveryRetry() => ReviewedRetryCase(nameof(ReviewedRecoveryRetry), prerequisite: false, hasRetry: false);
+    public static void ReviewedSourceWaitRetry() => ReviewedRetryCase(nameof(ReviewedSourceWaitRetry), prerequisite: true, hasRetry: true, secondWait: true);
+    public static void ReviewedDispatchWaitRetry() => ReviewedRetryCase(nameof(ReviewedDispatchWaitRetry), prerequisite: true, hasRetry: false, secondWait: true);
 
-    public static void ReviewedRepairDispatchRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: false, secondWait: true, clearDebt: true);
+    public static void ReviewedRepairDispatchRetry() => ReviewedRetryCase(nameof(ReviewedRepairDispatchRetry), prerequisite: true, hasRetry: false, secondWait: true, clearDebt: true);
 
-    private static void ReviewedRetryCase(bool prerequisite, bool hasRetry, bool secondWait = false, bool clearDebt = false)
+    private static void ReviewedRetryCase(string name, bool prerequisite, bool hasRetry, bool secondWait = false, bool clearDebt = false)
     {
         var root = Path.Combine(Path.GetTempPath(), "reviewed-retry-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try
         {
             using var productRoot = OverrideProductRoot(root);
-            ReviewedRetryDuringRecompositionAsync(root, prerequisite, hasRetry, secondWait, clearDebt).GetAwaiter().GetResult();
+            StepAsync(name, () => ReviewedRetryDuringRecompositionAsync(root, prerequisite, hasRetry, secondWait, clearDebt))
+                .GetAwaiter().GetResult();
+            Console.WriteLine(FormattableString.Invariant($"engine-host slowest step {SlowestStep.Name} {SlowestStep.Elapsed.TotalSeconds:F3}"));
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -574,7 +579,7 @@ public static partial class EngineHostChecks
         var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             "synthetic-account", "root", "home", DropboxProviderConfiguration.ContentAccess,
             DropboxProviderConfiguration.RequiredScopes).Normalize();
-        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding).WaitAsync(HookBound);
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
         var store = new InMemoryStateStore();
         var pair = SourceFixture.Bound(Pair(id) with { ConnectionId = binding.ConnectionId });
         if (secondWait)
@@ -623,111 +628,105 @@ public static partial class EngineHostChecks
         var observedStore = Local.JournalSourceChecks.HookedStore.Wrap(store);
         var storeHook = (Local.JournalSourceChecks.HookedStore)(object)observedStore;
         using var http = new HttpClient(new OwnedHandler());
-        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
             instance.StateAuthority, Settings, http, TimeProvider.System, _ => null, _ => observedStore,
             EngineHost.Mode.Persistent,
             new EngineExternals(new SyntheticCredentials(), _ => new HttpClient(new OwnedHandler()), recovery));
+        var configuration = (SemaphoreSlim)typeof(EngineHost)
+            .GetField("_configuration", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
+        var held = configuration;
+        var sourceCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var debtCleared = false;
+        if (secondWait)
+        {
+            if (!clearDebt) await host.RecomposeCurrentAsync(id, CancellationToken.None);
+            if (hasRetry)
+            {
+                var volumes = (System.Collections.IDictionary)typeof(EngineHost)
+                    .GetField("_volumes", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
+                var volume = volumes[pair.Roots!.LocalVolumeKey()]!;
+                held = (SemaphoreSlim)volume.GetType()
+                    .GetProperty("Serial", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(volume)!;
+            }
+            else storeHook.After = method =>
+            {
+                if (clearDebt && !debtCleared && method.Name == nameof(IStateStore.ReadPairExecution))
+                {
+                    Check.Require(store.Obligated(id), "ordinary Repair starts with outstanding source debt");
+                    debtCleared = true;
+                    foreach (var side in new[] { Side.Local, Side.Dropbox })
+                    {
+                        var source = store.ReadSource(id, side)!.Value;
+                        store.AdvanceSource(id, side, generation, source.Epoch, source.Revision,
+                            source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
+                            source.Provenance, source.Cursor, null);
+                    }
+                }
+                if (method.Name != nameof(IStateStore.ReadWorkWatermark)) return;
+                storeHook.After = null;
+                if (clearDebt)
+                    Check.Require(configuration.Wait(0) && !store.Obligated(id),
+                        "recomposition clears the debt before ordinary Repair reaches dispatch");
+                var gate = typeof(EngineHost).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
+                lock (gate)
+                    ((HashSet<string>)typeof(EngineHost).GetField("_closed", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .GetValue(host)!).Add(id);
+                sourceCompleted.TrySetResult();
+            };
+        }
+        if (!clearDebt) await held.WaitAsync();
+        Task<ResolveSummary> resolving;
+        Issue replacement;
+        var retryBefore = store.ReadPrerequisiteRetry(id);
+        ItemRetryCandidate? candidateBefore;
+        PendingRead pendingBefore;
         try
         {
-            var configuration = (SemaphoreSlim)typeof(EngineHost)
-                .GetField("_configuration", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
-            var held = configuration;
-            var sourceCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var debtCleared = false;
-            if (secondWait)
+            resolving = new EngineOperations(instance.StateAuthority.ProductRoot, _ => { }, host)
+                .ResolveAsync(id, reviewed.Id, ResolutionChoice.Retry, null, null, false, null,
+                    CancellationToken.None, reviewed.Reviewed);
+            if (secondWait && !hasRetry)
+                Check.Require(await Task.WhenAny(sourceCompleted.Task, resolving) == sourceCompleted.Task,
+                    "the reviewed choice finishes source acquisition before its dispatch recomposition wait");
+            Check.Require(!resolving.IsCompleted, secondWait
+                ? "the reviewed choice waits at the later source or dispatch boundary"
+                : "the reviewed choice waits for generation recomposition");
+            if (prerequisite)
+                store.Commit(id, StateChange.Empty with
+                {
+                    Raise = [(IssueKind.Failure, TextKey.RequiredRepairRetry, string.Empty,
+                        new IssueSubject([], null, new LocalHashProof(1, 0, "replacement")))]
+                });
+            else
             {
-                if (!clearDebt) await host.RecomposeCurrentAsync(id, CancellationToken.None).WaitAsync(HookBound);
-                if (hasRetry)
-                {
-                    var volumes = (System.Collections.IDictionary)typeof(EngineHost)
-                        .GetField("_volumes", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
-                    var volume = volumes[pair.Roots!.LocalVolumeKey()]!;
-                    held = (SemaphoreSlim)volume.GetType()
-                        .GetProperty("Serial", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(volume)!;
-                }
-                else storeHook.After = method =>
-                {
-                    if (clearDebt && !debtCleared && method.Name == nameof(IStateStore.ReadPairExecution))
-                    {
-                        Check.Require(store.Obligated(id), "ordinary Repair starts with outstanding source debt");
-                        debtCleared = true;
-                        foreach (var side in new[] { Side.Local, Side.Dropbox })
-                        {
-                            var source = store.ReadSource(id, side)!.Value;
-                            store.AdvanceSource(id, side, generation, source.Epoch, source.Revision,
-                                source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
-                                source.Provenance, source.Cursor, null);
-                        }
-                    }
-                    if (method.Name != nameof(IStateStore.ReadWorkWatermark)) return;
-                    storeHook.After = null;
-                    if (clearDebt)
-                        Check.Require(configuration.Wait(0) && !store.Obligated(id),
-                            "recomposition clears the debt before ordinary Repair reaches dispatch");
-                    var gate = typeof(EngineHost).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
-                    lock (gate)
-                        ((HashSet<string>)typeof(EngineHost).GetField("_closed", BindingFlags.Instance | BindingFlags.NonPublic)!
-                            .GetValue(host)!).Add(id);
-                    sourceCompleted.TrySetResult();
-                };
+                var entry = new Entry("file.txt", false, 1, DateTimeOffset.UnixEpoch, "replacement", "", "hash", null);
+                var pending = new PendingEffect(1, "replacement-operation", 0, PendingKind.LocalDelete,
+                    PendingPhase.Armed, entry.Path, new RemovalProof(entry, "1", "hash"), null,
+                    null, null, null, null, false, null);
+                store.ArmPending(id, pending);
+                store.RecordInUseFailure(id, generation, local.Epoch, entry.Path,
+                    new IssueSubject([new IssueItem(Side.Local, entry.Path, entry.Id)], null),
+                    TextKey.FailLocalInUse, null, ItemRetryDispatch.LocalRecovery, pending, null, Guid.NewGuid());
             }
-            if (!clearDebt && !await held.WaitAsync(HookBound))
-                throw new TimeoutException("the held semaphore did not free within " + HookBound.TotalSeconds + " s");
-            Task<ResolveSummary> resolving;
-            Issue replacement;
-            var retryBefore = store.ReadPrerequisiteRetry(id);
-            ItemRetryCandidate? candidateBefore;
-            PendingRead pendingBefore;
-            try
-            {
-                resolving = new EngineOperations(instance.StateAuthority.ProductRoot, _ => { }, host)
-                    .ResolveAsync(id, reviewed.Id, ResolutionChoice.Retry, null, null, false, null,
-                        CancellationToken.None, reviewed.Reviewed);
-                if (secondWait && !hasRetry)
-                    Check.Require(await Task.WhenAny(sourceCompleted.Task, resolving).WaitAsync(HookBound) ==
-                        sourceCompleted.Task,
-                        "the reviewed choice finishes source acquisition before its dispatch recomposition wait");
-                Check.Require(!resolving.IsCompleted, secondWait
-                    ? "the reviewed choice waits at the later source or dispatch boundary"
-                    : "the reviewed choice waits for generation recomposition");
-                if (prerequisite)
-                    store.Commit(id, StateChange.Empty with
-                    {
-                        Raise = [(IssueKind.Failure, TextKey.RequiredRepairRetry, string.Empty,
-                            new IssueSubject([], null, new LocalHashProof(1, 0, "replacement")))]
-                    });
-                else
-                {
-                    var entry = new Entry("file.txt", false, 1, DateTimeOffset.UnixEpoch, "replacement", "", "hash", null);
-                    var pending = new PendingEffect(1, "replacement-operation", 0, PendingKind.LocalDelete,
-                        PendingPhase.Armed, entry.Path, new RemovalProof(entry, "1", "hash"), null,
-                        null, null, null, null, false, null);
-                    store.ArmPending(id, pending);
-                    store.RecordInUseFailure(id, generation, local.Epoch, entry.Path,
-                        new IssueSubject([new IssueItem(Side.Local, entry.Path, entry.Id)], null),
-                        TextKey.FailLocalInUse, null, ItemRetryDispatch.LocalRecovery, pending, null, Guid.NewGuid());
-                }
-                replacement = PairSafety.ForReview(store.IssueById(id, reviewed.Id)!);
-                Check.Require(replacement.Id == reviewed.Id && replacement.Reviewed != reviewed.Reviewed,
-                    "the waiting choice now refers to a replaced notice under the same id");
-                candidateBefore = store.ReadItemRetryState(id, [reviewed.Id])[reviewed.Id];
-                pendingBefore = store.Pending(id);
-            }
-            finally { held.Release(); }
-            Exception? refusal = null;
-            try { await resolving.WaitAsync(HookBound); }
-            catch (Exception error) { refusal = error; }
-            Check.Require(refusal is EngineRequestException { Key: TextKey.ResolveStale },
-                (secondWait ? hasRetry ? "a replacement during source acquisition" : "a replacement before dispatch recomposition"
-                    : "a replacement during recomposition") + " refuses the reviewed retry with ResolveStale, not " +
-                (refusal?.GetType().Name ?? "success"));
-            Check.Require(PairSafety.ForReview(store.IssueById(id, reviewed.Id)!).Reviewed == replacement.Reviewed &&
-                store.ReadPrerequisiteRetry(id) == retryBefore &&
-                store.ReadItemRetryState(id, [reviewed.Id])[reviewed.Id] == candidateBefore &&
-                store.Pending(id) == pendingBefore && recovery.Resolved.Count == 0,
-                "stale refusal preserves the replacement fingerprint, failure count, retry identity and pending effect");
+            replacement = PairSafety.ForReview(store.IssueById(id, reviewed.Id)!);
+            Check.Require(replacement.Id == reviewed.Id && replacement.Reviewed != reviewed.Reviewed,
+                "the waiting choice now refers to a replaced notice under the same id");
+            candidateBefore = store.ReadItemRetryState(id, [reviewed.Id])[reviewed.Id];
+            pendingBefore = store.Pending(id);
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "ReviewedRetryDuringRecompositionAsync host disposal"); }
+        finally { held.Release(); }
+        Exception? refusal = null;
+        try { await resolving; }
+        catch (Exception error) { refusal = error; }
+        Check.Require(refusal is EngineRequestException { Key: TextKey.ResolveStale },
+            (secondWait ? hasRetry ? "a replacement during source acquisition" : "a replacement before dispatch recomposition"
+                : "a replacement during recomposition") + " refuses the reviewed retry with ResolveStale, not " +
+            (refusal?.GetType().Name ?? "success"));
+        Check.Require(PairSafety.ForReview(store.IssueById(id, reviewed.Id)!).Reviewed == replacement.Reviewed &&
+            store.ReadPrerequisiteRetry(id) == retryBefore &&
+            store.ReadItemRetryState(id, [reviewed.Id])[reviewed.Id] == candidateBefore &&
+            store.Pending(id) == pendingBefore && recovery.Resolved.Count == 0,
+            "stale refusal preserves the replacement fingerprint, failure count, retry identity and pending effect");
     }
 
     // V16-Q5: an actual unsuccessful enclosing Repair keeps the ordinary once-only durable accounting.
@@ -821,57 +820,51 @@ public static partial class EngineHostChecks
         store.SavePair(pair);
         var clock = new FakeTimeProvider();
         var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
-        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
             instance.StateAuthority, Settings, Http, clock, _ => null, _ => store,
             EngineHost.Mode.Direct, startupMonitor: monitor);
+        Check.Require(await FailsPrerequisiteAsync(host, pair.PairId), "seed refused-opportunity retry state");
+        var selected = store.ReadPrerequisiteRetry(pair.PairId)!.Value;
+        var generation = store.ReadPairExecution(pair.PairId)!.Value.Generation;
+        var configuration = (SemaphoreSlim)typeof(EngineHost).GetField("_configuration",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
+        await configuration.WaitAsync();
+        var first = host.RunPrerequisiteAsync(pair.PairId, default);
         try
         {
-            Check.Require(await FailsPrerequisiteAsync(host, pair.PairId).WaitAsync(HookBound),
-            "seed refused-opportunity retry state");
-            var selected = store.ReadPrerequisiteRetry(pair.PairId)!.Value;
-            var generation = store.ReadPairExecution(pair.PairId)!.Value.Generation;
-            var configuration = (SemaphoreSlim)typeof(EngineHost).GetField("_configuration",
-                BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
-            if (!await configuration.WaitAsync(HookBound))
-                throw new TimeoutException("the configuration semaphore did not free within " + HookBound.TotalSeconds + " s");
-            var first = host.RunPrerequisiteAsync(pair.PairId, default);
-            try
-            {
-                Check.Require(!first.IsCompleted, "the active prerequisite waits at configuration");
-                await host.RunPrerequisiteAsync(pair.PairId, default,
-                    schedule: scheduled ? (generation, selected) : null).WaitAsync(HookBound);
-                await host.RunPrerequisiteAsync(pair.PairId, default,
-                    schedule: scheduled ? (generation, selected) : null).WaitAsync(HookBound);
-            }
-            finally { configuration.Release(); }
-            try { await first.WaitAsync(HookBound); }
-            catch (EngineRequestException) { }
-            Check.Require(store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 2 },
-                "refused opportunities never count as attempted failures");
-            monitor.Start();
-            if (!scheduled)
-                await UntilAsync(() => store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 3 });
-            else
-            {
-                var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                using var deadline = monitor.ScheduleQuietStatus(TimeSpan.Zero, () => observed.TrySetResult());
-                await observed.Task.WaitAsync(TimeSpan.FromSeconds(30));
-            }
-            Check.Require(store.ReadPrerequisiteRetry(pair.PairId)?.Attempts == (scheduled ? 2 : 3),
-                "owed genuine events coalesce once; an owed schedule never bypasses its replacement deadline");
-            if (scheduled)
-            {
-                var replacement = store.ReadPrerequisiteRetry(pair.PairId)!.Value;
-                clock.Advance(replacement.RetryAfter - clock.GetUtcNow());
-                await UntilAsync(() => store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 3 });
-                var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                using var deadline = monitor.ScheduleQuietStatus(TimeSpan.Zero, () => observed.TrySetResult());
-                await observed.Task.WaitAsync(TimeSpan.FromSeconds(30));
-                Check.Require(store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 3 },
-                    "the replacement deadline admits the owed schedule exactly once without a later event");
-            }
+            Check.Require(!first.IsCompleted, "the active prerequisite waits at configuration");
+            await host.RunPrerequisiteAsync(pair.PairId, default,
+                schedule: scheduled ? (generation, selected) : null);
+            await host.RunPrerequisiteAsync(pair.PairId, default,
+                schedule: scheduled ? (generation, selected) : null);
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "RefusedPrerequisiteOpportunitiesAsync host disposal"); }
+        finally { configuration.Release(); }
+        try { await first; }
+        catch (EngineRequestException) { }
+        Check.Require(store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 2 },
+            "refused opportunities never count as attempted failures");
+        monitor.Start();
+        if (!scheduled)
+            await UntilAsync(() => store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 3 });
+        else
+        {
+            var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var deadline = monitor.ScheduleQuietStatus(TimeSpan.Zero, () => observed.TrySetResult());
+            await observed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        Check.Require(store.ReadPrerequisiteRetry(pair.PairId)?.Attempts == (scheduled ? 2 : 3),
+            "owed genuine events coalesce once; an owed schedule never bypasses its replacement deadline");
+        if (scheduled)
+        {
+            var replacement = store.ReadPrerequisiteRetry(pair.PairId)!.Value;
+            clock.Advance(replacement.RetryAfter - clock.GetUtcNow());
+            await UntilAsync(() => store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 3 });
+            var observed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var deadline = monitor.ScheduleQuietStatus(TimeSpan.Zero, () => observed.TrySetResult());
+            await observed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            Check.Require(store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 3 },
+                "the replacement deadline admits the owed schedule exactly once without a later event");
+        }
     }
 
     private static async Task RefusedUnchangedScheduleAsync(string root, bool remove)
@@ -882,46 +875,41 @@ public static partial class EngineHostChecks
         store.SavePair(pair);
         var clock = new FakeTimeProvider();
         var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
-        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
             instance.StateAuthority, Settings, Http, clock, _ => null, _ => store,
             EngineHost.Mode.Direct, startupMonitor: monitor);
+        var generation = store.ReadPairExecution(pair.PairId)!.Value.Generation;
+        var local = store.ReadSource(pair.PairId, Side.Local)!.Value;
+        var remote = store.ReadSource(pair.PairId, Side.Dropbox)!.Value;
+        var selected = new FailureRetryOwner.State(1, clock.GetUtcNow().AddSeconds(-1));
+        store.RecordPrerequisiteFailure(pair.PairId, generation, local.Epoch, remote.Epoch,
+            local.Revision, remote.Revision, null, selected, StateChange.Empty);
+        var configuration = (SemaphoreSlim)typeof(EngineHost).GetField("_configuration",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
+        await configuration.WaitAsync();
+        using var cancelled = new CancellationTokenSource();
+        var active = host.RunPrerequisiteAsync(pair.PairId, cancelled.Token);
         try
         {
-            var generation = store.ReadPairExecution(pair.PairId)!.Value.Generation;
-            var local = store.ReadSource(pair.PairId, Side.Local)!.Value;
-            var remote = store.ReadSource(pair.PairId, Side.Dropbox)!.Value;
-            var selected = new FailureRetryOwner.State(1, clock.GetUtcNow().AddSeconds(-1));
-            store.RecordPrerequisiteFailure(pair.PairId, generation, local.Epoch, remote.Epoch,
-                local.Revision, remote.Revision, null, selected, StateChange.Empty);
-            var configuration = (SemaphoreSlim)typeof(EngineHost).GetField("_configuration",
-                BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
-            if (!await configuration.WaitAsync(HookBound))
-                throw new TimeoutException("the configuration semaphore did not free within " + HookBound.TotalSeconds + " s");
-            using var cancelled = new CancellationTokenSource();
-            var active = host.RunPrerequisiteAsync(pair.PairId, cancelled.Token);
-            try
-            {
-                monitor.Start();
-                var consumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                using var barrier = monitor.ScheduleQuietStatus(TimeSpan.Zero, () => consumed.TrySetResult());
-                await consumed.Task.WaitAsync(TimeSpan.FromSeconds(30));
-                Check.Require(store.ReadPrerequisiteRetry(pair.PairId) == selected,
-                    "a due schedule refused during an active prerequisite leaves its retry state unchanged");
-                if (remove) store.RemovePair(pair.PairId);
-                cancelled.Cancel();
-            }
-            finally { configuration.Release(); }
-            try { await active.WaitAsync(HookBound); }
-            catch (OperationCanceledException) { }
-            if (!remove) await UntilAsync(() => store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 2 });
-            var refreshed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            using var finalBarrier = monitor.ScheduleQuietStatus(TimeSpan.Zero, () => refreshed.TrySetResult());
-            await refreshed.Task.WaitAsync(TimeSpan.FromSeconds(30));
-            Check.Require(remove ? store.Pair(pair.PairId) is null && store.ReadPrerequisiteRetry(pair.PairId) is null :
-                store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 2 },
-                "release restores an unchanged due schedule once, while a removed retry disappears");
+            monitor.Start();
+            var consumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var barrier = monitor.ScheduleQuietStatus(TimeSpan.Zero, () => consumed.TrySetResult());
+            await consumed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            Check.Require(store.ReadPrerequisiteRetry(pair.PairId) == selected,
+                "a due schedule refused during an active prerequisite leaves its retry state unchanged");
+            if (remove) store.RemovePair(pair.PairId);
+            cancelled.Cancel();
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "RefusedUnchangedScheduleAsync host disposal"); }
+        finally { configuration.Release(); }
+        try { await active; }
+        catch (OperationCanceledException) { }
+        if (!remove) await UntilAsync(() => store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 2 });
+        var refreshed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var finalBarrier = monitor.ScheduleQuietStatus(TimeSpan.Zero, () => refreshed.TrySetResult());
+        await refreshed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Check.Require(remove ? store.Pair(pair.PairId) is null && store.ReadPrerequisiteRetry(pair.PairId) is null :
+            store.ReadPrerequisiteRetry(pair.PairId) is { Attempts: 2 },
+            "release restores an unchanged due schedule once, while a removed retry disappears");
     }
 
     private static async Task WholeDropboxPairIsAffectedAsync(string root)
@@ -958,56 +946,52 @@ public static partial class EngineHostChecks
         var clock = new FakeTimeProvider();
         var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
         var delivered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot,
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot,
             message => delivered.TrySetResult(message), instance.StateAuthority, Settings with { StoragePageSize = 1 },
             Http, clock, _ => null, _ => store, EngineHost.Mode.Persistent, startupMonitor: monitor);
+        foreach (var id in new[] { "disabled", "paused", "decision", "eligible", "working" })
+            store.SavePair(Pair(id, enabled: id != "disabled"));
+        await host.PauseAsync("paused", default);
+        store.Commit("decision", StateChange.Empty with
+        {
+            Raise = [(IssueKind.DriveChange, TextKey.DriveRestored, string.Empty, new IssueSubject([], null))]
+        });
+        var ordinal = 0;
+        foreach (var id in new[] { "disabled", "paused", "decision", "eligible" })
+        {
+            var generation = store.ReadPairExecution(id)!.Value.Generation;
+            var local = store.ReadSource(id, Side.Local)!.Value;
+            var remote = store.ReadSource(id, Side.Dropbox)!.Value;
+            store.RecordPrerequisiteFailure(id, generation, local.Epoch, remote.Epoch,
+                local.Revision, remote.Revision, null,
+                new FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(++ordinal)), StateChange.Empty);
+        }
+        Check.Require(host.Status().Status == AutoStatus.Waiting,
+            "waiting observation pages beyond disabled, paused and decision-held earlier retry rows");
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var running = host.DispatchAsync("working", async (_, _, _, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token);
+            return true;
+        }, default);
         try
         {
-            foreach (var id in new[] { "disabled", "paused", "decision", "eligible", "working" })
-                store.SavePair(Pair(id, enabled: id != "disabled"));
-            await host.PauseAsync("paused", default).WaitAsync(HookBound);
-            store.Commit("decision", StateChange.Empty with
-            {
-                Raise = [(IssueKind.DriveChange, TextKey.DriveRestored, string.Empty, new IssueSubject([], null))]
-            });
-            var ordinal = 0;
-            foreach (var id in new[] { "disabled", "paused", "decision", "eligible" })
-            {
-                var generation = store.ReadPairExecution(id)!.Value.Generation;
-                var local = store.ReadSource(id, Side.Local)!.Value;
-                var remote = store.ReadSource(id, Side.Dropbox)!.Value;
-                store.RecordPrerequisiteFailure(id, generation, local.Epoch, remote.Epoch,
-                    local.Revision, remote.Revision, null,
-                    new FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(++ordinal)), StateChange.Empty);
-            }
-            Check.Require(host.Status().Status == AutoStatus.Waiting,
-                "waiting observation pages beyond disabled, paused and decision-held earlier retry rows");
-            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var running = host.DispatchAsync("working", async (_, _, _, token) =>
-            {
-                entered.TrySetResult();
-                await release.Task.WaitAsync(token);
-                return true;
-            }, default);
-            try
-            {
-                await entered.Task.WaitAsync(HookBound);
-                Check.Require(host.Status().Status == AutoStatus.Running,
-                    "an active pair keeps higher-priority status while another pair waits");
-                monitor.Start(quietOnly: true);
-                await UntilAsync(() => clock.HasArmedTimer);
-                clock.Advance(clock.NextDueIn!.Value);
-                Check.Require(await delivered.Task.WaitAsync(TimeSpan.FromSeconds(30)) ==
-                    Text.Get(TextKey.StatusStillWaiting, (TextArg.Reason, nameof(AttemptOwner.Prerequisite))),
-                    "another running pair cannot hide the eligible prerequisite waiting heartbeat");
-            }
-            finally { release.TrySetResult(); await running.WaitAsync(HookBound); }
-            await host.PauseAsync("eligible", default).WaitAsync(HookBound);
-            Check.Require(host.Status().Status != AutoStatus.Waiting,
-                "no waiting status remains when every durable retry is ineligible");
+            await entered.Task;
+            Check.Require(host.Status().Status == AutoStatus.Running,
+                "an active pair keeps higher-priority status while another pair waits");
+            monitor.Start(quietOnly: true);
+            await UntilAsync(() => clock.HasArmedTimer);
+            clock.Advance(clock.NextDueIn!.Value);
+            Check.Require(await delivered.Task.WaitAsync(TimeSpan.FromSeconds(30)) ==
+                Text.Get(TextKey.StatusStillWaiting, (TextArg.Reason, nameof(AttemptOwner.Prerequisite))),
+                "another running pair cannot hide the eligible prerequisite waiting heartbeat");
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "WaitingEligibilityAsync host disposal"); }
+        finally { release.TrySetResult(); await running; }
+        await host.PauseAsync("eligible", default);
+        Check.Require(host.Status().Status != AutoStatus.Waiting,
+            "no waiting status remains when every durable retry is ineligible");
     }
 
     private sealed class FailingRetryStore(IStateStore inner) : ForwardingStateStore(inner)
@@ -1060,7 +1044,7 @@ public static partial class EngineHostChecks
                     }, token);
                 }
                 return true;
-            }, CancellationToken.None).WaitAsync(HookBound);
+            }, CancellationToken.None);
             Check.Require(reservationVisits == 0,
                 "distinct singleton reservations never enumerate previously consumed subjects");
         }
@@ -1128,7 +1112,7 @@ public static partial class EngineHostChecks
                 Check.Require(await host.ExecuteItemAttemptAsync(registration, registration, null, other,
                     (_, _) => Task.FromResult(true), token), "another item set remains admissible");
                 return first;
-            }, CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+            }, CancellationToken.None).ConfigureAwait(false);
         Check.Require(admitted && reported is not null, "the first report is recorded once through the host");
 
         // A later opportunity completes the recorded candidate; the same change is idempotent, a different one refuses.
@@ -1156,7 +1140,7 @@ public static partial class EngineHostChecks
                     catch (LiveAdmissionStaleException) { rescoped = true; }
                     Check.Require(rescoped, "a duplicate completion that differs only in its close scope is refused");
                     return Task.FromResult(true);
-                }, token), CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+                }, token), CancellationToken.None).ConfigureAwait(false);
         Check.Require(completed, "the recorded candidate completes once through the host");
         Check.Require(store.Issues(PairId, [IssueKind.Failure])
                 .Count(issue => issue.Cause == TextKey.FailLocalInUse) == 1,
@@ -1214,7 +1198,7 @@ public static partial class EngineHostChecks
                 return Task.FromResult(true);
             }, token);
             return true;
-        }, default).WaitAsync(HookBound), "the temporary turns run inside one ordinary registration");
+        }, default), "the temporary turns run inside one ordinary registration");
         var row = store.ReadItemRetry(PairId);
         Check.Require(first == (true, now.AddSeconds(1)) && row == new FailureRetryOwner.State(1, now.AddSeconds(1)),
             "the first temporary turn without a provider wait commits the A01 first second, attempts 1");
@@ -1264,7 +1248,7 @@ public static partial class EngineHostChecks
                     at = host.ReportTemporaryFailure(registration, attemptId, epoch, "item.txt", subject,
                         TextKey.FailChanged, null, ItemRetryDispatch.OrdinaryItem, wait, started).RetryAt;
                     return Task.FromResult(true);
-                }, token), default).WaitAsync(HookBound);
+                }, token), default);
             return at;
         }
         var receipt = clock.GetTimestamp();
@@ -1323,7 +1307,7 @@ public static partial class EngineHostChecks
                 }
             }
             return true;
-        }, CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+        }, CancellationToken.None).ConfigureAwait(false);
         Check.Require(worked && rejected == 2,
             "two selected opportunities are admitted; another pair or generation is refused with the existing stale cause");
     }
@@ -1346,7 +1330,7 @@ public static partial class EngineHostChecks
             var retry = await listing.CompleteAttemptAsync(attempt, token).ConfigureAwait(false);
             await listing.EndAsync().ConfigureAwait(false);
             return retry;
-        }, CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+        }, CancellationToken.None).ConfigureAwait(false);
         Check.Require(!retried, "a Request attempt is never retried by the shared retry surface");
     }
 
@@ -1357,7 +1341,7 @@ public static partial class EngineHostChecks
         var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             "synthetic-account", "root", "home", DropboxProviderConfiguration.ContentAccess,
             DropboxProviderConfiguration.RequiredScopes).Normalize();
-        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding).WaitAsync(HookBound);
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
         using var inner = Massdex.SyncShark.Engine.Storage.StateStore.Open(
             Path.Combine(instance.StateAuthority.StateRoot, "transfer-retry.db"));
         var pair = Pair("transfer-no-retry-pair") with { ConnectionId = binding.ConnectionId };
@@ -1367,7 +1351,7 @@ public static partial class EngineHostChecks
             new EngineExternals(new SyntheticCredentials(), _ => new HttpClient()));
         try
         {
-            await host.RecomposeCurrentAsync(pair.PairId, default).WaitAsync(HookBound);
+            await host.RecomposeCurrentAsync(pair.PairId, default);
             var unproved = await host.DispatchAsync(pair.PairId, async (registration, admitted, generation, token) =>
             {
                 var session = PairSession.Open(inner, admitted, Settings, Http, false, null,
@@ -1377,7 +1361,7 @@ public static partial class EngineHostChecks
                         noEffectProven: false),
                     "an unproved Transfer publishes its transient completion");
                 return await session.Context.CompleteDownloadAttemptAsync(attempt, token).ConfigureAwait(false);
-            }, CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false);
+            }, CancellationToken.None).ConfigureAwait(false);
             Check.Require(!unproved, "an unproved Transfer attempt is not retried");
             // A proved retry emits one Wait naming the transfer's source path before it waits (ruling 1).
             var clock = new FakeTimeProvider();
@@ -1394,7 +1378,7 @@ public static partial class EngineHostChecks
             }, CancellationToken.None);
             await UntilAsync(() => clock.HasArmedTimer);
             clock.Advance(clock.NextDueIn!.Value);
-            Check.Require(await proved.WaitAsync(HookBound).ConfigureAwait(false), "a proved Transfer attempt is retried");
+            Check.Require(await proved.ConfigureAwait(false), "a proved Transfer attempt is retried");
             log.Dispose();
             var waits = File.ReadAllLines(log.Path).Select(line => line.Split(RunLog.FieldSeparator))
                 .Where(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Wait)).ToArray();
@@ -1402,7 +1386,7 @@ public static partial class EngineHostChecks
                 wait[RunLog.FieldWhat] == nameof(TextKey.RequestWaiting),
                 "the transfer retry Wait names the source path of the attempted transfer");
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "TransferRetryRequiresProofAsync host disposal"); }
+        finally { await host.DisposeAsync(); }
     }
 
     private static void StoppedPrerequisiteLogKeepsDistinctFailures(string root)
@@ -1461,7 +1445,7 @@ public static partial class EngineHostChecks
         finally
         {
             store.Error = null;
-            await TeardownAsync(host.DisposeAsync().AsTask(), "PausedPrerequisiteLogsAnAdmissionErrorAsync host disposal");
+            await host.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -1479,7 +1463,7 @@ public static partial class EngineHostChecks
         var dispatchRefused = false;
         try
         {
-            await host.DispatchAsync(PairId, (_, _, _, _) => Task.FromResult(true), CancellationToken.None).WaitAsync(HookBound)
+            await host.DispatchAsync(PairId, (_, _, _, _) => Task.FromResult(true), CancellationToken.None)
                 .ConfigureAwait(false);
         }
         catch (LiveAdmissionStaleException) { dispatchRefused = true; }
@@ -1489,7 +1473,7 @@ public static partial class EngineHostChecks
             "a paused pair still admits its source acquisition lifetime");
         await host.ResumeAsync(PairId, CancellationToken.None).ConfigureAwait(false);
         Check.Require(!host.IsPaused(PairId), "resume clears the pause");
-        Check.Require(await host.DispatchAsync(PairId, (_, _, _, _) => Task.FromResult(true), CancellationToken.None).WaitAsync(HookBound)
+        Check.Require(await host.DispatchAsync(PairId, (_, _, _, _) => Task.FromResult(true), CancellationToken.None)
                 .ConfigureAwait(false),
             "resume restores Dispatch admission");
     }
@@ -1515,18 +1499,18 @@ public static partial class EngineHostChecks
         await using var host = Compose(instance.StateAuthority, store);
         static Task<bool> Admitted(object registration, PairConfig pair, long generation, CancellationToken ct) =>
             Task.FromResult(true);
-        Check.Require(await host.DispatchAsync(PairId, Admitted, CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false) &&
+        Check.Require(await host.DispatchAsync(PairId, Admitted, CancellationToken.None).ConfigureAwait(false) &&
             await host.AcquireAsync(PairId, Admitted, CancellationToken.None).ConfigureAwait(false),
             "a failed Repair keeps the pair's Dispatch and source acquisition: real=" + real);
         await host.PauseAsync(PairId, CancellationToken.None).ConfigureAwait(false);
         var dispatchRefused = false;
-        try { await host.DispatchAsync(PairId, Admitted, CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false); }
+        try { await host.DispatchAsync(PairId, Admitted, CancellationToken.None).ConfigureAwait(false); }
         catch (LiveAdmissionStaleException) { dispatchRefused = true; }
         Check.Require(dispatchRefused &&
             await host.AcquireAsync(PairId, Admitted, CancellationToken.None).ConfigureAwait(false),
             "a pause over a failed Repair stops only Dispatch: real=" + real);
         await host.ResumeAsync(PairId, CancellationToken.None).ConfigureAwait(false);
-        Check.Require(await host.DispatchAsync(PairId, Admitted, CancellationToken.None).WaitAsync(HookBound).ConfigureAwait(false),
+        Check.Require(await host.DispatchAsync(PairId, Admitted, CancellationToken.None).ConfigureAwait(false),
             "resume restores Dispatch over a failed Repair: real=" + real);
         Check.Require(store.ReadPrerequisiteRetry(PairId) == floored && store.Obligated(PairId) &&
             RetryNotices(store, PairId) == 1,
@@ -1539,7 +1523,7 @@ public static partial class EngineHostChecks
         var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             "synthetic-account", "root", "home", DropboxProviderConfiguration.ContentAccess,
             DropboxProviderConfiguration.RequiredScopes).Normalize();
-        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding).WaitAsync(HookBound);
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
         var store = new InMemoryStateStore();
         var pairs = new[] { Pair("external-a"), Pair("external-b") }
             .Select(pair => pair with { ConnectionId = binding.ConnectionId }).ToArray();
@@ -1564,8 +1548,8 @@ public static partial class EngineHostChecks
                 (registration, pair, generation, _) => Task.FromResult(
                     host.BorrowGeneration(registration, pair.PairId, generation)), CancellationToken.None);
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "ExternalClientOwnershipAsync host disposal"); }
-        await TeardownAsync(host.DisposeAsync().AsTask(), "ExternalClientOwnershipAsync repeated host disposal");
+        finally { await host.DisposeAsync(); }
+        await host.DisposeAsync();
         Check.Require(handlers.All(handler => handler.Disposed == 1),
             "host stop and repeated disposal dispose every independently owned client exactly once");
     }
@@ -1576,7 +1560,7 @@ public static partial class EngineHostChecks
         var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             "synthetic-account", "root", "home", DropboxProviderConfiguration.ContentAccess,
             DropboxProviderConfiguration.RequiredScopes).Normalize();
-        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding).WaitAsync(HookBound);
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
         var pair = Pair("external-failure") with { ConnectionId = binding.ConnectionId };
         var handler = new OwnedHandler();
         var limiter = new AdaptiveLimiter(1, 1, TimeProvider.System, new FakeNetworkSignal(), _ => { },
@@ -1605,7 +1589,7 @@ public static partial class EngineHostChecks
         var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             "synthetic-account", "root", "home", DropboxProviderConfiguration.ContentAccess,
             DropboxProviderConfiguration.RequiredScopes).Normalize();
-        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding).WaitAsync(HookBound);
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
         using var inner = Massdex.SyncShark.Engine.Storage.StateStore.Open(
             Path.Combine(instance.StateAuthority.StateRoot, "receipts.db"));
         var pair = Pair("receipt-pair", enabled: opportunity || paused || startup) with { ConnectionId = binding.ConnectionId };
@@ -1622,125 +1606,121 @@ public static partial class EngineHostChecks
         string? sharedJob = null;
         if (shared)
         {
-            var first = await SeedOperationAsync(inner, pair, "SharedA").WaitAsync(HookBound);
-            var second = await SeedOperationAsync(inner, pair, "SharedB").WaitAsync(HookBound);
+            var first = await SeedOperationAsync(inner, pair, "SharedA");
+            var second = await SeedOperationAsync(inner, pair, "SharedB");
             sharedJob = AcceptReceiptAsync(inner, pair, [.. first, .. second], "shared");
         }
-        var bad = jobs && !shared ? await SeedReceiptAsync(inner, pair, "Bad").WaitAsync(HookBound) : null;
-        var good = jobs && !shared ? await SeedReceiptAsync(inner, pair, "Good").WaitAsync(HookBound) : null;
+        var bad = jobs && !shared ? await SeedReceiptAsync(inner, pair, "Bad") : null;
+        var good = jobs && !shared ? await SeedReceiptAsync(inner, pair, "Good") : null;
         using var handler = new ReceiptHandler();
         using var http = new HttpClient(handler);
-        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
             instance.StateAuthority, Settings, http, TimeProvider.System, _ => null, _ => store,
             EngineHost.Mode.Persistent,
             new EngineExternals(new SyntheticCredentials(), _ => new HttpClient(new OwnedHandler())));
-        try
+        if (opportunity && !startup)
         {
-            if (opportunity && !startup)
+            var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, _ => null, host);
+            try
             {
-                var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, _ => null, host);
-                try
+                store.SelectBudget = 2;
+                auto.Start();
+                if (fail)
                 {
-                    store.SelectBudget = 2;
-                    auto.Start();
-                    if (fail)
-                    {
-                        await store.Entered.Task.WaitAsync(HookBound);
-                        try { await auto.StopAsync().WaitAsync(HookBound); }
-                        catch (InvalidDataException error) when (ReferenceEquals(error, store.Failure)) { }
-                        Check.Require(host.Status().Status == AutoStatus.Held && store.Passes == 1,
-                            "Storage failure in an opportunity reaches BackgroundFailed, rather than a provider refusal.");
-                        return;
-                    }
-                    await store.Selections.Task.WaitAsync(HookBound);
-                    Check.Require(store.Passes == 1 && store.SelectCalls == 4 && handler.Reads == 2,
-                        $"One opportunity with two selections observes both jobs once " +
-                        $"(passes={store.Passes}, reads={handler.Reads}, selects={store.SelectCalls}).");
-                    store.SelectedAt = 5;
-                    store.Selected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                    auto.Kick(pair.PairId);
-                    await store.Selected.Task.WaitAsync(HookBound);
-                    Check.Require(store.Passes == 2 && store.SelectCalls == 5 && handler.Reads == 3,
-                        $"A later opportunity retries the persistent job but not the terminal receipt " +
-                        $"(passes={store.Passes}, reads={handler.Reads}, selects={store.SelectCalls}).");
+                    await store.Entered.Task;
+                    try { await auto.StopAsync(); }
+                    catch (InvalidDataException error) when (ReferenceEquals(error, store.Failure)) { }
+                    Check.Require(host.Status().Status == AutoStatus.Held && store.Passes == 1,
+                        "Storage failure in an opportunity reaches BackgroundFailed, rather than a provider refusal.");
+                    return;
                 }
-                finally
-                {
-                    try { await auto.StopAsync().WaitAsync(HookBound); }
-                    catch (InvalidDataException error) when (fail && ReferenceEquals(error, store.Failure)) { }
-                }
-                Check.Require(inner.FolderSubmission(good!).Phase == FolderSubmission.SubmissionPhase.Terminal &&
-                    inner.FolderSubmission(bad!).Phase == FolderSubmission.SubmissionPhase.Accepted,
-                    "A bad observation does not fail AutoSync or invent completion.");
-                return;
+                await store.Selections.Task;
+                Check.Require(store.Passes == 1 && store.SelectCalls == 4 && handler.Reads == 2,
+                    $"One opportunity with two selections observes both jobs once " +
+                    $"(passes={store.Passes}, reads={handler.Reads}, selects={store.SelectCalls}).");
+                store.SelectedAt = 5;
+                store.Selected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                auto.Kick(pair.PairId);
+                await store.Selected.Task;
+                Check.Require(store.Passes == 2 && store.SelectCalls == 5 && handler.Reads == 3,
+                    $"A later opportunity retries the persistent job but not the terminal receipt " +
+                    $"(passes={store.Passes}, reads={handler.Reads}, selects={store.SelectCalls}).");
             }
-            if (paused)
+            finally
             {
-                // A paused enabled pair: the Observation registration runs the startup pass; Dispatch is refused.
-                await host.PauseAsync(pair.PairId, default).WaitAsync(HookBound);
-                await ReconcileAtStartupAsync(host, store, http, instance.StateAuthority, pair.PairId).WaitAsync(HookBound);
-                var dispatchRefused = false;
-                try
-                {
-                    await host.DispatchAsync(pair.PairId, (_, _, _, _) => Task.FromResult(true), default).WaitAsync(HookBound);
-                }
-                catch (LiveAdmissionStaleException) { dispatchRefused = true; }
-                Check.Require(store.Passes == 1 && handler.Reads == 2 && dispatchRefused &&
-                    inner.FolderSubmission(bad!).Phase == FolderSubmission.SubmissionPhase.Accepted &&
-                    inner.FolderSubmission(good!).Phase == FolderSubmission.SubmissionPhase.Terminal,
-                    "A paused enabled pair is reconciled once at startup and dispatches nothing.");
-                return;
+                try { await auto.StopAsync(); }
+                catch (InvalidDataException error) when (fail && ReferenceEquals(error, store.Failure)) { }
             }
-            if (startup)
-            {
-                // The order StartAsync uses: the pair's own receipt pass, then AutoSync's continuation opportunity.
-                await ReconcileAtStartupAsync(host, store, http, instance.StateAuthority, pair.PairId).WaitAsync(HookBound);
-                Check.Require(store.Passes == 1 && handler.Reads == 2,
-                    "An enabled startup reconciles both jobs before AutoSync continues.");
-                var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, _ => null, host);
-                try
-                {
-                    store.SelectBudget = 2;
-                    auto.Start();
-                    await store.Selections.Task.WaitAsync(HookBound);
-                    Check.Require(store.Passes == 2 && store.SelectCalls == 4 && handler.Reads == 3 &&
-                        handler.GoodReads == 1 && handler.BadReads == 2 &&
-                        inner.FolderSubmission(good!).Phase == FolderSubmission.SubmissionPhase.Terminal &&
-                        inner.FolderSubmission(bad!).Phase == FolderSubmission.SubmissionPhase.Accepted,
-                        $"The AutoSync continuation rereads only the persistent job (passes={store.Passes}, " +
-                        $"reads={handler.Reads}, good={handler.GoodReads}, bad={handler.BadReads}).");
-                }
-                finally { await auto.StopAsync().WaitAsync(HookBound); }
-                return;
-            }
-            Exception? caught = null;
-            try { await host.StartAsync(default).WaitAsync(HookBound); }
-            catch (InvalidDataException error) { caught = error; }
-            Check.Require(store.Passes == 1 && (fail ? ReferenceEquals(caught, store.Failure) : caught is null),
-                "Startup reaches one receipt pass for a disabled unbound pair; storage failure escapes unchanged.");
-            if (shared)
-            {
-                Check.Require(handler.Reads == 1 &&
-                    inner.FolderSubmission(sharedJob!).Phase == FolderSubmission.SubmissionPhase.Terminal &&
-                    inner.FolderSubmission(sharedJob!).Cause is null &&
-                    inner.ActiveFolderRemovals(pair.PairId, default).Count() == 2,
-                    $"A submission shared by two operations is read once at startup (reads={handler.Reads}).");
-            }
-            else if (jobs)
-            {
-                Check.Require(inner.FolderSubmission(bad!).Phase == FolderSubmission.SubmissionPhase.Accepted &&
-                    inner.FolderSubmission(bad!).Cause == TextKey.DropboxRefused &&
-                    inner.FolderSubmission(good!).Phase == FolderSubmission.SubmissionPhase.Terminal,
-                    $"One bad job cannot prevent the next startup receipt: reads={handler.Reads}, " +
-                    $"bad={inner.FolderSubmission(bad!).Phase}/{inner.FolderSubmission(bad!).Cause}, " +
-                    $"good={inner.FolderSubmission(good!).Phase}/{inner.FolderSubmission(good!).Cause}.");
-                Check.Require(inner.ActiveFolderRemovals(pair.PairId, default).Count() == 2,
-                    "Startup receipts never retire either operation.");
-            }
-            else Check.Require(!inner.ActiveFolderRemovals(pair.PairId, default).Any() && handler.Reads == 0,
-                "An empty receipt pass does not invent recovery work or provider reads.");
+            Check.Require(inner.FolderSubmission(good!).Phase == FolderSubmission.SubmissionPhase.Terminal &&
+                inner.FolderSubmission(bad!).Phase == FolderSubmission.SubmissionPhase.Accepted,
+                "A bad observation does not fail AutoSync or invent completion.");
+            return;
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "StartupReceiptsAsync host disposal"); }
+        if (paused)
+        {
+            // A paused enabled pair: the Observation registration runs the startup pass; Dispatch is refused.
+            await host.PauseAsync(pair.PairId, default);
+            await ReconcileAtStartupAsync(host, store, http, instance.StateAuthority, pair.PairId);
+            var dispatchRefused = false;
+            try
+            {
+                await host.DispatchAsync(pair.PairId, (_, _, _, _) => Task.FromResult(true), default);
+            }
+            catch (LiveAdmissionStaleException) { dispatchRefused = true; }
+            Check.Require(store.Passes == 1 && handler.Reads == 2 && dispatchRefused &&
+                inner.FolderSubmission(bad!).Phase == FolderSubmission.SubmissionPhase.Accepted &&
+                inner.FolderSubmission(good!).Phase == FolderSubmission.SubmissionPhase.Terminal,
+                "A paused enabled pair is reconciled once at startup and dispatches nothing.");
+            return;
+        }
+        if (startup)
+        {
+            // The order StartAsync uses: the pair's own receipt pass, then AutoSync's continuation opportunity.
+            await ReconcileAtStartupAsync(host, store, http, instance.StateAuthority, pair.PairId);
+            Check.Require(store.Passes == 1 && handler.Reads == 2,
+                "An enabled startup reconciles both jobs before AutoSync continues.");
+            var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, _ => null, host);
+            try
+            {
+                store.SelectBudget = 2;
+                auto.Start();
+                await store.Selections.Task;
+                Check.Require(store.Passes == 2 && store.SelectCalls == 4 && handler.Reads == 3 &&
+                    handler.GoodReads == 1 && handler.BadReads == 2 &&
+                    inner.FolderSubmission(good!).Phase == FolderSubmission.SubmissionPhase.Terminal &&
+                    inner.FolderSubmission(bad!).Phase == FolderSubmission.SubmissionPhase.Accepted,
+                    $"The AutoSync continuation rereads only the persistent job (passes={store.Passes}, " +
+                    $"reads={handler.Reads}, good={handler.GoodReads}, bad={handler.BadReads}).");
+            }
+            finally { await auto.StopAsync(); }
+            return;
+        }
+        Exception? caught = null;
+        try { await host.StartAsync(default); }
+        catch (InvalidDataException error) { caught = error; }
+        Check.Require(store.Passes == 1 && (fail ? ReferenceEquals(caught, store.Failure) : caught is null),
+            "Startup reaches one receipt pass for a disabled unbound pair; storage failure escapes unchanged.");
+        if (shared)
+        {
+            Check.Require(handler.Reads == 1 &&
+                inner.FolderSubmission(sharedJob!).Phase == FolderSubmission.SubmissionPhase.Terminal &&
+                inner.FolderSubmission(sharedJob!).Cause is null &&
+                inner.ActiveFolderRemovals(pair.PairId, default).Count() == 2,
+                $"A submission shared by two operations is read once at startup (reads={handler.Reads}).");
+        }
+        else if (jobs)
+        {
+            Check.Require(inner.FolderSubmission(bad!).Phase == FolderSubmission.SubmissionPhase.Accepted &&
+                inner.FolderSubmission(bad!).Cause == TextKey.DropboxRefused &&
+                inner.FolderSubmission(good!).Phase == FolderSubmission.SubmissionPhase.Terminal,
+                $"One bad job cannot prevent the next startup receipt: reads={handler.Reads}, " +
+                $"bad={inner.FolderSubmission(bad!).Phase}/{inner.FolderSubmission(bad!).Cause}, " +
+                $"good={inner.FolderSubmission(good!).Phase}/{inner.FolderSubmission(good!).Cause}.");
+            Check.Require(inner.ActiveFolderRemovals(pair.PairId, default).Count() == 2,
+                "Startup receipts never retire either operation.");
+        }
+        else Check.Require(!inner.ActiveFolderRemovals(pair.PairId, default).Any() && handler.Reads == 0,
+            "An empty receipt pass does not invent recovery work or provider reads.");
     }
 
     // #79: an InProgress folder-delete job owns its next poll, so it completes with no unrelated wake.
@@ -1750,7 +1730,7 @@ public static partial class EngineHostChecks
         var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             "synthetic-account", "root", "home", DropboxProviderConfiguration.ContentAccess,
             DropboxProviderConfiguration.RequiredScopes).Normalize();
-        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding).WaitAsync(HookBound);
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
         using var store = Massdex.SyncShark.Engine.Storage.StateStore.Open(
             Path.Combine(instance.StateAuthority.StateRoot, "repoll.db"));
         var pair = Pair("repoll-pair", enabled: true) with { ConnectionId = binding.ConnectionId };
@@ -1762,44 +1742,40 @@ public static partial class EngineHostChecks
                 source.Epoch, source.Revision, source.Provenance, source.Cursor, source.Epoch,
                 source.Revision + 1, source.Provenance, source.Cursor, null);
         }
-        var id = await SeedReceiptAsync(store, pair, "Poll").WaitAsync(HookBound);
+        var id = await SeedReceiptAsync(store, pair, "Poll");
         using var handler = new ReceiptHandler { ProgressReads = 2 };
         using var http = new HttpClient(handler);
         var clock = new FakeTimeProvider();
         var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
-        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
             instance.StateAuthority, Settings, http, clock, _ => null, _ => store,
             EngineHost.Mode.Persistent,
             new EngineExternals(new SyntheticCredentials(), _ => new HttpClient(new OwnedHandler())),
             startupMonitor: monitor);
+        monitor.Start();
+        var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, _ => null, host);
         try
         {
-            monitor.Start();
-            var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, _ => null, host);
-            try
+            auto.Start();
+            await handler.FirstRead.Task.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            var armed = Environment.TickCount64 + 30_000;
+            while (!clock.HasArmedTimer && Environment.TickCount64 < armed) await Task.Yield();
+            Check.Require(clock.HasArmedTimer && store.FolderSubmission(id).Phase ==
+                FolderSubmission.SubmissionPhase.Accepted,
+                "the InProgress observation leaves the job accepted and arms its next poll");
+            // No Kick: the armed poll is the only thing that can reach the completion.
+            var completed = Environment.TickCount64 + 30_000;
+            while (store.FolderSubmission(id).Phase != FolderSubmission.SubmissionPhase.Terminal &&
+                   Environment.TickCount64 < completed)
             {
-                auto.Start();
-                await handler.FirstRead.Task.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
-                var armed = Environment.TickCount64 + 30_000;
-                while (!clock.HasArmedTimer && Environment.TickCount64 < armed) await Task.Yield();
-                Check.Require(clock.HasArmedTimer && store.FolderSubmission(id).Phase ==
-                    FolderSubmission.SubmissionPhase.Accepted,
-                    "the InProgress observation leaves the job accepted and arms its next poll");
-                // No Kick: the armed poll is the only thing that can reach the completion.
-                var completed = Environment.TickCount64 + 30_000;
-                while (store.FolderSubmission(id).Phase != FolderSubmission.SubmissionPhase.Terminal &&
-                       Environment.TickCount64 < completed)
-                {
-                    if (clock.HasArmedTimer) clock.Advance(Settings.FolderDeletePollInterval);
-                    await Task.Yield();
-                }
-                var final = store.FolderSubmission(id);
-                Check.Require(handler.GoodReads == 3 && final.Phase == FolderSubmission.SubmissionPhase.Terminal,
-                    $"the scheduled poll observes the job again and completes it (reads={handler.GoodReads}, phase={final.Phase})");
+                if (clock.HasArmedTimer) clock.Advance(Settings.FolderDeletePollInterval);
+                await Task.Yield();
             }
-            finally { await auto.StopAsync().WaitAsync(HookBound); }
+            var final = store.FolderSubmission(id);
+            Check.Require(handler.GoodReads == 3 && final.Phase == FolderSubmission.SubmissionPhase.Terminal,
+                $"the scheduled poll observes the job again and completes it (reads={handler.GoodReads}, phase={final.Phase})");
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "InProgressFolderJobRepollsToTerminalUnknownAsync host disposal"); }
+        finally { await auto.StopAsync(); }
     }
 
     // R6-6: the real host poll survives a refused survivor, then a recovery wake reaches retained work.
@@ -1809,7 +1785,7 @@ public static partial class EngineHostChecks
         var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             "account-id", "root", "home", DropboxProviderConfiguration.ContentAccess,
             DropboxProviderConfiguration.RequiredScopes).Normalize();
-        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding).WaitAsync(HookBound);
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
         var localRoot = Directory.CreateDirectory(Path.Combine(root, "survivor-local")).FullName;
         var pair = Pair("survivor-pair") with
         {
@@ -1848,111 +1824,107 @@ public static partial class EngineHostChecks
         using var http = new HttpClient(wire, disposeHandler: false);
         var clock = new FakeTimeProvider();
         var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
-        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
             instance.StateAuthority, Settings, http, clock, _ => null, _ => store, EngineHost.Mode.Persistent,
             new EngineExternals(new SyntheticCredentials(), _ => new HttpClient(wire, disposeHandler: false),
                 new FakeRecovery()), startupMonitor: monitor);
+        await host.RecomposeCurrentAsync(pair.PairId, default);
+        var owned = await host.DispatchSessionAsync(pair.PairId, () => null, async (session, token) =>
+        {
+            async Task<(string Operation, string Submission)> Begin(string path, bool survivor)
+            {
+                var entry = (await session.Dropbox.ReadOneAsync(path, token))!;
+                var local = entry with { Id = "local-" + path };
+                var saved = SyncedEntries.From(local, entry);
+                var records = new List<SyncedEntry> { saved };
+                if (survivor)
+                {
+                    var gone = (await session.Dropbox.ReadOneAsync(path + "/Gone", token))!;
+                    records.Add(SyncedEntries.From(gone with { Id = "local-gone" }, gone));
+                }
+                store.Commit(pair.PairId, StateChange.Empty with { Record = records });
+                var row = new Row(PathNames.DropboxKey(path), null, entry, saved, [], null,
+                    new RowContext(false, false, false, null, false, false, true, true));
+                using var plan = await new FolderPlanBuilder(session.Context).BuildAsync(row, Side.Dropbox,
+                    new HashSet<string>(StringComparer.Ordinal), live: false, token);
+                var operationId = store.BeginFolderRemoval(pair.PairId, plan, Settings.StoragePageSize, token);
+                var operation = store.FolderRemoval(pair.PairId, operationId);
+                store.AdvanceFolderRemoval(pair.PairId, operationId, operation.Generation, operation.Phase,
+                    operation with { Generation = operation.Generation + 1,
+                        Cursor = await session.Context.CaptureFolderCursorAsync!(token) });
+                var effects = store.ReadyFolderEffects(pair.PairId, operationId, -1, Settings.StoragePageSize).ToArray();
+                var id = store.ArmFolderSubmission(pair.PairId, effects);
+                var armed = store.FolderSubmission(id);
+                var result = (FolderSubmitResult.Accepted)await session.Dropbox.SubmitFolderRemovalAsync(
+                    armed, effects, new RequestAttempt(new object(), AttemptOwner.Recovery), token);
+                store.AdvanceFolderSubmission(armed, armed with { Generation = armed.Generation + 1,
+                    Phase = FolderSubmission.SubmissionPhase.Accepted, JobId = result.JobId }, []);
+                if (survivor)
+                {
+                    var terminal = (FolderJobResult.Terminal)await session.Dropbox.ReadFolderRemovalAsync(
+                        result.JobId, effects.Length, new RequestAttempt(new object(), AttemptOwner.Recovery), token);
+                    var accepted = store.FolderSubmission(id);
+                    store.AdvanceFolderSubmission(accepted, accepted with { Generation = accepted.Generation + 1,
+                        Phase = FolderSubmission.SubmissionPhase.Terminal }, terminal.Results);
+                    var current = store.FolderRemoval(pair.PairId, operationId);
+                    await session.Syncer.RecoverAsync(new RecoveryTarget(operationId, current.Generation, null, null),
+                        RecoveryChoice.Check, token);
+                    Check.Require(store.FolderRemoval(pair.PairId, operationId).Cursor is null,
+                        "R6-6 fixture resume closes the survivor operation's post-window cursor");
+                }
+                return (operationId, id);
+            }
+            var survivor = await Begin("Folder", true);
+            var poll = await Begin("Poll", false);
+            return (Survivor: survivor.Operation, Poll: poll.Submission);
+        }, default);
+        Debt(SourceObligation.NormalRepair);
+        wire.DeleteBatchPendingChecks = 1;
+        // Use the host's own AutoSync, so WakeAfterOperation reaches exactly the scheduler under test.
+        var auto = (Massdex.SyncShark.Engine.Run.AutoSync)typeof(EngineHost)
+            .GetField("_auto", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
+        monitor.Start();
+        bool Pending() => store.PendingFolderFollowUps(pair.PairId, owned.Survivor, -1, Settings.StoragePageSize).Any();
+        async Task Until(Func<bool> condition)
+        {
+            var bound = Environment.TickCount64 + 30_000;
+            while (!condition() && Environment.TickCount64 < bound) await Task.Yield();
+        }
         try
         {
-            await host.RecomposeCurrentAsync(pair.PairId, default).WaitAsync(HookBound);
-            var owned = await host.DispatchSessionAsync(pair.PairId, () => null, async (session, token) =>
+            auto.Start();
+            await Until(() => Volatile.Read(ref store.PollDecisions) >= 1);
+            var pending = Pending();
+            Check.Require(pending, "R6-6 refused survivor remains retained: pending=" + pending);
+            Check.Require(store.LocalRefusals > 1 && store.PollDecisions >= 1,
+                "R6-6 survivor refusal is contained through opportunity completion: refusals=" +
+                store.LocalRefusals + "; pollDecisions=" + store.PollDecisions);
+            var polls = wire.Calls.Count(call => call == "/2/files/delete_batch/check");
+            var bound = Environment.TickCount64 + 30_000;
+            while (Volatile.Read(ref store.PollDecisions) < 2 && Environment.TickCount64 < bound)
             {
-                async Task<(string Operation, string Submission)> Begin(string path, bool survivor)
-                {
-                    var entry = (await session.Dropbox.ReadOneAsync(path, token))!;
-                    var local = entry with { Id = "local-" + path };
-                    var saved = SyncedEntries.From(local, entry);
-                    var records = new List<SyncedEntry> { saved };
-                    if (survivor)
-                    {
-                        var gone = (await session.Dropbox.ReadOneAsync(path + "/Gone", token))!;
-                        records.Add(SyncedEntries.From(gone with { Id = "local-gone" }, gone));
-                    }
-                    store.Commit(pair.PairId, StateChange.Empty with { Record = records });
-                    var row = new Row(PathNames.DropboxKey(path), null, entry, saved, [], null,
-                        new RowContext(false, false, false, null, false, false, true, true));
-                    using var plan = await new FolderPlanBuilder(session.Context).BuildAsync(row, Side.Dropbox,
-                        new HashSet<string>(StringComparer.Ordinal), live: false, token);
-                    var operationId = store.BeginFolderRemoval(pair.PairId, plan, Settings.StoragePageSize, token);
-                    var operation = store.FolderRemoval(pair.PairId, operationId);
-                    store.AdvanceFolderRemoval(pair.PairId, operationId, operation.Generation, operation.Phase,
-                        operation with { Generation = operation.Generation + 1,
-                            Cursor = await session.Context.CaptureFolderCursorAsync!(token) });
-                    var effects = store.ReadyFolderEffects(pair.PairId, operationId, -1, Settings.StoragePageSize).ToArray();
-                    var id = store.ArmFolderSubmission(pair.PairId, effects);
-                    var armed = store.FolderSubmission(id);
-                    var result = (FolderSubmitResult.Accepted)await session.Dropbox.SubmitFolderRemovalAsync(
-                        armed, effects, new RequestAttempt(new object(), AttemptOwner.Recovery), token);
-                    store.AdvanceFolderSubmission(armed, armed with { Generation = armed.Generation + 1,
-                        Phase = FolderSubmission.SubmissionPhase.Accepted, JobId = result.JobId }, []);
-                    if (survivor)
-                    {
-                        var terminal = (FolderJobResult.Terminal)await session.Dropbox.ReadFolderRemovalAsync(
-                            result.JobId, effects.Length, new RequestAttempt(new object(), AttemptOwner.Recovery), token);
-                        var accepted = store.FolderSubmission(id);
-                        store.AdvanceFolderSubmission(accepted, accepted with { Generation = accepted.Generation + 1,
-                            Phase = FolderSubmission.SubmissionPhase.Terminal }, terminal.Results);
-                        var current = store.FolderRemoval(pair.PairId, operationId);
-                        await session.Syncer.RecoverAsync(new RecoveryTarget(operationId, current.Generation, null, null),
-                            RecoveryChoice.Check, token);
-                        Check.Require(store.FolderRemoval(pair.PairId, operationId).Cursor is null,
-                            "R6-6 fixture resume closes the survivor operation's post-window cursor");
-                    }
-                    return (operationId, id);
-                }
-                var survivor = await Begin("Folder", true).WaitAsync(HookBound);
-                var poll = await Begin("Poll", false).WaitAsync(HookBound);
-                return (Survivor: survivor.Operation, Poll: poll.Submission);
-            }, default).WaitAsync(HookBound);
-            Debt(SourceObligation.NormalRepair);
-            wire.DeleteBatchPendingChecks = 1;
-            // Use the host's own AutoSync, so WakeAfterOperation reaches exactly the scheduler under test.
-            var auto = (Massdex.SyncShark.Engine.Run.AutoSync)typeof(EngineHost)
-                .GetField("_auto", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
-            monitor.Start();
-            bool Pending() => store.PendingFolderFollowUps(pair.PairId, owned.Survivor, -1, Settings.StoragePageSize).Any();
-            async Task Until(Func<bool> condition)
-            {
-                var bound = Environment.TickCount64 + 30_000;
-                while (!condition() && Environment.TickCount64 < bound) await Task.Yield();
+                if (clock.HasArmedTimer) clock.Advance(Settings.FolderDeletePollInterval);
+                await Task.Yield();
             }
-            try
-            {
-                auto.Start();
-                await Until(() => Volatile.Read(ref store.PollDecisions) >= 1);
-                var pending = Pending();
-                Check.Require(pending, "R6-6 refused survivor remains retained: pending=" + pending);
-                Check.Require(store.LocalRefusals > 1 && store.PollDecisions >= 1,
-                    "R6-6 survivor refusal is contained through opportunity completion: refusals=" +
-                    store.LocalRefusals + "; pollDecisions=" + store.PollDecisions);
-                var polls = wire.Calls.Count(call => call == "/2/files/delete_batch/check");
-                var bound = Environment.TickCount64 + 30_000;
-                while (Volatile.Read(ref store.PollDecisions) < 2 && Environment.TickCount64 < bound)
-                {
-                    if (clock.HasArmedTimer) clock.Advance(Settings.FolderDeletePollInterval);
-                    await Task.Yield();
-                }
-                var observedPolls = wire.Calls.Count(call => call == "/2/files/delete_batch/check");
-                var phase = store.FolderSubmission(owned.Poll).Phase;
-                Check.Require(observedPolls == polls + 1 && phase == FolderSubmission.SubmissionPhase.Terminal,
-                    "R6-6 sibling folder poll executes without a new source event: before=" + polls +
-                    "; after=" + observedPolls + "; phase=" + phase + "; pollDecisions=" + store.PollDecisions);
-                var reads = store.LocalRefusals;
-                // Repeat only live work; the later recovery wake deliberately reaches both live work and prerequisites.
-                auto.Kick(pair.PairId);
-                await Until(() => Volatile.Read(ref store.PollDecisions) >= 3);
-                Check.Require(store.LocalRefusals > reads && Pending() && !Directory.Exists(Path.Combine(localRoot, "Folder", "Keep")) &&
-                    !inner.HasFolderJobProgress(pair.PairId, default),
-                    "R6-6 repeated refusal without prerequisite completion retains survivor; terminal receipt owns no polling");
-                Debt(null);
-                host.WakeAfterOperation(pair.PairId);
-                await Until(() => Volatile.Read(ref store.PollDecisions) >= 4);
-                Check.Require(!Pending() && Directory.Exists(Path.Combine(localRoot, "Folder", "Keep")),
-                    "R6-6 recovery wake reaches and completes the retained survivor without a new source event");
-            }
-            finally { await auto.StopAsync().WaitAsync(HookBound); }
+            var observedPolls = wire.Calls.Count(call => call == "/2/files/delete_batch/check");
+            var phase = store.FolderSubmission(owned.Poll).Phase;
+            Check.Require(observedPolls == polls + 1 && phase == FolderSubmission.SubmissionPhase.Terminal,
+                "R6-6 sibling folder poll executes without a new source event: before=" + polls +
+                "; after=" + observedPolls + "; phase=" + phase + "; pollDecisions=" + store.PollDecisions);
+            var reads = store.LocalRefusals;
+            // Repeat only live work; the later recovery wake deliberately reaches both live work and prerequisites.
+            auto.Kick(pair.PairId);
+            await Until(() => Volatile.Read(ref store.PollDecisions) >= 3);
+            Check.Require(store.LocalRefusals > reads && Pending() && !Directory.Exists(Path.Combine(localRoot, "Folder", "Keep")) &&
+                !inner.HasFolderJobProgress(pair.PairId, default),
+                "R6-6 repeated refusal without prerequisite completion retains survivor; terminal receipt owns no polling");
+            Debt(null);
+            host.WakeAfterOperation(pair.PairId);
+            await Until(() => Volatile.Read(ref store.PollDecisions) >= 4);
+            Check.Require(!Pending() && Directory.Exists(Path.Combine(localRoot, "Folder", "Keep")),
+                "R6-6 recovery wake reaches and completes the retained survivor without a new source event");
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "RepairHeldSurvivorPollAsync host disposal"); }
+        finally { await auto.StopAsync(); }
     }
 
     // D1 (itemWait): an item wait committed after the first dispatch holds ordinary work, yet the folder-poll
@@ -1966,7 +1938,7 @@ public static partial class EngineHostChecks
         var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             "account-id", "root", "home", DropboxProviderConfiguration.ContentAccess,
             DropboxProviderConfiguration.RequiredScopes).Normalize();
-        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding).WaitAsync(HookBound);
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
         var localRoot = Directory.CreateDirectory(Path.Combine(root, name + "-local")).FullName;
         var pair = Pair("settle-pair") with
         {
@@ -1987,131 +1959,127 @@ public static partial class EngineHostChecks
         RunLog OpenLog(string pairId) => RunLog.Open(Path.Combine(root, "settle-logs"), pairId,
             Guid.NewGuid().ToString("N"), progress.Enqueue, Settings.LogBufferCharacters, clock);
         var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
-        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, progress.Enqueue,
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, progress.Enqueue,
             instance.StateAuthority, Settings, http, clock, OpenLog, _ => store, EngineHost.Mode.Persistent,
             new EngineExternals(new SyntheticCredentials(), _ => new HttpClient(wire, disposeHandler: false),
                 new FakeRecovery()), startupMonitor: monitor);
+        Check.Require(await host.RunPrerequisiteAsync(pair.PairId, default) is { Completed: true } &&
+            store.FirstRepairDone(pair.PairId) && !store.Obligated(pair.PairId),
+            "the receipt fixture starts after a real completed first Repair with current source coverage");
+        wire.SeedFolder("Poll");
+        var accepted = await host.DispatchSessionAsync(pair.PairId, () => null, async (session, token) =>
+        {
+            var entry = (await session.Dropbox.ReadOneAsync("Poll", token))!;
+            var saved = Massdex.SyncShark.Engine.Executor.SyncedEntries.From(entry with { Id = "local-poll" }, entry);
+            store.Commit(pair.PairId, StateChange.Empty with { Record = [saved] });
+            var row = new Row(PathNames.DropboxKey(entry.Path), null, entry, saved, [], null,
+                new RowContext(false, false, false, null, false, false, true, true));
+            using var plan = store.OpenFolderPlan(pair.PairId, row, Side.Dropbox);
+            await plan.CaptureAsync(session.Dropbox.ReadAllAsync(entry.Path,
+                new ListOptions(Recursive: true, IncludeOutOfScope: true), token), token);
+            Check.Require(!plan.Children(token).Any(), "the successful receipt fixture is an empty folder");
+            plan.Complete(true, token);
+            var operationId = store.BeginFolderRemoval(pair.PairId, plan, StateSchema.OneRow, token);
+            var operation = store.FolderRemoval(pair.PairId, operationId);
+            store.AdvanceFolderRemoval(pair.PairId, operationId, operation.Generation, operation.Phase,
+                operation with { Generation = operation.Generation + 1,
+                    Cursor = await session.Context.CaptureFolderCursorAsync!(token) });
+            var effects = store.ReadyFolderEffects(pair.PairId, operationId, -1, StateSchema.OneRow).ToArray();
+            var id = store.ArmFolderSubmission(pair.PairId, effects);
+            var armed = store.FolderSubmission(id);
+            var result = (FolderSubmitResult.Accepted)await session.Dropbox.SubmitFolderRemovalAsync(
+                armed, effects, new RequestAttempt(new object(), AttemptOwner.Recovery), token);
+            store.AdvanceFolderSubmission(armed, armed with { Generation = armed.Generation + 1,
+                Phase = FolderSubmission.SubmissionPhase.Accepted, JobId = result.JobId }, []);
+            return (Submission: id, Operation: operationId, Root: entry);
+        }, default);
+        var execution = store.ReadPairExecution(pair.PairId)!.Value;
+        var remoteSource = store.ReadSource(pair.PairId, Side.Dropbox)!.Value;
+        store.AcquireDropboxPage(pair.PairId, execution.Generation, remoteSource.Epoch, remoteSource.Revision,
+            remoteSource.Provenance!, remoteSource.Cursor,
+            [new ChangeNotice(Side.Dropbox, ChangeKind.Changed, accepted.Root.Path, null, accepted.Root.Id,
+                accepted.Root, false, false),
+             new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, "Poll/Child", null, "remote-child", null, false, true)],
+            store.FolderRemoval(pair.PairId, accepted.Operation).Cursor!);
+        bool WorkPending() => store.PendingAncestors(pair.PairId, execution.Generation, Side.Dropbox,
+            [PathNames.DropboxKey("Poll"), PathNames.DropboxKey("Poll/Child")], 0).Any();
+        Check.Require(WorkPending(), "the terminal receipt fixture starts with pending root and dependent work");
+        monitor.Start();
+        var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, OpenLog, host);
         try
         {
-            Check.Require(await host.RunPrerequisiteAsync(pair.PairId, default).WaitAsync(HookBound) is { Completed: true } &&
-                store.FirstRepairDone(pair.PairId) && !store.Obligated(pair.PairId),
-                "the receipt fixture starts after a real completed first Repair with current source coverage");
-            wire.SeedFolder("Poll");
-            var accepted = await host.DispatchSessionAsync(pair.PairId, () => null, async (session, token) =>
+            auto.Start();
+            if (itemWait)
             {
-                var entry = (await session.Dropbox.ReadOneAsync("Poll", token))!;
-                var saved = Massdex.SyncShark.Engine.Executor.SyncedEntries.From(entry with { Id = "local-poll" }, entry);
-                store.Commit(pair.PairId, StateChange.Empty with { Record = [saved] });
-                var row = new Row(PathNames.DropboxKey(entry.Path), null, entry, saved, [], null,
-                    new RowContext(false, false, false, null, false, false, true, true));
-                using var plan = store.OpenFolderPlan(pair.PairId, row, Side.Dropbox);
-                await plan.CaptureAsync(session.Dropbox.ReadAllAsync(entry.Path,
-                    new ListOptions(Recursive: true, IncludeOutOfScope: true), token), token);
-                Check.Require(!plan.Children(token).Any(), "the successful receipt fixture is an empty folder");
-                plan.Complete(true, token);
-                var operationId = store.BeginFolderRemoval(pair.PairId, plan, StateSchema.OneRow, token);
-                var operation = store.FolderRemoval(pair.PairId, operationId);
-                store.AdvanceFolderRemoval(pair.PairId, operationId, operation.Generation, operation.Phase,
-                    operation with { Generation = operation.Generation + 1,
-                        Cursor = await session.Context.CaptureFolderCursorAsync!(token) });
-                var effects = store.ReadyFolderEffects(pair.PairId, operationId, -1, StateSchema.OneRow).ToArray();
-                var id = store.ArmFolderSubmission(pair.PairId, effects);
-                var armed = store.FolderSubmission(id);
-                var result = (FolderSubmitResult.Accepted)await session.Dropbox.SubmitFolderRemovalAsync(
-                    armed, effects, new RequestAttempt(new object(), AttemptOwner.Recovery), token);
-                store.AdvanceFolderSubmission(armed, armed with { Generation = armed.Generation + 1,
-                    Phase = FolderSubmission.SubmissionPhase.Accepted, JobId = result.JobId }, []);
-                return (Submission: id, Operation: operationId, Root: entry);
-            }, default).WaitAsync(HookBound);
-            var execution = store.ReadPairExecution(pair.PairId)!.Value;
-            var remoteSource = store.ReadSource(pair.PairId, Side.Dropbox)!.Value;
-            store.AcquireDropboxPage(pair.PairId, execution.Generation, remoteSource.Epoch, remoteSource.Revision,
-                remoteSource.Provenance!, remoteSource.Cursor,
-                [new ChangeNotice(Side.Dropbox, ChangeKind.Changed, accepted.Root.Path, null, accepted.Root.Id,
-                    accepted.Root, false, false),
-                 new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, "Poll/Child", null, "remote-child", null, false, true)],
-                store.FolderRemoval(pair.PairId, accepted.Operation).Cursor!);
-            bool WorkPending() => store.PendingAncestors(pair.PairId, execution.Generation, Side.Dropbox,
-                [PathNames.DropboxKey("Poll"), PathNames.DropboxKey("Poll/Child")], 0).Any();
-            Check.Require(WorkPending(), "the terminal receipt fixture starts with pending root and dependent work");
-            monitor.Start();
-            var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, OpenLog, host);
-            try
-            {
-                auto.Start();
-                if (itemWait)
+                await UntilAsync(() => store.PollDecisions > 0);
+                File.WriteAllText(Path.Combine(localRoot, "waiting.txt"), "waiting");
+                await TemporaryTurnAsync(host, pair.PairId, "waiting.txt", null, TimeSpan.FromHours(1),
+                    clock.GetTimestamp());
+                var row = store.ReadItemRetry(pair.PairId);
+                if (ordinaryFirst is { } ordinary)
                 {
-                    await UntilAsync(() => store.PollDecisions > 0);
-                    File.WriteAllText(Path.Combine(localRoot, "waiting.txt"), "waiting");
-                    await TemporaryTurnAsync(host, pair.PairId, "waiting.txt", null, TimeSpan.FromHours(1),
-                        clock.GetTimestamp()).WaitAsync(HookBound);
-                    var row = store.ReadItemRetry(pair.PairId);
-                    if (ordinaryFirst is { } ordinary)
-                    {
-                        // B-141 R3: the poll's receipt wake lands while an ordinary opportunity is active and coalesces
-                        // with an ordinary wake; the held ordinary half must not drop the receipt half.
-                        var quiet = Environment.TickCount64 + 30_000;
-                        while (clock.NextDueIn != Settings.FolderDeletePollInterval && Environment.TickCount64 < quiet)
-                            await Task.Yield();
-                        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                        store.HoldRefusal = release;
-                        auto.Kick(pair.PairId);
-                        await store.RefusalHeld.Task.WaitAsync(TimeSpan.FromSeconds(30));
-                        // Stands in for the armed poll firing now: its one-shot deadline goes and its wake, the receipt kick
-                        // (AutoSync.OpportunityAsync), is delivered while the held opportunity is active. On the old AND
-                        // the ordinary half drops it, and nothing rearms the poll, so the job never reaches Terminal.
-                        host.ScheduleFolderPoll(pair.PairId, false, () => { });
-                        if (ordinary) auto.Kick(pair.PairId);
-                        auto.Kick(pair.PairId, receiptsOnly: true);
-                        if (!ordinary) auto.Kick(pair.PairId);
-                        release.SetResult();
-                    }
-                    var settle = Environment.TickCount64 + 30_000;
-                    while (store.FolderSubmission(accepted.Submission).Phase != FolderSubmission.SubmissionPhase.Terminal &&
-                        Environment.TickCount64 < settle)
-                    {
-                        if (clock.NextDueIn == Settings.FolderDeletePollInterval) clock.Advance(Settings.FolderDeletePollInterval);
+                    // B-141 R3: the poll's receipt wake lands while an ordinary opportunity is active and coalesces
+                    // with an ordinary wake; the held ordinary half must not drop the receipt half.
+                    var quiet = Environment.TickCount64 + 30_000;
+                    while (clock.NextDueIn != Settings.FolderDeletePollInterval && Environment.TickCount64 < quiet)
                         await Task.Yield();
-                    }
-                    string[] observed;
-                    lock (wire.Calls) observed = wire.Calls.ToArray();
-                    Check.Require(row is not null &&
-                        store.FolderSubmission(accepted.Submission).Phase == FolderSubmission.SubmissionPhase.Terminal &&
-                        store.ReadItemRetry(pair.PairId) == row &&
-                        !observed.Any(IsUpload),
-                        "D1 folder-poll receipts are reconciled before the item deadline and the waiting file is not uploaded; " +
-                        "ordinaryFirst=" + ordinaryFirst + " memory=" + memory);
-                    return;
+                    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    store.HoldRefusal = release;
+                    auto.Kick(pair.PairId);
+                    await store.RefusalHeld.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                    // Stands in for the armed poll firing now: its one-shot deadline goes and its wake, the receipt kick
+                    // (AutoSync.OpportunityAsync), is delivered while the held opportunity is active. On the old AND
+                    // the ordinary half drops it, and nothing rearms the poll, so the job never reaches Terminal.
+                    host.ScheduleFolderPoll(pair.PairId, false, () => { });
+                    if (ordinary) auto.Kick(pair.PairId);
+                    auto.Kick(pair.PairId, receiptsOnly: true);
+                    if (!ordinary) auto.Kick(pair.PairId);
+                    release.SetResult();
                 }
-                var bound = Environment.TickCount64 + 30_000;
-                while ((store.FolderRemoval(pair.PairId, accepted.Operation).Active || WorkPending()) &&
-                    Environment.TickCount64 < bound)
+                var settle = Environment.TickCount64 + 30_000;
+                while (store.FolderSubmission(accepted.Submission).Phase != FolderSubmission.SubmissionPhase.Terminal &&
+                    Environment.TickCount64 < settle)
                 {
                     if (clock.NextDueIn == Settings.FolderDeletePollInterval) clock.Advance(Settings.FolderDeletePollInterval);
                     await Task.Yield();
                 }
-                string[] calls;
-                lock (wire.Calls) calls = wire.Calls.ToArray();
-                Check.Require(store.FolderSubmission(accepted.Submission).Phase == FolderSubmission.SubmissionPhase.Terminal &&
-                    store.FolderRemoval(pair.PairId, accepted.Operation).Phase == FolderRemovalPhase.Complete &&
-                    !store.ActiveFolderRemovals(pair.PairId, default).Any() &&
-                    store.FolderRemovalItems(pair.PairId, accepted.Operation, -1, StateSchema.OneRow)
-                        .All(item => item.EffectState == FolderRemovalItem.EffectStatus.Settled),
-                    "InProgress, InProgress, Terminal completes and retires the folder operation with no external wake; " +
-                    $"submission={store.FolderSubmission(accepted.Submission)}; operation={store.FolderRemoval(pair.PairId, accepted.Operation)}; " +
-                    $"selects={store.SelectCalls}; pending={WorkPending()}; nextDue={clock.NextDueIn}; " +
-                    $"passes={store.Passes}; pollDecisions={store.PollDecisions}; calls={string.Join(",", calls)}; " +
-                    $"progress={string.Join(" | ", progress)}; issues=" +
-                    string.Join(" | ", store.Issues(pair.PairId).Select(issue => issue.Path + ":" + issue.Cause)));
-                Check.Require(wire.Calls.Count(call => call == "/2/files/delete_batch/check") == 3 &&
-                    wire.Calls.Count(call => call == "/2/files/delete_batch") == 1,
-                    "the successful terminal fixture has exactly three checks and never resends its one original delete");
-                Check.Require(store.SelectCalls >= 2 && !WorkPending(),
-                    "terminal receipt-only completion wakes ordinary selection and retires root and dependent work without an external event");
+                string[] observed;
+                lock (wire.Calls) observed = wire.Calls.ToArray();
+                Check.Require(row is not null &&
+                    store.FolderSubmission(accepted.Submission).Phase == FolderSubmission.SubmissionPhase.Terminal &&
+                    store.ReadItemRetry(pair.PairId) == row &&
+                    !observed.Any(IsUpload),
+                    "D1 folder-poll receipts are reconciled before the item deadline and the waiting file is not uploaded; " +
+                    "ordinaryFirst=" + ordinaryFirst + " memory=" + memory);
+                return;
             }
-            finally { await auto.StopAsync().WaitAsync(HookBound); }
+            var bound = Environment.TickCount64 + 30_000;
+            while ((store.FolderRemoval(pair.PairId, accepted.Operation).Active || WorkPending()) &&
+                Environment.TickCount64 < bound)
+            {
+                if (clock.NextDueIn == Settings.FolderDeletePollInterval) clock.Advance(Settings.FolderDeletePollInterval);
+                await Task.Yield();
+            }
+            string[] calls;
+            lock (wire.Calls) calls = wire.Calls.ToArray();
+            Check.Require(store.FolderSubmission(accepted.Submission).Phase == FolderSubmission.SubmissionPhase.Terminal &&
+                store.FolderRemoval(pair.PairId, accepted.Operation).Phase == FolderRemovalPhase.Complete &&
+                !store.ActiveFolderRemovals(pair.PairId, default).Any() &&
+                store.FolderRemovalItems(pair.PairId, accepted.Operation, -1, StateSchema.OneRow)
+                    .All(item => item.EffectState == FolderRemovalItem.EffectStatus.Settled),
+                "InProgress, InProgress, Terminal completes and retires the folder operation with no external wake; " +
+                $"submission={store.FolderSubmission(accepted.Submission)}; operation={store.FolderRemoval(pair.PairId, accepted.Operation)}; " +
+                $"selects={store.SelectCalls}; pending={WorkPending()}; nextDue={clock.NextDueIn}; " +
+                $"passes={store.Passes}; pollDecisions={store.PollDecisions}; calls={string.Join(",", calls)}; " +
+                $"progress={string.Join(" | ", progress)}; issues=" +
+                string.Join(" | ", store.Issues(pair.PairId).Select(issue => issue.Path + ":" + issue.Cause)));
+            Check.Require(wire.Calls.Count(call => call == "/2/files/delete_batch/check") == 3 &&
+                wire.Calls.Count(call => call == "/2/files/delete_batch") == 1,
+                "the successful terminal fixture has exactly three checks and never resends its one original delete");
+            Check.Require(store.SelectCalls >= 2 && !WorkPending(),
+                "terminal receipt-only completion wakes ordinary selection and retires root and dependent work without an external event");
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "InProgressFolderJobSettlesWithoutWakeAsync host disposal"); }
+        finally { await auto.StopAsync(); }
     }
 
     private static async Task FolderPollLifecycleAsync(string root, string transition)
@@ -2120,7 +2088,7 @@ public static partial class EngineHostChecks
         var binding = new DropboxConnectionBinding(DropboxProviderConfiguration.RegisteredClientId,
             "synthetic-account", "root", "home", DropboxProviderConfiguration.ContentAccess,
             DropboxProviderConfiguration.RequiredScopes).Normalize();
-        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding).WaitAsync(HookBound);
+        await new DropboxConnectionStore(instance.StateAuthority).SaveNewAsync(binding);
         var database = Path.Combine(instance.StateAuthority.StateRoot, "lifecycle.db");
         var pair = Pair("lifecycle-pair") with { ConnectionId = binding.ConnectionId };
         string submission;
@@ -2134,7 +2102,7 @@ public static partial class EngineHostChecks
                     source.Epoch, source.Revision, source.Provenance, source.Cursor, source.Epoch,
                     source.Revision + 1, source.Provenance, source.Cursor, null);
             }
-            submission = await SeedReceiptAsync(seed, pair, "Poll").WaitAsync(HookBound);
+            submission = await SeedReceiptAsync(seed, pair, "Poll");
         }
         var runs = transition == "restart" ? 2 : 1;
         for (var run = 0; run < runs; run++)
@@ -2145,51 +2113,47 @@ public static partial class EngineHostChecks
             using var http = new HttpClient(handler);
             var clock = new FakeTimeProvider();
             var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
-            var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
+            await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot, _ => { },
                 instance.StateAuthority, Settings, http, clock, _ => null, _ => store, EngineHost.Mode.Persistent,
                 new EngineExternals(new SyntheticCredentials(), _ => new HttpClient(new OwnedHandler())),
                 startupMonitor: monitor);
+            monitor.Start();
+            var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, _ => null, host);
             try
             {
-                monitor.Start();
-                var auto = new Massdex.SyncShark.Engine.Run.AutoSync(store, _ => null, host);
-                try
+                auto.Start();
+                await UntilAsync(() => handler.Reads == 1 && clock.NextDueIn == Settings.FolderDeletePollInterval);
+                Check.Require(inner.FolderSubmission(submission).Phase == FolderSubmission.SubmissionPhase.Accepted,
+                    "durable accepted receipt rebuilds its armed wait, including after restart");
+                if (transition is "pause" or "disable")
                 {
-                    auto.Start();
-                    await UntilAsync(() => handler.Reads == 1 && clock.NextDueIn == Settings.FolderDeletePollInterval);
-                    Check.Require(inner.FolderSubmission(submission).Phase == FolderSubmission.SubmissionPhase.Accepted,
-                        "durable accepted receipt rebuilds its armed wait, including after restart");
-                    if (transition is "pause" or "disable")
+                    if (transition == "pause") await host.PauseAsync(pair.PairId, default);
+                    else await host.ChangeGenerationAsync(pair, (_, state, _, _) =>
                     {
-                        if (transition == "pause") await host.PauseAsync(pair.PairId, default).WaitAsync(HookBound);
-                        else await host.ChangeGenerationAsync(pair, (_, state, _, _) =>
-                        {
-                            state.SavePair(pair with { Enabled = false });
-                            return Task.FromResult(true);
-                        }, default).WaitAsync(HookBound);
-                        await UntilAsync(() => clock.NextDueIn is null || clock.NextDueIn > Settings.FolderDeletePollInterval);
-                        clock.Advance(Settings.FolderDeletePollInterval);
-                        await auto.StopAsync().WaitAsync(HookBound);
-                        Check.Require(handler.Reads == 1, "pause/disable withdraws the pending folder deadline");
-                    }
-                    else if (transition == "stop")
-                    {
-                        clock.Advance(Settings.FolderDeletePollInterval);
-                        await handler.Held.Task.WaitAsync(TimeSpan.FromSeconds(30));
-                        var autoStopping = auto.StopAsync();
-                        var stopping = host.StopAsync(default);
-                        Check.Require(!stopping.IsCompleted && !autoStopping.IsCompleted,
-                            "stop joins a receipt callback that has not returned");
-                        Check.Require(inner.FolderSubmission(submission).Phase == FolderSubmission.SubmissionPhase.Accepted,
-                            "the store remains usable while its callback is draining");
-                        handler.Release.TrySetResult();
-                        await Task.WhenAll(stopping, autoStopping).WaitAsync(HookBound);
-                    }
+                        state.SavePair(pair with { Enabled = false });
+                        return Task.FromResult(true);
+                    }, default);
+                    await UntilAsync(() => clock.NextDueIn is null || clock.NextDueIn > Settings.FolderDeletePollInterval);
+                    clock.Advance(Settings.FolderDeletePollInterval);
+                    await auto.StopAsync();
+                    Check.Require(handler.Reads == 1, "pause/disable withdraws the pending folder deadline");
                 }
-                finally { handler.Release.TrySetResult(); await auto.StopAsync().WaitAsync(HookBound); }
-                Check.Require(handler.Deletes == 0, "lifecycle recovery never resends a delete");
+                else if (transition == "stop")
+                {
+                    clock.Advance(Settings.FolderDeletePollInterval);
+                    await handler.Held.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                    var autoStopping = auto.StopAsync();
+                    var stopping = host.StopAsync(default);
+                    Check.Require(!stopping.IsCompleted && !autoStopping.IsCompleted,
+                        "stop joins a receipt callback that has not returned");
+                    Check.Require(inner.FolderSubmission(submission).Phase == FolderSubmission.SubmissionPhase.Accepted,
+                        "the store remains usable while its callback is draining");
+                    handler.Release.TrySetResult();
+                    await Task.WhenAll(stopping, autoStopping);
+                }
             }
-            finally { await TeardownAsync(host.DisposeAsync().AsTask(), "FolderPollLifecycleAsync host disposal"); }
+            finally { handler.Release.TrySetResult(); await auto.StopAsync(); }
+            Check.Require(handler.Deletes == 0, "lifecycle recovery never resends a delete");
         }
     }
 
@@ -2380,7 +2344,7 @@ public static partial class EngineHostChecks
             if (Reads == HoldRead)
             {
                 Held.TrySetResult();
-                await Release.Task.WaitAsync(HookBound);
+                await Release.Task;
             }
             var body = await request.Content!.ReadAsStringAsync(ct);
             if (body.Contains("Bad", StringComparison.Ordinal)) { BadReads++; throw new InvalidOperationException(); }
@@ -2513,40 +2477,36 @@ public static partial class EngineHostChecks
         var clock = new FakeTimeProvider();
         var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
         var published = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var host = EngineHost.Compose(instance.StateAuthority.ProductRoot,
+        await using var host = EngineHost.Compose(instance.StateAuthority.ProductRoot,
             message => published.TrySetResult(message), instance.StateAuthority, Settings, Http, clock,
             _ => null, _ => store, EngineHost.Mode.Persistent, startupMonitor: monitor);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var running = host.DispatchAsync("quiet-pair", async (registration, pair, generation, token) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(token).ConfigureAwait(false);
+            return true;
+        }, CancellationToken.None);
         try
         {
-            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var running = host.DispatchAsync("quiet-pair", async (registration, pair, generation, token) =>
+            await entered.Task.ConfigureAwait(false);
+            monitor.Start(quietOnly: true);
+            using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            while (!clock.HasArmedTimer)
             {
-                entered.TrySetResult();
-                await release.Task.WaitAsync(token).ConfigureAwait(false);
-                return true;
-            }, CancellationToken.None);
-            try
-            {
-                await entered.Task.WaitAsync(HookBound).ConfigureAwait(false);
-                monitor.Start(quietOnly: true);
-                using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                while (!clock.HasArmedTimer)
-                {
-                    bound.Token.ThrowIfCancellationRequested();
-                    await Task.Yield();
-                }
-                clock.Advance(clock.NextDueIn!.Value);
-                Check.Require(await published.Task.WaitAsync(bound.Token).ConfigureAwait(false) ==
-                    Text.Get(TextKey.StatusStillQuiet), "a quiet working host publishes the name-free sentence");
+                bound.Token.ThrowIfCancellationRequested();
+                await Task.Yield();
             }
-            finally
-            {
-                release.TrySetResult();
-                await running.WaitAsync(HookBound).ConfigureAwait(false);
-            }
+            clock.Advance(clock.NextDueIn!.Value);
+            Check.Require(await published.Task.WaitAsync(bound.Token).ConfigureAwait(false) ==
+                Text.Get(TextKey.StatusStillQuiet), "a quiet working host publishes the name-free sentence");
         }
-        finally { await TeardownAsync(host.DisposeAsync().AsTask(), "QuietWorkingStatusHasNoEmptyNameAsync host disposal"); }
+        finally
+        {
+            release.TrySetResult();
+            await running.ConfigureAwait(false);
+        }
     }
 
     private static EngineHost Compose(PilotStateAuthority authority, IStateStore store) =>

@@ -14,17 +14,26 @@ namespace Massdex.SyncShark.Engine.Tests.Run;
 public static partial class EngineHostChecks
 {
     private static readonly TimeSpan HookBound = TimeSpan.FromSeconds(30);
+    internal static (string Name, TimeSpan Elapsed) SlowestStep { get; private set; }
 
-    // A teardown, stop or join that times out leaves a live host behind, so the process can no longer be
-    // trusted: name the site and end it instead of running later checks. Never force-disposes a live resource.
-    private static async Task TeardownAsync(Task task, string site)
+    internal static async Task StepAsync(string name, Func<Task> body)
     {
-        try { await task.WaitAsync(HookBound).ConfigureAwait(false); }
-        catch (TimeoutException)
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var pending = Task.Run(body);
+        try
         {
-            Console.Error.WriteLine("FAIL " + site + ": timed out after " + HookBound.TotalSeconds + " s");
+            await pending.WaitAsync(HookBound).ConfigureAwait(false);
+        }
+        catch (TimeoutException) when (!pending.IsCompleted)
+        {
+            Console.Error.WriteLine($"FAIL engine-host step {name}: no completion after 30 s; process exits");
             Console.Error.Flush();
             Environment.Exit(CheckArguments.Failure);
+        }
+        finally
+        {
+            var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            if (elapsed > SlowestStep.Elapsed) SlowestStep = (name, elapsed);
         }
     }
 
@@ -432,7 +441,7 @@ public static partial class EngineHostChecks
     {
         await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "item-repair-failed"), turn: false)
             .ConfigureAwait(false);
-        await rig.SyncedAsync().WaitAsync(HookBound).ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
         var wait = TimeSpan.FromSeconds(20);
         var receipt = rig.Clock.GetUtcNow();
         var started = rig.Clock.GetTimestamp();
@@ -468,7 +477,7 @@ public static partial class EngineHostChecks
     {
         await using var rig = await ItemRig.StartedAsync(Path.Combine(root, providerWait ? "item-paused-repair-wait" :
             "item-paused-repair"), turn: false).ConfigureAwait(false);
-        await rig.SyncedAsync().WaitAsync(HookBound).ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
         var wait = TimeSpan.FromSeconds(20);
         var started = rig.Clock.GetTimestamp();
         var account = (rig.Rig.Pair.Roots!.Dropbox.AccountId, (string?)null, (string?)null);
@@ -479,7 +488,7 @@ public static partial class EngineHostChecks
             {
                 await repair.Finishing.WaitAsync(HookBound).ConfigureAwait(false);
                 await rig.TurnAsync(providerWait ? wait : null, providerWait ? started : null, prerequisite: true)
-                    .WaitAsync(HookBound).ConfigureAwait(false);
+                    .ConfigureAwait(false);
                 // The 429 that carried R installed the account floor at its receipt.
                 if (providerWait) FailureRetryOwner.InstallProviderConstraint(account, started, wait, rig.Clock);
                 repair.Proceed();
@@ -487,7 +496,7 @@ public static partial class EngineHostChecks
                 var pausing = rig.Host.PauseAsync(rig.PairId, default);
                 await UntilAsync(() => rig.Host.IsPaused(rig.PairId)).ConfigureAwait(false);
                 repair.Proceed();
-                await pausing.WaitAsync(HookBound).ConfigureAwait(false);
+                await pausing.ConfigureAwait(false);
             }
             Check.Require(rig.Store.ReadPrerequisiteRetry(rig.PairId) is null && rig.Attempts == 0,
                 "C5 a paused completion writes no item row");
@@ -495,7 +504,7 @@ public static partial class EngineHostChecks
             await UntilAsync(() => !rig.Host.ItemRetryHolds(rig.PairId, generation, out _),
                 "C5 a paused completion leaves no item wait holding the pair").ConfigureAwait(false);
             var calls = rig.Calls;
-            await rig.Host.ResumeAsync(rig.PairId, default).WaitAsync(HookBound).ConfigureAwait(false);
+            await rig.Host.ResumeAsync(rig.PairId, default).ConfigureAwait(false);
             if (providerWait)
             {
                 await UntilAsync(() => rig.Clock.NextDueIn == wait).ConfigureAwait(false);
@@ -577,7 +586,7 @@ public static partial class EngineHostChecks
     {
         await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "item-repair-cancelled"), turn: false)
             .ConfigureAwait(false);
-        await rig.SyncedAsync().WaitAsync(HookBound).ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
         var commits = new UploadCommits(rig, ItemRig.File);
         var mark = commits[ItemRig.File];
         using var stop = new CancellationTokenSource();
@@ -610,10 +619,10 @@ public static partial class EngineHostChecks
         try
         {
             await finishing.Task.WaitAsync(HookBound).ConfigureAwait(false);
-            await rig.TurnAsync(prerequisite: true).WaitAsync(HookBound).ConfigureAwait(false);
+            await rig.TurnAsync(prerequisite: true).ConfigureAwait(false);
         }
         finally { turned.TrySetResult(); }
-        try { await repairing.WaitAsync(HookBound).ConfigureAwait(false); }
+        try { await repairing.ConfigureAwait(false); }
         catch (Exception error) when (error is OperationCanceledException or PrerequisiteStoppedException) { }
         Check.Require(delivered && drained,
             "setup: N-162 the rewrite is committed as work and its dispatch has ended before the cancel");
@@ -875,7 +884,7 @@ public static partial class EngineHostChecks
             .ConfigureAwait(false);
         const string Second = "second.txt";
         System.IO.File.WriteAllText(Path.Combine(rig.Rig.Pair.LocalRoot, Second), "second");
-        await rig.SyncedAsync().WaitAsync(HookBound).ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
         var now = rig.Clock.GetUtcNow();
         var watermark = rig.Store.ReadWorkWatermark();
         var (first, second) = await rig.Host.DispatchSessionAsync(rig.PairId, () => null, async (session, token) =>
@@ -939,9 +948,8 @@ public static partial class EngineHostChecks
                 go.TrySetResult();
                 release.TrySetResult();
             }
-            return (await firstTask.WaitAsync(HookBound).ConfigureAwait(false),
-                await secondTask.WaitAsync(HookBound).ConfigureAwait(false));
-        }, default).WaitAsync(HookBound).ConfigureAwait(false);
+            return (await firstTask.ConfigureAwait(false), await secondTask.ConfigureAwait(false));
+        }, default).ConfigureAwait(false);
         var row = rig.Store.ReadPrerequisiteRetry(rig.PairId);
         Check.Require(row == new FailureRetryOwner.State(1, now + rig.FirstWait) &&
                 first == (true, row!.Value.RetryAfter) && second == (true, row.Value.RetryAfter),
@@ -1145,13 +1153,13 @@ public static partial class EngineHostChecks
         internal static async Task<ItemRig> StartedAsync(string folder, TimeSpan? providerWait = null, bool turn = true,
             bool memory = false)
         {
-            var rig = await OpenAsync(folder, NewClock(), memory: memory).WaitAsync(HookBound).ConfigureAwait(false);
+            var rig = await OpenAsync(folder, NewClock(), memory: memory).ConfigureAwait(false);
             try
             {
-                await rig.BaselineAsync().WaitAsync(HookBound).ConfigureAwait(false);
+                await rig.BaselineAsync().ConfigureAwait(false);
                 if (turn) await rig.TurnAsync(providerWait, providerWait is null ? null : rig.Clock.GetTimestamp())
-                    .WaitAsync(HookBound).ConfigureAwait(false);
-                await rig.StartAsync().WaitAsync(HookBound).ConfigureAwait(false);
+                    .ConfigureAwait(false);
+                await rig.StartAsync().ConfigureAwait(false);
                 // The startup opportunity dispatches beside the row's recorded file (IR-1), or with no row once; either
                 // way it has ended and been counted before a check marks anything.
                 if (turn) await UntilAsync(() => rig.Opportunities > 0 && rig.AutoSyncIdle()).ConfigureAwait(false);
@@ -1162,7 +1170,7 @@ public static partial class EngineHostChecks
             }
             catch
             {
-                await TeardownAsync(rig.DisposeAsync().AsTask(), "ItemRig.StartedAsync setup-failure disposal");
+                await rig.DisposeAsync().ConfigureAwait(false);
                 throw;
             }
         }
@@ -1391,8 +1399,7 @@ public static partial class EngineHostChecks
             FinishFailed = null;
             BeforeCommit = null;
             BeforeCapture = null;
-            // Bounded so a stuck host join names this teardown instead of hanging the group (B-236).
-            try { if (Rig is not null) await Rig.DisposeAsync().AsTask().WaitAsync(HookBound).ConfigureAwait(false); }
+            try { if (Rig is not null) await Rig.DisposeAsync().ConfigureAwait(false); }
             finally
             {
                 Check.Require(Volatile.Read(ref _barrierFailure) is null,
@@ -1875,11 +1882,11 @@ public static partial class EngineHostChecks
         const string other = "other.txt";
         var refused = shape is "own" or "older";
         // No ordinary attempt holds the file at the earlier turn or the Repair; the Repair's input is written below.
-        await rig.SyncedAsync().WaitAsync(HookBound).ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
         FailureRetryOwner.State? earlier = null;
         if (shape is "older" or "settled")
         {
-            await rig.TurnAsync().WaitAsync(HookBound).ConfigureAwait(false);
+            await rig.TurnAsync().ConfigureAwait(false);
             earlier = rig.Store.ReadItemRetry(rig.PairId);
         }
         Check.Require(!rig.Store.Obligated(rig.PairId) && rig.Store.ReadItemRetry(rig.PairId) == earlier &&
@@ -1947,12 +1954,11 @@ public static partial class EngineHostChecks
             {
                 await finishing.Task.WaitAsync(HookBound).ConfigureAwait(false);
                 System.IO.File.WriteAllText(Path.Combine(rig.Rig.Pair.LocalRoot, other), "concurrent " + what);
-                await TemporaryTurnAsync(rig.Host, rig.PairId, other, null, null, null).WaitAsync(HookBound)
-                    .ConfigureAwait(false);
+                await TemporaryTurnAsync(rig.Host, rig.PairId, other, null, null, null).ConfigureAwait(false);
                 concurrent = rig.Store.ReadItemRetry(rig.PairId);
                 proceed.TrySetResult();
             }
-            summary = await repair.WaitAsync(HookBound).ConfigureAwait(false);
+            summary = await repair.ConfigureAwait(false);
             (row, now, attempts) = (rig.Store.ReadItemRetry(rig.PairId), rig.Clock.GetUtcNow(), rig.Attempts);
         }
         finally
@@ -1964,7 +1970,7 @@ public static partial class EngineHostChecks
             rig.Rig.Wire.NameWriteErrors.Remove(ItemRig.File);
             read.TrySetResult();
             release.TrySetResult();
-            await holder.WaitAsync(HookBound).ConfigureAwait(false);
+            await holder.ConfigureAwait(false);
         }
         string log;
         using (var stream = new FileStream(summary.LogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))

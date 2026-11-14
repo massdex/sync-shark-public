@@ -62,7 +62,7 @@ public static partial class EngineHostChecks
                 host.ReportInventoryFailure(registration, path, local with { Path = path },
                     TextKey.FailLocalInUse, false, null);
                 return Task.FromResult(true);
-            }, CancellationToken.None).WaitAsync(HookBound);
+            }, CancellationToken.None);
         }
         await ReportAsync(Original);
         var first = store.Issues(PairId).Single();
