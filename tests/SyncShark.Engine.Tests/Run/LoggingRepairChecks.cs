@@ -50,6 +50,7 @@ internal static class LoggingRepairChecks
                 await SourceFailureAttemptsAsync(Path.Combine(folder.FullName, "source-failed-resume-" + afterCommit), afterCommit,
                     SourceFault.Resumed, true);
             }
+            await MemberCatchUpKeepsFailureAsync(Path.Combine(folder.FullName, "source-member-inverse"));
             await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "superseded"), afterCommit: false, sourceFailed: false);
             await SupersededAccountingFailureAsync(Path.Combine(folder.FullName, "superseded-accounting"));
             await ScheduledSupersessionRecoveryAsync(Path.Combine(folder.FullName, "scheduled-superseded"));
@@ -1041,6 +1042,37 @@ internal static class LoggingRepairChecks
             "operation wake alone resumes the source without another Repair or clock advance");
     }
 
+    // One Local journal source, not one root: a sibling Local root on the same volume and a Dropbox root that
+    // pair-a's scope holds out as nested (the ScenarioFixture.AddSecondPair topology; the wire has one tree).
+    private static async Task AddNestedMemberAsync(RepairChecks.ComposedRig rig, IStateStore raw, string folder, string id)
+    {
+        var local = Path.Combine(folder, id + "-local");
+        Directory.CreateDirectory(local);
+        rig.Wire.SeedFolder(id);
+        var dropboxRoot = rig.Pair.DropboxRoot + "/" + id;
+        var other = rig.Pair with
+        {
+            PairId = id, Drive = null, LocalRoot = local, DropboxRoot = dropboxRoot,
+            Roots = rig.Pair.Roots! with
+            {
+                LocalRoot = local, DropboxRoot = dropboxRoot, Local = WindowsDirectoryListing.ReadIdentity(local)
+            }
+        };
+        raw.SavePair(other);
+        await rig.Host.RecomposeCurrentAsync(id, default);
+        var identity = await rig.Host.DispatchAsync(id, (registration, pair, generation, _) =>
+            rig.Host.BorrowGeneration(registration, pair.PairId, generation).Dropbox.ReadRootIdentityAsync(default),
+            default);
+        raw.SavePair(other with { Roots = other.Roots! with { Dropbox = identity } });
+        // Both generations recompose against the saved pairs, so pair-a's scope now holds pair-b's root out.
+        foreach (var member in new[] { rig.Pair.PairId, id })
+        {
+            await rig.Host.DrainGenerationAsync(member, default);
+            await rig.Host.RecomposeCurrentAsync(member, default);
+        }
+        await rig.Host.EnsureSourceBasesAsync(id, default);
+    }
+
     private static async Task SourceRecoversAtDeadlineAsync(string folder, SourceFault kind, bool failedResume, int memberCount)
     {
         var clock = new FakeTimeProvider();
@@ -1062,9 +1094,21 @@ internal static class LoggingRepairChecks
         var pinning = false;
         var finished = new Dictionary<string, int>(StringComparer.Ordinal);
         var atFinish = new Dictionary<string, (bool RowNull, int Waits, int Failures)>(StringComparer.Ordinal);
+        // H2-m's order (B-229): pair-b's attempt is held after registration, at its own log, before its own catch-up.
+        string? holdAttempt = null;
+        var attemptHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAttempt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock, monitor: monitor,
             mode: EngineHost.Mode.Persistent, openLog: id =>
             {
+                var hold = false;
+                lock (gate)
+                    if (holdAttempt == id) (hold, holdAttempt) = (true, null);
+                if (hold)
+                {
+                    attemptHeld.TrySetResult();
+                    releaseAttempt.Task.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+                }
                 var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
                 logs.Enqueue((id, log.Path));
                 return log;
@@ -1114,36 +1158,7 @@ internal static class LoggingRepairChecks
                 };
             });
         members = memberCount == 1 ? [rig.Pair.PairId] : [rig.Pair.PairId, "pair-b"];
-        if (memberCount == 2)
-        {
-            // One Local journal source, not one root: a sibling Local root on the same volume and a Dropbox root that
-            // pair-a's scope holds out as nested (the ScenarioFixture.AddSecondPair topology; the wire has one tree).
-            var local = Path.Combine(folder, members[1] + "-local");
-            Directory.CreateDirectory(local);
-            rig.Wire.SeedFolder(members[1]);
-            var dropboxRoot = rig.Pair.DropboxRoot + "/" + members[1];
-            var other = rig.Pair with
-            {
-                PairId = members[1], Drive = null, LocalRoot = local, DropboxRoot = dropboxRoot,
-                Roots = rig.Pair.Roots! with
-                {
-                    LocalRoot = local, DropboxRoot = dropboxRoot, Local = WindowsDirectoryListing.ReadIdentity(local)
-                }
-            };
-            raw.SavePair(other);
-            await rig.Host.RecomposeCurrentAsync(members[1], default);
-            var identity = await rig.Host.DispatchAsync(members[1], (registration, pair, generation, _) =>
-                rig.Host.BorrowGeneration(registration, pair.PairId, generation).Dropbox.ReadRootIdentityAsync(default),
-                default);
-            raw.SavePair(other with { Roots = other.Roots! with { Dropbox = identity } });
-            // Both generations recompose against the saved pairs, so pair-a's scope now holds pair-b's root out.
-            foreach (var id in members)
-            {
-                await rig.Host.DrainGenerationAsync(id, default);
-                await rig.Host.RecomposeCurrentAsync(id, default);
-            }
-            await rig.Host.EnsureSourceBasesAsync(members[1], default);
-        }
+        if (memberCount == 2) await AddNestedMemberAsync(rig, raw, folder, members[1]);
         foreach (var id in members)
         {
             using var log = rig.Log(folder, "initial-" + id);
@@ -1218,6 +1233,14 @@ internal static class LoggingRepairChecks
                 pinning = true;
             }
         }
+        // H2-m's order: pair-b's attempt is pending before pair-a's deadline attempt runs the failed resume.
+        Task<RepairSummary?>? heldAttempt = null;
+        if (failedResume && members.Length > 1)
+        {
+            lock (gate) holdAttempt = members[1];
+            heldAttempt = Task.Run(() => rig.Host.RunPrerequisiteAsync(members[1], default));
+            await attemptHeld.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
         var firstWait = TimeSpan.FromSeconds(rig.Host.Settings.Backoff.InitialBackoffSeconds);
         await UntilAsync(() => clock.NextDueIn == firstWait);
         clock.Advance(firstWait);
@@ -1247,6 +1270,17 @@ internal static class LoggingRepairChecks
             // means no restart wake or attempt is still on its way for it.
             bool Owed(string id) => raw.Obligated(id) && raw.ReadPrerequisiteRetry(id)?.Attempts == 2 && Waits(id) == 2;
             bool Restarted(string id) => members.Length > 1 && !raw.Obligated(id) && finishes.Finishes(id) == 2;
+            if (heldAttempt is not null)
+            {
+                // pair-a's own catch-up failed while pair-b's attempt was pending: pair-a is accounted twice, and the
+                // failure reached pair-b's attempt (one more Failed line), not its row (still one attempt and one wait).
+                await UntilAsync(() => raw.ReadPrerequisiteRetry(members[0])?.Attempts == 2 && Waits(members[0]) == 2,
+                    AccountedEvidence);
+                Check.Require(raw.ReadPrerequisiteRetry(members[1])?.Attempts == 1 && Waits(members[1]) == 1 &&
+                    Failures(members[1]) == 2, "pair-b's attempt was pending when pair-a's catch-up failed; " + AccountedEvidence());
+                releaseAttempt.TrySetResult();
+                await heldAttempt.WaitAsync(TimeSpan.FromSeconds(30));
+            }
             await UntilAsync(() => members.All(id => (Owed(id) || Restarted(id)) && MonitorIdle(monitor, id)), AccountedEvidence);
             var owed = members.Where(Owed).ToArray();
             if (owed.Length != 0)
@@ -1483,6 +1517,56 @@ internal static class LoggingRepairChecks
                 fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry)) == (failedResume ? 2 : 1),
             "each failed source attempt has one wait and no generic retry notice");
         Check.Require(await rig.Host.RunPrerequisiteAsync(pairId, default) is null, "a recovered pair owes no extra attempt");
+    }
+
+    // B-229 two-member inverse: a source failure after member A's own catch-up stays A's failure, even though member B's
+    // own attempt then catches the shared source up and a non-attempt catch-up of A succeeds, both before A completes.
+    private static async Task MemberCatchUpKeepsFailureAsync(string folder)
+    {
+        var clock = new QuietClock();
+        var logs = new ConcurrentQueue<(string PairId, string Path)>();
+        IStateStore raw = null!;
+        SourceFinishStore observed = null!;
+        await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock,
+            decorate: store =>
+            {
+                raw = store;
+                return new HookStore(observed = new SourceFinishStore(store, false));
+            }, openLog: id =>
+            {
+                var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
+                logs.Enqueue((id, log.Path));
+                return log;
+            });
+        string[] members = [rig.Pair.PairId, "pair-b"];
+        await AddNestedMemberAsync(rig, raw, folder, members[1]);
+        using (var log = rig.Log(folder, "initial-" + members[1]))
+            Check.Require((await rig.RunAsync(log, default, targetPair: members[1])).Completed && !raw.Obligated(members[1]),
+                "member B starts with its initial Repair complete");
+        int Waits(string id) => logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
+            .Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Wait) &&
+                fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry));
+        var generation = raw.ReadPairExecution(members[0])!.Value.Generation;
+        observed.AtFinish = () =>
+        {
+            observed.AtFinish = null;
+            var armed = observed.ArmPageFault(SourceFault.Resumed);
+            File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "finish-trigger.txt"), "trigger");
+            Exception? caught = null;
+            try { rig.Host.CatchUpLocalAsync(members[0], generation, default).WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult(); }
+            catch (Exception error) { caught = error; }
+            Check.Require(ReferenceEquals(caught, armed), "the source failure arrives after member A's own catch-up");
+            var other = rig.Host.RunPrerequisiteAsync(members[1], default).WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+            Check.Require(other is null && raw.ReadPrerequisiteRetry(members[1]) is null && Waits(members[1]) == 1,
+                "member B's own attempt catches the shared source up before member A completes");
+            rig.Host.CatchUpLocalAsync(members[0], generation, default).WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+        };
+        var first = await rig.Host.RunPrerequisiteAsync(members[0], default);
+        var row = raw.ReadPrerequisiteRetry(members[0]);
+        Check.Require(first is { Completed: true } && row is { Attempts: 1 } && Waits(members[0]) == 1,
+            "member A still records its source-retry wait and keeps its row; " +
+            $"completed={first?.Completed}, rowAttempts={row?.Attempts.ToString() ?? "none"}, waits={Waits(members[0])}, " +
+            $"otherRow={raw.ReadPrerequisiteRetry(members[1])?.Attempts.ToString() ?? "none"}, otherWaits={Waits(members[1])}");
     }
 
     private static void RequireRecoveryCounts(IReadOnlyDictionary<string, int> counts, bool failedResume)
