@@ -615,9 +615,9 @@ internal sealed partial class ChangeTable
                 (StateSchema.ParamWork, work.WorkId)).Any()) return;
         var issueId = Read(null, StateSchema.WorkIssue, static reader => Number(reader, StateSchema.WorkIssueId),
             (StateSchema.ParamWork, work.WorkId)).FirstOrDefault();
+        responsibility = (null, issueId);
         if (issueId is null)
         {
-            responsibility = (null, null);
             return;
         }
         if (IssueTable.ById(_connection, pairId, issueId.Value) is not { } issue ||
