@@ -146,8 +146,7 @@ public sealed partial class StateStore : IStateStore
     {
         if (issue.Kind != IssueKind.Failure || !IssuePolicy.IsLocalAccessRetryCause(issue.Cause) ||
             IssueTable.ReadItemRetryState(_connection, transaction, pairId, pair, [issue.Id])[issue.Id] is not { } episode ||
-            _isRegisteredItemAttempt?.Invoke(Guid.Empty, pairId, episode.Token.PairGeneration, episode.Token.Subject,
-                episode.Token) == true || ResponsibilityRetained(transaction, pair, issue, episode) ||
+            ResponsibilityRetained(transaction, pair, issue, episode) ||
             IssueTable.ClearItemEpisode(_connection, transaction, pair, episode.Token) == 0) return false;
         SettleEpisodeWork(transaction, pair, episode);
         return true;
