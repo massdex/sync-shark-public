@@ -16,6 +16,7 @@ public sealed class FolderDeleteRunner
     private readonly ActionExecutor _actions;
     private readonly IRecoveryExecutionBoundary _recovery;
     private readonly LocalFolderEffects _local;
+    private ISet<string>? _rememberedAbsent;
     private readonly HeldMemberSettlement _held;
 
     /// <summary>Uses the shared action owner and recovery admission boundary without invoking either during construction.</summary>
@@ -59,6 +60,7 @@ public sealed class FolderDeleteRunner
     {
         var absent = new HashSet<string>(StringComparer.Ordinal);
         foreach (var batch in Batches(pages)) await RunGroupAsync(batch, ct, absent);
+        _rememberedAbsent = absent;
         return absent;
     }
 
@@ -131,6 +133,7 @@ public sealed class FolderDeleteRunner
     public async Task ResumeAsync(FolderRemovalState operation, WorkSelection? selection, CancellationToken ct,
         ISet<string>? absent = null)
     {
+        absent ??= _rememberedAbsent;
         var operationId = operation.OperationId;
         var more = operation.Active;
         while (more)
