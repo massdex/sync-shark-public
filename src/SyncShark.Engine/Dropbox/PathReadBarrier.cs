@@ -54,6 +54,10 @@ internal sealed class PathReadBarrier(Func<string, CancellationToken, Task<Entry
         {
             return (true, null);
         }
+        catch (Exception) when (answer)
+        {
+            return (false, null);
+        }
     }
 
     private async Task ProduceAsync(string path, Read current, CancellationToken ct)
