@@ -244,7 +244,7 @@ public sealed class FolderDeleteRunner
         // Settlement reports the effect lines the completed log keeps: deepest first, then the frozen key, the
         // same order the submission uses (engine.md 6.x), so the log records the deletion order.
         var settleable = Members(operation.OperationId, ct)
-            .Where(item => !item.IsTerminal && (item.EffectState == FolderRemovalItem.EffectStatus.Verified ||
+            .Where(item => !item.IsTerminal && (item.EffectState is FolderRemovalItem.EffectStatus.Verified or FolderRemovalItem.EffectStatus.NoEffect ||
                 item is { EffectKind: FolderEffectKind.StateOnly, EffectState: FolderRemovalItem.EffectStatus.Ready }))
             .OrderByDescending(item => PathNames.Depth(item.Path))
             .ThenBy(item => PathNames.Key(item.Path), StringComparer.Ordinal)
@@ -257,9 +257,9 @@ public sealed class FolderDeleteRunner
                 progress.SettleRefused();
                 continue;
             }
-            if (item.EffectState == FolderRemovalItem.EffectStatus.Verified)
+            if (item.EffectState is FolderRemovalItem.EffectStatus.Verified or FolderRemovalItem.EffectStatus.NoEffect)
             {
-                if (IsRecovering(item)) continue;
+                if (IsRecovering(item) && item is not { EffectState: FolderRemovalItem.EffectStatus.NoEffect, Phase: FolderRemovalItem.RecoveryPhase.DeleteArmed }) continue;
                 // A verified Dropbox effect without its cursor has no post-window evidence, so it cannot settle.
                 if (operation.DeletingSide == Side.Dropbox && operation.Cursor is null) progress.SettleRefused();
                 else verified.Add(item);
