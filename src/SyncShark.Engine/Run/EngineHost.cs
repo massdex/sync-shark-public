@@ -842,7 +842,8 @@ internal sealed class EngineHost : IAsyncDisposable
                 _settings.JournalPageBufferBytes);
             volume.Source.WorkCommitted = id => Wake(id);
             volume.Source.ReportItemFailureAsync = ReportJournalItemFailureAsync;
-            _volumes.Add(key, volume);
+            // LocalSourceStopped reads the map under _gate from AutoSync and Monitor threads.
+            lock (_gate) _volumes.Add(key, volume);
         }
         var source = Store.ReadSource(pair.PairId, Side.Local) ?? throw Stale();
         lock (volume.Gate)
@@ -981,17 +982,21 @@ internal sealed class EngineHost : IAsyncDisposable
         if (pair.Generation != generation || pair.Pair.Roots is null) throw Stale();
         var key = pair.Pair.Roots.LocalVolumeKey();
         if (!_volumes.TryGetValue(key, out var volume)) throw Stale();
-        return await WithVolumeStoppedAsync(volume, async token =>
+        if (prerequisite)
         {
-            var caughtUp = await volume.Source.CatchUpForPairAsync(pairId, generation, token, log).ConfigureAwait(false);
-            // The attempt's own catch-up discharges a source failure that reached it earlier; the stopped reader and
-            // held serial keep any later failure after this point, where JournalFailed sets the flag again.
-            if (prerequisite)
+            return await WithVolumeStoppedAsync(volume, async token =>
+            {
+                var caughtUp = await volume.Source.CatchUpForPairAsync(pairId, generation, token, log).ConfigureAwait(false);
+                // The attempt's own catch-up discharges a source failure that reached it earlier; the stopped reader and
+                // held serial keep any later failure after this point, where JournalFailed sets the flag again.
                 lock (volume.Gate)
                 lock (_gate)
                     if (_prerequisites.TryGetValue(pairId, out var pending)) pending.SourceFailed = false;
-            return caughtUp;
-        }, ct, log).ConfigureAwait(false);
+                return caughtUp;
+            }, ct, log).ConfigureAwait(false);
+        }
+        return await WithVolumeStoppedAsync(volume,
+            token => volume.Source.CatchUpForPairAsync(pairId, generation, token, log), ct, log).ConfigureAwait(false);
     }
 
     /// <summary>The one stop/run/restart sequence for a volume: holds its serial, stops and joins acquisition,
@@ -1074,7 +1079,8 @@ internal sealed class EngineHost : IAsyncDisposable
     private bool LocalSourceStopped(PairConfig pair) => pair.Roots is { } roots &&
         _volumes.TryGetValue(roots.LocalVolumeKey(), out var volume) && !volume.Source.Available;
 
-    // Compose durable classification with source availability and the member's retained recovery purpose.
+    // Compose durable classification with source availability and the member's retained recovery purpose. The
+    // generation is read here, under _gate, because the purpose is dropped under _gate when a generation is replaced.
     private FailureRetryOwner.State? ItemRetry(string pairId)
     {
         lock (_gate)

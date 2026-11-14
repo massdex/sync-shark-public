@@ -41,8 +41,10 @@ internal static class LoggingRepairChecks
                 await SourceRecoversAtDeadlineAsync(Path.Combine(folder.FullName, "deadline-failed-resume-" + members),
                     SourceFault.Resumed, true, members);
             }
-            await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "source-before"), afterCommit: false);
-            await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "source-after"), afterCommit: true);
+            await SourceFailureAttemptsAsync(Path.Combine(folder.FullName, "source-before"), afterCommit: false,
+                SourceFault.Resumed, failedResume: false);
+            await SourceFailureAttemptsAsync(Path.Combine(folder.FullName, "source-after"), afterCommit: true,
+                SourceFault.Resumed, failedResume: false);
             foreach (var afterCommit in new[] { false, true })
             {
                 foreach (var kind in new[] { SourceFault.JournalChanged, SourceFault.BelowRetention, SourceFault.AheadOfEnd })
@@ -51,7 +53,7 @@ internal static class LoggingRepairChecks
                     SourceFault.Resumed, true);
             }
             await MemberCatchUpKeepsFailureAsync(Path.Combine(folder.FullName, "source-member-inverse"));
-            await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "superseded"), afterCommit: false, sourceFailed: false);
+            await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "superseded"), afterCommit: false);
             await SupersededAccountingFailureAsync(Path.Combine(folder.FullName, "superseded-accounting"));
             await ScheduledSupersessionRecoveryAsync(Path.Combine(folder.FullName, "scheduled-superseded"));
             await IdleRetryHeartbeatAsync(Path.Combine(folder.FullName, "idle-retry"));
@@ -763,7 +765,8 @@ internal static class LoggingRepairChecks
         Check.Require(reported?.InnerExceptions is [var single] && ReferenceEquals(single, failure),
             "host disposal reports the preserved source-loss accounting failure once");
 
-        // Restart on the same store past P2's deadline; nothing but the host's startup wake reaches either member.
+        // Restart on the same store past P2's deadline; only the host's startup wake reaches P2, then the check drives
+        // P1's catch-up itself.
         clock.Advance(firstWait);
         RestartFinishStore? restarted = null;
         var restartedMonitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
@@ -816,13 +819,8 @@ internal static class LoggingRepairChecks
             [volumes.Values.Cast<object>().Single(), new IOException("synthetic source loss")]);
     }
 
-    private static async Task SourceAttemptRetryAsync(string folder, bool afterCommit, bool sourceFailed = true)
+    private static async Task SourceAttemptRetryAsync(string folder, bool afterCommit)
     {
-        if (sourceFailed)
-        {
-            await SourceFailureAttemptsAsync(folder, afterCommit, SourceFault.Resumed, failedResume: false);
-            return;
-        }
         var clock = new QuietClock();
         var paths = new List<string>();
         SourceFinishStore? observed = null;
@@ -833,12 +831,8 @@ internal static class LoggingRepairChecks
                 paths.Add(log.Path);
                 return log;
             });
-        observed!.AtFinish = () =>
-        {
-            if (sourceFailed) FailJournal(rig.Host);
-            else rig.Store.RequireRepairAfterLoss(rig.Pair.PairId,
-                rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation);
-        };
+        observed!.AtFinish = () => rig.Store.RequireRepairAfterLoss(rig.Pair.PairId,
+            rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation);
         for (var attempt = 1; attempt <= 2; attempt++)
         {
             var summary = await rig.Host.RunPrerequisiteAsync(rig.Pair.PairId, default);
@@ -850,9 +844,8 @@ internal static class LoggingRepairChecks
             Check.Require(!rig.Store.Issues(rig.Pair.PairId).Any(issue => issue.Cause == TextKey.RequiredRepairRetry),
                 "repeated source loss never creates the generic prerequisite retry notice");
         }
-        var reason = sourceFailed ? TextKey.WaitSourceRetry : TextKey.WaitSupersededRetry;
         Check.Require(paths.SelectMany(Lines).Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Wait) &&
-            fields[RunLog.FieldWhat] == reason.ToString()) == 2,
+            fields[RunLog.FieldWhat] == TextKey.WaitSupersededRetry.ToString()) == 2,
             "each source-attributed attempt emits its selected Wait even after the attempt log completed");
         observed.AtFinish = null;
         Check.Require((await rig.Host.RunPrerequisiteAsync(rig.Pair.PairId, default)) is { Completed: true } &&
@@ -1090,11 +1083,11 @@ internal static class LoggingRepairChecks
         var snapshot = new TaskCompletionSource<Dictionary<string, int>>(TaskCreationOptions.RunContinuationsAsynchronously);
         var members = Array.Empty<string>();
         var normalDebt = new ConcurrentDictionary<string, bool>();
-        // H2's pinned finish (B-229): each member's first recovery FinishRepair, with its row and log counts.
+        // Recovery finish record (B-229): each member's first recovery FinishRepair, with its row and log counts.
         var pinning = false;
         var finished = new Dictionary<string, int>(StringComparer.Ordinal);
         var atFinish = new Dictionary<string, (bool RowNull, int Waits, int Failures)>(StringComparer.Ordinal);
-        // H2-m's order (B-229): pair-b's attempt is held after registration, at its own log, before its own catch-up.
+        // Two-member order (B-229): pair-b's attempt is held after registration, at its own log, before its own catch-up.
         string? holdAttempt = null;
         var attemptHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseAttempt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1188,7 +1181,7 @@ internal static class LoggingRepairChecks
         while (logs.TryDequeue(out _)) { }
         lock (gate) armed = kind == SourceFault.Resumed && !failedResume;
         observed.ArmPageFault(kind);
-        File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "trigger.txt"), "pending");
+        foreach (var id in members) File.WriteAllText(Path.Combine(raw.Pair(id)!.LocalRoot, "trigger.txt"), "pending");
         if (kind == SourceFault.Resumed && !failedResume)
         {
             var measured = await snapshot.Task.WaitAsync(TimeSpan.FromSeconds(30));
@@ -1233,9 +1226,9 @@ internal static class LoggingRepairChecks
                 pinning = true;
             }
         }
-        // H2-m's order: pair-b's attempt is pending before pair-a's deadline attempt runs the failed resume.
+        // Two members on one source: pair-b's attempt is pending before pair-a's deadline attempt resumes the source.
         Task<RepairSummary?>? heldAttempt = null;
-        if (failedResume && members.Length > 1)
+        if (kind == SourceFault.Resumed && members.Length > 1)
         {
             lock (gate) holdAttempt = members[1];
             heldAttempt = Task.Run(() => rig.Host.RunPrerequisiteAsync(members[1], default));
@@ -1244,6 +1237,18 @@ internal static class LoggingRepairChecks
         var firstWait = TimeSpan.FromSeconds(rig.Host.Settings.Backoff.InitialBackoffSeconds);
         await UntilAsync(() => clock.NextDueIn == firstWait);
         clock.Advance(firstWait);
+        if (heldAttempt is not null && !failedResume)
+        {
+            // pair-a's own catch-up resumed the source and published pair-b's notice; pair-b's AutoSync handled it while
+            // pair-b's attempt was still pending with its source-recovery row, which item completion must not retire.
+            await UntilAsync(() => raw.ReadPrerequisiteRetry(members[0]) is null &&
+                raw.SyncedByKey(members[1], Side.Local, PathNames.Key("trigger.txt")) is not null &&
+                EngineHostChecks.AutoSyncIdle(rig.Host, members[1]));
+            Check.Require(raw.ReadPrerequisiteRetry(members[1]) is { Attempts: 1 } && observed.ItemCompletions(members[1]) == 0,
+                "pair-b's AutoSync ran on the resumed source while its attempt was pending and kept its retry row");
+            releaseAttempt.TrySetResult();
+            await heldAttempt.WaitAsync(TimeSpan.FromSeconds(30));
+        }
         if (failedResume)
         {
             // Diagnostic only: each member's accounting, its Repair finishes, debt, pending attempt and Monitor state.
@@ -1265,7 +1270,7 @@ internal static class LoggingRepairChecks
                         $"monitorIdle={MonitorIdle(monitor, id)}";
                 }));
             }
-            // Amended H2-m (B-229): after the failed resume each member is obligated and accounted twice,
+            // After the failed resume (B-229), each member is obligated and accounted twice,
             // or, with another member on the source, already repaired by the restart a member's catch-up ran. Monitor idle
             // means no restart wake or attempt is still on its way for it.
             bool Owed(string id) => raw.Obligated(id) && raw.ReadPrerequisiteRetry(id)?.Attempts == 2 && Waits(id) == 2;
@@ -1289,7 +1294,7 @@ internal static class LoggingRepairChecks
                 await UntilAsync(() => clock.NextDueIn == next);
                 clock.Advance(next);
             }
-            // Pinned (x) (B-229): a member's whole-pair Repair ends with its row null, and once its
+            // Clean completion (B-229): a member's whole-pair Repair ends with its row null, and once its
             // attempt has completed (Monitor idle) that completion has added no retry wait and no failure.
             await UntilAsync(() =>
             {
