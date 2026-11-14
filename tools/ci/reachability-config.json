@@ -1,0 +1,199 @@
+{
+  "TextKeepExclusions": {
+    "Tooling inventories and this analyzer describe code rather than consume it": [
+      "tools/ci/spec-baseline-files.jsonl",
+      "tools/ci/spec-baseline.jsonl",
+      "tools/ci/spec-verdicts.json",
+      "tools/ci/structure-debt.md",
+      "tools/ci/Reachability/Analysis.cs",
+      "tools/ci/Reachability/Config.cs",
+      "tools/ci/Reachability/TypeNode.cs",
+      "tools/ci/Reachability/ReflectionChecks.cs",
+      "tools/ci/Reachability/KeepRules.cs",
+      "tools/ci/Reachability/Program.cs",
+      "tools/ci/Reachability/Report.cs",
+      "tools/ci/Reachability/WpfHelper.cs",
+      "tools/ci/reachability-config.json",
+      "VERSION-MAP.md",
+      ".gitattributes",
+      "CHANGELOG.md",
+      "tools/ci/Reachability/packages.lock.json",
+      "tools/ci/run-reachability.ps1"
+    ]
+  },
+  "Cuts": [
+    {
+      "Route": "legacy-supervisor",
+      "Path": "apps/SyncShark/ProcessEntry.cs",
+      "First": 53,
+      "Last": 54,
+      "Hash": "9e118343c2ce",
+      "Gui": false
+    },
+    {
+      "Route": "legacy-supervisor",
+      "Path": "apps/SyncShark/ProcessEntry.cs",
+      "First": 110,
+      "Last": 111,
+      "Hash": "fb10cbb11584",
+      "Gui": false
+    },
+    {
+      "Route": "background-host",
+      "Path": "apps/SyncShark/ProcessEntry.cs",
+      "First": 55,
+      "Last": 56,
+      "Hash": "69a163c74b1e",
+      "Gui": false
+    },
+    {
+      "Route": "background-host",
+      "Path": "apps/SyncShark/ProcessEntry.cs",
+      "First": 80,
+      "Last": 81,
+      "Hash": "a732ac873f54",
+      "Gui": false
+    },
+    {
+      "Route": "cli-autosync-pipe",
+      "Path": "apps/SyncShark/CliEntry.cs",
+      "First": 112,
+      "Last": 113,
+      "Hash": "0a7d1c19ff58",
+      "Gui": false
+    },
+    {
+      "Route": "cli-core-v2",
+      "Path": "apps/SyncShark/CliEntry.cs",
+      "First": 116,
+      "Last": 117,
+      "Hash": "7ed62fb1638d",
+      "Gui": false
+    },
+    {
+      "Route": "cli-core-v1",
+      "Path": "apps/SyncShark/CliEntry.cs",
+      "First": 119,
+      "Last": 134,
+      "Hash": "2f50e2ec5694",
+      "Gui": false
+    },
+    {
+      "Route": "gui",
+      "Path": "apps/SyncShark/ProcessEntry.cs",
+      "First": 62,
+      "Last": 62,
+      "Hash": "eb997cde4fc4",
+      "Gui": true
+    },
+    {
+      "Route": "gui",
+      "Path": "apps/SyncShark/ProcessEntry.cs",
+      "First": 171,
+      "Last": 177,
+      "Hash": "9c56c03b15c5",
+      "Gui": true
+    },
+    {
+      "Route": "gui-core-v1",
+      "Path": "apps/SyncShark/MainWindow.xaml.cs",
+      "First": 288,
+      "Last": 288,
+      "Hash": "811a258dc57f",
+      "Gui": false
+    }
+  ],
+  "InteropFiles": {
+    "src/SyncShark.Core/DropboxCredentialStore.cs": "9a3e743a0295",
+    "src/SyncShark.Core/GoogleDriveCredentialStore.cs": "7b8ae6c4a999",
+    "src/SyncShark.Core/LocalPipePeer.cs": "9dc796a55934",
+    "src/SyncShark.Core/NtfsIdentityPaths.cs": "a068c3760c64",
+    "src/SyncShark.Core/NtfsUsnChanges.cs": "9a1c280349b4",
+    "src/SyncShark.Core/NtfsUsnJournal.cs": "c17943cc51f4",
+    "src/SyncShark.Core/NtfsUsnJournal.File.cs": "e420d8f60e66",
+    "src/SyncShark.Core/PilotSafety.cs": "e4f0997fb4a7",
+    "src/SyncShark.Core/StorageInventoryWindows.cs": "f7bfdc5a90e2",
+    "src/SyncShark.Core/SyncCliBridgeTransport.cs": "723cc25f960d",
+    "src/SyncShark.Core/SyncDiscoveryBatch.cs": "777f433a1097",
+    "src/SyncShark.Core/SyncDiscoveryClient.cs": "6412b1162cc1",
+    "src/SyncShark.Core/SyncLocalFileAuthority.cs": "f7a904d7cd39",
+    "src/SyncShark.Core/SyncSharkRuntimePaths.cs": "6326829b113b",
+    "src/SyncShark.Core/SyncStorageInventory.cs": "8060b0e064de",
+    "src/SyncShark.Core/SyncTransferResourceController.cs": "ae10bf0bc380",
+    "src/SyncShark.Core/WindowsCloudFiles.cs": "1f84ba3c9f1d",
+    "src/SyncShark.Core/WindowsDirectoryListing.cs": "ce5901a9510e",
+    "src/SyncShark.Core/WindowsPlaceholderCompatibility.cs": "369ed67d2610",
+    "src/SyncShark.Core/V2/Adapters/AutoSyncProcess.cs": "4bf19dad3886",
+    "src/SyncShark.Core/V2/Local/LinkContentCopy.cs": "145dc6c41846",
+    "src/SyncShark.Core/V2/Local/LocalFileAbsence.cs": "9dda5ef703dc",
+    "src/SyncShark.Core/V2/Local/LocalGapIo.cs": "fb6e67437585",
+    "src/SyncShark.Core/V2/Local/LocalJournalNames.cs": "5ed157f894d0",
+    "src/SyncShark.Core/V2/Local/OnlineOnlyHydration.cs": "4b3d2e1c161d",
+    "src/SyncShark.Engine/Local/LocalBin.cs": "5ea53dc7d4b9",
+    "src/SyncShark.Engine/Local/VolumeSpace.cs": "cd8b314510c5",
+    "apps/SyncShark/CliEntry.cs": "ecdf86cd1ddc",
+    "apps/SyncShark/ExistingWindowActivation.cs": "f0cf54dec847",
+    "apps/SyncShark/ExplorerIntegration.cs": "c4f425f4912c",
+    "apps/SyncShark/MainWindow.xaml.cs": "943c3fcd5ed3",
+    "apps/SyncShark/SystemWakeSource.cs": "ce1c29a3a4ca",
+    "apps/SyncShark/TrayFlyoutWindow.cs": "1a5df1b6ad25",
+    "apps/SyncShark/WorkspaceVisuals.cs": "35a2f1e42c36",
+    "tools/SyncShark.DiscoverySetupNative.cs": "a1e25f8cdb39",
+    "tools/SyncShark.IdentityPackage.cs": "bd435b4056e3",
+    "tools/SyncShark.JournalNative.cs": "3eefcc835bc4",
+    "tools/SyncShark.JournalSetup.cs": "0618d906e1ec",
+    "tools/SyncShark.UpdaterDiscovery.cs": "cc69fd67dcb3",
+    "tools/SyncShark.UpdaterSession.cs": "cd99954542be",
+    "tools/SyncShark.UpdaterSetup.cs": "b6e2d06efc26",
+    "tools/SyncShark.UpdaterSignature.cs": "6991ce825768",
+    "tools/SyncShark.UpdaterWindows.cs": "13d4bc06457a"
+  },
+  "Sentinels": [
+    {
+      "Type": "Massdex.SyncShark.Engine.Local.LocalBin.DeleteSink",
+      "Profile": "LIVE"
+    },
+    {
+      "Type": "Massdex.SyncShark.EngineHostEntry",
+      "Profile": "LIVE"
+    },
+    {
+      "Type": "Massdex.SyncShark.Engine.Edge.EngineCliRuntime",
+      "Profile": "LIVE"
+    },
+    {
+      "Type": "Massdex.SyncShark.Engine.RecoveryView",
+      "Profile": "LIVE"
+    },
+    {
+      "Type": "Massdex.SyncShark.Engine.Storage.StateEncoding",
+      "Profile": "LIVE"
+    },
+    {
+      "Type": "Massdex.SyncShark.MainWindow",
+      "Profile": "GUI"
+    },
+    {
+      "Type": "Massdex.SyncShark.ProviderMark",
+      "Profile": "GUI"
+    },
+    {
+      "Type": "Massdex.SyncShark.SyncLocalFileAuthority",
+      "Profile": "LIVE"
+    },
+    {
+      "Type": "Massdex.SyncShark.Engine.Local.LocalErrors",
+      "Profile": "LIVE"
+    }
+  ],
+  "EdgeChecks": [
+    {
+      "Route": "gui",
+      "Target": "Massdex.SyncShark.App"
+    },
+    {
+      "Route": "cli-core-v2",
+      "Target": "Massdex.SyncShark.V2.V2CliRuntime"
+    }
+  ]
+}
