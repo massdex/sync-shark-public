@@ -5,7 +5,7 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// back. Only running reads are registered.</summary>
 internal sealed class PathReadBarrier(Func<string, CancellationToken, Task<Entry?>> read)
 {
-    private readonly Dictionary<string, Read> _running = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Read> _running = new(StringComparer.OrdinalIgnoreCase);
     private long _started;
 
     // One registered read: its start order, its outcome, and whether it ended because its producer was stopped.
