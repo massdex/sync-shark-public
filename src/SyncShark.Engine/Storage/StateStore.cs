@@ -1217,10 +1217,10 @@ public sealed partial class StateStore : IStateStore
         if (expected.Count == 0) return;
         using var transaction = _connection.BeginTransaction();
         var ended = new System.Runtime.CompilerServices.StrongBox<bool>();
-        var endEpisode = AbsentEpisodeEnd(transaction, RequirePairRow(transaction, pairId), pairId, ended);
         var closed = false;
         foreach (var issue in expected)
-            closed |= IssueTable.CloseExact(_connection, transaction, pairId, issue, endEpisode: endEpisode);
+            closed |= IssueTable.CloseExact(_connection, transaction, pairId, issue,
+                endEpisode: AbsentEpisodeEnd(transaction, RequirePairRow(transaction, pairId), pairId, ended, issue));
         if (closed) CommitClosure(transaction, pairId, ended.Value);
     });
 
