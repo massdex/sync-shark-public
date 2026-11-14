@@ -200,7 +200,7 @@ public sealed class Syncer
             // Alone refusals are not competition; any refused remainder lane of a serial-started pass is.
             var competed = (serial || lanes > 1) && Volatile.Read(ref refused) > refusedAlone;
             repeat = competed || retired;
-            serialOnly = !retired && (serialOnly || serial && competed);
+            serialOnly = false;
             serial = competed && Volatile.Read(ref progress0) == 0;
         } while (repeat);
     }
