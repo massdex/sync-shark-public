@@ -31,7 +31,7 @@ internal sealed class HeldMemberSettlement(ExecutorContext context)
 
     // Paths cannot prove absence for an escaped member; its subject must identify the frozen binding instead.
     private static bool Bound(Issue issue, SyncedEntry? saved) =>
-        saved is { LocalId.Length: > 0, DropboxId.Length: > 0 } && issue.Subject.Items.Count != 0 &&
+        saved is { LocalId.Length: > 0 } && issue.Subject.Items.Count != 0 &&
         !IssuePolicy.UnknownMove(issue.Kind, issue.Subject) &&
         issue.Subject.Items.All(item => item.Id == saved!.IdOn(item.Side));
 
