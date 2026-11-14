@@ -527,7 +527,7 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
             var liveEpisode = episodes.Contains(issue.Id);
             var protectedByOwner = liveEpisode || protection(issue.Id);
             if (IssuePolicy.Obsolete(issue, Scanned, localUntrusted, remoteUntrusted, appliedExclusions,
-                pendingExclusions, _context.Scope, protectedByOwner, liveEpisode))
+                pendingExclusions, _context.Scope, protectedByOwner, liveEpisode: false))
             {
                 store.CloseScanIssue(pair.PairId, _context.ScanId, issue);
                 continue;
