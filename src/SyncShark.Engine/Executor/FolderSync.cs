@@ -527,7 +527,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         {
             failed |= !outcome.Succeeded();
             if (outcome.None == NoneReason.Unfinished) temporary?.Invoke();
-        }, retainUnfinished, absent: absent);
+        }, retainUnfinished);
         return !failed && SettlementReady(result);
     }
 }
