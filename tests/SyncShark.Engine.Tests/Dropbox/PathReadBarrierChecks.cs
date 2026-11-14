@@ -82,6 +82,11 @@ internal static class PathReadBarrierChecks
                 "A joined terminal failure stays unchanged; only a live follower of a stopped producer retries: " +
                 failure.GetType().Name + "/" + stopped + "/" + callerCancelled);
         }
+        var older = new PathReadBarrier.Read(1);
+        older.Done.SetException(new ItemFailedException("a/x", TextKey.ReadDropboxFailed, null));
+        var held = await PathReadBarrier.AwaitReadAsync(older, answer: false, ct: foreign.Token);
+        Check.Require(held is { Again: true, Value: null },
+            "An older failure returns a cancelled held-back caller to its own cancellation check.");
     }
 
     private static async Task OverlapAsync(string outcome)

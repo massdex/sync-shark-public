@@ -50,7 +50,7 @@ internal sealed class PathReadBarrier(Func<string, CancellationToken, Task<Entry
             return (!answer, value);
         }
         // Every answer outcome belongs to this caller, including terminal cancellation, unless its producer stopped.
-        catch (Exception) when (!ct.IsCancellationRequested && (!answer || current.ProducerCancelled))
+        catch (Exception) when (!answer || !ct.IsCancellationRequested && current.ProducerCancelled)
         {
             return (true, null);
         }

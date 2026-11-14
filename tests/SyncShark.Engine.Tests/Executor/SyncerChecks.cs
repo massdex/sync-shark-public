@@ -2842,6 +2842,12 @@ public static class SyncerChecks
                 store.SyncedByKey(context.Pair.PairId, Side.Dropbox, PathNames.DropboxKey("x")) is null,
                 "Both failed create attempts preserve source, occupant identity/version/bytes and absent bindings.");
         }
+        // These are direct attempts without retry capture, so the second does not replace the first issue.
+        var open = store.Issues(context.Pair.PairId).Where(issue => issue.Path == "x" && !issue.Dismissed).ToArray();
+        Check.Require(open.Length == 2 &&
+            open.Count(issue => issue.Kind == IssueKind.Failure && issue.Cause == TextKey.FailDropboxNoPermission) == 1 &&
+            open.Count(issue => issue.Kind == IssueKind.NameClash && issue.Cause == TextKey.ClashNameTaken) == 1,
+            "Two direct attempts leave exactly one permission failure and one occupied-name clash for the item.");
     }
 
     private static async Task KeptReadFailureAsync()

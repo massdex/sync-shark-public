@@ -507,7 +507,7 @@ internal sealed class Scenario : IDisposable
         };
     }
 
-    /// <summary>Runs the change between a row's freshness read and its effect, after the target side's binding read.</summary>
+    /// <summary>Runs the change after this side's binding read; the Local lookup follows both provider reads.</summary>
     public void AfterFreshRead(Side side, string path, Action change, int occurrence = 1)
     {
         var key = side == Side.Local ? PathNames.Key(path) : PathNames.DropboxKey(path);
