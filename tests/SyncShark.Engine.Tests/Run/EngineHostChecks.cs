@@ -34,7 +34,7 @@ public static partial class EngineHostChecks
         {
             using var productRoot = OverrideProductRoot(root);
             RunAsync(root).GetAwaiter().GetResult();
-            Console.WriteLine(FormattableString.Invariant($"engine-host slowest step {SlowestStep.Name} {SlowestStep.Elapsed.TotalSeconds:F3}"));
+            PrintSlowestStep();
         }
         finally
         {
@@ -566,7 +566,7 @@ public static partial class EngineHostChecks
             using var productRoot = OverrideProductRoot(root);
             StepAsync(name, () => ReviewedRetryDuringRecompositionAsync(root, prerequisite, hasRetry, secondWait, clearDebt))
                 .GetAwaiter().GetResult();
-            Console.WriteLine(FormattableString.Invariant($"engine-host slowest step {SlowestStep.Name} {SlowestStep.Elapsed.TotalSeconds:F3}"));
+            PrintSlowestStep();
         }
         finally { Directory.Delete(root, recursive: true); }
     }

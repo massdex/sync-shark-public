@@ -42,8 +42,7 @@ public static class EngineHostReadChecks
             using var productRoot = OverrideProductRoot(root);
             Massdex.SyncShark.Engine.Tests.Run.EngineHostChecks.StepAsync(nameof(EngineHostReadChecks), () => RunAsync(root))
                 .GetAwaiter().GetResult();
-            var slowest = Massdex.SyncShark.Engine.Tests.Run.EngineHostChecks.SlowestStep;
-            Console.WriteLine(FormattableString.Invariant($"engine-host slowest step {slowest.Name} {slowest.Elapsed.TotalSeconds:F3}"));
+            Massdex.SyncShark.Engine.Tests.Run.EngineHostChecks.PrintSlowestStep();
         }
         finally
         {

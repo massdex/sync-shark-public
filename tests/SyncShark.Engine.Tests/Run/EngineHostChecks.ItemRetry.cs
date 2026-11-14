@@ -16,6 +16,8 @@ public static partial class EngineHostChecks
     private static readonly TimeSpan HookBound = TimeSpan.FromSeconds(30);
     internal static (string Name, TimeSpan Elapsed) SlowestStep { get; private set; }
 
+    internal static void PrintSlowestStep() => Console.WriteLine(FormattableString.Invariant($"engine-host slowest step {SlowestStep.Name} {SlowestStep.Elapsed.TotalSeconds:F3}"));
+
     internal static async Task StepAsync(string name, Func<Task> body)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -26,7 +28,7 @@ public static partial class EngineHostChecks
         }
         catch (TimeoutException) when (!pending.IsCompleted)
         {
-            Console.Error.WriteLine($"FAIL engine-host step {name}: no completion after 30 s; process exits");
+            Console.Error.WriteLine($"FAIL engine-host step {name}: no completion after {HookBound.TotalSeconds} s; process exits");
             Console.Error.Flush();
             Environment.Exit(CheckArguments.Failure);
         }
