@@ -732,7 +732,6 @@ public sealed class FolderDeleteRunner
         if (!await MatchesAsync(side, root.Path, root, ct) ||
             !await MatchesAsync(other, opposite, operation.SourceEvidence, ct))
         {
-            absent?.Remove(operation.OperationId);
             return eligible;
         }
         // Valid only for this opportunity's first continuation, never a later recovery or deferred settlement.
