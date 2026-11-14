@@ -22,7 +22,7 @@ internal sealed class HeldMemberSettlement(ExecutorContext context)
                 var proven = new List<Issue>();
                 foreach (var (issue, saved) in page)
                     if (Bound(issue, saved) &&
-                        await AbsentAsync(() => local.ReadByIdDocumentedAsync(saved!.LocalId, ct)) &&
+                        await AbsentAsync(() => local.ReadByIdAsync(saved!.LocalId, ct)) &&
                         await AbsentAsync(() => dropbox.ReadByIdAsync(saved!.DropboxId, ct))) proven.Add(issue);
                 if (proven.Count != 0) context.Store.CloseIdentityAbsent(context.Pair.PairId, proven);
             }
