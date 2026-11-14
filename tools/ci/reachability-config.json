@@ -57,24 +57,24 @@
     {
       "Route": "cli-autosync-pipe",
       "Path": "apps/SyncShark/CliEntry.cs",
-      "First": 110,
-      "Last": 111,
+      "First": 112,
+      "Last": 113,
       "Hash": "0a7d1c19ff58",
       "Gui": false
     },
     {
       "Route": "cli-core-v2",
       "Path": "apps/SyncShark/CliEntry.cs",
-      "First": 114,
-      "Last": 115,
+      "First": 116,
+      "Last": 117,
       "Hash": "7ed62fb1638d",
       "Gui": false
     },
     {
       "Route": "cli-core-v1",
       "Path": "apps/SyncShark/CliEntry.cs",
-      "First": 117,
-      "Last": 132,
+      "First": 119,
+      "Last": 134,
       "Hash": "2f50e2ec5694",
       "Gui": false
     },
