@@ -590,7 +590,10 @@ public sealed class RunLog : IDisposable, IProgress<RunEvent>
                 return item.Cause + CountJoiner + FailureReason(item.InnerException);
             if (current is LiveAdmissionStaleException stale)
                 return stale.Detail is null ? stale.Reason.ToString() : stale.Reason + CountJoiner + stale.Detail;
-            if (current is JournalSourceException journal) return JournalFailure(journal);
+            if (current is JournalSourceException journal)
+                return journal.NativeError is { } code ? Text.Get(TextKey.FailureNativeCode,
+                    (TextArg.Name, journal.Status.ToString()), (TextArg.Count, code.ToString(CultureInfo.InvariantCulture)))
+                    : journal.Status.ToString();
             if (current is Win32Exception native)
                 return Text.Get(TextKey.FailureNativeCode, (TextArg.Name, native.GetType().Name),
                     (TextArg.Count, native.NativeErrorCode.ToString(CultureInfo.InvariantCulture)));
@@ -599,14 +602,6 @@ public sealed class RunLog : IDisposable, IProgress<RunEvent>
         return Text.Get(TextKey.FailureCode, (TextArg.Name, root.GetType().Name),
             (TextArg.Count, root.HResult.ToString(CultureInfo.InvariantCulture)));
     }
-
-    // A journal page failure's safe evidence: its classified status and, when the page read established one, the
-    // native code. FailureReason never emits an exception message.
-    private static string JournalFailure(JournalSourceException journal) =>
-        journal.NativeError is { } code
-            ? Text.Get(TextKey.FailureNativeCode, (TextArg.Name, journal.Status.ToString()),
-                (TextArg.Count, code.ToString(CultureInfo.InvariantCulture)))
-            : journal.Status.ToString();
 
     private static string SafeProviderTag(string value)
     {
