@@ -160,7 +160,7 @@ public sealed partial class StateStore : IStateStore
         if (scanned is null)
             for (var index = 0; index < issue.Subject.Items.Count; index++)
                 if (!PathNames.Same(issue.Subject.Items[index].Path, issue.Path)) return false;
-        if (!EndAbsentEpisode(transaction, pair, pairId, scanned ?? issue)) return false;
+        if (!EndAbsentEpisode(transaction, pair, pairId, issue)) return false;
         ended.Value = true;
         return true;
     };
