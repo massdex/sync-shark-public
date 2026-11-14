@@ -9,6 +9,7 @@ internal sealed class HeldMemberSettlement(ExecutorContext context)
     {
         if (context.Local is not IIdentitySide local || context.Dropbox is not IIdentitySide dropbox) return;
         var (low, high) = PathNames.DescendantBounds(PathNames.Key(root.Path));
+        low = PathNames.Key(root.Path);
         foreach (var kind in IssueClosure.AfterEffect)
         {
             var after = (Key: low, IssueId: (long)StateSchema.BeforeFirstOrdinal);
