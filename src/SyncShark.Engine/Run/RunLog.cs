@@ -590,11 +590,6 @@ public sealed class RunLog : IDisposable, IProgress<RunEvent>
                 return item.Cause + CountJoiner + FailureReason(item.InnerException);
             if (current is LiveAdmissionStaleException stale)
                 return stale.Detail is null ? stale.Reason.ToString() : stale.Reason + CountJoiner + stale.Detail;
-            if (current is JournalSourceException journal)
-                return journal.NativeError is { } code
-                    ? Text.Get(TextKey.FailureNativeCode, (TextArg.Name, journal.Status.ToString()),
-                        (TextArg.Count, code.ToString(CultureInfo.InvariantCulture)))
-                    : journal.Status.ToString();
             if (current is Win32Exception native)
                 return Text.Get(TextKey.FailureNativeCode, (TextArg.Name, native.GetType().Name),
                     (TextArg.Count, native.NativeErrorCode.ToString(CultureInfo.InvariantCulture)));
