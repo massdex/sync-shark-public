@@ -1,0 +1,13 @@
+{
+  "engine": [
+    "dependencies",
+    "literals",
+    "paths",
+    "strings"
+  ],
+  "core": [
+    "--cli-checks",
+    "--v2-removal-review-checks"
+  ],
+  "ui": []
+}
