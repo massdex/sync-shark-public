@@ -221,7 +221,8 @@ public static partial class ChangeRunnerChecks
     // retirement throws the live admission's own stale refusal, once. Opportunity 1 then leaves the old operation
     // retired and nothing outstanding but W; opportunity 2, on the same LiveSyncer (retry, M-B83: its unfinished map
     // must have forgotten the retired operation) or on a fresh one over the reopened store (restart), freezes the
-    // vacate once more and lands.
+    // vacate once more. The rename lands at most one opportunity later on the same instance, as after every vacate
+    // (SelectionRenames.FinishRenameAsync holds it for the next selection; VacateUntilLandedAsync), with no more work.
     private static async Task VacateSupersedeGapAsync()
     {
         foreach (var restart in new[] { false, true })
@@ -270,7 +271,15 @@ public static partial class ChangeRunnerChecks
                 syncer = LiveSyncer(fixture, c.Selection, new Boundary(_ => new Lease()), []);
             }
             Exception? second = null;
-            try { await syncer.SyncWorkAsync(guard.Token).WaitAsync(guard.Token); }
+            var opportunities = 1;
+            try
+            {
+                while (opportunities < 3 && !VacateLanded(c))
+                {
+                    opportunities++;
+                    await syncer.SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+                }
+            }
             catch (Exception error) { second = error; }
             fixture.Hooks.AfterCall = null;
             var operation = frozen is null ? null : fixture.Inner.FolderRemoval(PairId, frozen);
@@ -278,9 +287,11 @@ public static partial class ChangeRunnerChecks
                 fixture.Hooks.Count(nameof(IStateStore.RetireFolderRemoval)) - retired == 1 &&
                 operation is { Phase: FolderRemovalPhase.Complete, Authority: FolderRemovalAuthority.Vacate } &&
                 VacateDeleted(c) == 1 && VacateRows(fixture) == 2 && VacateLanded(c),
-                name + ": the next opportunity freezes the vacate once more and lands: second=" + second?.Message +
-                Counts() + "; operation=" + operation + "; deleted=" + VacateDeleted(c) +
-                "; operations=" + VacateRows(fixture));
+                name + ": the next opportunity freezes the vacate once more and the rename lands: second=" +
+                second?.Message + Counts() + "; operation=" + operation + "; deleted=" + VacateDeleted(c) +
+                "; operations=" + VacateRows(fixture) + "; landed=" + VacateLanded(c) + " after opportunity " +
+                opportunities);
+            Console.WriteLine(name + ": landed after opportunity " + opportunities);
         }
     }
 
