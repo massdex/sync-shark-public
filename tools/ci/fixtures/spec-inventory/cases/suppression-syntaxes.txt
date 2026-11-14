@@ -1,0 +1,11 @@
+Synthetic text candidates, not active configuration or accepted dispositions.
+<NoWarn>CS1591</NoWarn>
+<WarningsNotAsErrors>CS1591</WarningsNotAsErrors>
+#pragma warning disable CS1591
+#nullable disable
+[SuppressMessage("Design", "CA1031")]
+value = 1  # noqa: F841
+# pylint: disable=unused-variable
+dotnet_diagnostic.CA1031.severity = none
+known-red: synthetic-case
+skip selector: synthetic-case
