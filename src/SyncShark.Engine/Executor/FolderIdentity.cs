@@ -15,7 +15,7 @@ internal static class FolderIdentity
             .Any(binding => binding != saved)) return true;
         var absent = PathNames.Other(deletingFrom);
         return context.For(absent) is not IIdentitySide identities ||
-            await identities.ReadByIdAsync(originalId ?? saved.IdOn(absent), ct) is { InScope: true } found &&
+            originalId != saved.IdOn(absent) && await identities.ReadByIdAsync(originalId ?? saved.IdOn(absent), ct) is { InScope: true } found &&
             !(originalId is not null && PathNames.Same(found.Location.Entry.Path, keptPath));
     }
 }
