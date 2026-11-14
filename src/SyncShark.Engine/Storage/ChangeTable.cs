@@ -271,7 +271,7 @@ internal sealed partial class ChangeTable
             return null;
         }
         long? observedThrough = null;
-        var pass = OpenPass(pair, pairId, expectedGeneration, scope, ref observedThrough);
+        var pass = OpenPass(pair, pairId, expectedGeneration, scope, ref observedThrough) with { Through = Watermark(null) };
         if (NextCandidate(pair, pairId, ref pass, null, out _, out _, observedThrough) is not { } candidate) return null;
         _passes[pairId] = pass;
         return Selected(pairId, candidate, pass.Through);
