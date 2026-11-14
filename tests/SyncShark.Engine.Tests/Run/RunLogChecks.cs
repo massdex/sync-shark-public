@@ -35,6 +35,7 @@ public static class RunLogChecks
             ProviderRequestLifetime(folder.FullName);
             ProviderReason(folder.FullName);
             ClassifiedFailures(folder.FullName);
+            JournalSourceFailure(folder.FullName);
             FailureLocation(folder.FullName);
             ThrowingProgress(folder.FullName);
             FailureIdentity(folder.FullName);
@@ -296,6 +297,20 @@ public static class RunLogChecks
             Check.Require(text.Contains("native code " + code), "native failures retain the actual OS code");
         Check.Require(text.Contains("HRESULT ") && !text.Contains("secret-value"),
             "fallback is accurately labelled and arbitrary exception arguments/messages stay private");
+    }
+
+    // B-229: the classified journal status and its native code reach the log as safe evidence, never the message.
+    private static void JournalSourceFailure(string folder)
+    {
+        using var log = Open(folder, "journal-source", []);
+        log.Failed(new JournalSourceException(NtfsUsnPageStatus.Unavailable, 1784, "secret-value"));
+        log.Failed(new JournalSourceException(NtfsUsnPageStatus.InvalidRecord, null, "secret-value"));
+        var lines = ReadShared(log.Path).Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Check.Require(lines.Length == 2 && RunLog.TryDecodeRecord(lines[0], out var native) &&
+            native.Detail == "Unavailable; native code 1784" &&
+            RunLog.TryDecodeRecord(lines[1], out var statusOnly) &&
+            statusOnly.Detail == nameof(NtfsUsnPageStatus.InvalidRecord),
+            "B-229: a journal page failure keeps its status with the native code, or the status alone when there is none");
     }
 
     private static void FailureIdentity(string folder)

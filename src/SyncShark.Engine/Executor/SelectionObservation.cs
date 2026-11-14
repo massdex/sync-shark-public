@@ -6,6 +6,13 @@ namespace Massdex.SyncShark.Engine.Executor;
 internal readonly struct SelectionObservation(SelectionPass pass, ExecutorContext _context, Observer _observer,
     Parents _parents, RowContexts _rows, ActionExecutor _executor)
 {
+    internal static bool SettlesDropboxEcho(ChangeNotice notice, SyncedEntry? saved, bool boundAtOrUnder) => notice.Kind switch
+    {
+        ChangeKind.Deleted => !boundAtOrUnder,
+        ChangeKind.Changed => Decide.DropboxMatchesBaseline(notice.Observed, saved),
+        _ => false,
+    };
+
     // One observation of both sides projects one row; the error paths fail that same observation.
     internal async ValueTask<Row?> ReadAsync(SelectionBranch branch, ItemFailedException? failedWalk,
         Action<Row, string?> observed, CancellationToken ct)

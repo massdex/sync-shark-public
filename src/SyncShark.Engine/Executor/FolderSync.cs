@@ -30,11 +30,13 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
 
     /// <summary>The one checked folder-removal entry: duties D1-D9 under one admission, then the run after it ends
     /// (D10). Every refusal names its check; item errors before the freeze reach the caller (D11).</summary>
-    internal async Task<CheckedFolderRemoval> RemoveCheckedAsync(FolderRemovalRequest request, CancellationToken ct)
+    internal async Task<CheckedFolderRemoval> RemoveCheckedAsync(FolderRemovalRequest request, CancellationToken ct,
+        bool retireAbsent = false)
     {
         var (operationId, check, observed) = await PrepareCheckedAsync(request, ct);
         return operationId is null ? new CheckedFolderRemoval(check, null, observed)
-            : new CheckedFolderRemoval(check, await RunAndFinishAsync(operationId, request.Selection, ct), observed);
+            : new CheckedFolderRemoval(check, await RunAndFinishAsync(operationId, request.Selection, ct, retireAbsent),
+                observed);
     }
 
     // D1: a live selection runs under its own admitted execution; otherwise work, permit and shared path locks over the
@@ -91,8 +93,9 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                     return (null, FolderRemovalCheck.Absent, observed);
                 if (root is not null && root.Id != expected) return (null, FolderRemovalCheck.Replaced, observed);
             }
-            if (!await JustifiedAsync(request, observed, ct)) return (null, FolderRemovalCheck.NotJustified, observed);
-            return await FreezeCheckedTailAsync(request, observed, execution, ct);
+            var (justified, preRestoreId) = await JustifiedAsync(request, observed, ct);
+            if (!justified) return (null, FolderRemovalCheck.NotJustified, observed);
+            return await FreezeCheckedTailAsync(request, observed, execution, preRestoreId, ct);
         }
         catch (Exception error) when (OwnsItemErrors(request) && ItemFailures.IsItemError(error))
         {
@@ -143,23 +146,27 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             throw new ChangedUnderneathException(Row.Path(observed));
     }
 
-    // D4: the route's counterpart justification, plus the B-213 identity check for automatic plans.
-    private async Task<bool> JustifiedAsync(FolderRemovalRequest request, Row observed, CancellationToken ct)
+    // D4: the route's counterpart justification, plus the B-213 identity check for automatic plans. A root this run
+    // restored is asked about its original identity; the same value goes to the freeze for the send-time recheck.
+    private async Task<(bool Justified, string? PreRestoreId)> JustifiedAsync(FolderRemovalRequest request, Row observed,
+        CancellationToken ct)
     {
         var (folder, deletingFrom) = (request.Folder, request.DeletingFrom);
+        var absent = PathNames.Other(deletingFrom);
+        var restored = request.RestoredAncestors?.Contains(folder.Key) == true;
+        var preRestoreId = restored ? folder.Synced?.IdOn(absent) : null;
         var justified = request.Route switch
         {
             FolderRemovalRoute.SelectedReplacement => observed.Local == folder.Local && observed.Dropbox == folder.Dropbox,
             FolderRemovalRoute.PlannedReplacement => PlannedReplacementJustified(observed, folder, deletingFrom),
             FolderRemovalRoute.Vacate => observed.EntryOn(deletingFrom) == folder.EntryOn(deletingFrom),
             FolderRemovalRoute.Repair => RepairJustified(observed, folder, deletingFrom),
-            _ => FolderDeletes.PlanJustified(observed.EntryOn(deletingFrom), observed.EntryOn(PathNames.Other(deletingFrom)),
-                request.Exclusion is not null || request.Route == FolderRemovalRoute.Chosen ||
-                request.RestoredAncestors?.Contains(folder.Key) == true)
+            _ => FolderDeletes.PlanJustified(observed.EntryOn(deletingFrom), observed.EntryOn(absent),
+                request.Exclusion is not null || request.Route == FolderRemovalRoute.Chosen || restored)
         };
-        return justified && !(AuthorityOf(request.Route, request.Exclusion) is FolderRemovalAuthority.Inferred
+        return (justified && !(AuthorityOf(request.Route, request.Exclusion) is FolderRemovalAuthority.Inferred
             or FolderRemovalAuthority.Vacate && await FolderIdentity.KeptElsewhereAsync(_context, observed.Synced,
-                deletingFrom, ct));
+                deletingFrom, ct, preRestoreId, observed.EntryOn(absent)?.Path)), preRestoreId);
     }
 
     // D4's Repair arm (-7 1.2): the reobserved binding is the request's, X is absent or itself at its shared-side path
@@ -185,7 +192,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
 
     // D4p and D6-D9, shared by the entry and the retained live plan, which owns D1-D4 itself.
     private async Task<(string? OperationId, FolderRemovalCheck Check, Row Observed)> FreezeCheckedTailAsync(
-        FolderRemovalRequest request, Row observed, IAdmittedExecution? execution, CancellationToken ct)
+        FolderRemovalRequest request, Row observed, IAdmittedExecution? execution, string? preRestoreId,
+        CancellationToken ct)
     {
         var deletingFrom = request.DeletingFrom;
         var authority = AuthorityOf(request.Route, request.Exclusion);
@@ -233,7 +241,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         }
         // Only Vacate links its rename work, the same fact as the Vacate backfill.
         var operationId = FreezePlan(plan, authority,
-            request.Route == FolderRemovalRoute.Vacate ? request.Selection : null, superseded, ct, execution);
+            request.Route == FolderRemovalRoute.Vacate ? request.Selection : null, superseded, preRestoreId, ct, execution);
         RememberUnfinished(deletingFrom, observed, operationId);
         return (operationId, FolderRemovalCheck.Passed, observed);
     }
@@ -251,11 +259,13 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
     }
 
     // D10: the one continuation, after the admission has ended.
+    // RemoveFolderCoreAsync's routes (excluded, chosen, planned and selected replacement) hand the first continuation's
+    // proven-absent roots to the finish; live replacement, vacate and Repair finish without them.
     private async Task<FolderRemovalResult> RunAndFinishAsync(string operationId, WorkSelection? selection,
-        CancellationToken ct)
+        CancellationToken ct, bool retireAbsent)
     {
-        await RunPreparedFolderRemovalsAsync([operationId], ct);
-        return await FinishFolderRemovalAsync(operationId, selection, ct);
+        var absent = await RunPreparedFolderRemovalsAsync([operationId], ct);
+        return await FinishFolderRemovalAsync(operationId, selection, ct, absent: retireAbsent ? absent : null);
     }
 
     // One root keeps one operation: every route that would plan this root continues the unfinished one instead, so
@@ -291,7 +301,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
     }
 
     private string FreezePlan(FolderPlan plan, FolderRemovalAuthority authority, WorkSelection? renameWork,
-        FolderRemovalState? superseded, CancellationToken ct, IAdmittedExecution? execution)
+        FolderRemovalState? superseded, string? preRestoreId, CancellationToken ct, IAdmittedExecution? execution)
     {
         string operationId;
         try
@@ -306,9 +316,10 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             }
             var pageSize = _context.Settings.StoragePageSize;
             operationId = renameWork is null
-                ? _context.Store.BeginFolderRemoval(_context.Pair.PairId, plan, authority, pageSize, ct, Admission(execution))
+                ? _context.Store.BeginFolderRemoval(_context.Pair.PairId, plan, authority, pageSize, ct, Admission(execution),
+                    preRestoreId)
                 : _context.Store.BeginFolderRemoval(_context.Pair.PairId, plan, authority, pageSize, ct, renameWork,
-                    Admission(execution));
+                    Admission(execution), preRestoreId);
         }
         catch (Exception primary)
         {
@@ -375,10 +386,10 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
     /// <summary>Runs independently admitted survivor reconciliation and returns actual durable aggregate state.</summary>
     internal async Task<FolderRemovalResult> FinishFolderRemovalAsync(string operationId, WorkSelection? selection, CancellationToken ct,
         Action<Row, SyncOutcome>? completed = null, Action<Row, Issue>? retainUnfinished = null,
-        Func<Side, string, string?, bool>? temporary = null)
+        Func<Side, string, string?, bool>? temporary = null, ISet<string>? absent = null)
     {
         var operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
-        await _folderDelete.ResumeAsync(operation, selection, ct);
+        await _folderDelete.ResumeAsync(operation, selection, ct, absent);
         operation = _context.Store.FolderRemoval(_context.Pair.PairId, operationId);
         if (_folderDelete.FollowUpsReady(operation, ct) &&
             _context.Store.RenameRemovalWork(_context.Pair.PairId, operationId) is null)
@@ -458,9 +469,9 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         var id = await PrepareOrdinaryAsync(new FolderRemovalRequest(row, FolderDeletes.DeletingSide(row),
             FolderRemovalRoute.Ordinary) { Completed = Completed, Live = _context.Live, Temporary = temporary }, ct);
         if (id is null) return outcome;
-        await RunPreparedFolderRemovalsAsync([id], ct);
+        var absent = await RunPreparedFolderRemovalsAsync([id], ct);
         // A nested survivor is reached from the same continuation, so it keeps the run's exclusion (§6.3).
-        var result = await FinishFolderRemovalAsync(id, selection, ct, Completed, retainUnfinished, temporary);
+        var result = await FinishFolderRemovalAsync(id, selection, ct, Completed, retainUnfinished, temporary, absent);
         outcome = !failed && SettlementReady(result) ? SyncOutcome.InSync :
             new SyncOutcome(ActionKind.DeferFolder, null, null, null, true);
         completed?.Invoke(row, outcome);
@@ -518,7 +529,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             !operation.Active && operation.Cause is null && operation.RetirementDisposition is not null;
     }
 
-    internal Task RunPreparedFolderRemovalsAsync(IEnumerable<string> operationIds, CancellationToken ct) =>
+    internal Task<ISet<string>> RunPreparedFolderRemovalsAsync(IEnumerable<string> operationIds, CancellationToken ct) =>
         _folderDelete.RunPreparedAsync(Pages(operationIds), ct);
 
     // Supplies ready effects one stored page at a time; the batch owner streams them into provider-legal batches.
@@ -656,8 +667,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
     private async Task<FolderRemovalResult?> RemoveFolderCoreAsync(FolderRemovalRequest request, CancellationToken ct)
     {
         if (OwnsItemErrors(request))
-            return await PrepareOrdinaryAsync(request, ct) is { } id ? await RunAndFinishAsync(id, null, ct) : null;
-        var removal = await RemoveCheckedAsync(request, ct);
+            return await PrepareOrdinaryAsync(request, ct) is { } id ? await RunAndFinishAsync(id, null, ct, true) : null;
+        var removal = await RemoveCheckedAsync(request, ct, retireAbsent: true);
         return removal.Check == FolderRemovalCheck.Waiting
             ? throw new ChangedUnderneathException(Row.Path(removal.Observed)) : removal.Removal;
     }
@@ -682,7 +693,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                     // A kept mount's notice outcome settles the selection as the fallback's would (D7).
                     var request = new FolderRemovalRequest(folder, deletingFrom, FolderRemovalRoute.Ordinary)
                         { Live = true, Completed = (_, outcome) => fallback = outcome };
-                    if (!await JustifiedAsync(request, observed, token))
+                    var (justified, preRestoreId) = await JustifiedAsync(request, observed, token);
+                    if (!justified)
                     {
                         // The plan's descendant permission is not the fallback's: it must pass ordinary evidence (B-153).
                         _context.Store.ValidateLiveCoverage(selection, coverage, LockKeys.Ordinary(footprint));
@@ -691,7 +703,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                         return (string?)null;
                     }
                     RequireAncestorsClear(observed);
-                    return (await FreezeCheckedTailAsync(request, observed, execution, token)).OperationId;
+                    return (await FreezeCheckedTailAsync(request, observed, execution, preRestoreId, token)).OperationId;
                 }
                 catch (Exception error) when (error is not ChangedUnderneathException && ItemFailures.IsItemError(error))
                 {
@@ -705,13 +717,13 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             if (fallback?.None == NoneReason.Unfinished) temporary?.Invoke();
             return fallback?.Succeeded() == true;
         }
-        await RunPreparedFolderRemovalsAsync([id], ct);
+        var absent = await RunPreparedFolderRemovalsAsync([id], ct);
         var failed = false;
         var result = await FinishFolderRemovalAsync(id, selection, ct, (_, outcome) =>
         {
             failed |= !outcome.Succeeded();
             if (outcome.None == NoneReason.Unfinished) temporary?.Invoke();
-        }, retainUnfinished);
+        }, retainUnfinished, absent: absent);
         return !failed && SettlementReady(result);
     }
 }

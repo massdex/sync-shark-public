@@ -180,7 +180,7 @@ public static class Decide
         // Both contents are unchanged; refresh only the applicable saved facts.
         var refresh = synced.IsFolder
             ? local.Path != synced.LocalPath || dropbox.Path != synced.DropboxPath
-            : LocalStampDiffers(local, synced) || !DropboxMatchesBaseline(dropbox, synced);
+            : LocalStampDiffers(local, synced) || !DropboxIdentityHolds(dropbox, synced);
         return refresh ? Record(row) : None(row, NoneReason.InSync);
     }
 
@@ -219,7 +219,7 @@ public static class Decide
 
     private static bool InSyncIdentityHolds(Row row) =>
         row.Synced is not { IsFolder: true } ||
-        LocalMatchesBaseline(row.Local, row.Synced) && DropboxMatchesBaseline(row.Dropbox, row.Synced);
+        LocalMatchesBaseline(row.Local, row.Synced) && DropboxIdentityHolds(row.Dropbox, row.Synced);
 
     /// <summary>Whether Local metadata matches the saved binding; settlement still requires clean acquired evidence.</summary>
     internal static bool LocalMatchesBaseline(Entry? local, SyncedEntry? saved) =>
@@ -227,8 +227,13 @@ public static class Decide
         local.Path == saved.LocalPath && local.IsFolder == saved.IsFolder &&
         (local.IsFolder ? local.Id == saved.LocalId : LocalChanged(local, saved, null, false) == false);
 
+    /// <summary>Exact no-effect Dropbox echo match; source and responsibility guards belong to settlement.</summary>
+    internal static bool DropboxMatchesBaseline(Entry? dropbox, SyncedEntry? saved) =>
+        dropbox is { Skip: null } && saved is not null && dropbox.Path == saved.DropboxPath &&
+        dropbox.IsFolder == saved.IsFolder && dropbox.Id == saved.DropboxId && !DropboxChanged(dropbox, saved);
+
     // The saved Dropbox identity remains the authority independently of content or path changes.
-    internal static bool DropboxMatchesBaseline(Entry? dropbox, SyncedEntry saved) =>
+    internal static bool DropboxIdentityHolds(Entry? dropbox, SyncedEntry saved) =>
         dropbox is not null && dropbox.Id == saved.DropboxId;
 
     /// <summary>Did the local file's content change since the record? null = unknown, the hash is needed. Folders never change.</summary>
@@ -272,8 +277,8 @@ public static class Decide
             binding is not { IsFolder: false } || binding.LocalKey == binding.DropboxKey ||
             !PathNames.Same(local.Path, PathNames.LocalSpelling(dropbox.Path))) return null;
         if (PathNames.Same(local.Path, binding.LocalKey) && local.Id == binding.LocalId &&
-            !DropboxMatchesBaseline(dropbox, binding)) return Side.Dropbox;
-        if (PathNames.Same(dropbox.Path, binding.DropboxKey) && DropboxMatchesBaseline(dropbox, binding) &&
+            !DropboxIdentityHolds(dropbox, binding)) return Side.Dropbox;
+        if (PathNames.Same(dropbox.Path, binding.DropboxKey) && DropboxIdentityHolds(dropbox, binding) &&
             local.Id != binding.LocalId) return Side.Local;
         return null;
     }

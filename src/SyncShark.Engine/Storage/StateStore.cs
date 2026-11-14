@@ -107,9 +107,7 @@ public sealed partial class StateStore : IStateStore
             if (!IssueTable.CloseExact(_connection, transaction, replaced.PairId, issue)) return;
             _changes.SettleIssueWork(transaction, replaced);
         }
-        transaction.Commit();
-        _closureKeys?.Remove(replaced.PairId);
-        if (sourceLess) _changes.RecordRetirement(replaced.PairId);
+        CommitClosure(transaction, replaced.PairId, sourceLess);
     });
 
     // The captured candidate still describes the stored episode exactly: its token, dispatch and pending binding.
@@ -127,17 +125,45 @@ public sealed partial class StateStore : IStateStore
     // A responsibility this retirement does not resolve keeps its notice, work and members untouched: first-run
     // provenance, a pending recovery or unknown move, or (only a closure detaches them) another member's work.
     private bool RetirementProtected(SqliteTransaction transaction, long pair, Issue issue,
-        ItemRetryCandidate replaced, bool sourceLess)
+        ItemRetryCandidate replaced, bool sourceLess) =>
+        ResponsibilityRetained(transaction, pair, issue, replaced) ||
+        sourceLess && ReadPage(transaction, StateSchema.ReadIssueMembers,
+            static reader => reader.IsDBNull(StateSchema.MemberWorkId) ? 0L : reader.GetInt64(StateSchema.MemberWorkId),
+            (StateSchema.ParamIssue, issue.Id)).Any(work => work != replaced.Token.WorkId);
+
+    private bool ResponsibilityRetained(SqliteTransaction transaction, long pair, Issue issue,
+        ItemRetryCandidate replaced)
     {
         if (issue.Subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None ||
             IssueTable.IsRecoveryNotice(issue) ||
             IssueTable.AtPendingPath(issue, IssueTable.PendingPath(_connection, transaction, pair))) return true;
-        if (replaced.Dispatch == ItemRetryDispatch.LocalRecovery || replaced.PendingOperationId is not null ||
-            IssuePolicy.UnknownMove(issue.Kind, issue.Subject)) return true;
-        return sourceLess && ReadPage(transaction, StateSchema.ReadIssueMembers,
-                static reader => reader.IsDBNull(StateSchema.MemberWorkId) ? 0L : reader.GetInt64(StateSchema.MemberWorkId),
-                (StateSchema.ParamIssue, issue.Id)).Any(work => work != replaced.Token.WorkId);
+        return replaced.Dispatch == ItemRetryDispatch.LocalRecovery || replaced.PendingOperationId is not null ||
+            IssuePolicy.UnknownMove(issue.Kind, issue.Subject);
     }
+
+    // Both absence triggers end exactly this wait inside the issue-close transaction; other responsibilities stay.
+    private bool EndAbsentEpisode(SqliteTransaction transaction, long pair, string pairId, Issue issue)
+    {
+        if (issue.Kind != IssueKind.Failure || !IssuePolicy.IsLocalAccessRetryCause(issue.Cause) ||
+            IssueTable.ReadItemRetryState(_connection, transaction, pairId, pair, [issue.Id])[issue.Id] is not { } episode ||
+            _isRegisteredItemAttempt?.Invoke(Guid.Empty, pairId, episode.Token.PairGeneration, episode.Token.Subject,
+                episode.Token) == true || ResponsibilityRetained(transaction, pair, issue, episode) ||
+            IssueTable.ClearItemEpisode(_connection, transaction, pair, episode.Token) == 0) return false;
+        SettleEpisodeWork(transaction, pair, episode);
+        return true;
+    }
+
+    // A removal proves only its exact path; a scan already checked every endpoint of the pre-acknowledgement row.
+    private Func<Issue, bool> AbsentEpisodeEnd(SqliteTransaction transaction, long pair, string pairId,
+        System.Runtime.CompilerServices.StrongBox<bool> ended, Issue? scanned = null) => issue =>
+    {
+        if (scanned is null)
+            for (var index = 0; index < issue.Subject.Items.Count; index++)
+                if (!PathNames.Same(issue.Subject.Items[index].Path, issue.Path)) return false;
+        if (!EndAbsentEpisode(transaction, pair, pairId, scanned ?? issue)) return false;
+        ended.Value = true;
+        return true;
+    };
 
     // The episode's own work is source-less when the issue itself created it; acquired work drains by its selection.
     private bool SourceLessWork(SqliteTransaction transaction, long pair, ItemRetryCandidate episode) =>
@@ -959,7 +985,7 @@ public sealed partial class StateStore : IStateStore
                 if (DeletedHistoryCursor(pairId) != cursor)
                 {
                     // History withdrawn between blocks: the scan holds no restored names, as if it had gone first.
-                    Execute(_connection, null, StateSchema.ClearScanDeletedNames, (StateSchema.ParamPair, pairId));
+                    Execute(_connection, null, StateSchema.ClearDeletedNames, (StateSchema.ParamPairRow, pair));
                     return null;
                 }
                 try
@@ -981,6 +1007,8 @@ public sealed partial class StateStore : IStateStore
                         reader.GetInt64(StateSchema.DeletedBlockRow), readOnly: true))
                         count += InsertDeletedNames(transaction, pair,
                             StateEncoding.DecodeDeletedNames(names, reader.GetInt32(StateSchema.DeletedBlockCount), last, after));
+                    // An open statement at COMMIT keeps every attached tree in a read transaction, blocking the scan file's automatic checkpoint.
+                    reader.Dispose();
                     transaction.Commit();
                     after = last;
                     return true;
@@ -1044,8 +1072,8 @@ public sealed partial class StateStore : IStateStore
     {
         // The held store lock fences the generation read and the loss transition together.
         var generation = ReadPairExecution(pairId)!.Value.Generation;
-        var clearScan = _scans.Any(item => item.Key.PairId == pairId && item.Value.Active && item.Value.Record.Discovery);
-        if (clearScan) AttachScan(pairId, create: false);
+        var scan = _scans.FirstOrDefault(item => item.Key.PairId == pairId && item.Value.Active && item.Value.Record.Discovery).Value;
+        if (scan is not null) AttachScan(pairId, create: false);
         var change = StateChange.Empty with
         {
             Raise = [(IssueKind.Info, TextKey.DeletedHistoryCorrupt, string.Empty, new IssueSubject([], null))]
@@ -1053,8 +1081,8 @@ public sealed partial class StateStore : IStateStore
         using (var transaction = _connection.BeginTransaction())
         {
             Execute(_connection, transaction, StateSchema.ClearDeletedHistory, (StateSchema.ParamPair, pairId));
-            if (clearScan)
-                Execute(_connection, transaction, StateSchema.ClearScanDeletedNames, (StateSchema.ParamPair, pairId));
+            if (scan is not null)
+                Execute(_connection, transaction, StateSchema.ClearDeletedNames, (StateSchema.ParamPairRow, scan.PairRow));
             // Restore's current Repair reacquires history before executing rows; other readers need new debt.
             if (requireRepair) _changes.RequireRepairAfterLoss(transaction, pairId, generation);
             StateCommitter.Commit(_connection, transaction, _changes, pairId, change, DateTimeOffset.UtcNow,
@@ -1084,12 +1112,12 @@ public sealed partial class StateStore : IStateStore
         AttachScan(pairId, create: false);
         using var transaction = _connection.BeginTransaction();
         Execute(_connection, transaction, StateSchema.ClearScanDropbox, (StateSchema.ParamPair, pairId),
-            (StateSchema.ParamScan, scanToken.ToByteArray()));
+            (StateSchema.ParamScan, scan.Key));
         if (discardNames)
         {
             scan.ResumedHistory = false;
             scan.IncrementalHistory = false;
-            Execute(_connection, transaction, StateSchema.ClearScanDeletedNames, (StateSchema.ParamPair, pairId));
+            Execute(_connection, transaction, StateSchema.ClearDeletedNames, (StateSchema.ParamPairRow, scan.PairRow));
             Execute(_connection, transaction, StateSchema.ClearDeletedHistory, (StateSchema.ParamPair, pairId));
         }
         transaction.Commit();
@@ -1186,6 +1214,27 @@ public sealed partial class StateStore : IStateStore
         })) { }
     }
 
+    /// <inheritdoc />
+    public void CloseIdentityAbsent(string pairId, IReadOnlyList<Issue> expected) => Write(() =>
+    {
+        if (expected.Count == 0) return;
+        using var transaction = _connection.BeginTransaction();
+        var ended = new System.Runtime.CompilerServices.StrongBox<bool>();
+        var endEpisode = AbsentEpisodeEnd(transaction, RequirePairRow(transaction, pairId), pairId, ended);
+        var closed = false;
+        foreach (var issue in expected)
+            closed |= IssueTable.CloseExact(_connection, transaction, pairId, issue, endEpisode: endEpisode);
+        if (closed) CommitClosure(transaction, pairId, ended.Value);
+    });
+
+    // Publish retirement only after the exact-close transaction commits.
+    private void CommitClosure(SqliteTransaction transaction, string pairId, bool retired)
+    {
+        transaction.Commit();
+        _closureKeys?.Remove(pairId);
+        if (retired) _changes.RecordRetirement(pairId);
+    }
+
     public bool CloseScanIssue(string pairId, Guid scanId, Issue expected) => Ordered(() =>
     {
         var scan = RequireScan(pairId, scanId);
@@ -1194,10 +1243,12 @@ public sealed partial class StateStore : IStateStore
         using var transaction = _connection.BeginTransaction();
         using var unchanged = StorageCommand.Create(_connection, transaction, StateSchema.ScanIssueUnchanged,
             (StateSchema.ParamScan, scan.Key), (StateSchema.ParamPairRow, scan.PairRow), (StateSchema.ParamIssue, expected.Id));
+        var ended = IssuePolicy.IsLocalAccessRetryCause(expected.Cause)
+            ? new System.Runtime.CompilerServices.StrongBox<bool>() : null;
         if ((long)unchanged.ExecuteScalar()! == 0 ||
-            !IssueTable.CloseExact(_connection, transaction, pairId, expected, acknowledgeFirstRun: true)) return false;
-        transaction.Commit();
-        _closureKeys?.Remove(pairId);
+            !IssueTable.CloseExact(_connection, transaction, pairId, expected, acknowledgeFirstRun: true,
+                endEpisode: ended is null ? null : AbsentEpisodeEnd(transaction, scan.PairRow, pairId, ended, expected))) return false;
+        CommitClosure(transaction, pairId, ended?.Value == true);
         return true;
     });
 
@@ -1755,6 +1806,11 @@ public sealed partial class StateStore : IStateStore
         Ordered(() => _changes.SelectWork(pairId, expectedGeneration, scope));
 
     /// <inheritdoc />
+    public (int Settled, bool More) SettleEchoes(string pairId, long expectedGeneration, PathScope scope,
+        Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize) =>
+        Ordered(() => _changes.SettleEchoes(pairId, expectedGeneration, scope, settles, pageSize));
+
+    /// <inheritdoc />
     public (long Local, long Dropbox) CountWork(string pairId, long expectedGeneration, long through) =>
         Ordered(() => _changes.CountWork(pairId, expectedGeneration, through));
 
@@ -2310,11 +2366,12 @@ public sealed partial class StateStore : IStateStore
 
     /// <inheritdoc />
     public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize,
-        CancellationToken ct, Action? admit = null) => BeginFolderRemovalCore(pairId, plan, authority, pageSize, ct, null, admit);
+        CancellationToken ct, Action? admit = null, string? preRestoreId = null) =>
+        BeginFolderRemovalCore(pairId, plan, authority, pageSize, ct, null, admit, preRestoreId);
 
     public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize,
-        CancellationToken ct, WorkSelection renameWork, Action? admit = null) =>
-        BeginFolderRemovalCore(pairId, plan, authority, pageSize, ct, renameWork, admit);
+        CancellationToken ct, WorkSelection renameWork, Action? admit = null, string? preRestoreId = null) =>
+        BeginFolderRemovalCore(pairId, plan, authority, pageSize, ct, renameWork, admit, preRestoreId);
 
     public string? RenameRemoval(WorkSelection selection)
     {
@@ -2337,7 +2394,7 @@ public sealed partial class StateStore : IStateStore
 
     // Header, frozen members and the rename-work link publish together in this one transaction.
     private string BeginFolderRemovalCore(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize,
-        CancellationToken ct, WorkSelection? renameWork, Action? admit) => Ordered(() =>
+        CancellationToken ct, WorkSelection? renameWork, Action? admit, string? preRestoreId) => Ordered(() =>
     {
         // _lock is reentrant, so the admission's own store reads nest in this one critical section: an acquisition
         // waits for the lock and cannot commit between the final validation and this publication (B-153).
@@ -2358,7 +2415,7 @@ public sealed partial class StateStore : IStateStore
             (StateSchema.ParamSavedRootJson, StateEncoding.OptionalEnvelope(plan.Folder.Synced)),
             (StateSchema.ParamRootContextJson, StateEncoding.Envelope(plan.Folder.Context)),
             (StateSchema.ParamCursor, null), (StateSchema.ParamActive, true), (StateSchema.ParamCause, null),
-            (StateSchema.ParamAuthority, authority.ToString())));
+            (StateSchema.ParamAuthority, authority.ToString()), (StateSchema.ParamPreRestoreId, preRestoreId)));
         AddFolderRemovalItem(transaction, pair, operation, 0, plan.Folder.Key, root.Path, root, plan.Folder.Synced,
             plan.DeleteWhole ? FolderVerdict.Removed : FolderVerdict.Survives, false, plan.DeleteWhole);
         long previous = 0;
@@ -2729,6 +2786,19 @@ public sealed partial class StateStore : IStateStore
                 (StateSchema.ParamAfter, StateSchema.BeforeFirstOrdinal), (StateSchema.ParamTake, StateSchema.OneRow));
     }
 
+    /// <inheritdoc />
+    public IReadOnlyList<(Issue Issue, SyncedEntry? Saved)> HeldFolderMembers(string pairId, string operationId,
+        IssueKind kind, (string Key, long IssueId) after, string high, int pageSize)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pageSize);
+        lock (_lock)
+            return ReadPage(null, StateSchema.HeldFolderMembers, static reader => (IssueTable.ReadIssue(reader),
+                    StateEncoding.ReadOptionalEnvelope<SyncedEntry>(reader, StateSchema.HeldMemberSavedJson)),
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamOperation, operationId),
+                (StateSchema.ParamKind, (int)kind), (StateSchema.ParamLow, after.Key),
+                (StateSchema.ParamHigh, high), (StateSchema.ParamAfter, after.IssueId), (StateSchema.ParamTake, pageSize));
+    }
+
     private IReadOnlyList<FolderRemovalItem> FolderItemPage(string pairId, string operationId,
         long afterOrdinal, int pageSize, string sql)
     {
@@ -2779,6 +2849,8 @@ public sealed partial class StateStore : IStateStore
         var pair = RequirePairRow(transaction, pairId);
         var operation = ReadFolder(transaction, pair, operationId);
         var settled = new bool[items.Count];
+        System.Runtime.CompilerServices.StrongBox<bool>? ended = null;
+        Func<Issue, bool>? endEpisode = null;
         for (var index = 0; index < items.Count; index++)
         {
             var (generation, next, change) = items[index];
@@ -2792,7 +2864,9 @@ public sealed partial class StateStore : IStateStore
             {
                 continue;
             }
-            ApplyFolderSettlement(transaction, pair, pairId, operationId, current, generation, next, change, settling);
+            ApplyFolderSettlement(transaction, pair, pairId, operationId, current, generation, next, change, settling,
+                settling && change.CloseProvenAbsent
+                    ? endEpisode ??= AbsentEpisodeEnd(transaction, pair, pairId, ended = new()) : null);
             if (settling && operation.DeletingSide == Side.Local &&
                 current.EffectState == FolderRemovalItem.EffectStatus.Verified &&
                 current.EffectKind != FolderEffectKind.StateOnly)
@@ -2804,6 +2878,7 @@ public sealed partial class StateStore : IStateStore
             settled[index] = true;
         }
         transaction.Commit();
+        if (ended?.Value == true) _changes.RecordRetirement(pairId);
         for (var index = 0; index < items.Count; index++)
             if (settled[index]) UpdateClosures(pairId, items[index].Change);
         return settled;
@@ -2837,7 +2912,8 @@ public sealed partial class StateStore : IStateStore
     }
 
     private void ApplyFolderSettlement(SqliteTransaction transaction, long pair, string pairId, string operationId,
-        FolderRemovalItem current, long expectedGeneration, FolderRemovalItem next, StateChange verifiedChange, bool settling)
+        FolderRemovalItem current, long expectedGeneration, FolderRemovalItem next, StateChange verifiedChange, bool settling,
+        Func<Issue, bool>? endEpisode)
     {
         var ordinal = current.Ordinal;
         // The effect update already writes phase and generation; recovery payloads only need writing when changed.
@@ -2864,7 +2940,7 @@ public sealed partial class StateStore : IStateStore
                 (StateSchema.ParamNextEffectGeneration, next.EffectGeneration),
                 (StateSchema.ParamCause, next.Cause?.ToString())));
         StateCommitter.Commit(_connection, transaction, _changes, pairId, verifiedChange, DateTimeOffset.UtcNow,
-            narrowRecordUpdates: true, raised: null, scans: ActiveScanPartitions(pairId, transaction));
+            narrowRecordUpdates: true, raised: null, scans: ActiveScanPartitions(pairId, transaction), endEpisode: endEpisode);
     }
 
     /// <inheritdoc />
@@ -2893,8 +2969,10 @@ public sealed partial class StateStore : IStateStore
         ValidateFolderChange(transaction, pair, pairId, operation, operation.RootEntry.Path,
             operation.SavedRoot, verifiedRootChange);
         if (selection is not null) _changes.AdvanceBefore(transaction, pairId, selection, verifiedRootChange);
+        var ended = verifiedRootChange.CloseProvenAbsent ? new System.Runtime.CompilerServices.StrongBox<bool>() : null;
         StateCommitter.Commit(_connection, transaction, _changes, pairId, verifiedRootChange, DateTimeOffset.UtcNow,
-            narrowRecordUpdates: true, raised: null, scans: ActiveScanPartitions(pairId, transaction));
+            narrowRecordUpdates: true, raised: null, scans: ActiveScanPartitions(pairId, transaction),
+            endEpisode: ended is null ? null : AbsentEpisodeEnd(transaction, pair, pairId, ended));
         RequireOne(Execute(_connection, transaction, StateSchema.TerminalFolder,
             (StateSchema.ParamPairRow, pair), (StateSchema.ParamOperation, operationId),
             (StateSchema.ParamGeneration, expectedGeneration),
@@ -2902,6 +2980,7 @@ public sealed partial class StateStore : IStateStore
             (StateSchema.ParamNextPhase, nameof(FolderRemovalPhase.Complete)), (StateSchema.ParamCause, null)));
         transaction.Commit();
         UpdateClosures(pairId, verifiedRootChange);
+        if (ended?.Value == true) _changes.RecordRetirement(pairId);
     });
 
     private void ValidateFolderChange(SqliteTransaction transaction, long pair, string pairId,

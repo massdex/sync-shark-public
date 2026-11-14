@@ -24,4 +24,7 @@ public sealed record FolderRemovalState(
     /// <summary>Where each send checks the opposite side against <see cref="SourceEvidence"/>.</summary>
     public string CounterpartPath =>
         SourceEvidence?.Path ?? SavedRoot?.PathOn(PathNames.Other(DeletingSide)) ?? RootEntry.Path;
+
+    /// <summary>The absent-side identity a restored root had before this run restored it; null otherwise.</summary>
+    public string? PreRestoreId { get; init; }
 }

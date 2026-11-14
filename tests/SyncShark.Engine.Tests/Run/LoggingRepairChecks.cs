@@ -31,9 +31,30 @@ internal static class LoggingRepairChecks
             await SourceRetryWaitAsync(Path.Combine(folder.FullName, "source-wait"));
             await SourceLossPublishesAllMembersAsync(Path.Combine(folder.FullName, "source-members"));
             await SourceLossPublishesAllMembersAsync(Path.Combine(folder.FullName, "source-members-several"), several: true);
-            await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "source-before"), afterCommit: false);
-            await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "source-after"), afterCommit: true);
-            await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "superseded"), afterCommit: false, sourceFailed: false);
+            await ReplacementBaseAfterRestartWakesRepairAsync(Path.Combine(folder.FullName, "replacement-wake"));
+            await BootstrapDebtSurvivesRecoverableLossAsync(Path.Combine(folder.FullName, "bootstrap-recovery"));
+            await ExplicitRepairClearedRowStillRecoversAsync(Path.Combine(folder.FullName, "explicit-recovery"), false);
+            await ExplicitRepairClearedRowStillRecoversAsync(Path.Combine(folder.FullName, "explicit-recovery-available"), true);
+            foreach (var members in new[] { 1, 2 })
+            {
+                foreach (var kind in Enum.GetValues<SourceFault>())
+                    await SourceRecoversAtDeadlineAsync(Path.Combine(folder.FullName, "deadline-" + kind + members), kind, false, members);
+                await SourceRecoversAtDeadlineAsync(Path.Combine(folder.FullName, "deadline-failed-resume-" + members),
+                    SourceFault.Resumed, true, members);
+            }
+            await SourceFailureAttemptsAsync(Path.Combine(folder.FullName, "source-before"), afterCommit: false,
+                SourceFault.Resumed, failedResume: false);
+            await SourceFailureAttemptsAsync(Path.Combine(folder.FullName, "source-after"), afterCommit: true,
+                SourceFault.Resumed, failedResume: false);
+            foreach (var afterCommit in new[] { false, true })
+            {
+                foreach (var kind in new[] { SourceFault.JournalChanged, SourceFault.BelowRetention, SourceFault.AheadOfEnd })
+                    await SourceFailureAttemptsAsync(Path.Combine(folder.FullName, "source-" + kind + afterCommit), afterCommit, kind, false);
+                await SourceFailureAttemptsAsync(Path.Combine(folder.FullName, "source-failed-resume-" + afterCommit), afterCommit,
+                    SourceFault.Resumed, true);
+            }
+            await MemberCatchUpKeepsFailureAsync(Path.Combine(folder.FullName, "source-member-inverse"));
+            await SourceAttemptRetryAsync(Path.Combine(folder.FullName, "superseded"), afterCommit: false);
             await SupersededAccountingFailureAsync(Path.Combine(folder.FullName, "superseded-accounting"));
             await ScheduledSupersessionRecoveryAsync(Path.Combine(folder.FullName, "scheduled-superseded"));
             await IdleRetryHeartbeatAsync(Path.Combine(folder.FullName, "idle-retry"));
@@ -654,7 +675,7 @@ internal static class LoggingRepairChecks
     }
 
     // J1 (-11 §3): P1's accounting fails, yet P2 gets its row, Monitor wait, log and the status tail; after a
-    // restart past P2's deadline the startup wake alone runs each member's Repair once. Several failures aggregate.
+    // restart past P2's deadline its due wake recovers without Repair. Several failures aggregate.
     private static async Task SourceLossPublishesAllMembersAsync(string folder, bool several = false)
     {
         var clock = new FakeTimeProvider();
@@ -704,8 +725,8 @@ internal static class LoggingRepairChecks
         Exception? actual = null;
         try { await rig.Host.ChangeGenerationAsync(rig.Pair, (_, _, _, _) => Task.FromResult(true), default); }
         catch (Exception error) { actual = error; }
-        Check.Require(rig.Store.Obligated(rig.Pair.PairId) && rig.Store.Obligated(other.PairId),
-            "accounting failure for the first member cannot prevent publication of the second member's Repair debt");
+        Check.Require(!rig.Store.Obligated(rig.Pair.PairId) && !rig.Store.Obligated(other.PairId),
+            "accounting failure for the first member cannot prevent the second member's retry publication, and a recoverable source loss adds no source-loss obligation");
         Check.Require(rig.Host.Status().Status == AutoStatus.Held,
             "J1 after the status tail the host reports the source failure");
         var written = logs.ToArray();
@@ -719,7 +740,7 @@ internal static class LoggingRepairChecks
             Check.Require(actual is AggregateException { InnerExceptions: [var first, var second] } &&
                     ReferenceEquals(first, failure) && ReferenceEquals(second, failure) && observed.Accountings == 0 &&
                     members.All(id => rig.Store.ReadPrerequisiteRetry(id) is null),
-                "J1 several members' accounting failures are reported together, each member keeping its debt");
+                "J1 several members' accounting failures are reported together; neither member gains debt or a deadline");
             await monitor.StopAsync();
             try { await rig.DisposeAsync(); }
             catch (AggregateException error) { reported = error; }
@@ -745,7 +766,8 @@ internal static class LoggingRepairChecks
         Check.Require(reported?.InnerExceptions is [var single] && ReferenceEquals(single, failure),
             "host disposal reports the preserved source-loss accounting failure once");
 
-        // Restart on the same store past P2's deadline; nothing but the host's startup wake reaches either member.
+        // Restart on the same store past P2's deadline; only the host's startup wake reaches P2, then the check drives
+        // P1's catch-up itself.
         clock.Advance(firstWait);
         RestartFinishStore? restarted = null;
         var restartedMonitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
@@ -753,14 +775,15 @@ internal static class LoggingRepairChecks
             mode: EngineHost.Mode.Persistent, wire: rig.Wire, openLog: OpenLog,
             decorate: store => new HookStore(restarted = new RestartFinishStore(store)));
         await after.Host.StartAsync(default);
-        await UntilAsync(() => members.All(id => !after.Store.Obligated(id) && restarted!.Finishes(id) == 1));
+        await UntilAsync(() => after.Store.ReadPrerequisiteRetry(p2) is null);
+        await after.Host.CatchUpLocalAsync(p1, after.Store.ReadPairExecution(p1)!.Value.Generation, default);
         var quiet = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using (restartedMonitor.ScheduleQuietStatus(TimeSpan.Zero, () => quiet.TrySetResult()))
             await quiet.Task.WaitAsync(TimeSpan.FromSeconds(30));
-        Check.Require(restarted!.Finishes(p2) == 1 && after.Store.ReadPrerequisiteRetry(p2) is null,
-            "J1 after restart past its deadline P2's prerequisite Repair runs exactly once with no other event");
-        Check.Require(restarted.Finishes(p1) == 1,
-            "J1 P1's own debt is reached by the same startup wake through its Repair reason");
+        Check.Require(restarted!.Finishes(p2) == 0 && after.Store.ReadPrerequisiteRetry(p2) is null &&
+            !after.Store.Obligated(p2), "P2's due wake recovers without a Repair");
+        Check.Require(restarted.Finishes(p1) == 0 && !after.Store.Obligated(p1),
+            "P1 owes nothing after its recoverable loss");
     }
 
     // Counts committed Repair completions per pair for the J1 restart.
@@ -778,12 +801,13 @@ internal static class LoggingRepairChecks
         }
     }
 
-    private static async Task UntilAsync(Func<bool> condition)
+    private static async Task UntilAsync(Func<bool> condition, Func<string>? evidence = null)
     {
         var bound = Environment.TickCount64 + 30_000;
         while (!condition())
         {
-            Check.Require(Environment.TickCount64 < bound, "the awaited host state arrives");
+            if (Environment.TickCount64 >= bound)
+                Check.Require(false, "the awaited host state arrives" + (evidence is null ? "" : "; " + evidence()));
             await Task.Yield();
         }
     }
@@ -796,7 +820,7 @@ internal static class LoggingRepairChecks
             [volumes.Values.Cast<object>().Single(), new IOException("synthetic source loss")]);
     }
 
-    private static async Task SourceAttemptRetryAsync(string folder, bool afterCommit, bool sourceFailed = true)
+    private static async Task SourceAttemptRetryAsync(string folder, bool afterCommit)
     {
         var clock = new QuietClock();
         var paths = new List<string>();
@@ -808,12 +832,8 @@ internal static class LoggingRepairChecks
                 paths.Add(log.Path);
                 return log;
             });
-        observed!.AtFinish = () =>
-        {
-            if (sourceFailed) FailJournal(rig.Host);
-            else rig.Store.RequireRepairAfterLoss(rig.Pair.PairId,
-                rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation);
-        };
+        observed!.AtFinish = () => rig.Store.RequireRepairAfterLoss(rig.Pair.PairId,
+            rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation);
         for (var attempt = 1; attempt <= 2; attempt++)
         {
             var summary = await rig.Host.RunPrerequisiteAsync(rig.Pair.PairId, default);
@@ -825,9 +845,8 @@ internal static class LoggingRepairChecks
             Check.Require(!rig.Store.Issues(rig.Pair.PairId).Any(issue => issue.Cause == TextKey.RequiredRepairRetry),
                 "repeated source loss never creates the generic prerequisite retry notice");
         }
-        var reason = sourceFailed ? TextKey.WaitSourceRetry : TextKey.WaitSupersededRetry;
         Check.Require(paths.SelectMany(Lines).Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Wait) &&
-            fields[RunLog.FieldWhat] == reason.ToString()) == 2,
+            fields[RunLog.FieldWhat] == TextKey.WaitSupersededRetry.ToString()) == 2,
             "each source-attributed attempt emits its selected Wait even after the attempt log completed");
         observed.AtFinish = null;
         Check.Require((await rig.Host.RunPrerequisiteAsync(rig.Pair.PairId, default)) is { Completed: true } &&
@@ -906,9 +925,763 @@ internal static class LoggingRepairChecks
         }
     }
 
+    private static bool MonitorIdle(Massdex.SyncShark.Engine.Run.Monitor monitor, string pairId)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var type = monitor.GetType();
+        lock (type.GetField("_gate", flags)!.GetValue(monitor)!)
+            return !((HashSet<string>)type.GetField("_opportunities", flags)!.GetValue(monitor)!).Contains(pairId) &&
+                !((HashSet<string>)type.GetField("_runningPairs", flags)!.GetValue(monitor)!).Contains(pairId);
+    }
+
+    private static async Task BootstrapDebtSurvivesRecoverableLossAsync(string folder)
+    {
+        var clock = new FakeTimeProvider();
+        clock.Advance(DateTimeOffset.UtcNow - clock.GetUtcNow());
+        var logs = new ConcurrentQueue<string>();
+        IStateStore raw = null!;
+        SourceFinishStore observed = null!;
+        RestartFinishStore finishes = null!;
+        await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock, mode: EngineHost.Mode.Persistent,
+            decorate: store =>
+            {
+                raw = store;
+                return new HookStore(observed = new SourceFinishStore(finishes = new RestartFinishStore(store), false));
+            }, openLog: id =>
+            {
+                var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
+                logs.Enqueue(log.Path);
+                return log;
+            });
+        var pairId = rig.Pair.PairId;
+        rig.Wire.BeforeListingAsync = async (_, _) =>
+        {
+            rig.Wire.BeforeListingAsync = null;
+            observed.ArmPageFault(SourceFault.Resumed);
+            File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "trigger.txt"), "pending");
+            await UntilAsync(() => logs.SelectMany(Lines).Any(fields =>
+                fields[RunLog.FieldKind] == nameof(RunEventKind.Failed)));
+        };
+        await rig.Host.StartAsync(default);
+        await UntilAsync(() => raw.ReadPrerequisiteRetry(pairId) is { Attempts: 1 } &&
+            logs.SelectMany(Lines).Count(fields => fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry)) == 1);
+        Check.Require(raw.ReadSource(pairId, Side.Local)?.Obligation == SourceObligation.Bootstrap &&
+            !raw.Issues(pairId).Any(issue => issue.Cause == TextKey.RequiredRepairRetry) && finishes.Finishes(pairId) == 0,
+            "recoverable loss keeps Bootstrap and its source retry without a root notice");
+        var wait = TimeSpan.FromSeconds(rig.Host.Settings.Backoff.InitialBackoffSeconds);
+        await UntilAsync(() => clock.NextDueIn == wait);
+        clock.Advance(wait);
+        await UntilAsync(() => finishes.Finishes(pairId) == 1 && !raw.Obligated(pairId) &&
+            raw.ReadPrerequisiteRetry(pairId) is null);
+    }
+
+    // With sourceAvailable, a non-attempt catch-up resumes the source right after the explicit finish clears the row,
+    // so only the member's retained recovery purpose admits the next prerequisite attempt.
+    private static async Task ExplicitRepairClearedRowStillRecoversAsync(string folder, bool sourceAvailable)
+    {
+        var clock = new FakeTimeProvider();
+        clock.Advance(DateTimeOffset.UtcNow - clock.GetUtcNow());
+        var logs = new ConcurrentQueue<string>();
+        IStateStore raw = null!;
+        SourceFinishStore observed = null!;
+        RestartFinishStore finishes = null!;
+        var afterFinish = false;
+        var rowCleared = false;
+        Action? afterCleared = null;
+        string pairId = string.Empty;
+        await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock, mode: EngineHost.Mode.Persistent,
+            decorate: store =>
+            {
+                raw = store;
+                return new HookStore(observed = new SourceFinishStore(finishes = new RestartFinishStore(store), false))
+                {
+                    AfterFinishRepair = () =>
+                    {
+                        if (!afterFinish) return;
+                        rowCleared = raw.ReadPrerequisiteRetry(pairId) is null;
+                        afterFinish = false;
+                        afterCleared?.Invoke();
+                    }
+                };
+            }, openLog: id =>
+            {
+                var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
+                logs.Enqueue(log.Path);
+                return log;
+            });
+        pairId = rig.Pair.PairId;
+        using (var log = rig.Log(folder, "initial"))
+            Check.Require((await rig.RunAsync(log, default)).Completed, "explicit recovery starts after Bootstrap");
+        await rig.Host.StartAsync(default);
+        var generation = raw.ReadPairExecution(pairId)!.Value.Generation;
+        await rig.Host.CatchUpLocalAsync(pairId, generation, default);
+        await UntilAsync(() => EngineHostChecks.AutoSyncIdle(rig.Host, pairId));
+        while (logs.TryDequeue(out _)) { }
+        var now = clock.GetUtcNow();
+        if (sourceAvailable)
+            afterCleared = () => rig.Host.CatchUpLocalAsync(pairId, generation, default)
+                .WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+        int SourceBaseStages() => logs.SelectMany(Lines).Count(fields =>
+            fields[RunLog.FieldWhat] == nameof(TextKey.StageSourceBase) && fields[RunLog.FieldOutcome] == nameof(RunEvent.Ended));
+        observed.AtFinish = () =>
+        {
+            observed.AtFinish = null;
+            observed.ArmPageFault(SourceFault.Resumed);
+            File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "trigger.txt"), "pending");
+            Check.Require(SpinWait.SpinUntil(() => raw.ReadPrerequisiteRetry(pairId) is { Attempts: 1 } &&
+                logs.SelectMany(Lines).Any(fields => fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry)),
+                TimeSpan.FromSeconds(30)), "background failure accounting completes before explicit finish");
+            Check.Require(raw.ReadItemRetry(pairId) is not null &&
+                !rig.Host.ItemRetryHolds(pairId, generation, out var admitted) && admitted is null,
+                "the stopped source owns recovery before explicit finish clears the row");
+            afterFinish = true;
+        };
+        var operations = new EngineOperations(rig.Instance.StateAuthority.ProductRoot, _ => { }, rig.Host);
+        Check.Require(await operations.RepairAsync(pairId, default) is { Completed: true } && rowCleared,
+            "explicit Repair commits and clears the debt-free source retry");
+        if (sourceAvailable) await UntilAsync(() => SourceBaseStages() != 0);
+        await UntilAsync(() => rig.Host.Status().Status == AutoStatus.Idle);
+        Check.Require(finishes.Finishes(pairId) == 2 && !raw.Obligated(pairId) &&
+            raw.ReadPrerequisiteRetry(pairId) is null && clock.GetUtcNow() == now,
+            "operation wake alone resumes the source without another Repair or clock advance");
+        if (sourceAvailable)
+            Check.Require(SourceBaseStages() == 1,
+                "with no row, no debt and an available source, the retained recovery purpose admits one prerequisite " +
+                "attempt, whose own log records the source-base stage once; stages=" + SourceBaseStages());
+    }
+
+    // One Local journal source, not one root: a sibling Local root on the same volume and a Dropbox root that
+    // pair-a's scope holds out as nested (the ScenarioFixture.AddSecondPair topology; the wire has one tree).
+    private static async Task AddNestedMemberAsync(RepairChecks.ComposedRig rig, IStateStore raw, string folder, string id)
+    {
+        var local = Path.Combine(folder, id + "-local");
+        Directory.CreateDirectory(local);
+        rig.Wire.SeedFolder(id);
+        var dropboxRoot = rig.Pair.DropboxRoot + "/" + id;
+        var other = rig.Pair with
+        {
+            PairId = id, Drive = null, LocalRoot = local, DropboxRoot = dropboxRoot,
+            Roots = rig.Pair.Roots! with
+            {
+                LocalRoot = local, DropboxRoot = dropboxRoot, Local = WindowsDirectoryListing.ReadIdentity(local)
+            }
+        };
+        raw.SavePair(other);
+        await rig.Host.RecomposeCurrentAsync(id, default);
+        var identity = await rig.Host.DispatchAsync(id, (registration, pair, generation, _) =>
+            rig.Host.BorrowGeneration(registration, pair.PairId, generation).Dropbox.ReadRootIdentityAsync(default),
+            default);
+        raw.SavePair(other with { Roots = other.Roots! with { Dropbox = identity } });
+        // Both generations recompose against the saved pairs, so pair-a's scope now holds pair-b's root out.
+        foreach (var member in new[] { rig.Pair.PairId, id })
+        {
+            await rig.Host.DrainGenerationAsync(member, default);
+            await rig.Host.RecomposeCurrentAsync(member, default);
+        }
+        await rig.Host.EnsureSourceBasesAsync(id, default);
+    }
+
+    private static async Task SourceRecoversAtDeadlineAsync(string folder, SourceFault kind, bool failedResume, int memberCount)
+    {
+        var clock = new FakeTimeProvider();
+        clock.Advance(DateTimeOffset.UtcNow - clock.GetUtcNow());
+        var logs = new ConcurrentQueue<(string PairId, string Path)>();
+        IStateStore raw = null!;
+        SourceFinishStore observed = null!;
+        RestartFinishStore finishes = null!;
+        var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
+        var gate = new object();
+        var armed = false;
+        var counting = false;
+        var retryPages = 0;
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var snapshot = new TaskCompletionSource<Dictionary<string, int>>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var members = Array.Empty<string>();
+        var normalDebt = new ConcurrentDictionary<string, bool>();
+        // Recovery finish record (B-229): each member's first recovery FinishRepair, with its row and log counts.
+        var pinning = false;
+        var finished = new Dictionary<string, int>(StringComparer.Ordinal);
+        var atFinish = new Dictionary<string, (bool RowNull, int Waits, int Failures)>(StringComparer.Ordinal);
+        // Two-member order (B-229): pair-b's attempt is held after registration, at its own log, before its own catch-up.
+        string? holdAttempt = null;
+        var attemptHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAttempt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock, monitor: monitor,
+            mode: EngineHost.Mode.Persistent, openLog: id =>
+            {
+                var hold = false;
+                lock (gate)
+                    if (holdAttempt == id) (hold, holdAttempt) = (true, null);
+                if (hold)
+                {
+                    attemptHeld.TrySetResult();
+                    releaseAttempt.Task.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+                }
+                var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
+                logs.Enqueue((id, log.Path));
+                return log;
+            }, decorate: store =>
+            {
+                raw = store;
+                var counted = Massdex.SyncShark.Engine.Tests.Local.JournalSourceChecks.HookedStore.Wrap(store);
+                var hook = (Massdex.SyncShark.Engine.Tests.Local.JournalSourceChecks.HookedStore)(object)counted;
+                hook.Before = method =>
+                {
+                    lock (gate)
+                    {
+                        if (armed && method.Name == nameof(IStateStore.ReadJournal)) { armed = false; counting = true; }
+                        if (counting) counts[method.Name] = counts.GetValueOrDefault(method.Name) + 1;
+                    }
+                };
+                hook.After = method =>
+                {
+                    if (method.Name != nameof(IStateStore.AcquireJournalPage) || !hook.LastPageHasDebt) return;
+                    foreach (var id in members)
+                        if (raw.ReadSource(id, Side.Local)?.Obligation == SourceObligation.NormalRepair) normalDebt[id] = true;
+                };
+                return new HookStore(observed = new SourceFinishStore(finishes = new RestartFinishStore(counted), false))
+                {
+                    AfterPrerequisiteRetries = () =>
+                    {
+                        lock (gate)
+                        {
+                            retryPages++;
+                            if (!counting) return;
+                            counting = false;
+                            snapshot.TrySetResult(new Dictionary<string, int>(counts));
+                        }
+                    },
+                    AfterFinishRepair = () =>
+                    {
+                        lock (gate)
+                        {
+                            if (!pinning) return;
+                            foreach (var id in members)
+                            {
+                                if (finishes.Finishes(id) <= finished[id] || atFinish.ContainsKey(id)) continue;
+                                atFinish[id] = (raw.ReadPrerequisiteRetry(id) is null, Waits(id), Failures(id));
+                            }
+                        }
+                    }
+                };
+            });
+        members = memberCount == 1 ? [rig.Pair.PairId] : [rig.Pair.PairId, "pair-b"];
+        if (memberCount == 2) await AddNestedMemberAsync(rig, raw, folder, members[1]);
+        foreach (var id in members)
+        {
+            using var log = rig.Log(folder, "initial-" + id);
+            Check.Require((await rig.RunAsync(log, default, targetPair: id)).Completed && !raw.Obligated(id),
+                "each recovery fixture member starts with its initial Repair complete");
+        }
+        await rig.Host.StartAsync(default);
+        await rig.Host.CatchUpLocalAsync(rig.Pair.PairId, raw.ReadPairExecution(rig.Pair.PairId)!.Value.Generation, default);
+        bool Idle() => members.All(id => EngineHostChecks.AutoSyncIdle(rig.Host, id) && MonitorIdle(monitor, id));
+        using (var bound = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        {
+            do
+            {
+                await UntilAsync(Idle);
+                var settled = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using (monitor.ScheduleQuietStatus(TimeSpan.Zero, () =>
+                {
+                    lock (gate) settled.TrySetResult(retryPages);
+                }))
+                {
+                    var mark = await settled.Task.WaitAsync(bound.Token);
+                    await UntilAsync(() => { lock (gate) return retryPages > mark; });
+                }
+                bound.Token.ThrowIfCancellationRequested();
+            } while (!Idle());
+        }
+        while (logs.TryDequeue(out _)) { }
+        lock (gate) armed = kind == SourceFault.Resumed && !failedResume;
+        observed.ArmPageFault(kind);
+        foreach (var id in members) File.WriteAllText(Path.Combine(raw.Pair(id)!.LocalRoot, "trigger.txt"), "pending");
+        if (kind == SourceFault.Resumed && !failedResume)
+        {
+            var measured = await snapshot.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            var expected = new Dictionary<string, int>
+            {
+                [nameof(IStateStore.RecordPrerequisiteFailure)] = memberCount,
+                [nameof(IStateStore.ReadSource)] = 3 * memberCount,
+                [nameof(IStateStore.ReadPrerequisiteRetry)] = memberCount,
+                [nameof(IStateStore.ReadPairExecution)] = memberCount,
+                [nameof(IStateStore.ReadJournal)] = 1,
+                [nameof(IStateStore.ReadPrerequisiteRetries)] = 1
+            };
+            var evidence = string.Join(", ", measured.OrderBy(item => item.Key).Select(item => item.Key + "=" + item.Value));
+            Console.WriteLine("B229 C1e c M=" + memberCount + ": " + evidence);
+            foreach (var (method, count) in expected)
+                Check.Require(measured.GetValueOrDefault(method) == count, "background recovery " + method + ": " + evidence);
+            foreach (var method in measured.Keys)
+                Check.Require(expected.ContainsKey(method), "unexpected background recovery method " + method + ": " + evidence);
+        }
+        int Waits(string id) => logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
+            .Count(fields => fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry));
+        int Failures(string id) => logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
+            .Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Failed));
+        bool Accounted(int attempts) => members.All(id => raw.ReadPrerequisiteRetry(id)?.Attempts == attempts &&
+            Waits(id) == attempts);
+        await UntilAsync(() => Accounted(1));
+        foreach (var id in members)
+        {
+            Check.Require(!raw.Obligated(id) && logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
+                .Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Failed)) == 1,
+                "the first source failure adds no debt and emits one failure per member");
+            Check.Require(raw.ReadItemRetry(id) is not null &&
+                !rig.Host.ItemRetryHolds(id, raw.ReadPairExecution(id)!.Value.Generation, out var admitted) && admitted is null,
+                "the stopped source excludes the durable retry from item-only admission");
+        }
+        if (failedResume)
+        {
+            observed.ArmPageFault(SourceFault.Resumed);
+            lock (gate)
+            {
+                foreach (var id in members) finished[id] = finishes.Finishes(id);
+                pinning = true;
+            }
+        }
+        // Two members on one source: pair-b's attempt is pending before pair-a's deadline attempt resumes the source.
+        Task<RepairSummary?>? heldAttempt = null;
+        if (kind == SourceFault.Resumed && members.Length > 1)
+        {
+            lock (gate) holdAttempt = members[1];
+            heldAttempt = Task.Run(() => rig.Host.RunPrerequisiteAsync(members[1], default));
+            await attemptHeld.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        var firstWait = TimeSpan.FromSeconds(rig.Host.Settings.Backoff.InitialBackoffSeconds);
+        await UntilAsync(() => clock.NextDueIn == firstWait);
+        clock.Advance(firstWait);
+        if (heldAttempt is not null && !failedResume)
+        {
+            // pair-a's own catch-up resumed the source and published pair-b's notice; pair-b's AutoSync handled it while
+            // pair-b's attempt was still pending with its source-recovery row, which item completion must not retire.
+            await UntilAsync(() => raw.ReadPrerequisiteRetry(members[0]) is null &&
+                raw.SyncedByKey(members[1], Side.Local, PathNames.Key("trigger.txt")) is not null &&
+                EngineHostChecks.AutoSyncIdle(rig.Host, members[1]));
+            Check.Require(raw.ReadPrerequisiteRetry(members[1]) is { Attempts: 1 } && observed.ItemCompletions(members[1]) == 0,
+                "pair-b's AutoSync ran on the resumed source while its attempt was pending and kept its retry row");
+            releaseAttempt.TrySetResult();
+            await heldAttempt.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        if (failedResume)
+        {
+            // Diagnostic only: each member's accounting, its Repair finishes, debt, pending attempt and Monitor state.
+            string AccountedEvidence()
+            {
+                var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                var registry = (System.Collections.IDictionary)typeof(EngineHost).GetField("_prerequisites", flags)!.GetValue(rig.Host)!;
+                var hostGate = typeof(EngineHost).GetField("_gate", flags)!.GetValue(rig.Host)!;
+                return string.Join("; ", members.Select(id =>
+                {
+                    var waits = Waits(id);
+                    var row = raw.ReadPrerequisiteRetry(id);
+                    object? pending;
+                    lock (hostGate) pending = registry[id];
+                    return $"member={id}, accounted={row?.Attempts == 2 && waits == 2}, rowAttempts={row?.Attempts.ToString() ?? "none"}, " +
+                        $"retryWaits={waits}, failures={Failures(id)}, finishes={finishes.Finishes(id)}, obligated={raw.Obligated(id)}, " +
+                        $"localObligation={raw.ReadSource(id, Side.Local)?.Obligation?.ToString() ?? "none"}, " +
+                        $"pending={(pending is null ? "none" : "sourceFailed=" + pending.GetType().GetField("SourceFailed", flags)!.GetValue(pending))}, " +
+                        $"monitorIdle={MonitorIdle(monitor, id)}";
+                }));
+            }
+            // After the failed resume (B-229), each member is obligated and accounted twice,
+            // or, with another member on the source, already repaired by the restart a member's catch-up ran. Monitor idle
+            // means no restart wake or attempt is still on its way for it.
+            bool Owed(string id) => raw.Obligated(id) && raw.ReadPrerequisiteRetry(id)?.Attempts == 2 && Waits(id) == 2;
+            bool Restarted(string id) => members.Length > 1 && !raw.Obligated(id) && finishes.Finishes(id) == 2;
+            if (heldAttempt is not null)
+            {
+                // pair-a's own catch-up failed while pair-b's attempt was pending: pair-a is accounted twice, and the
+                // failure reached pair-b's attempt (one more Failed line), not its row (still one attempt and one wait).
+                await UntilAsync(() => raw.ReadPrerequisiteRetry(members[0])?.Attempts == 2 && Waits(members[0]) == 2,
+                    AccountedEvidence);
+                Check.Require(raw.ReadPrerequisiteRetry(members[1])?.Attempts == 1 && Waits(members[1]) == 1 &&
+                    Failures(members[1]) == 2, "pair-b's attempt was pending when pair-a's catch-up failed; " + AccountedEvidence());
+                releaseAttempt.TrySetResult();
+                await heldAttempt.WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            await UntilAsync(() => members.All(id => (Owed(id) || Restarted(id)) && MonitorIdle(monitor, id)), AccountedEvidence);
+            var owed = members.Where(Owed).ToArray();
+            if (owed.Length != 0)
+            {
+                var next = owed.Select(id => raw.ReadPrerequisiteRetry(id)!.Value.RetryAfter).Min() - clock.GetUtcNow();
+                await UntilAsync(() => clock.NextDueIn == next);
+                clock.Advance(next);
+            }
+            // Clean completion (B-229): a member's whole-pair Repair ends with its row null, and once its
+            // attempt has completed (Monitor idle) that completion has added no retry wait and no failure.
+            await UntilAsync(() =>
+            {
+                lock (gate) if (!members.All(atFinish.ContainsKey)) return false;
+                return members.All(id => MonitorIdle(monitor, id));
+            }, AccountedEvidence);
+            foreach (var id in members)
+            {
+                (bool RowNull, int Waits, int Failures) at;
+                lock (gate) at = atFinish[id];
+                var row = raw.ReadPrerequisiteRetry(id);
+                Check.Require(at.RowNull && row is null && Waits(id) == at.Waits && Failures(id) == at.Failures,
+                    "a completed whole-pair Repair leaves its member's row null and its completion records no failure; " +
+                    $"member={id}, rowNullAtFinish={at.RowNull}, rowAttemptsNow={row?.Attempts.ToString() ?? "none"}, " +
+                    $"waitsAtFinish={at.Waits}, waitsNow={Waits(id)}, failuresAtFinish={at.Failures}, failuresNow={Failures(id)}; " +
+                    AccountedEvidence());
+            }
+        }
+        var repair = kind != SourceFault.Resumed || failedResume;
+        await UntilAsync(() => members.All(id => raw.ReadPrerequisiteRetry(id) is null && !raw.Obligated(id) &&
+            finishes.Finishes(id) == (repair ? 2 : 1)));
+        Check.Require(members.All(id => observed.ItemCompletions(id) == 0 && (!repair || normalDebt.ContainsKey(id))),
+            "source recovery never retires an item-only retry; lost continuity repairs the observed normal debt; " +
+            $"variant={nameof(SourceRecoversAtDeadlineAsync)}; kind={kind}; members={memberCount}; failedResume={failedResume}; continuity={(repair ? "lost" : "healthy")}; " +
+            string.Join("; ", members.Select(id => $"member={id}, CompleteItemRetry={observed.ItemCompletions(id)}, " +
+                $"CompleteItemRetryLastResult={observed.ItemCompletionResult(id)?.ToString() ?? "none recorded"}, " +
+                $"observedDebtKinds={(normalDebt.ContainsKey(id) ? nameof(SourceObligation.NormalRepair) : "none recorded")}")));
+        if (!repair)
+        {
+            var before = raw.ReadWorkWatermark();
+            foreach (var id in members) File.WriteAllText(Path.Combine(raw.Pair(id)!.LocalRoot, "after.txt"), "later");
+            // Diagnostic only: each conjunct of the wait below, per member, with its binding, notices and retry row.
+            string AfterEvidence() =>
+                $"watermarkAdvanced={raw.ReadWorkWatermark() > before} (before={before}, now={raw.ReadWorkWatermark()}); " +
+                $"wireHasAfter={rig.Wire.Snapshot().Any(item => item.Path == "after.txt" && !item.Folder && Encoding.UTF8.GetString(item.Bytes) == "later")}; " +
+                "wire=[" + string.Join(", ", rig.Wire.Snapshot().Where(item => item.Path.EndsWith("after.txt", StringComparison.Ordinal))
+                    .Select(item => item.Path + (item.Folder ? " folder" : "=" + Encoding.UTF8.GetString(item.Bytes)))) + "]; " +
+                $"hostStatus={rig.Host.Status()}; " + string.Join("; ", members.Select(id =>
+                    $"member={id}, bound={raw.SyncedByKey(id, Side.Local, PathNames.Key("after.txt")) is not null}, " +
+                    $"binding={raw.SyncedByKey(id, Side.Local, PathNames.Key("after.txt"))?.ToString() ?? "none"}, " +
+                    $"retry={(raw.ReadPrerequisiteRetry(id) is { } row ? row.Attempts + "@" + row.RetryAfter.UtcTicks : "none")}, " +
+                    $"obligated={raw.Obligated(id)}, issues=[" +
+                    string.Join(", ", raw.Issues(id).Select(issue => issue.Kind + "/" + issue.Cause + "/" + issue.Path)) + "]"));
+            await UntilAsync(() => raw.ReadWorkWatermark() > before && members.All(id =>
+                raw.SyncedByKey(id, Side.Local, PathNames.Key("after.txt")) is not null) && rig.Wire.Snapshot()
+                .Any(item => item.Path == "after.txt" && !item.Folder && Encoding.UTF8.GetString(item.Bytes) == "later"), AfterEvidence);
+        }
+    }
+
+    private static async Task ReplacementBaseAfterRestartWakesRepairAsync(string folder)
+    {
+        var clock = new FakeTimeProvider();
+        clock.Advance(DateTimeOffset.UtcNow - clock.GetUtcNow());
+        var logs = new ConcurrentQueue<string>();
+        RunLog OpenLog(string id)
+        {
+            var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
+            logs.Enqueue(log.Path);
+            return log;
+        }
+        IStateStore raw = null!;
+        SourceFinishStore firstStore = null!;
+        var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
+        var rig = await RepairChecks.ComposeRigAsync(folder, time: clock, monitor: monitor,
+            mode: EngineHost.Mode.Persistent, openLog: OpenLog,
+            decorate: store => { raw = store; return new HookStore(firstStore = new SourceFinishStore(store, false)); });
+        var pairId = rig.Pair.PairId;
+        var firstWait = TimeSpan.FromSeconds(rig.Host.Settings.Backoff.InitialBackoffSeconds);
+        try
+        {
+            Check.Require(MonitorIdle(monitor, pairId), "the first base queues no replacement recovery wake");
+            using (var log = rig.Log(folder, "initial"))
+                Check.Require((await rig.RunAsync(log, default)).Completed && !raw.Obligated(pairId),
+                    "the restart fixture begins with a completed Repair and no debt");
+            await rig.Host.StartAsync(default);
+            await rig.Host.CatchUpLocalAsync(pairId, raw.ReadPairExecution(pairId)!.Value.Generation, default);
+            while (logs.TryDequeue(out _)) { }
+            firstStore.ArmPageFault(SourceFault.Resumed);
+            File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "trigger.txt"), "pending");
+            await UntilAsync(() => raw.ReadPrerequisiteRetry(pairId) is { Attempts: 1 } && logs.SelectMany(Lines)
+                .Any(fields => fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry)));
+            Check.Require(!raw.Obligated(pairId) && raw.ReadPrerequisiteRetry(pairId)!.Value.RetryAfter == clock.GetUtcNow() + firstWait,
+                "the first source failure leaves a debt-free first retry");
+        }
+        finally
+        {
+            await monitor.StopAsync();
+            await rig.DisposeAsync();
+        }
+        clock.Advance(firstWait);
+        SourceFinishStore restarted = null!;
+        RestartFinishStore finishes = null!;
+        var secondMonitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
+        await using var after = await RepairChecks.ComposeRigAsync(folder, time: clock, monitor: secondMonitor,
+            mode: EngineHost.Mode.Persistent, wire: rig.Wire, openLog: OpenLog, composeBeforeStart: false,
+            decorate: store =>
+            {
+                raw = store;
+                var pair = store.Pair(pairId)!;
+                var generation = store.ReadPairExecution(pairId)!.Value.Generation;
+                var source = store.ReadSource(pairId, Side.Local)!.Value;
+                var volume = pair.Roots!.LocalVolumeKey();
+                var saved = store.ReadJournal(volume)!;
+                Check.Require(store.AcquireJournalPage(volume, saved, saved with { JournalId = saved.JournalId ^ 1UL },
+                    [(pairId, generation, source.Epoch, source.Revision, false)], []) is not null,
+                    "downtime changes only the saved journal identity");
+                restarted = new SourceFinishStore(finishes = new RestartFinishStore(store), false);
+                restarted.HoldLostInterval();
+                return new HookStore(restarted);
+            });
+        try
+        {
+            await after.Host.StartAsync(default).WaitAsync(TimeSpan.FromSeconds(30));
+            await restarted.LostIntervalEntered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            await UntilAsync(() => raw.ReadPrerequisiteRetry(pairId) is null && restarted.ItemCompletions(pairId) == 1 &&
+                !raw.Obligated(pairId) && finishes.Finishes(pairId) == 0 && MonitorIdle(secondMonitor, pairId));
+            restarted.LostIntervalRelease.TrySetResult();
+            await UntilAsync(() => finishes.Finishes(pairId) == 1 && !raw.Obligated(pairId) &&
+                raw.ReadPrerequisiteRetry(pairId) is null && raw.LastRepair(pairId) is { Completed: true });
+            Check.Require(restarted.ItemCompletions(pairId) == 1,
+                "only the replacement-base wake reaches Repair after startup retired the item-only retry");
+        }
+        finally { restarted.LostIntervalRelease.TrySetResult(); }
+    }
+
+    private static async Task SourceFailureAttemptsAsync(string folder, bool afterCommit, SourceFault kind,
+        bool failedResume)
+    {
+        var clock = new QuietClock();
+        var paths = new List<string>();
+        IStateStore raw = null!;
+        SourceFinishStore observed = null!;
+        RestartFinishStore finishes = null!;
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var counterGate = new object();
+        var counting = false;
+        await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock,
+            decorate: store =>
+            {
+                raw = store;
+                var counted = Massdex.SyncShark.Engine.Tests.Local.JournalSourceChecks.HookedStore.Wrap(store);
+                ((Massdex.SyncShark.Engine.Tests.Local.JournalSourceChecks.HookedStore)(object)counted).Before = method =>
+                {
+                    lock (counterGate)
+                        if (counting) counts[method.Name] = counts.GetValueOrDefault(method.Name) + 1;
+                };
+                return new HookStore(observed = new SourceFinishStore(finishes = new RestartFinishStore(counted), afterCommit));
+            }, openLog: id =>
+            {
+                var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
+                paths.Add(log.Path);
+                return log;
+            });
+        var pairId = rig.Pair.PairId;
+        var generation = raw.ReadPairExecution(pairId)!.Value.Generation;
+        observed.AtFinish = () =>
+        {
+            observed.AtFinish = null;
+            var armed = observed.ArmPageFault(kind);
+            File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "finish-trigger.txt"), "trigger");
+            Exception? caught = null;
+            try { rig.Host.CatchUpLocalAsync(pairId, generation, default).WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult(); }
+            catch (Exception error) { caught = error; }
+            Check.Require(ReferenceEquals(caught, armed), "the at-finish catch-up completes within the bound with its armed failure");
+        };
+        Exception? firstFailure = null;
+        RepairSummary? first = null;
+        try { first = await rig.Host.RunPrerequisiteAsync(pairId, default); }
+        catch (Exception error) { firstFailure = error; }
+        var refused = !afterCommit && kind is SourceFault.JournalChanged or SourceFault.BelowRetention;
+        Check.Require(refused ? firstFailure is LiveAdmissionStaleException { Reason: LiveAdmissionStaleReason.CoverageChanged }
+                : firstFailure is null && first is { Completed: true },
+            "the first finish preserves its approved journal fence outcome: " + kind);
+        Check.Require(raw.Obligated(pairId) == refused && raw.ReadPrerequisiteRetry(pairId) is { Attempts: 1 } &&
+            observed.Accountings == 1, "the source failure is accounted once, preserving only the existing debt");
+        // Inverse of the own-catch-up discharge (B-229): this failure arrived after the attempt's own catch-up.
+        Check.Require(paths.SelectMany(Lines).Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Wait) &&
+            fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry)) == 1,
+            "a source failure after the attempt's own catch-up still records its source-retry wait");
+        var armedResume = failedResume ? observed.ArmPageFault(SourceFault.Resumed) : null;
+        var previousLogs = paths.Count;
+        lock (counterGate) counting = kind == SourceFault.Resumed;
+        Exception? resumeFailure = null;
+        RepairSummary? second = null;
+        try { second = await rig.Host.RunPrerequisiteAsync(pairId, default); }
+        catch (Exception error) { resumeFailure = error; }
+        finally { lock (counterGate) counting = false; }
+        if (kind == SourceFault.Resumed) RequireRecoveryCounts(counts, failedResume);
+        if (kind == SourceFault.Resumed && !failedResume)
+        {
+            var lines = paths.Skip(previousLogs).SelectMany(Lines).ToArray();
+            foreach (var stage in new[] { TextKey.StageVolumeWait, TextKey.StageJournalStop })
+                Check.Require(lines.Count(fields => fields[RunLog.FieldWhat] == stage.ToString() &&
+                    fields[RunLog.FieldOutcome] == nameof(RunEvent.Ended)) == 1,
+                    "one completed recovery stage is logged: " + stage);
+            var journal = lines.Single(fields => fields[RunLog.FieldWhat] == nameof(TextKey.StageJournal) &&
+                fields[RunLog.FieldOutcome] == nameof(RunEvent.Ended));
+            var format = Text.Get(TextKey.StageEnded, (TextArg.Name, Text.Get(TextKey.StageJournal)),
+                (TextArg.Count, "RECORDS"), (TextArg.Seconds, "SECONDS"));
+            var pattern = "^" + System.Text.RegularExpressions.Regex.Escape(format)
+                .Replace("RECORDS", "(?<records>[0-9]+)").Replace("SECONDS", ".*") + "$";
+            var match = System.Text.RegularExpressions.Regex.Match(journal[RunLog.FieldDetail], pattern);
+            Check.Require(match.Success, "the completed journal stage exposes its delivered-record count");
+            var records = long.Parse(match.Groups["records"].Value, System.Globalization.CultureInfo.InvariantCulture);
+            var lookups = counts.GetValueOrDefault(nameof(IStateStore.SyncedById)) +
+                counts.GetValueOrDefault(nameof(IStateStore.SyncedBindingsById));
+            Check.Require(lookups <= records, "C1e recovery saved lookups do not exceed delivered records");
+            Console.WriteLine($"B229 C1e a LOG: records={records}; lookups={lookups}; volume-waits=1; journal-stops=1");
+        }
+        if (failedResume)
+        {
+            Check.Require(ReferenceEquals(resumeFailure, armedResume) && raw.Obligated(pairId) &&
+                raw.ReadPrerequisiteRetry(pairId) is { Attempts: 2 }, "the failed resume keeps debt and its second retry");
+            Check.Require(await rig.Host.RunPrerequisiteAsync(pairId, default) is { Completed: true },
+                "the next attempt repairs the failed resume");
+        }
+        else
+            Check.Require(resumeFailure is null && (kind == SourceFault.Resumed ? second is null : second is { Completed: true }),
+                "a continuous source resumes without Repair; an unproven interval runs Repair");
+        Check.Require(!raw.Obligated(pairId) && raw.ReadPrerequisiteRetry(pairId) is null &&
+            finishes.Finishes(pairId) == (kind == SourceFault.Resumed && !failedResume || refused ? 1 : 2),
+            "only required whole-pair Repairs finish, and successful recovery clears the retry");
+        Check.Require(!raw.Issues(pairId).Any(issue => issue.Cause == TextKey.RequiredRepairRetry) &&
+            paths.SelectMany(Lines).Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Wait) &&
+                fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry)) == (failedResume ? 2 : 1),
+            "each failed source attempt has one wait and no generic retry notice");
+        Check.Require(await rig.Host.RunPrerequisiteAsync(pairId, default) is null, "a recovered pair owes no extra attempt");
+    }
+
+    // B-229 two-member inverse: a source failure after member A's own catch-up stays A's failure, even though member B's
+    // own attempt then catches the shared source up and a non-attempt catch-up of A succeeds, both before A completes.
+    private static async Task MemberCatchUpKeepsFailureAsync(string folder)
+    {
+        var clock = new QuietClock();
+        var logs = new ConcurrentQueue<(string PairId, string Path)>();
+        IStateStore raw = null!;
+        SourceFinishStore observed = null!;
+        await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock,
+            decorate: store =>
+            {
+                raw = store;
+                return new HookStore(observed = new SourceFinishStore(store, false));
+            }, openLog: id =>
+            {
+                var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
+                logs.Enqueue((id, log.Path));
+                return log;
+            });
+        string[] members = [rig.Pair.PairId, "pair-b"];
+        await AddNestedMemberAsync(rig, raw, folder, members[1]);
+        using (var log = rig.Log(folder, "initial-" + members[1]))
+            Check.Require((await rig.RunAsync(log, default, targetPair: members[1])).Completed && !raw.Obligated(members[1]),
+                "member B starts with its initial Repair complete");
+        int Waits(string id) => logs.Where(log => log.PairId == id).SelectMany(log => Lines(log.Path))
+            .Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Wait) &&
+                fields[RunLog.FieldWhat] == nameof(TextKey.WaitSourceRetry));
+        var generation = raw.ReadPairExecution(members[0])!.Value.Generation;
+        observed.AtFinish = () =>
+        {
+            observed.AtFinish = null;
+            var armed = observed.ArmPageFault(SourceFault.Resumed);
+            File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "finish-trigger.txt"), "trigger");
+            Exception? caught = null;
+            try { rig.Host.CatchUpLocalAsync(members[0], generation, default).WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult(); }
+            catch (Exception error) { caught = error; }
+            Check.Require(ReferenceEquals(caught, armed), "the source failure arrives after member A's own catch-up");
+            var other = rig.Host.RunPrerequisiteAsync(members[1], default).WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+            Check.Require(other is null && raw.ReadPrerequisiteRetry(members[1]) is null && Waits(members[1]) == 1,
+                "member B's own attempt catches the shared source up before member A completes");
+            rig.Host.CatchUpLocalAsync(members[0], generation, default).WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+        };
+        var first = await rig.Host.RunPrerequisiteAsync(members[0], default);
+        var row = raw.ReadPrerequisiteRetry(members[0]);
+        Check.Require(first is { Completed: true } && row is { Attempts: 1 } && Waits(members[0]) == 1,
+            "member A still records its source-retry wait and keeps its row; " +
+            $"completed={first?.Completed}, rowAttempts={row?.Attempts.ToString() ?? "none"}, waits={Waits(members[0])}, " +
+            $"otherRow={raw.ReadPrerequisiteRetry(members[1])?.Attempts.ToString() ?? "none"}, otherWaits={Waits(members[1])}");
+    }
+
+    private static void RequireRecoveryCounts(IReadOnlyDictionary<string, int> counts, bool failedResume)
+    {
+        var expected = failedResume
+            ? new Dictionary<string, int>
+            {
+                [nameof(IStateStore.ReadPairExecution)] = 6, [nameof(IStateStore.ReadSource)] = 4,
+                [nameof(IStateStore.ReadPrerequisiteRetry)] = 2, [nameof(IStateStore.HasOpenIssue)] = 1,
+                [nameof(IStateStore.ReadItemRetry)] = 1, [nameof(IStateStore.Obligated)] = 1,
+                [nameof(IStateStore.RequireRepairAfterLoss)] = 1, [nameof(IStateStore.RecordPrerequisiteFailure)] = 1,
+                [nameof(IStateStore.ReadJournal)] = 1
+            }
+            : new Dictionary<string, int>
+            {
+                [nameof(IStateStore.ReadPairExecution)] = 5, [nameof(IStateStore.ReadPrerequisiteRetry)] = 3,
+                [nameof(IStateStore.Obligated)] = 3, [nameof(IStateStore.ReadSource)] = 3,
+                [nameof(IStateStore.HasOpenIssue)] = 1, [nameof(IStateStore.ReadItemRetry)] = 1,
+                [nameof(IStateStore.CompleteRecomposition)] = 1, [nameof(IStateStore.ReadWorkWatermark)] = 1
+            };
+        var sourceMethods = new[] { nameof(IStateStore.AcquireJournalPage), nameof(IStateStore.SyncedById),
+            nameof(IStateStore.SyncedBindingsById) };
+        var evidence = string.Join(", ", counts.OrderBy(entry => entry.Key).Select(entry => entry.Key + "=" + entry.Value));
+        Console.WriteLine("B229 C1e " + (failedResume ? "b" : "a") + ": " + evidence);
+        foreach (var (method, count) in expected)
+            Check.Require(counts.GetValueOrDefault(method) == count,
+                "B229 C1e " + method + " expected " + count + "; measured " + evidence);
+        foreach (var method in counts.Keys)
+            Check.Require(expected.ContainsKey(method) || sourceMethods.Contains(method),
+                "B229 C1e unexpected method " + method + "; measured " + evidence);
+        if (!failedResume) Check.Require(counts.GetValueOrDefault(nameof(IStateStore.AcquireJournalPage)) >= 1,
+            "the resumed capture durably publishes its boundary");
+    }
+
+    private enum SourceFault { Resumed, JournalChanged, BelowRetention, AheadOfEnd }
+
     private sealed class SourceFinishStore(IStateStore inner, bool afterCommit) : ForwardingStateStore(inner)
     {
         internal Action? AtFinish;
+        private int _holdLostInterval;
+        internal readonly TaskCompletionSource LostIntervalEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource LostIntervalRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ConcurrentDictionary<string, int> _itemCompletions = new();
+        private readonly ConcurrentDictionary<string, bool> _itemCompletionResults = new();
+        internal int ItemCompletions(string pairId) => _itemCompletions.GetValueOrDefault(pairId);
+        internal bool? ItemCompletionResult(string pairId) =>
+            _itemCompletionResults.TryGetValue(pairId, out var completed) ? completed : null;
+        internal void HoldLostInterval() => Interlocked.Exchange(ref _holdLostInterval, 1);
+        public override bool CompleteItemRetry(string pairId, long expectedGeneration, FailureRetryOwner.State expected)
+        {
+            var completed = base.CompleteItemRetry(pairId, expectedGeneration, expected);
+            _itemCompletionResults[pairId] = completed;
+            _itemCompletions.AddOrUpdate(pairId, 1, (_, count) => count + 1);
+            return completed;
+        }
+        private Tuple<SourceFault, IOException>? _pageFault;
+        internal IOException ArmPageFault(SourceFault kind)
+        {
+            var error = new IOException("synthetic journal publication failure");
+            Interlocked.Exchange(ref _pageFault, Tuple.Create(kind, error));
+            return error;
+        }
+        public override long? AcquireJournalPage(string volumeKey, JournalPosition? expected, JournalPosition next,
+            IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision, bool LostInterval)> members,
+            IEnumerable<(string PairId, ChangeNotice Notice)> notices)
+        {
+            if (members.Any(member => member.LostInterval) && Interlocked.Exchange(ref _holdLostInterval, 0) != 0)
+            {
+                LostIntervalEntered.TrySetResult();
+                LostIntervalRelease.Task.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+            }
+            if (Interlocked.Exchange(ref _pageFault, null) is { } fault)
+            {
+                var (kind, error) = fault;
+                if (kind != SourceFault.Resumed)
+                {
+                    var saved = expected ?? throw new InvalidOperationException("the fault requires a committed position");
+                    var checkpoint = NtfsUsnJournal.ReadCheckpoint(base.Pair(members[0].PairId)!.LocalRoot);
+                    Check.Require(kind != SourceFault.BelowRetention ||
+                        Math.Max(checkpoint.FirstUsn, checkpoint.LowestValidUsn) > 0,
+                        "the below-retention fixture needs a nonzero retained start");
+                    var bogus = kind switch
+                    {
+                        SourceFault.JournalChanged => saved with { JournalId = saved.JournalId ^ 1UL },
+                        SourceFault.BelowRetention => saved with { NextUsn = 0 },
+                        SourceFault.AheadOfEnd => saved with { NextUsn = checked((ulong)checkpoint.NextUsn + (1UL << 30)) },
+                        _ => throw new InvalidOperationException()
+                    };
+                    base.AcquireJournalPage(volumeKey, expected, bogus,
+                        members.Select(member => (member.PairId, member.Generation, member.Epoch, member.Revision, false)).ToArray(), []);
+                }
+                throw error;
+            }
+            return base.AcquireJournalPage(volumeKey, expected, next, members, notices);
+        }
         internal Exception? AccountingFailure;
         // J1: only the first accounting call fails, whichever member the volume reaches first.
         internal bool FailFirstOnly;

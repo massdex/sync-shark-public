@@ -50,12 +50,14 @@ public static class StateStoreChecks
     private static async Task RunAsync()
     {
         var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        // DuplicateBindingSchemaCases opens its raw connection before any store has created the folder.
+        Directory.CreateDirectory(folder);
         var failures = new List<Exception>();
         try
         {
             foreach (var test in new Func<string, Task>[]
             {
-                DuplicateBindingSchemaCases, RenameDestinationCases, DisposedRecordCases, IssueRollbackCase, IssueUpgradeCases, PersistedImportNoticeCase, BusyReaderCases, BasicCases, MappingCases, ScanCases, DeletedHistoryCases, DeletedHistoryBatchCases, DeletedHistoryUpgradeCases, LocalPublishedUpgradeCases, CanonicalClosureCases, ClosureCostCases, ScanRecordCases, SkipCases, ProtectingMemberCases, MemberlessUpgradeCases, UnreadableCases, RecordCases, GroupedRecordCases, GroupedAdoptionCases, ListedQueuePartitionCountCases, MarkerCases,
+                DuplicateBindingSchemaCases, PreRestoreUpgradeCases, RenameDestinationCases, DisposedRecordCases, IssueRollbackCase, IssueUpgradeCases, PersistedImportNoticeCase, BusyReaderCases, BasicCases, MappingCases, ScanCases, DeletedHistoryCases, DeletedHistoryBatchCases, DeletedHistoryUpgradeCases, LocalPublishedUpgradeCases, CanonicalClosureCases, ClosureCostCases, ScanRecordCases, SkipCases, ProtectingMemberCases, MemberlessUpgradeCases, UnreadableCases, RecordCases, GroupedRecordCases, GroupedAdoptionCases, ListedQueuePartitionCountCases, MarkerCases,
                 PendingCases, PageCases, JournalCases, PageWaitCases, ItemRetryCases, CompletionCases, ClaimedRepairCases, DropboxBookmarkCases, DropboxResetRetryCases, ConfigurationCases,
                 ItemCases, FolderCases, CounterpartPagesCases, CounterpartSiblingAnchorCases, UpgradeCases, PhaseIndexUpgradeCases, CodecCases, LegacyPendingCases, KeepRulesCases,
                 PendingAcknowledgmentCases, UnsavedPendingBindingRaces, CrossedPendingReplacement, SelectedPendingSettlement, RootContextCases, FolderMemberOrdinalCases, FolderSettlementCases, FolderBatchSettlementCases, InvalidJobCases, FolderRefusalTypeCases, BeginFolderRemovalCancellationCase, BeginFolderRemovalMidCancellationCase, DecoratedCases, PostCommitCases
@@ -189,6 +191,8 @@ public static class StateStoreChecks
             var live = store.OpenScan(PairId, Side.Dropbox, ScanTestSettings.BatchRows);
             await live.AddAsync(new Listed(Other, Entry(Other, folder: true)), CancellationToken.None);
             await live.CompleteAsync();
+            Check.Require(!store.ScanRows(PairId, _ => Context).Any(row => row.Dropbox?.Path == Parent),
+                "Reset clears the earlier delta's Dropbox rows from the same scan partition.");
             Check.Require(!store.DeletedNameExact(PairId, PathNames.Key(Other)) &&
                 store.DeletedNameExact(PairId, PathNames.Key(Moved)),
                 "Fresh live ancestor overrides saved tombstone; new delta deletion remains investigation only.");
@@ -360,7 +364,7 @@ public static class StateStoreChecks
     // Use the original schema's own SQL, preserving its exact ALTER formatting and FK destinations.
     private static void DowngradeIssueFixture(SqliteConnection connection)
     {
-        Execute(connection, "DROP TABLE binding_repair;ALTER TABLE folder_removal DROP COLUMN authority;DROP INDEX folder_rename_work;ALTER TABLE folder_removal DROP COLUMN rename_work_id;ALTER TABLE change_work DROP COLUMN rename_continuation_json;ALTER TABLE change_work DROP COLUMN discovery_required;" + DropLocalPublished);
+        Execute(connection, Executor.ChangeRunnerChecks.DuplicateBindingInverse + "DROP INDEX folder_rename_work;ALTER TABLE folder_removal DROP COLUMN rename_work_id;ALTER TABLE change_work DROP COLUMN rename_continuation_json;ALTER TABLE change_work DROP COLUMN discovery_required;" + DropLocalPublished);
         Execute(connection, "DROP TRIGGER invalidate_deleted_history;DROP TABLE discovery_deleted_block;DROP TABLE discovery_deleted_delta;ALTER TABLE pair DROP COLUMN deleted_history_owed;ALTER TABLE pair DROP COLUMN deleted_history_cursor;" + StateSchema.DeletedHistorySchema);
         using var legacy = Inspect(":memory:");
         Execute(legacy, StateSchema.Create + StateSchema.SchemaAdditions);
@@ -2860,10 +2864,12 @@ public static class StateStoreChecks
         return plan;
     }
 
-    private static async Task<string> PrepareFolder(StateStore store, string path, RowContext? context = null)
+    private static async Task<string> PrepareFolder(StateStore store, string path, RowContext? context = null,
+        string? preRestoreId = null)
     {
         using var plan = await CompletedPlanAsync(store, path, context);
-        return store.BeginFolderRemoval(PairId, plan, FolderRemovalAuthority.Inferred, StateSchema.OneRow, CancellationToken.None);
+        return store.BeginFolderRemoval(PairId, plan, FolderRemovalAuthority.Inferred, StateSchema.OneRow, CancellationToken.None,
+            preRestoreId: preRestoreId);
     }
 
     private static async Task RootContextCases(string path)
@@ -3497,7 +3503,8 @@ public static class StateStoreChecks
         string expectedRows;
         using (var inspect = Inspect(path))
         {
-            Execute(inspect, "UPDATE source_state SET repair_revision=repair_revision+1;");
+            // Folder-removal authority backfill: a pre-upgrade operation without rename_work_id becomes Legacy.
+            Execute(inspect, "UPDATE source_state SET repair_revision=repair_revision+1;UPDATE folder_removal SET authority='Legacy';");
             expectedRows = DatabaseImage(inspect);
             Execute(inspect, "UPDATE source_state SET repair_revision=repair_revision-1;");
             DowngradeIssueFixture(inspect);
@@ -3526,6 +3533,34 @@ public static class StateStoreChecks
         using var reopened = StateStore.OpenReadOnly(path)!;
         Check.Require(reopened.FolderRemovalItems(PairId, operation, BeforeFirstOrdinal, int.MaxValue)
             .SequenceEqual(members), "current schema reopens read-only without an obsolete index");
+    }
+
+    // An operation frozen before the v15 step records no original identity; one frozen after it reads its own back,
+    // writable and read-only.
+    private static async Task PreRestoreUpgradeCases(string path)
+    {
+        string legacy;
+        using (var store = StateStore.Open(path))
+        {
+            store.SavePair(Pair());
+            store.Commit(PairId, StateChange.Empty with { Record = [Saved()] });
+            legacy = await PrepareFolder(store, Parent);
+        }
+        using (var connection = Inspect(path))
+            Execute(connection, Executor.ChangeRunnerChecks.DuplicateBindingInverse + "PRAGMA user_version=14;");
+        string restored;
+        using (var upgraded = StateStore.Open(path))
+        {
+            Check.Require(upgraded.FolderRemoval(PairId, legacy).PreRestoreId is null,
+                "an operation frozen before the upgrade records no original identity");
+            restored = await PrepareFolder(upgraded, Other, preRestoreId: RemoteId);
+            Check.Require(upgraded.FolderRemoval(PairId, restored).PreRestoreId == RemoteId,
+                "a frozen original identity reads back");
+        }
+        using var reopened = StateStore.OpenReadOnly(path)!;
+        Check.Require(reopened.FolderRemoval(PairId, legacy).PreRestoreId is null &&
+            reopened.FolderRemoval(PairId, restored).PreRestoreId == RemoteId,
+            "both operations read back unchanged from a read-only reopen");
     }
 
     private static Task CodecCases(string path)

@@ -31,6 +31,8 @@ internal sealed class EngineHost : IAsyncDisposable
     private readonly HashSet<string> _closed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Volume> _volumes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Prerequisite> _prerequisites = new(StringComparer.Ordinal);
+    // Source recovery remains prerequisite-owned after another member makes the shared source available.
+    private readonly Dictionary<string, long> _sourceRetries = new(StringComparer.Ordinal);
     // The item wait the host last wrote for each pair, with the keys its turns recorded (IR-1). Every host write of a
     // pair's retry row updates or removes its entry in the same locked step; nothing else sets a row.
     private readonly Dictionary<string, ItemWait> _itemWaits = new(StringComparer.Ordinal);
@@ -116,10 +118,12 @@ internal sealed class EngineHost : IAsyncDisposable
         {
             if (_stopping || volume.Members is not { Count: > 0 } members) return;
             volume.Source.Invalidate();
+            var lost = volume.Source.ContinuityLost;
             foreach (var member in members)
             {
                 var pairId = member.Pair.PairId;
-                Store.RequireRepairAfterLoss(pairId, member.Generation);
+                _sourceRetries[pairId] = member.Generation;
+                if (lost) Store.RequireRepairAfterLoss(pairId, member.Generation);
                 if (_prerequisites.TryGetValue(pairId, out var pending))
                 {
                     pending.SourceFailed = true;
@@ -800,6 +804,8 @@ internal sealed class EngineHost : IAsyncDisposable
             lock (_gate)
             {
                 if (_stopping) throw Stale();
+                if (_sourceRetries.TryGetValue(id, out var sourceGeneration) && current?.Generation != sourceGeneration)
+                    _sourceRetries.Remove(id);
                 _resources.Remove(id, out old);
                 if (replacement is not null) _resources.Add(id, replacement);
             }
@@ -836,7 +842,8 @@ internal sealed class EngineHost : IAsyncDisposable
                 _settings.JournalPageBufferBytes);
             volume.Source.WorkCommitted = id => Wake(id);
             volume.Source.ReportItemFailureAsync = ReportJournalItemFailureAsync;
-            _volumes.Add(key, volume);
+            // LocalSourceStopped reads the map under _gate from AutoSync and Monitor threads.
+            lock (_gate) _volumes.Add(key, volume);
         }
         var source = Store.ReadSource(pair.PairId, Side.Local) ?? throw Stale();
         lock (volume.Gate)
@@ -941,7 +948,8 @@ internal sealed class EngineHost : IAsyncDisposable
         }
     }
 
-    internal async Task EnsureSourceBasesAsync(string pairId, CancellationToken ct, RunLog? log = null)
+    internal async Task EnsureSourceBasesAsync(string pairId, CancellationToken ct, RunLog? log = null,
+        bool prerequisite = false)
     {
         await AcquireAsync(pairId, async (registration, pair, generation, token) =>
         {
@@ -960,7 +968,7 @@ internal sealed class EngineHost : IAsyncDisposable
                 await resources.Feed.EnsureSourceBaseAsync(token).ConfigureAwait(false);
                 log?.Event(RunEvent.Stage(TextKey.StageSourceBase, ended: true, count: RunLog.CompletedOperation));
                 if (pair.Roots is null) throw new EngineRequestException(TextKey.RootUnbound);
-                await CatchUpLocalAsync(pairId, generation, token, log).ConfigureAwait(false);
+                await CatchUpLocalAsync(pairId, generation, token, log, prerequisite).ConfigureAwait(false);
                 return pair;
             }
             finally { lock (_gate) ((Registration)registration).Log = null; }
@@ -968,12 +976,25 @@ internal sealed class EngineHost : IAsyncDisposable
     }
 
     internal async Task<LocalCatchUp> CatchUpLocalAsync(string pairId, long generation, CancellationToken ct,
-        RunLog? log = null)
+        RunLog? log = null, bool prerequisite = false)
     {
         var pair = Store.ReadPairExecution(pairId) ?? throw Stale();
         if (pair.Generation != generation || pair.Pair.Roots is null) throw Stale();
         var key = pair.Pair.Roots.LocalVolumeKey();
         if (!_volumes.TryGetValue(key, out var volume)) throw Stale();
+        if (prerequisite)
+        {
+            return await WithVolumeStoppedAsync(volume, async token =>
+            {
+                var caughtUp = await volume.Source.CatchUpForPairAsync(pairId, generation, token, log).ConfigureAwait(false);
+                // The attempt's own catch-up discharges a source failure that reached it earlier; the stopped reader and
+                // held serial keep any later failure after this point, where JournalFailed sets the flag again.
+                lock (volume.Gate)
+                lock (_gate)
+                    if (_prerequisites.TryGetValue(pairId, out var pending)) pending.SourceFailed = false;
+                return caughtUp;
+            }, ct, log).ConfigureAwait(false);
+        }
         return await WithVolumeStoppedAsync(volume,
             token => volume.Source.CatchUpForPairAsync(pairId, generation, token, log), ct, log).ConfigureAwait(false);
     }
@@ -1054,11 +1075,28 @@ internal sealed class EngineHost : IAsyncDisposable
             ? PairAdmission.AwaitingDecision : PairAdmission.Admitted;
     }
 
+    // A stopped Local source owes prerequisite catch-up; this reads no membership gate while callers hold _gate.
+    private bool LocalSourceStopped(PairConfig pair) => pair.Roots is { } roots &&
+        _volumes.TryGetValue(roots.LocalVolumeKey(), out var volume) && !volume.Source.Available;
+
+    // Compose durable classification with source availability and the member's retained recovery purpose. The
+    // generation is read here, under _gate, because the purpose is dropped under _gate when a generation is replaced.
+    private FailureRetryOwner.State? ItemRetry(string pairId)
+    {
+        lock (_gate)
+            return Store.ReadItemRetry(pairId) is { } row && Store.ReadPairExecution(pairId) is { } current &&
+                !SourceRecoveryPending(pairId, current.Generation) && !LocalSourceStopped(current.Pair) ? row : null;
+    }
+
+    // Callers hold _gate; purpose belongs to the failed member's generation, not the volume's availability.
+    private bool SourceRecoveryPending(string pairId, long generation) =>
+        _sourceRetries.TryGetValue(pairId, out var failedGeneration) && failedGeneration == generation;
+
     /// <summary>The item-only state this dispatch is admitted with; true when a pre-deadline wait must hold the
     /// pair's ordinary dispatch.</summary>
     internal bool ItemRetryHolds(string pairId, long generation, out FailureRetryOwner.State? admitted)
     {
-        admitted = Store.ReadItemRetry(pairId);
+        admitted = ItemRetry(pairId);
         return admitted is { } row && _monitor.ItemWaitPending(pairId, generation, row);
     }
 
@@ -1156,10 +1194,11 @@ internal sealed class EngineHost : IAsyncDisposable
                 var retry = expected is null ? Store.ReadPrerequisiteRetry(pairId) : reviewedRetry;
                 if (schedule is { } selected &&
                     (selected.Generation != current.Value.Generation || selected.State != retry)) return null;
-                if (retry is not null && Store.ReadItemRetry(pairId) is not null) itemOnly = true;
+                if (retry is not null && ItemRetry(pairId) is not null) itemOnly = true;
                 else
                 {
-                    if (!Store.Obligated(pairId) && retry is null) return null;
+                    if (!Store.Obligated(pairId) && retry is null &&
+                        !SourceRecoveryPending(pairId, current.Value.Generation) && !LocalSourceStopped(current.Value.Pair)) return null;
                     attempt = new Prerequisite(current.Value.Pair, current.Value.Generation);
                     generation = current.Value.Generation;
                     _prerequisites.Add(pairId, attempt);
@@ -1180,7 +1219,7 @@ internal sealed class EngineHost : IAsyncDisposable
             log ??= ownedLog;
             await RecomposeCurrentAsync(pairId, ct, log).ConfigureAwait(false);
             if (expected is not null) Store.ReadPrerequisiteRetry(pairId, expected);
-            await EnsureSourceBasesAsync(pairId, ct, log).ConfigureAwait(false);
+            await EnsureSourceBasesAsync(pairId, ct, log, prerequisite: true).ConfigureAwait(false);
             if (!Store.Obligated(pairId))
             {
                 var local = Store.ReadSource(pairId, Side.Local) ?? throw Stale();
@@ -1301,6 +1340,7 @@ internal sealed class EngineHost : IAsyncDisposable
                         if (!pending.SourceFailed &&
                             (succeeded || error is EngineRequestException { Key: TextKey.ResolveStale }))
                         {
+                            if (succeeded) _sourceRetries.Remove(pairId);
                             // The Repair no longer owns the row: its own temporary turn starts the item wait now,
                             // printed as a wait (retry is output, not a notice).
                             if (pending.ItemTurn is { } turn)

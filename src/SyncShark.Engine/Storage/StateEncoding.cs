@@ -328,7 +328,8 @@ internal static class StateEncoding
             active,
             ReadOptionalEnum<TextKey>(reader, StateSchema.FolderCause),
             disposition,
-            ReadEnum<FolderRemovalAuthority>(reader, StateSchema.FolderAuthority));
+            ReadEnum<FolderRemovalAuthority>(reader, StateSchema.FolderAuthority))
+        { PreRestoreId = ReadOptionalText(reader, StateSchema.FolderPreRestoreId) };
     }
 
     /// <summary>Decodes one member row and refuses facts its phase cannot have.</summary>

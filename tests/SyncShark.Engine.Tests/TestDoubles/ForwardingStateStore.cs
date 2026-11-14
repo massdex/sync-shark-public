@@ -128,6 +128,9 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
             expectedCursor, nextEpoch, nextRevision, provenance, cursor, obligation);
     public virtual WorkSelection? SelectWork(string pairId, long expectedGeneration, PathScope scope) =>
         Inner.SelectWork(pairId, expectedGeneration, scope);
+    public virtual (int Settled, bool More) SettleEchoes(string pairId, long expectedGeneration, PathScope scope,
+        Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize) =>
+        Inner.SettleEchoes(pairId, expectedGeneration, scope, settles, pageSize);
     public virtual (long Local, long Dropbox) CountWork(string pairId, long expectedGeneration, long through) =>
         Inner.CountWork(pairId, expectedGeneration, through);
     public virtual bool CompleteOutOfScope(WorkSelection selection, PathScope scope) =>
@@ -203,11 +206,12 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
         FolderRemovalItem.ProvenanceKind provenance, string path, Entry? observed, Entry? selected) =>
         Inner.InsertFolderMember(pairId, operationId, expectedGeneration, provenance, path, observed, selected);
     public virtual string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, WorkSelection renameWork,
-        Action? admit = null) => Inner.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, renameWork, admit);
+        Action? admit = null, string? preRestoreId = null) =>
+        Inner.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, renameWork, admit, preRestoreId);
     public virtual string? RenameRemoval(WorkSelection selection) => Inner.RenameRemoval(selection);
     public virtual long? RenameRemovalWork(string pairId, string operationId) => Inner.RenameRemovalWork(pairId, operationId);
-    public virtual string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, Action? admit = null) =>
-        Inner.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, admit);
+    public virtual string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, Action? admit = null,
+        string? preRestoreId = null) => Inner.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, admit, preRestoreId);
     public virtual FolderRemovalState FolderRemoval(string pairId, string operationId) =>
         Inner.FolderRemoval(pairId, operationId);
     public virtual IEnumerable<FolderRemovalState> ActiveFolderRemovals(string pairId, CancellationToken ct) =>
@@ -229,6 +233,11 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
         long afterOrdinal, int pageSize) => Inner.FolderRemovalItems(pairId, operationId, afterOrdinal, pageSize);
     public virtual FolderRemovalItem? FolderRemovalItemByKey(string pairId, string operationId, string key) =>
         Inner.FolderRemovalItemByKey(pairId, operationId, key);
+    public virtual IReadOnlyList<(Issue Issue, SyncedEntry? Saved)> HeldFolderMembers(string pairId, string operationId,
+        IssueKind kind, (string Key, long IssueId) after, string high, int pageSize) =>
+        Inner.HeldFolderMembers(pairId, operationId, kind, after, high, pageSize);
+    public virtual void CloseIdentityAbsent(string pairId, IReadOnlyList<Issue> expected) =>
+        Inner.CloseIdentityAbsent(pairId, expected);
     public virtual void AdvanceFolderRemoval(string pairId, string operationId, long expectedGeneration,
         FolderRemovalPhase expectedPhase, FolderRemovalState next) =>
         Inner.AdvanceFolderRemoval(pairId, operationId, expectedGeneration, expectedPhase, next);

@@ -16,6 +16,7 @@ public sealed class FolderDeleteRunner
     private readonly ActionExecutor _actions;
     private readonly IRecoveryExecutionBoundary _recovery;
     private readonly LocalFolderEffects _local;
+    private readonly HeldMemberSettlement _held;
 
     /// <summary>Uses the shared action owner and recovery admission boundary without invoking either during construction.</summary>
     internal FolderDeleteRunner(ExecutorContext context, ActionExecutor actions,
@@ -25,6 +26,7 @@ public sealed class FolderDeleteRunner
         _actions = actions;
         _recovery = recovery;
         _local = new LocalFolderEffects(context, actions, Read, IsFrozen, LateAsync, path => Report(Side.Local, path));
+        _held = new HeldMemberSettlement(context);
     }
 
     private string PairId => _context.Pair.PairId;
@@ -32,7 +34,7 @@ public sealed class FolderDeleteRunner
     /// <summary>Submits eligible effects with durable member attribution and joins their jobs before guarded continuation.
     /// Only a Complete aggregate permits whole-root closure or replacement.</summary>
     public async Task<IReadOnlyList<FolderRemovalResult>> RunGroupAsync(
-        IReadOnlyList<FolderRemovalEffect> eligibleEffects, CancellationToken ct)
+        IReadOnlyList<FolderRemovalEffect> eligibleEffects, CancellationToken ct, ISet<string>? absent = null)
     {
         var operations = eligibleEffects.Select(effect => effect.OperationId).Distinct(StringComparer.Ordinal)
             .Select(Read).ToArray();
@@ -44,7 +46,7 @@ public sealed class FolderDeleteRunner
                 var eligible = new List<FolderRemovalEffect>();
                 foreach (var operation in group)
                     eligible.AddRange(await EligibleAsync(Read(operation.OperationId), eligibleEffects
-                        .Where(effect => effect.OperationId == operation.OperationId), execution, token));
+                        .Where(effect => effect.OperationId == operation.OperationId), execution, token, absent));
                 return await SendAndJoinAsync(eligible, execution, token);
             }, ct);
         }
@@ -53,9 +55,11 @@ public sealed class FolderDeleteRunner
     }
 
     /// <summary>Sends each accumulated batch in turn; the batch owner applies the provider's bound across pages.</summary>
-    internal async Task RunPreparedAsync(IEnumerable<IReadOnlyList<FolderRemovalEffect>> pages, CancellationToken ct)
+    internal async Task<ISet<string>> RunPreparedAsync(IEnumerable<IReadOnlyList<FolderRemovalEffect>> pages, CancellationToken ct)
     {
-        foreach (var batch in Batches(pages)) await RunGroupAsync(batch, ct);
+        var absent = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var batch in Batches(pages)) await RunGroupAsync(batch, ct, absent);
+        return absent;
     }
 
     /// <summary>Streams pages into provider-legal batches; a full batch crosses page and operation boundaries.</summary>
@@ -124,7 +128,8 @@ public sealed class FolderDeleteRunner
     }
 
     /// <summary>Continues the durable operation through fresh recovery admission without replaying uncertain effects.</summary>
-    public async Task ResumeAsync(FolderRemovalState operation, WorkSelection? selection, CancellationToken ct)
+    public async Task ResumeAsync(FolderRemovalState operation, WorkSelection? selection, CancellationToken ct,
+        ISet<string>? absent = null)
     {
         var operationId = operation.OperationId;
         var more = operation.Active;
@@ -134,7 +139,7 @@ public sealed class FolderDeleteRunner
             await JoinAsync([operationId], ct);
             var current = Read(operationId);
             more = current.Active && await _recovery.ExecuteAsync(current,
-                (execution, token) => ContinueAsync(operationId, execution, selection, token), ct);
+                (execution, token) => ContinueAsync(operationId, execution, selection, token, absent), ct);
         }
     }
 
@@ -149,7 +154,8 @@ public sealed class FolderDeleteRunner
     };
 
     // True when another send happened, so its receipts must be joined outside this lease before settling.
-    private async Task<bool> ContinueAsync(string operationId, IAdmittedExecution execution, WorkSelection? selection, CancellationToken ct)
+    private async Task<bool> ContinueAsync(string operationId, IAdmittedExecution execution, WorkSelection? selection, CancellationToken ct,
+        ISet<string>? absent)
     {
         var operation = Read(operationId);
         var progress = ReadProgress(operation, ct);
@@ -157,7 +163,7 @@ public sealed class FolderDeleteRunner
         {
             // A user's terminal discard touches only its own stage, so it never waits on another member's effect.
             await RecoverMembersAsync(operation, progress, ct, terminalOnly: true);
-            await ConcludeAsync(Read(operationId), progress, selection, ct);
+            await ConcludeAsync(Read(operationId), progress, selection, ct, false);
             return false;
         }
         var after = BeforeFirstOrdinal;
@@ -168,14 +174,15 @@ public sealed class FolderDeleteRunner
                 _context.Settings.StoragePageSize).ToArray();
             if (page.Length == 0) break;
             after = page[^1].ItemOrdinal;
-            var eligible = await EligibleAsync(operation, page, execution, ct);
+            var eligible = await EligibleAsync(operation, page, execution, ct, absent);
             if (eligible.Count == 0) continue;
             if (await SendAndJoinAsync(eligible, execution, ct)) return true;
         }
         if (progress.Ready) progress.Refused(TextKey.FailChanged);
-        await CloseWindowAsync(operation, progress, ct);
+        var proven = absent?.Contains(operationId) == true;
+        await CloseWindowAsync(operation, progress, ct, proven);
         await RecoverMembersAsync(operation, progress, ct);
-        await ConcludeAsync(Read(operationId), progress, selection, ct);
+        await ConcludeAsync(Read(operationId), progress, selection, ct, proven);
         return false;
     }
 
@@ -220,7 +227,7 @@ public sealed class FolderDeleteRunner
     // One settlement pass over one frozen operation: verified members are settled before the cursor retires, so a crash re-reads the same unsettled set.
     // Mappings settle only after the post-window feed agrees with the frozen set; the cursor retires last, so a
     // crash re-reads it and a failed or mismatching read leaves every verified member unsettled and visible.
-    private async Task CloseWindowAsync(FolderRemovalState operation, Progress progress, CancellationToken ct)
+    private async Task CloseWindowAsync(FolderRemovalState operation, Progress progress, CancellationToken ct, bool proven)
     {
         if (operation.Cursor is { } cursor)
         {
@@ -268,7 +275,7 @@ public sealed class FolderDeleteRunner
         foreach (var batch in submission.Chunk(MaxEffectsPerSubmission))
         {
             ct.ThrowIfCancellationRequested();
-            var settled = Settle(operation, batch);
+            var settled = Settle(operation, batch, proven);
             for (var index = 0; index < batch.Length; index++)
             {
                 if (!settled[index]) progress.SettleRefused();
@@ -284,6 +291,10 @@ public sealed class FolderDeleteRunner
                 Report(operation, item.Path);
         if (operation.Cursor is not null && !progress.Unsettled)
             Advance(operation, FolderRemovalPhase.Checking, operation.Cause, null);
+        // Recursive receipts cover the effect, not the identities of descendants that may have escaped.
+        foreach (var item in verified)
+            if (completed.Contains(item.Ordinal) && item.EffectKind == FolderEffectKind.RecursiveFolder)
+                await _held.SettleAsync(operation, item, ct);
     }
 
     private static bool IsRecovering(FolderRemovalItem item) => item.Stage is not null ||
@@ -578,7 +589,7 @@ public sealed class FolderDeleteRunner
             await MatchesAsync(other, item.Saved?.PathOn(other) ?? item.Path, null, ct);
     }
 
-    private IReadOnlyList<bool> Settle(FolderRemovalState operation, IReadOnlyList<FolderRemovalItem> items)
+    private IReadOnlyList<bool> Settle(FolderRemovalState operation, IReadOnlyList<FolderRemovalItem> items, bool proven)
     {
         var changes = items.Select(item => (item.Generation, item with
         {
@@ -588,7 +599,7 @@ public sealed class FolderDeleteRunner
             Phase = FolderRemovalItem.RecoveryPhase.Settled,
             Cause = null
         }, item.Ordinal == RootOrdinal ? StateChange.Empty :
-            Forget(operation.DeletingSide, item.Path, item.Saved, item.EffectKind))).ToArray();
+            Forget(operation.DeletingSide, item.Path, item.Saved, item.EffectKind, proven))).ToArray();
         return _context.Store.SettleFolderRemovalItems(PairId, operation.OperationId, changes);
     }
 
@@ -611,15 +622,15 @@ public sealed class FolderDeleteRunner
         }
     }
 
-    private static StateChange Forget(Side side, string path, SyncedEntry? saved, FolderEffectKind kind)
+    private static StateChange Forget(Side side, string path, SyncedEntry? saved, FolderEffectKind kind, bool provenAbsent = false)
     {
         IReadOnlyList<(Side Side, string Key)> keys = saved is null
             ? [(side, PathNames.KeyFor(side, path))]
             : [(Side.Local, saved.LocalKey), (Side.Dropbox, saved.DropboxKey)];
         IReadOnlyList<(string Path, IReadOnlyList<IssueKind> Kinds)> close = [(path, IssueClosure.AfterEffect)];
         return kind == FolderEffectKind.ConditionalFile
-            ? StateChange.Empty with { ForgetSelf = keys, Close = close }
-            : StateChange.Empty with { ForgetSubtrees = keys, Close = close };
+            ? StateChange.Empty with { ForgetSelf = keys, Close = close, CloseProvenAbsent = provenAbsent }
+            : StateChange.Empty with { ForgetSubtrees = keys, Close = close, CloseProvenAbsent = provenAbsent };
     }
 
     private void Report(Side side, string path) =>
@@ -632,7 +643,7 @@ public sealed class FolderDeleteRunner
     }
 
     // One conclusion pass: retirement, advance and completion are mutually exclusive outcomes of the same progress accumulator.
-    private async Task ConcludeAsync(FolderRemovalState operation, Progress progress, WorkSelection? selection, CancellationToken ct)
+    private async Task ConcludeAsync(FolderRemovalState operation, Progress progress, WorkSelection? selection, CancellationToken ct, bool proven)
     {
         var root = operation.RootEntry;
         if (progress.Failed && !progress.Reported)
@@ -672,18 +683,18 @@ public sealed class FolderDeleteRunner
             if (sent && !followUp && !progress.Unfinished && checking.Cursor is null)
             {
                 if (await ReadableAsync(checking, root.Path, operation.SavedRoot,
-                    FolderEffectKind.RecursiveFolder, ct)) Complete(checking, selection);
+                    FolderEffectKind.RecursiveFolder, ct)) Complete(checking, selection, proven);
                 else Advance(checking, FolderRemovalPhase.Retained, Text.ReadFailedOn(Side.Local));
             }
         }
     }
 
-    private void Complete(FolderRemovalState operation, WorkSelection? selection)
+    private void Complete(FolderRemovalState operation, WorkSelection? selection, bool proven)
     {
         var root = operation.RootEntry;
         try
         {
-            var change = Forget(operation.DeletingSide, root.Path, operation.SavedRoot, FolderEffectKind.RecursiveFolder);
+            var change = Forget(operation.DeletingSide, root.Path, operation.SavedRoot, FolderEffectKind.RecursiveFolder, proven);
             // A Repair removal settles X's obligation with its forget; the handoff names only where X was seen (-6 3.5.5).
             if (operation is { Authority: FolderRemovalAuthority.Repair, SavedRoot: { } victim })
             {
@@ -720,14 +731,19 @@ public sealed class FolderDeleteRunner
 
     // Fresh checks narrow observed mismatches: a refused effect stays Ready and unsent for honest disposition.
     private async Task<IReadOnlyList<FolderRemovalEffect>> EligibleAsync(FolderRemovalState operation,
-        IEnumerable<FolderRemovalEffect> effects, IAdmittedExecution execution, CancellationToken ct)
+        IEnumerable<FolderRemovalEffect> effects, IAdmittedExecution execution, CancellationToken ct, ISet<string>? absent = null)
     {
         var side = operation.DeletingSide;
         var root = operation.RootEntry;
         var eligible = new List<FolderRemovalEffect>();
         if (!await MatchesAsync(side, root.Path, root, ct) ||
             !await MatchesAsync(PathNames.Other(side), operation.CounterpartPath, operation.SourceEvidence, ct))
+        {
+            absent?.Remove(operation.OperationId);
             return eligible;
+        }
+        // Valid only for this opportunity's first continuation, never a later recovery or deferred settlement.
+        if (operation.SourceEvidence is null && PathNames.Same(operation.CounterpartPath, root.Path)) absent?.Add(operation.OperationId);
         foreach (var effect in effects)
         {
             if (effect is not { Kind: FolderEffectKind.RecursiveFolder or FolderEffectKind.ConditionalFile,
@@ -838,7 +854,8 @@ public sealed class FolderDeleteRunner
                 FolderRemovalAuthority.Legacy)) continue;
             try
             {
-                if (await FolderIdentity.KeptElsewhereAsync(_context, operation.SavedRoot, operation.DeletingSide, ct))
+                if (await FolderIdentity.KeptElsewhereAsync(_context, operation.SavedRoot, operation.DeletingSide, ct,
+                        operation.PreRestoreId, operation.CounterpartPath))
                     refused.Add(id);
             }
             catch (Exception error) when (ItemFailures.IsItemError(error))

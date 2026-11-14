@@ -52,6 +52,171 @@ public static class QueryPlanChecks
         CheckPlans(connection);
         DescendantProbeCost();
         EvidenceIdentityCost(connection);
+        EchoProbePlans(connection);
+        EchoProbeCosts();
+    }
+
+    // Execution order for one genuine Dropbox edit: twelve reads, less the ordinary watermark read avoided.
+    internal static readonly (string Name, string Sql, string? Index)[] EchoHeadStatements =
+    [
+        (nameof(StateSchema.EchoWorkPending), StateSchema.EchoWorkPending, "work_source_order"),
+        (nameof(StateSchema.PairFence), StateSchema.PairFence, "sqlite_autoindex_pair_1"),
+        (nameof(StateSchema.SourceFence), StateSchema.SourceFence, "sqlite_autoindex_source_state_1"),
+        (nameof(StateSchema.SourceFence), StateSchema.SourceFence, "sqlite_autoindex_source_state_1"),
+        (nameof(StateSchema.WorkWatermark), StateSchema.WorkWatermark, null),
+        (nameof(StateSchema.EchoResponsibilities), StateSchema.EchoResponsibilities, "issue_path_key"),
+        (nameof(StateSchema.SelectWork), StateSchema.SelectWork, "work_source_order"),
+        (nameof(StateSchema.ReadRenameContinuation), StateSchema.ReadRenameContinuation, "INTEGER PRIMARY KEY"),
+        (nameof(StateSchema.ItemEpisodeByWork), StateSchema.ItemEpisodeByWork, "issue_item_retry_work"),
+        (nameof(StateSchema.WorkIssue), StateSchema.WorkIssue, "issue_member_work"),
+        (nameof(StateSchema.ReadIdentitySelection), StateSchema.ReadIdentitySelection, "work_identity"),
+        (nameof(StateSchema.SelectSyncedByDropboxId), StateSchema.SelectSyncedByDropboxId, "synced_dropbox_id"),
+    ];
+
+    private static void EchoProbePlans(SqliteConnection connection)
+    {
+        foreach (var (name, sql, index) in EchoHeadStatements)
+        {
+            var plan = CheckDurableStatement(connection, sql, index, keepPair: true);
+            Console.WriteLine($"B214-CR3 plan {name}: {string.Join("; ", plan)}");
+            Check.Require(plan.Where(line => line == "SCAN w" || line.StartsWith("SCAN w ", StringComparison.Ordinal) ||
+                line == "SCAN p" || line.StartsWith("SCAN p ", StringComparison.Ordinal) ||
+                line == "SCAN f" || line.StartsWith("SCAN f ", StringComparison.Ordinal)).Count() == 0,
+                "B214-CR3: ordinary-head reads do not scan aliased durable tables: " + name);
+        }
+        var direct = Plan(connection, StateSchema.SyncedDropboxBound);
+        var target = direct.Where(line => line.StartsWith("SEARCH synced_entry ", StringComparison.Ordinal)).ToArray();
+        Check.Require(target.Length == 3 &&
+            target.Count(line => line.Contains("synced_dropbox_key", StringComparison.Ordinal) &&
+                IsLookup(line, "dropbox_key_delta")) == 2 &&
+            target.Count(line => line.Contains("synced_local_key", StringComparison.Ordinal) &&
+                IsLookup(line, "<expr>")) == 1 &&
+            target.Count(line => line.Contains("dropbox_key_delta=?", StringComparison.Ordinal)) == 1 &&
+            target.Count(line => line.Contains("<expr>=?", StringComparison.Ordinal)) == 1 &&
+            target.Count(line => line.Contains("dropbox_key_delta>? AND dropbox_key_delta<?", StringComparison.Ordinal)) == 1,
+            "B214-QP1: exactly three direct binding seeks: " + string.Join("; ", direct));
+        var inherited = Plan(connection, StateSchema.SyncedInheritedUnderPage);
+        Check.Require(inherited.Count(line => line.StartsWith("SEARCH synced_entry ", StringComparison.Ordinal)) == 1 &&
+            inherited.Any(line => line.Contains("synced_local_key", StringComparison.Ordinal) &&
+                line.Contains("<expr>>? AND <expr><?", StringComparison.Ordinal)),
+            "B214-QP1: one bounded inherited-key range: " + string.Join("; ", inherited));
+        var peers = new[] { StateSchema.PeerPathPage, StateSchema.OwnedPeerPathPage }.Select(sql => Plan(connection, sql)).ToArray();
+        foreach (var peer in peers)
+        {
+            Console.WriteLine("B214-QP1 Local peer plan: " + string.Join("; ", peer));
+            Check.Require(peer.Any(line => line.StartsWith("SEARCH w USING INDEX work_path ", StringComparison.Ordinal) &&
+                line.Contains("path_key=?", StringComparison.Ordinal)), "B214-QP1: Local peers seek work_path at the exact path");
+        }
+        var gate = Plan(connection, StateSchema.EchoWorkPending);
+        Console.WriteLine("B214-CR2 gate plan: " + string.Join("; ", gate));
+        Check.Require(gate.Any(line => line.StartsWith("SEARCH w USING", StringComparison.Ordinal) &&
+                line.Contains("INDEX work_source_order (pair_id=? AND pair_generation=? AND side=? AND source_epoch=? AND work_id>? AND work_id<?)", StringComparison.Ordinal)) &&
+            gate.All(line => line != "SCAN w" && !line.StartsWith("SCAN w ", StringComparison.Ordinal)),
+            "B214-CR2: the no-echo gate seeks the current-source work range without scanning acquired work");
+        var pending = Plan(connection, StateSchema.EchoPending, keepPair: true);
+        Check.Require(pending.Any(line => line.StartsWith("SEARCH pair USING INTEGER PRIMARY KEY", StringComparison.Ordinal)),
+            "B214-QP1: pending effects read the pair primary key");
+        foreach (var line in direct.Concat(inherited).Concat(peers.SelectMany(plan => plan)).Concat(pending))
+            Check.Require(!new[] { "SCAN synced_entry", "SCAN change_work", "LIST SUBQUERY", "MATERIALIZE",
+                "COMPOUND", "UNION ALL", "USE TEMP B-TREE" }.Any(part => line.Contains(part, StringComparison.Ordinal)),
+                "B214-QP1: no materialization, durable scan or read-time sort: " + line);
+    }
+
+    // The reviewed two sizes expose work proportional to an overridden subtree rather than the existing page size.
+    private static void EchoProbeCosts()
+    {
+        const int pageSize = 100;
+        foreach (var shape in new[] { "inherited", "explicit", "overridden", "late-inherited" })
+        {
+            (int Rows, long Steps, bool Found)? previous = null;
+            foreach (var count in new[] { shape is "inherited" or "explicit" ? 10 : 1_000, 100_000 })
+            {
+                using var connection = OpenSchema();
+                SeedEchoProbe(connection, count, shape);
+                var direct = ReadEchoProbe(connection, StateSchema.SyncedDropboxBound, pageSize);
+                var range = shape == "explicit" ? direct :
+                    ReadEchoProbe(connection, StateSchema.SyncedInheritedUnderPage, pageSize);
+                Check.Require(direct.Found == (shape == "explicit") &&
+                    range.Found == (shape is "explicit" or "inherited") &&
+                    range.Rows == (shape is "explicit" or "inherited" ? 1 : pageSize),
+                    "B214-QP2: the probe returns the expected evidence within its page: " + shape);
+                if (previous is { } before)
+                    Check.Require(range.Steps == before.Steps,
+                        "B214-QP2: VM steps do not grow with descendants: " + shape + " " + before.Steps + "/" + range.Steps);
+                Console.WriteLine($"B214-QP2 shape={shape} descendants={count} rows={range.Rows} vm-steps={range.Steps}");
+                previous = range;
+            }
+        }
+        foreach (var (overrides, inherited, rows, found) in new[]
+        {
+            (10, false, 10, false), (10, true, 11, true), (60, false, 60, false),
+            (pageSize, false, pageSize, false), (pageSize - 1, true, pageSize, true)
+        })
+        {
+            using var connection = OpenSchema();
+            SeedEchoProbe(connection, overrides, inherited ? "late-inherited" : "overridden");
+            var actual = ReadEchoProbe(connection, StateSchema.SyncedInheritedUnderPage, pageSize);
+            Check.Require(actual.Rows == rows && actual.Found == found,
+                "B214-QP2: exhausted, full nonmatching and final-row inherited evidence stay distinct");
+        }
+    }
+
+    private static void SeedEchoProbe(SqliteConnection connection, int count, string shape)
+    {
+        using var transaction = connection.BeginTransaction();
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "INSERT INTO pair(pair_id,def_json) VALUES('echo-probe','{}');";
+        command.ExecuteNonQuery();
+        command.CommandText = "INSERT INTO synced_entry(pair_id,local_path,dropbox_key_delta,dropbox_path_delta," +
+            "is_folder,local_id,local_size,local_mtime,dropbox_id,dropbox_hash) " +
+            "VALUES(1,$path,$key,$remote,0,'',1,0,$id,'hash');";
+        command.Parameters.AddWithValue("$path", "");
+        command.Parameters.AddWithValue("$key", DBNull.Value);
+        command.Parameters.AddWithValue("$remote", DBNull.Value);
+        command.Parameters.AddWithValue("$id", "");
+        void Insert(string path, string? remote)
+        {
+            command.Parameters["$path"].Value = path;
+            command.Parameters["$key"].Value = remote is null ? DBNull.Value : PathNames.DropboxKey(remote);
+            command.Parameters["$remote"].Value = (object?)remote ?? DBNull.Value;
+            command.Parameters["$id"].Value = StateEncoding.IdFor(Side.Dropbox, "id-" + path)!;
+            command.ExecuteNonQuery();
+        }
+        for (var index = 0; index < count; index++)
+        {
+            var suffix = index.ToString("D6", System.Globalization.CultureInfo.InvariantCulture);
+            Insert((shape == "explicit" ? "Q/" : "P/") + suffix,
+                shape == "inherited" ? null : (shape == "explicit" ? "P/" : "Q/") + suffix);
+        }
+        if (shape == "late-inherited") Insert("P/Z", null);
+        transaction.Commit();
+    }
+
+    // Stop exactly when production knows the answer; the handle belongs to this synthetic SqliteConnection.
+    private static (int Rows, long Steps, bool Found) ReadEchoProbe(SqliteConnection connection, string sql, int take)
+    {
+        var prepared = SQLitePCL.raw.sqlite3_prepare_v2(connection.Handle, sql, out var statement);
+        Check.Require(prepared == SQLitePCL.raw.SQLITE_OK, "B214 probe prepares the production statement");
+        try
+        {
+            SQLitePCL.raw.sqlite3_bind_text(statement, SQLitePCL.raw.sqlite3_bind_parameter_index(statement, "$p"), "echo-probe");
+            SQLitePCL.raw.sqlite3_bind_text(statement, SQLitePCL.raw.sqlite3_bind_parameter_index(statement, "$k"), PathNames.DropboxKey("P"));
+            var takeIndex = SQLitePCL.raw.sqlite3_bind_parameter_index(statement, "$take");
+            if (takeIndex != 0) SQLitePCL.raw.sqlite3_bind_int(statement, takeIndex, take);
+            var rows = 0;
+            var found = false;
+            while (true)
+            {
+                var result = SQLitePCL.raw.sqlite3_step(statement);
+                if (result == SQLitePCL.raw.SQLITE_DONE) break;
+                Check.Require(result == SQLitePCL.raw.SQLITE_ROW, "B214 probe executes successfully");
+                rows++;
+                if (SQLitePCL.raw.sqlite3_column_int(statement, 0) != 0) { found = true; break; }
+            }
+            return (rows, SQLitePCL.raw.sqlite3_stmt_status(statement, SQLitePCL.raw.SQLITE_STMTSTATUS_VM_STEP, 0), found);
+        }
+        finally { SQLitePCL.raw.sqlite3_finalize(statement); }
     }
 
     // B-101 (section 3.7): the admission identity probe (ChangeTable.UnownedIdentity) is one seek on work_identity.
@@ -266,7 +431,7 @@ public static class QueryPlanChecks
                 (StateSchema.ParamOwnKey, childKey), (StateSchema.ParamPath, "cost/a/child"),
                 (StateSchema.ParamIsFolder, false), (StateSchema.ParamSize, 1L), (StateSchema.ParamMtime, 0L),
                 (StateSchema.ParamId, "id-child"), (StateSchema.ParamRev, ""), (StateSchema.ParamHash, ""),
-                (StateSchema.ParamSkip, null));
+                (StateSchema.ParamSkip, null), (StateSchema.ParamShared, false));
             var foundProbe = probe.ExecuteFirst(StateSchema.ScanHasDescendants, (StateSchema.ParamPair, "cost"),
                 (StateSchema.ParamScan, Guid.Empty.ToByteArray()), (StateSchema.ParamSide, (int)Side.Local), (StateSchema.ParamTargetKey, key));
             var foundDelete = probe.Execute(StateSchema.ScanDeleteDescendants, (StateSchema.ParamPair, "cost"),
@@ -334,8 +499,8 @@ public static class QueryPlanChecks
         Check.Require(Plan(connection, StateSchema.DeleteSyncedBothSubtrees).Any(line =>
             line.Contains("<expr>>? AND <expr><?", StringComparison.Ordinal)),
             "Bilateral subtree forgetting seeks the Local descendant range.");
-        CheckDurableStatement(connection, StateSchema.LocalEchoResponsibilities);
-        CheckDurableStatement(connection, StateSchema.LocalEchoPending);
+        CheckDurableStatement(connection, StateSchema.EchoResponsibilities);
+        CheckDurableStatement(connection, StateSchema.EchoPending);
         CheckDurableStatement(connection, StateSchema.PeerPathPage);
         CheckDurableStatement(connection, StateSchema.WorkHasChildren);
         CheckDurableStatement(connection, StateSchema.RequireIdentityDiscovery);
@@ -473,6 +638,15 @@ public static class QueryPlanChecks
             create.CommandText = StateSchema.CreateDeletedName;
             create.ExecuteNonQuery();
         }
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "EXPLAIN " + StateSchema.ClearDeletedNames;
+            command.Parameters.AddWithValue(StateSchema.ParamPairRow, 1L);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                Check.Require(reader.GetString(1) != "OpenEphemeral",
+                    "reset deletes names directly without buffering the pair's full keys");
+        }
         Check.Require(Plan(connection, StateSchema.DeletedNameLive)
                 .Any(line => line.Contains("pair_id=? AND path_key=?", StringComparison.Ordinal)),
             "Resumed discovery live overrides seek the complete key without statistics.");
@@ -567,7 +741,7 @@ public static class QueryPlanChecks
             "the queue snapshot ranges both sides through work_source_order: " + string.Join("; ", plan));
     }
 
-    private static void CheckDurableStatement(SqliteConnection connection, string sql, string? index = null,
+    private static List<string> CheckDurableStatement(SqliteConnection connection, string sql, string? index = null,
         bool keepPair = false)
     {
         var plan = Plan(connection, sql, keepPair);
@@ -578,6 +752,7 @@ public static class QueryPlanChecks
         if (index is not null)
             Check.Require(plan.Any(line => line.Contains(index, StringComparison.Ordinal)),
                 "schema statement uses its owning index " + index + ": " + sql);
+        return plan;
     }
 
     private static void CheckIndexUse(SqliteConnection connection, string sql, string index)

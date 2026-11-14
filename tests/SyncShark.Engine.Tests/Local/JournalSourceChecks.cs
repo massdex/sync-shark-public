@@ -3,6 +3,8 @@ using System.Runtime.InteropServices;
 using Massdex.SyncShark;
 using Massdex.SyncShark.Engine;
 using Massdex.SyncShark.Engine.Local;
+using Massdex.SyncShark.Engine.Storage;
+using Massdex.SyncShark.Engine.Tests.TestDoubles;
 using RunLog = Massdex.SyncShark.Engine.Run.RunLog;
 using EngineHost = Massdex.SyncShark.Engine.Run.EngineHost;
 
@@ -84,6 +86,20 @@ public static class JournalSourceChecks
             }
             AliasPageClassification(baseRoot.FullName);
             await RetainedPageRaceAsync(baseRoot.FullName);
+            await FailedCatchUpResumesWithoutDebtAsync(baseRoot.FullName);
+            await ResumeStoreWorkFollowsTheIntervalAsync(baseRoot.FullName);
+            SavedLookupShapesIgnoreSavedSize(baseRoot.FullName);
+            PageResolutionCounts(baseRoot.FullName);
+            PagePublicationStatements(baseRoot.FullName);
+            await ShortResumeDoesNotConfirmAsync(baseRoot.FullName, false);
+            await ShortResumeDoesNotConfirmAsync(baseRoot.FullName, true);
+            await CancelledResumeDoesNotConfirmAsync(baseRoot.FullName);
+            await RemovedMemberResumeAsync(baseRoot.FullName, frozen: false, refuseFrozen: false);
+            await RemovedMemberResumeAsync(baseRoot.FullName, frozen: true, refuseFrozen: false);
+            await RemovedMemberResumeAsync(baseRoot.FullName, frozen: true, refuseFrozen: true);
+            await FailedResumeRebasesWithDebtAsync(baseRoot.FullName);
+            foreach (var kind in new[] { "JournalChanged", "BelowRetention", "AheadOfEnd" })
+                await FailedSourceOutsideRetentionRebasesAsync(baseRoot.FullName, kind);
             await HealthyPagePublishesBeforeAcknowledgmentAsync(baseRoot.FullName);
             await PairCatchUpReturnsTheCommittedAcquisitionAsync(baseRoot.FullName);
             await FrozenLastPageDebtIsCarriedAsync(baseRoot.FullName);
@@ -407,8 +423,8 @@ public static class JournalSourceChecks
             };
             Check.Require(await source.CatchUpAsync(default) is not null,
                 "A restarted or quiet source reaches a successful durable boundary.");
-            Check.Require(woken.SequenceEqual(refused ? new[] { "B", "C" } : Array.Empty<string>()),
-                "One recovery wake reaches each current member, never a removed member or a source without refusal.");
+            Check.Require(woken.SequenceEqual(restart || refused ? new[] { "B", "C" } : Array.Empty<string>()),
+                "One recovery wake reaches each current member after a refusal or a replacement base, never a removed member or a source with neither.");
             woken.Clear();
             Check.Require(await source.CatchUpAsync(default) is not null && woken.Count == 0,
                 "Repeated empty acquisition does not repeat the consumed recovery wake.");
@@ -1175,9 +1191,50 @@ public static class JournalSourceChecks
         {
             Check.Require(!source.Available && error.Message.Contains(nameof(NtfsUsnPageStatus.Unavailable),
                 StringComparison.Ordinal), "An unavailable page exposes its classified diagnostic and stopped state.");
+            Check.Require(error is JournalSourceException { Status: NtfsUsnPageStatus.Unavailable, NativeError: null },
+                "An unavailable page's failure carries its status and the page's native error.");
         }
         Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) == scenario.Start,
             "An unavailable page never advances the last saved journal position.");
+        var revision = Revision(scenario, "A");
+        try
+        {
+            await source.CatchUpForPairAsync("A", 0, default);
+            throw new InvalidOperationException("An unreadable source must not confirm a resume.");
+        }
+        catch (IOException)
+        {
+            Check.Require(!source.Available && scenario.Store.ReadJournal(scenario.VolumeKey) == scenario.Start &&
+                Revision(scenario, "A") == revision,
+                "persistent source unavailability publishes nothing and adds no revision");
+        }
+        // A page read that fails at the volume handle carries the native error it was classified from.
+        var driveRoot = FreeDriveRoot()
+            ?? throw new InvalidOperationException(
+                "The native-error regression requires an unmounted drive letter.");
+        var unreadable = new JournalSource(scenario.VolumeKey, driveRoot, scenario.Store, scenario.Start,
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
+        try
+        {
+            await unreadable.RunAsync(default);
+            throw new InvalidOperationException("An unreadable volume must not complete as healthy.");
+        }
+        catch (IOException error)
+        {
+            Check.Require(!unreadable.Available &&
+                error is JournalSourceException { Status: NtfsUsnPageStatus.Unavailable } failed &&
+                failed.NativeError is > 0,
+                "A page read that fails at the volume handle carries its native error.");
+        }
+    }
+
+    // A drive letter that is not mounted, so opening its volume handle fails before any journal read.
+    private static string? FreeDriveRoot()
+    {
+        for (var letter = 'D'; letter <= 'Z'; letter++)
+            if (!DriveInfo.GetDrives().Any(drive => char.ToUpperInvariant(drive.Name[0]) == letter))
+                return letter + ":\\";
+        return null;
     }
 
     // J11 failure accounting: a background acquisition that faults after a durable commit escapes to the task's
@@ -1237,8 +1294,8 @@ public static class JournalSourceChecks
         }
         var recovered = await scenario.Source.CatchUpForPairAsync("A", 0, default);
         Check.Require(scenario.Source.Available && recovered.Checkpoint.NextUsn >= (long)scenario.Start.NextUsn &&
-            Obligation(scenario, "A") is not null,
-            "A failed source installs a fresh pre-list base with Repair debt instead of remaining stopped.");
+            Obligation(scenario, "A") is null && Revision(scenario, "A") == failedRevision,
+            "A failed source resumes from its committed position without adding Repair debt.");
         File.WriteAllText(Path.Combine(scenario.RootOf("A"), "after-failure.txt"), "later");
         await scenario.Source.CatchUpAsync(default);
         Check.Require(scenario.Store.ReadWorkWatermark() > recovered.ThroughWorkId,
@@ -1481,6 +1538,489 @@ public static class JournalSourceChecks
             return (member.PairId, (long)0, source.Epoch, source.Revision, false);
         }).ToArray();
 
+    private static async Task ShortResumeDoesNotConfirmAsync(string baseRoot, bool staleAgain)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "short-resume-" + staleAgain, "A", "B");
+        RequireRetainedSpan(scenario);
+        await FailRetainedPageAsync(scenario, "first.txt", finite: true, scenario.RootOf("A"));
+        var outside = Directory.CreateDirectory(Path.Combine(scenario.Root, "outside")).FullName;
+        File.Move(Path.Combine(scenario.RootOf("A"), "first.txt"), Path.Combine(outside, "pending.txt"));
+        var lower = NtfsUsnJournal.ReadCheckpoint(scenario.Root).NextUsn;
+        var attempts = 0;
+        var readbacks = 0;
+        var refreshes = scenario.Host.RefreshCalls;
+        var reads = scenario.Host.RefreshReads;
+        scenario.StoreHook.Before = method =>
+        {
+            if (method.Name == nameof(IStateStore.ReadJournal)) readbacks++;
+            if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+            attempts++;
+            if (attempts > 1 && !staleAgain) return;
+            var source = scenario.StoreHook.Inner.ReadSource("B", Side.Local)!.Value;
+            scenario.StoreHook.Inner.AdvanceSource("B", Side.Local, 0, source.Epoch, source.Revision,
+                source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
+                source.Provenance, source.Cursor, source.Obligation);
+        };
+        LocalCatchUp? returned = null;
+        Exception? caught = null;
+        try { returned = await scenario.Source.CatchUpForPairAsync("A", 0, default); }
+        catch (Exception error) { caught = error; }
+        scenario.StoreHook.Before = null;
+        Check.Require(staleAgain ? caught is LiveAdmissionStaleException : caught is null &&
+            returned is not null && returned.Checkpoint.NextUsn < lower,
+            "a stale terminal publication either returns short or refuses, never confirms the captured end");
+        Check.Require(attempts == 2 && readbacks == 1 && scenario.Host.RefreshCalls - refreshes == 1 &&
+            scenario.Host.RefreshReads - reads == 2,
+            "short capture makes two publications, one readback and one two-member refresh");
+        // Bring the fixture's member fence current after the deliberately refused second publication.
+        if (staleAgain) scenario.Host.Refresh(scenario.Host.Snapshot(), null);
+        var revision = Revision(scenario, "A");
+        await FailRetainedPageAsync(scenario, "fresh.txt", finite: false, scenario.RootOf("A"));
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap && Revision(scenario, "A") == revision + 1,
+            "a failure after a short or refused resume still forces a replacement base");
+    }
+
+    private static async Task CancelledResumeDoesNotConfirmAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "cancelled-resume", "A", "B");
+        await FailRetainedPageAsync(scenario, "first.txt", finite: true, scenario.RootOf("A"));
+        var revision = Revision(scenario, "A");
+        var refreshes = scenario.Host.RefreshCalls;
+        var reads = scenario.Host.RefreshReads;
+        var (_, reopened, publications) = await CancelDelayedSuffixAsync(scenario, haltAt: 2, withBurst: false);
+        scenario.Host.Reading = null;
+        scenario.StoreHook.After = null;
+        scenario.Host.Install(reopened);
+        Check.Require(publications[0] == 0 && scenario.Host.RefreshCalls == refreshes &&
+            scenario.Host.RefreshReads == reads, "cancellation before publication performs no debt refresh reads");
+        await FailRetainedPageAsync(scenario, "fresh.txt", finite: false, scenario.RootOf("A"));
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap && Revision(scenario, "A") == revision + 1,
+            "a cancelled resume remains unconfirmed when its next source attempt fails");
+    }
+
+    private static async Task RemovedMemberResumeAsync(string baseRoot, bool frozen, bool refuseFrozen)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "removed-resume-" + frozen + refuseFrozen, "A", "B");
+        RequireRetainedSpan(scenario);
+        await FailRetainedPageAsync(scenario, "first.txt", finite: true, scenario.RootOf("A"));
+        var outside = Directory.CreateDirectory(Path.Combine(scenario.Root, "outside")).FullName;
+        File.Move(Path.Combine(scenario.RootOf("A"), "first.txt"), Path.Combine(outside, "pending.txt"));
+        var captured = scenario.Host.Snapshot();
+        var halt = new ReadHalt();
+        scenario.Host.Reading = halt.Observe;
+        // Compare, capture entry, page entry, classification and retention precede the final publication check.
+        halt.Arm(6, () => scenario.Host.Install(captured.Where(member => member.Pair.PairId != "B").ToArray()));
+        Exception? refused = null;
+        try { await scenario.Source.CatchUpForPairAsync("A", 0, default); }
+        catch (Exception error) { refused = error; }
+        scenario.Host.Reading = null;
+        Check.Require(refused is LiveAdmissionStaleException && scenario.Source.Available &&
+            scenario.Host.Snapshot().All(member => member.Pair.PairId != "B"),
+            "membership removal before the final publication refuses the unconfirmed resume");
+        if (frozen)
+        {
+            if (refuseFrozen)
+            {
+                scenario.StoreHook.Before = method =>
+                {
+                    if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+                    scenario.StoreHook.Before = null;
+                    var source = scenario.StoreHook.Inner.ReadSource("A", Side.Local)!.Value;
+                    scenario.StoreHook.Inner.AdvanceSource("A", Side.Local, 0, source.Epoch, source.Revision,
+                        source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
+                        source.Provenance, source.Cursor, source.Obligation);
+                };
+            }
+            Exception? frozenFailure = null;
+            LocalCatchUp? checkpoint = null;
+            try { checkpoint = await scenario.Source.CheckpointForPairAsync("A", 0, default); }
+            catch (Exception error) { frozenFailure = error; }
+            Check.Require(refuseFrozen ? frozenFailure is LiveAdmissionStaleException : frozenFailure is null &&
+                checkpoint is not null && checkpoint.Checkpoint.NextUsn ==
+                    (long)scenario.Store.ReadJournal(scenario.VolumeKey)!.NextUsn,
+                "only a durably completed frozen capture confirms the pending resume");
+            scenario.StoreHook.Before = null;
+            if (refuseFrozen) scenario.Host.Refresh(scenario.Host.Snapshot(), null);
+        }
+        var revision = Revision(scenario, "A");
+        await FailRetainedPageAsync(scenario, "fresh.txt", finite: false, scenario.RootOf("A"));
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Revision(scenario, "A") == revision + (frozen && !refuseFrozen ? 0 : 1),
+            "a later failure distinguishes confirmed frozen coverage from either refusal");
+    }
+
+    private sealed class JournalProgress : IProgress<RunEvent>
+    {
+        internal long Records;
+        internal int Reports;
+        public void Report(RunEvent value)
+        {
+            if (value.StageKey != TextKey.StageJournal) return;
+            Records = value.Count ?? 0;
+            if (value.InProgress) Reports++;
+        }
+    }
+
+    private static void SeedUnrelatedSaved(Scenario scenario, int count)
+    {
+        using var probe = new CostProbe(scenario.Database);
+        probe.Execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<$count) " +
+            "INSERT INTO synced_entry(pair_id,local_path,is_folder,local_id,local_size,local_mtime,dropbox_id,dropbox_hash) " +
+            "SELECT (SELECT id FROM pair WHERE pair_id=$p),'background/'||i,0,'l'||i,1,0,'d'||i,'hash' FROM n;",
+            ("$count", count), ("$p", "A"));
+    }
+
+    private static async Task ResumeStoreWorkFollowsTheIntervalAsync(string baseRoot)
+    {
+        Dictionary<string, int>? previous = null;
+        foreach (var saved in new[] { 5_110, 20_440 })
+        {
+            using var scenario = new Scenario(baseRoot, "resume-cost-" + saved, "A");
+            SeedUnrelatedSaved(scenario, saved);
+            File.WriteAllText(Path.Combine(scenario.Root, "first.txt"), "first");
+            await FailRetainedPageAsync(scenario, "second.txt", finite: true);
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            scenario.StoreHook.Before = method => counts[method.Name] = counts.GetValueOrDefault(method.Name) + 1;
+            var progress = new JournalProgress();
+            await scenario.Source.CatchUpForPairAsync("A", 0, default, progress);
+            scenario.StoreHook.Before = null;
+            var lookups = counts.GetValueOrDefault(nameof(IStateStore.SyncedById)) +
+                counts.GetValueOrDefault(nameof(IStateStore.SyncedBindingsById));
+            var publications = counts.GetValueOrDefault(nameof(IStateStore.AcquireJournalPage));
+            Check.Require(progress.Records + 1 < 5_110,
+                "resume-cost setup needs fewer delivered records than the smallest saved history; R=" + progress.Records);
+            Check.Require(lookups <= progress.Records && publications <= progress.Records + 1,
+                "resume lookups and publications follow delivered interval records, not saved history");
+            // The confirmed finite capture ends with a Progress page, so every page invocation reports progress.
+            Check.Require(progress.Reports > 0 && progress.Reports <= progress.Records,
+                "the finite resume reports each nonempty delivered page");
+            foreach (var method in new[] { nameof(IStateStore.SyncedById), nameof(IStateStore.SyncedBindingsById),
+                nameof(IStateStore.AcquireJournalPage) }) counts.Remove(method);
+            Check.Require(previous is null || counts.Count == previous.Count &&
+                counts.All(item => previous.GetValueOrDefault(item.Key) == item.Value),
+                "all other source store calls are independent of unrelated saved history");
+            previous = counts;
+            Console.WriteLine($"B229 C1a saved={saved}; R={progress.Records}; reports={progress.Reports}; lookups={lookups}; publications={publications}");
+        }
+    }
+
+    private static void SavedLookupShapesIgnoreSavedSize(string baseRoot)
+    {
+        var previous = new Dictionary<string, StatementCost>();
+        foreach (var saved in new[] { 5_110, 20_440, 1_000_000 })
+        {
+            using var scenario = new Scenario(baseRoot, "lookup-cost-" + saved, "A");
+            SyncedEntry Binding(string path, string id) => new(PathNames.Key(path), path,
+                PathNames.DropboxKey(path), path, false, id, 1, 0, "remote-" + path, "hash");
+            scenario.Store.Commit("A", StateChange.Empty with
+            {
+                Record = [Binding("one.txt", "one"), Binding("many-one.txt", "many"),
+                    Binding("many-two.txt", "many"), Binding("many-three.txt", "many")]
+            });
+            SeedUnrelatedSaved(scenario, saved);
+            using var probe = new CostProbe(scenario.Database);
+            var one = default(StatementCost);
+            foreach (var id in new[] { "absent", "one", "many" })
+            {
+                var cost = id == "many"
+                    ? probe.Execute(StateSchema.SelectSyncedByLocalId, ("$p", "A"), ("$id", id))
+                    : probe.ExecuteFirst(StateSchema.SelectSyncedByLocalId, ("$p", "A"), ("$id", id));
+                Check.Require(cost.ProbePrepares == 1 && (!previous.TryGetValue(id, out var before) ||
+                    cost.VmSteps == before.VmSteps && cost.PathKeyCalls == before.PathKeyCalls),
+                    "saved lookup statement work stays fixed for each shape across all saved sizes: " + id);
+                if (id == "one") one = cost;
+                if (id == "many") Check.Require(cost.VmSteps > one.VmSteps, "the alias probe consumes all three bindings");
+                previous[id] = cost;
+                Console.WriteLine($"B229 C1b saved={saved}; shape={id}; {cost}");
+            }
+            Check.Require(scenario.Store.SyncedBindingsById("A", Side.Local, "many").Count() == 3 &&
+                scenario.Store.SyncedById("A", Side.Local, "absent") is null,
+                "production consumers observe the same three-binding and absent shapes after bulk seeding");
+        }
+    }
+
+    private static void PagePublicationStatements(string baseRoot)
+    {
+        var previous = new Dictionary<(int Shape, int Ordinal), StatementCost>();
+        foreach (var savedCount in new[] { 5_110, 20_440 })
+        {
+            using var scenario = Scenario.WithSeparateRoots(baseRoot, "publication-cost-" + savedCount, "A", "B");
+            SeedUnrelatedSaved(scenario, savedCount);
+            using var probe = new CostProbe(scenario.Database);
+            var shapes = new[] { (Members: 1, Notices: 1, Debt: 0), (Members: 1, Notices: 4, Debt: 0),
+                (Members: 2, Notices: 4, Debt: 1) };
+            for (var shape = 0; shape < shapes.Length; shape++)
+            {
+                var (members, notices, debt) = shapes[shape];
+                var position = scenario.Store.ReadJournal(scenario.VolumeKey)!;
+                var watermark = scenario.Store.ReadWorkWatermark();
+                var sources = scenario.Members.Take(members).Select(pair => SourceRow(scenario, pair.PairId)).ToArray();
+                var costs = new List<StatementCost>();
+                probe.Begin();
+                costs.Add(probe.ExecuteFirst(StateSchema.JournalRead, (StateSchema.ParamVolume, scenario.VolumeKey)));
+                for (var member = 0; member < members; member++)
+                {
+                    costs.Add(probe.ExecuteFirst(StateSchema.PairFence, (StateSchema.ParamPair, scenario.Members[member].PairId)));
+                    costs.Add(probe.ExecuteFirst(StateSchema.SourceFence, (StateSchema.ParamPairRow, (long)member + 1),
+                        (StateSchema.ParamSide, (int)Side.Local)));
+                }
+                costs.Add(probe.ExecuteFirst(StateSchema.WorkWatermark));
+                for (var index = 0; index < notices; index++)
+                {
+                    var member = index % members;
+                    var workId = watermark + index + 1;
+                    var notice = new ChangeNotice(Side.Local, ChangeKind.Changed, $"page-{shape}-{index}.txt",
+                        null, null, null, true, false);
+                    costs.Add(probe.Execute(StateSchema.InsertWork,
+                        (StateSchema.ParamId, workId), (StateSchema.ParamPairRow, (long)member + 1),
+                        (StateSchema.ParamGeneration, 0L), (StateSchema.ParamEpoch, sources[member].Epoch),
+                        (StateSchema.ParamSide, (int)notice.Side), (StateSchema.ParamDomain, scenario.VolumeKey),
+                        (StateSchema.ParamPath, PathNames.KeyFor(notice.Side, notice.Path)), (StateSchema.ParamOldPath, null),
+                        (StateSchema.ParamIdentity, null), (StateSchema.ParamNotice, StateEncoding.Envelope(notice)),
+                        (StateSchema.ParamBefore, StateEncoding.OptionalEnvelope<SyncedEntry>(null)),
+                        (StateSchema.ParamAcquisition, workId), (StateSchema.ParamParent, null), (StateSchema.ParamObligation, null)));
+                }
+                for (var member = 0; member < debt; member++)
+                {
+                    var source = sources[member];
+                    costs.Add(probe.Execute(StateSchema.AdvanceSource,
+                        (StateSchema.ParamNextEpoch, source.Epoch), (StateSchema.ParamProvenance, null),
+                        (StateSchema.ParamCursor, source.Cursor), (StateSchema.ParamGapReason, nameof(SourceObligation.LocalSkippedCoverage)),
+                        (StateSchema.ParamReason, nameof(SourceObligation.Bootstrap)), (StateSchema.ParamNextRevision, source.Revision + 1),
+                        (StateSchema.ParamPairRow, (long)member + 1), (StateSchema.ParamSide, (int)Side.Local),
+                        (StateSchema.ParamEpoch, source.Epoch), (StateSchema.ParamExpectedProvenance, null),
+                        (StateSchema.ParamExpectedCursor, source.Cursor), (StateSchema.ParamRevision, source.Revision),
+                        (StateSchema.ParamGeneration, 0L)));
+                }
+                costs.Add(probe.Execute(StateSchema.JournalAdvance, (StateSchema.ParamVolume, scenario.VolumeKey),
+                    (StateSchema.ParamJournal, unchecked((long)position.JournalId)),
+                    (StateSchema.ParamNext, unchecked((long)position.NextUsn + 1)),
+                    (StateSchema.ParamExpectedJournal, unchecked((long)position.JournalId)),
+                    (StateSchema.ParamExpectedNext, unchecked((long)position.NextUsn))));
+                probe.Commit();
+                var total = costs.Aggregate(default(StatementCost), (sum, cost) => sum + cost);
+                Console.WriteLine($"B229 C1d saved={savedCount}; shape={shape}; {total}");
+                Check.Require(total.ProbePrepares == 3 + 2 * members + notices + debt &&
+                    total.ChangedRows == notices + debt + 1, "publication statements and changed rows follow M, N and K");
+                for (var ordinal = 0; ordinal < costs.Count; ordinal++)
+                {
+                    var key = (shape, ordinal);
+                    var cost = costs[ordinal];
+                    Check.Require(!previous.TryGetValue(key, out var before) ||
+                        cost.VmSteps == before.VmSteps && cost.PathKeyCalls == before.PathKeyCalls,
+                        $"publication work is independent of saved size: shape={shape}, ordinal={ordinal}, before={before}, after={cost}");
+                    previous[key] = cost;
+                }
+            }
+        }
+    }
+
+    private static void PageResolutionCounts(string baseRoot)
+    {
+        foreach (var savedCount in new[] { 5_110, 20_440 })
+        foreach (var plainCount in new[] { 1, 8 })
+        {
+            using var scenario = Scenario.WithSeparateRoots(baseRoot, $"page-counts-{savedCount}-{plainCount}", "A", "B");
+            var root = scenario.RootOf("A");
+            var outside = Directory.CreateDirectory(Path.Combine(scenario.Root, "outside")).FullName;
+            ulong Identity(string path) => unchecked((ulong)WindowsDirectoryListing.List(Path.GetDirectoryName(path)!)
+                .Single(entry => entry.Name == Path.GetFileName(path)).FileId);
+            ulong Write(string path)
+            {
+                File.WriteAllText(path, "synthetic");
+                return Identity(path);
+            }
+            var records = new List<(ulong Id, uint Reason, FileAttributes Attributes)>();
+            var rootIdentity = NtfsIdentityPaths.ReadRootIdentity(root);
+            records.Add((rootIdentity.FileId, 0x80000000, FileAttributes.Directory));
+            for (var index = 0; index < plainCount; index++)
+                records.Add((Write(Path.Combine(root, "f" + index + ".txt")), 0x00000002, FileAttributes.Normal));
+            var stage = StageNames.For(Path.Combine(root, "stage-target.txt"));
+            Check.Require(StageNames.IsStage(Path.GetFileName(stage)), "the page fixture uses the stage owner's name");
+            records.Add((Write(stage), 0x00000002, FileAttributes.Normal));
+            var renamed = Write(Path.Combine(root, "r-new.txt"));
+            records.Add((renamed, 0x00002000, FileAttributes.Normal));
+            records.Add((Write(Path.Combine(outside, "unknown.txt")), 0x00000002, FileAttributes.Normal));
+            var moved = Write(Path.Combine(outside, "away.txt"));
+            records.Add((moved, 0x00002000, FileAttributes.Normal));
+            var absentPath = Path.Combine(root, "absent.txt");
+            records.Add((Write(absentPath), 0x00000002, FileAttributes.Normal));
+            File.Delete(absentPath);
+            var denied = Write(Path.Combine(root, "denied.txt"));
+            records.Add((denied, 0x00000002, FileAttributes.Normal));
+            var directory = Directory.CreateDirectory(Path.Combine(root, "new-folder")).FullName;
+            var directoryId = Identity(directory);
+            records.Add((directoryId, 0x00000100, FileAttributes.Directory));
+            records.Add((directoryId, 0x80000100, FileAttributes.Directory));
+            var aliasPath = Path.Combine(root, "a1.txt");
+            var alias = Write(aliasPath);
+            Check.Require(CreateHardLinkW(Path.Combine(root, "a2.txt"), aliasPath, IntPtr.Zero) &&
+                CreateHardLinkW(Path.Combine(outside, "a3.txt"), aliasPath, IntPtr.Zero),
+                "the page fixture has two in-root aliases and one outside-root alias");
+            records.Add((alias, 0x00010000, FileAttributes.Normal));
+            records.Add((alias, 0x00000001, FileAttributes.Normal));
+            SyncedEntry Binding(string path, ulong id) => new(PathNames.Key(path), path,
+                PathNames.DropboxKey(path), path, false, LocalIdentity.FileIdText(id), 1, 0, "remote-" + path, "hash");
+            scenario.Store.Commit("A", StateChange.Empty with
+            {
+                Record = [Binding("r-old.txt", renamed), Binding("away.txt", moved),
+                    Binding("a1.txt", alias), Binding("a-gone.txt", alias)]
+            });
+            SeedUnrelatedSaved(scenario, savedCount);
+            foreach (var pair in scenario.Members)
+            {
+                var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+                var attempts = 0;
+                var cacheSizes = new List<int>();
+                var listing = new LocalListing(pair, new PathScope(pair, [pair]), (_, _, _, _) => { });
+                var paths = new UsnPaths(pair, scenario.Store, listing, NtfsIdentityPaths.ReadRootIdentity(pair.LocalRoot));
+                var failure = new UnauthorizedAccessException("synthetic page identity failure");
+                Check.Require(LocalErrors.IsFileFailure(failure), "the fixture failure belongs to the Local error owner");
+                paths.BeforeIdentityRead = id =>
+                {
+                    attempts++;
+                    if (pair.PairId != "A") return;
+                    if (id == denied) throw failure;
+                    if (id == directoryId)
+                        cacheSizes.Add(((System.Collections.IDictionary)typeof(UsnPaths)
+                            .GetField("_resolved", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(paths)!).Count);
+                };
+                paths.BeginPage();
+                for (var index = 0; index < records.Count; index++)
+                {
+                    var record = records[index];
+                    paths.Observe(record.Id, 0, (ulong)index + 1, 0, record.Reason, record.Attributes);
+                }
+                scenario.StoreHook.Before = method => counts[method.Name] = counts.GetValueOrDefault(method.Name) + 1;
+                var notices = paths.Resolve(default).ToArray();
+                scenario.StoreHook.Before = null;
+                var local = pair.PairId == "A";
+                var evidence = $"member={pair.PairId}; saved={savedCount}; j={plainCount}; BIR={attempts}; " +
+                    string.Join(", ", counts.Select(value => value.Key + "=" + value.Value)) +
+                    $"; notices={notices.Length}; E6={string.Join(",", cacheSizes)}";
+                Console.WriteLine("B229 C1c " + evidence);
+                Check.Require(attempts == plainCount + 9 && !paths.NeedsRepair &&
+                    counts.GetValueOrDefault(nameof(IStateStore.SyncedById)) == (local ? 5 : plainCount + 9) &&
+                    counts.GetValueOrDefault(nameof(IStateStore.SyncedBindingsById)) == 1 && counts.Count == 2 &&
+                    notices.Length == (local ? plainCount + 7 : 0), "page branch work: " + evidence);
+                Check.Require(local ? cacheSizes.SequenceEqual(new[] { plainCount + 6, plainCount + 6 }) : cacheSizes.Count == 0,
+                    "each directory invalidation visits the current page cache: " + evidence);
+                Console.WriteLine($"B229 C1c derived, not counted: resolver={plainCount + (local ? 8 : 9)}; " +
+                    $"listing={(local ? plainCount + 6 : 0)}; containment={(local ? 2 * (plainCount + 2) : 0)}");
+            }
+        }
+    }
+
+    private static async Task FailRetainedPageAsync(Scenario scenario, string name, bool finite, string? root = null)
+    {
+        root ??= scenario.Root;
+        var path = Path.Combine(root, name);
+        File.WriteAllText(path, "uncommitted");
+        var id = unchecked((ulong)WindowsDirectoryListing.List(root).Single(entry => entry.Name == name).FileId);
+        var races = 0;
+        var paths = scenario.Host.Snapshot().Single(member => member.Pair.PairId == "A").Paths;
+        paths.BeforeIdentityRead = identity =>
+        {
+            if (identity == id)
+            {
+                races++;
+                throw new NtfsLinkEnumerationChangedException(identity);
+            }
+        };
+        var failed = false;
+        try
+        {
+            if (finite) await scenario.Source.CatchUpForPairAsync("A", 0, default);
+            else await scenario.Source.CatchUpAsync(default);
+        }
+        catch (IOException) { failed = true; }
+        finally { paths.BeforeIdentityRead = null; }
+        Check.Require(failed && races == 2 && !scenario.Source.Available,
+            "the real reader exhausts its one replay and exposes the failed source");
+    }
+
+    private static async Task FailedCatchUpResumesWithoutDebtAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "confirmed-resume", "A");
+        var revision = Revision(scenario, "A");
+        var obligation = Obligation(scenario, "A");
+        File.WriteAllText(Path.Combine(scenario.Root, "first.txt"), "first");
+        await FailRetainedPageAsync(scenario, "second.txt", finite: true);
+        var lower = NtfsUsnJournal.ReadCheckpoint(scenario.Root).NextUsn;
+        var resumed = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(scenario.Source.Available && Obligation(scenario, "A") == obligation &&
+            Revision(scenario, "A") == revision && resumed.Checkpoint.NextUsn >= lower &&
+            (ulong)resumed.Checkpoint.NextUsn == scenario.Store.ReadJournal(scenario.VolumeKey)!.NextUsn &&
+            FirstNotice(scenario, "A")?.Notice.Path is "first.txt" or "second.txt",
+            "a finite resume covers its captured interval durably without adding source-loss debt");
+        await FailRetainedPageAsync(scenario, "third.txt", finite: false);
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Obligation(scenario, "A") == obligation && Revision(scenario, "A") == revision,
+            "a later fresh failure proves the previous finite capture confirmed the resume");
+    }
+
+    private static async Task FailedResumeRebasesWithDebtAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "failed-resume", "A");
+        var revision = Revision(scenario, "A");
+        await FailRetainedPageAsync(scenario, "first.txt", finite: true);
+        await FailRetainedPageAsync(scenario, "second.txt", finite: true);
+        Check.Require(scenario.Source.ContinuityLost, "a second failure before finite confirmation loses continuity");
+        var refreshes = scenario.Host.RefreshCalls;
+        var reads = scenario.Host.RefreshReads;
+        var rebased = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        var now = NtfsUsnJournal.ReadCheckpoint(scenario.Root);
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap &&
+            Revision(scenario, "A") == revision + 1 && FirstNotice(scenario, "A") is null &&
+            rebased.Checkpoint.NextUsn >= now.FirstUsn && rebased.Checkpoint.NextUsn <= now.NextUsn &&
+            scenario.Host.RefreshCalls - refreshes == 1 && scenario.Host.RefreshReads - reads == 1,
+            "a failed resume rebases once, refreshes its one debt member and preserves Bootstrap");
+        Check.Require(!scenario.Source.ContinuityLost, "a committed replacement base clears failed-resume state");
+        await FailRetainedPageAsync(scenario, "fresh.txt", finite: false);
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Revision(scenario, "A") == revision + 1 && !scenario.Source.ContinuityLost,
+            "a fresh failure after replacement gets its own confirmed resume without extra debt");
+    }
+
+    private static async Task FailedSourceOutsideRetentionRebasesAsync(string baseRoot, string kind)
+    {
+        using var scenario = new Scenario(baseRoot, "outside-retention-" + kind, "A");
+        var revision = Revision(scenario, "A");
+        var now = NtfsUsnJournal.ReadCheckpoint(scenario.Root);
+        Check.Require(kind != "BelowRetention" || Math.Max(now.FirstUsn, now.LowestValidUsn) > 0,
+            "the below-retention fixture needs a nonzero retained start");
+        var bogus = kind switch
+        {
+            "JournalChanged" => scenario.Start with { JournalId = scenario.Start.JournalId ^ 1UL },
+            "BelowRetention" => scenario.Start with { NextUsn = 0 },
+            "AheadOfEnd" => scenario.Start with { NextUsn = checked((ulong)now.NextUsn + (1UL << 30)) },
+            _ => throw new InvalidOperationException()
+        };
+        var fault = new IOException("synthetic journal publication failure");
+        scenario.StoreHook.Before = method =>
+        {
+            if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+            scenario.StoreHook.Before = null;
+            scenario.StoreHook.Inner.AcquireJournalPage(scenario.VolumeKey, scenario.Start, bogus, Fences(scenario), []);
+            throw fault;
+        };
+        File.WriteAllText(Path.Combine(scenario.Root, "uncommitted.txt"), "pending");
+        Exception? caught = null;
+        try { await scenario.Source.CatchUpAsync(default); }
+        catch (Exception error) { caught = error; }
+        Check.Require(ReferenceEquals(caught, fault), "the real publication exposes the armed store failure");
+        scenario.Source.Invalidate();
+        var refreshes = scenario.Host.RefreshCalls;
+        var reads = scenario.Host.RefreshReads;
+        var rebased = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap &&
+            Revision(scenario, "A") == revision + 1 && rebased.Checkpoint.JournalId == now.JournalId &&
+            scenario.Host.RefreshCalls - refreshes == 1 && scenario.Host.RefreshReads - reads == 1,
+            "an invalid saved position rebases and refreshes its one debt member: " + kind);
+    }
+
     private static async Task RetainedPageRaceAsync(string baseRoot)
     {
         foreach (var finite in new[] { false, true })
@@ -1495,8 +2035,10 @@ public static class JournalSourceChecks
             var entries = WindowsDirectoryListing.List(scenario.Root).Where(entry => entry.Name is "first.txt" or "second.txt")
                 .ToDictionary(entry => entry.Name, entry => unchecked((ulong)entry.FileId));
             var races = 0;
+            var resolutions = new Dictionary<ulong, int>();
             member.Paths.BeforeIdentityRead = id =>
             {
+                resolutions[id] = resolutions.GetValueOrDefault(id) + 1;
                 if (id == entries["first.txt"] && races == 0 || id == entries["second.txt"] && races == 1 && repeatRace)
                 {
                     races++;
@@ -1513,6 +2055,9 @@ public static class JournalSourceChecks
             catch (IOException) { failed = true; }
             Check.Require(failed == repeatRace && races == (repeatRace ? 2 : 1),
                 "A first race and a different identity's replay race exhaust exactly one page replay.");
+            Check.Require(resolutions.GetValueOrDefault(entries["first.txt"]) == 2 &&
+                resolutions.GetValueOrDefault(entries["second.txt"]) == 1,
+                "the raced identity is attempted twice and the later identity only in the replay");
             if (repeatRace)
                 Check.Require(!scenario.Source.Available && scenario.Source.Position == start &&
                     scenario.Store.ReadWorkWatermark() == watermark,
@@ -1590,6 +2135,7 @@ public static class JournalSourceChecks
     private sealed class Scenario : IDisposable
     {
         private readonly string _database;
+        internal string Database => _database;
         private readonly bool _separateRoots;
         public string Root { get; }
         public string VolumeKey { get; }

@@ -11,6 +11,8 @@ public sealed class EngineCliRuntime : ISyncCliRuntime, IEngineCliAccess, IEngin
     private readonly EngineOperations? _operations;
     private readonly PilotStateAuthority? _hostAuthority;
     private readonly int _width = RunLog.HumanWidth;
+    // The app edge's retained terminal-startup notice; only an absent-host status result shows it.
+    private readonly string? _startupNotice;
     private readonly SyncTransferRateLimiter _dropboxLimiter = new(new SyncTransferSettings());
     private PilotInstanceLock? _ownLock;
     private DropboxAccountClients? _dropboxAccounts;
@@ -19,7 +21,7 @@ public sealed class EngineCliRuntime : ISyncCliRuntime, IEngineCliAccess, IEngin
     private int _disposed;
 
     public EngineCliRuntime() { }
-    public EngineCliRuntime(int width) => _width = width;
+    public EngineCliRuntime(int width, string? startupNotice = null) { _width = width; _startupNotice = startupNotice; }
     public EngineCliRuntime(EngineOperations operations) =>
         _operations = operations ?? throw new ArgumentNullException(nameof(operations));
 
@@ -91,8 +93,12 @@ public sealed class EngineCliRuntime : ISyncCliRuntime, IEngineCliAccess, IEngin
             throw new SyncCliUnsupportedException(EngineCliCatalog.Message(EngineMessageKey.NeedsEngine));
         try
         {
-            return await new EngineCommands(_operations ?? new EngineOperations(SyncSharkRuntimePaths.ProductRoot,
+            var result = await new EngineCommands(_operations ?? new EngineOperations(SyncSharkRuntimePaths.ProductRoot,
                 progress, _width)).RunAsync(invocation, ct);
+            // Additive presentation only: the retained notice never replaces the state the host actually reported.
+            return result is Results.HostResult status && _startupNotice is { Length: > 0 } notice
+                ? status with { Message = status.Message + Environment.NewLine + notice }
+                : result;
         }
         catch (EngineRequestException error)
         {

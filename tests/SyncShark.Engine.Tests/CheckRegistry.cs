@@ -62,12 +62,14 @@ public static class CheckRegistry
         ["row"] = [Contracts.RowChecks.Run],
         ["side-facts"] = [Contracts.SideFactsChecks.Run],
         ["scope"] = [Contracts.PathScopeChecks.Run],
-        ["issues"] = [Contracts.IssuePolicyChecks.Run, Contracts.IssueSubjectChecks.Run, Contracts.IssueSubjectChecks.ReviewedIdentity,
+        ["issues"] = [Executor.FolderDeleteRunnerChecks.AbsentEpisode, Run.RepairChecks.AbsentEpisodes, Run.EngineHostChecks.AbsentEpisodeRepair, Contracts.IssuePolicyChecks.Run, Contracts.IssueSubjectChecks.Run, Contracts.IssueSubjectChecks.ReviewedIdentity,
             Contracts.IssueSubjectChecks.ReviewedNullMembers, Contracts.DriveEvidenceChecks.Run],
         ["locks"] = [Contracts.PathLocksChecks.Run],
         ["containment"] = [Executor.ChangeRunnerChecks.RunContainment, Storage.ScanReaderChecks.Run, Storage.ChangeTableChecks.Run],
         // B-204: completion containment, with its own key so a red control fails here first.
         ["completion-containment"] = [Executor.ChangeRunnerChecks.CompletionFailureContained],
+        ["dropbox-echo"] = [Storage.ChangeTableChecks.RunDropboxEchoes, Executor.ChangeRunnerChecks.RunDropboxEchoes,
+            Dropbox.DropboxFeedChecks.RunDropboxEchoPartialPage, Run.CallBudgetChecks.RunDropboxEchoMoves],
         ["completion-containment-cost"] = [Executor.ChangeRunnerChecks.CompletionFailureCost],
         ["containment-move-out"] = [Executor.ChangeRunnerChecks.RunMoveOutSafety],
         // Its own key: the syncer group aborts before this case on an inherited red (CI-B153-1).

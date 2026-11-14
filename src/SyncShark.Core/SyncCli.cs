@@ -21,6 +21,11 @@ public enum SyncCliExitCode
     PendingVerification = 8,
     PlanBoundExceeded = 9,
     StateDamaged = 10,
+    // Persistent Engine-host startup results. They are process results, never a command's exit outcome,
+    // so they are deliberately absent from SyncCliRegistry.ExitCodes.
+    StartupReleaseRecoveryRequired = 20,
+    StartupInvalidDataLocation = 21,
+    StartupLegacyFootprintRefused = 22,
     Canceled = 130
 }
 
@@ -231,6 +236,19 @@ public static class SyncCli
         SyncCliRegistry.Blocked.Select(item => item.Value).ToArray();
 
     public static IReadOnlyDictionary<string, string> ExitCodeHelp => SyncCliRegistry.ExitCodes;
+
+    /// <summary>True for the startup refusals that cannot clear without a user action and must never relaunch.</summary>
+    public static bool IsPersistentStartupRefusal(int exitCode) => (SyncCliExitCode)exitCode is
+        SyncCliExitCode.StartupReleaseRecoveryRequired or SyncCliExitCode.StartupInvalidDataLocation
+        or SyncCliExitCode.StartupLegacyFootprintRefused;
+
+    /// <summary>The edge message key that explains one persistent startup refusal and the user's options.</summary>
+    public static string PersistentStartupRefusalNoticeKey(int exitCode) => (SyncCliExitCode)exitCode switch
+    {
+        SyncCliExitCode.StartupReleaseRecoveryRequired => "startup-release-recovery-required-notice",
+        SyncCliExitCode.StartupInvalidDataLocation => "startup-invalid-data-location-notice",
+        _ => "startup-legacy-footprint-refused-notice"
+    };
 
     public static bool IsCliInvocation(IReadOnlyList<string> args) =>
         args is { Count: > 0 } && string.Equals(args[0], CliSwitch, StringComparison.OrdinalIgnoreCase);

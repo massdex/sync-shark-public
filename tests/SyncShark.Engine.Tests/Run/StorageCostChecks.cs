@@ -63,6 +63,8 @@ internal static class StorageCostChecks
             FixedInvolvedCosts(folder);
             TwoSizes(folder);
             EvidenceLedger();
+            ScanFootprint(folder);
+            Storage.DeletedHistoryChecks.RunRestoreFootprint();
         }
         finally
         {
@@ -195,6 +197,114 @@ internal static class StorageCostChecks
             Check.Require(measured.Commands == 1,
                 "a completed empty discovery is one existence query, not per-item membership or history work");
         }
+    }
+
+    private static void ScanFootprint(string folder)
+    {
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        var small = ScanFootprintAt(Path.Combine(folder, "footprint-small"), SmallFiles);
+        var large = ScanFootprintAt(Path.Combine(folder, "footprint-large"), LargeFiles);
+        // At four times the entries, linear per-entry growth is 1 and quadratic is 4; 2 separates them.
+        var linear = large.LogicalBytes * small.Entries <= 2 * small.LogicalBytes * large.Entries;
+        Console.WriteLine($"SCAN-FOOTPRINT linear={linear} elapsed_total_ms={timer.ElapsedMilliseconds}");
+        Check.Require(linear, "scan footprint: logical bytes per entry stay linear");
+    }
+
+    private static (long Entries, long LogicalBytes) ScanFootprintAt(string folder, int count)
+    {
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var entries = ScanFootprintEntries(count);
+            using var rig = NewRig(Path.Combine(folder, "state.db"));
+            rig.Store.BeginScan(rig.Pair.PairId, 0, includeDeleted: false);
+            var local = rig.Store.OpenScan(rig.Pair.PairId, Side.Local, ScanTestSettings.BatchRows);
+            var dropbox = rig.Store.OpenScan(rig.Pair.PairId, Side.Dropbox, ScanTestSettings.BatchRows);
+            foreach (var entry in entries.Local)
+                local.AddAsync(new Listed(entry.Path, entry), default).GetAwaiter().GetResult();
+            foreach (var entry in entries.Dropbox)
+                dropbox.AddAsync(new Listed(entry.Path, entry), default).GetAwaiter().GetResult();
+            Task.WhenAll(local.CompleteAsync(), dropbox.CompleteAsync()).GetAwaiter().GetResult();
+            // The writer stays open; closing this read-only connection cannot checkpoint as the last connection.
+            var scanFile = Directory.EnumerateFiles(folder, "state.db" + StateSchema.ScanFileSuffix + "*" + StateSchema.DatabaseExtension).Single();
+            var walFileBytes = new FileInfo(scanFile + StateSchema.WalSuffix).Length;
+            var dbFileBytes = new FileInfo(scanFile).Length;
+            using var connection = StateStore.Connect(scanFile, SqliteOpenMode.ReadOnly);
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA page_count;";
+            var pages = (long)command.ExecuteScalar()!;
+            command.CommandText = "PRAGMA page_size;";
+            var logicalBytes = pages * (long)command.ExecuteScalar()!;
+            Console.WriteLine(string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"SCAN-FOOTPRINT entries={2L * count} mean_path={entries.Local.Average(entry => entry.Path.Length):F2} " +
+                $"scan_wal_file_bytes={walFileBytes} scan_db_file_bytes={dbFileBytes} footprint=physical " +
+                $"scan_logical_bytes={logicalBytes} logical_bytes_per_entry={(double)logicalBytes / (2 * count):F2} " +
+                $"wal_file_bytes_per_entry={(double)walFileBytes / (2 * count):F2}"));
+            command.CommandText = "SELECT 1 FROM pragma_module_list WHERE name='dbstat';";
+            if (command.ExecuteScalar() is null) Console.WriteLine("SCAN-FOOTPRINT dbstat=absent");
+            else
+            {
+                command.CommandText = "SELECT name,count(*),sum(unused) FROM dbstat GROUP BY name ORDER BY name;";
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                    Console.WriteLine($"SCAN-FOOTPRINT btree={reader.GetString(0)} pages={reader.GetInt64(1)} unused_bytes={reader.GetInt64(2)}");
+            }
+            return (2L * count, logicalBytes);
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    private static (Entry[] Local, Entry[] Dropbox) ScanFootprintEntries(int count)
+    {
+        // R01 folder share and R02 mean key length; pad file names to keep the whole tree's mean at 132 ASCII bytes.
+        var folders = count * 224 / 1000;
+        var entries = new Entry[count];
+        for (var index = 0; index < count; index++)
+        {
+            var isFolder = index < folders;
+            var parent = index == 0 ? "" : entries[isFolder ? (index - 1) / 4 : (index - folders) % folders].Path;
+            var name = (isFolder ? "d" : "f") + index.ToString("D5", System.Globalization.CultureInfo.InvariantCulture);
+            var path = PathNames.Child(parent, name);
+            entries[index] = new Entry(path, isFolder, isFolder ? 0 : 1_048_576 + index,
+                isFolder ? default : BaseTime.AddSeconds(index),
+                ((1L << 48) + index).ToString(System.Globalization.CultureInfo.InvariantCulture), "", "", null);
+        }
+        var padding = count * 132 - entries.Sum(entry => entry.Path.Length);
+        var files = count - folders;
+        for (var index = 0; index < files; index++)
+        {
+            var entry = entries[folders + index];
+            entries[folders + index] = entry with { Path = entry.Path + new string('x', padding / files + (index < padding % files ? 1 : 0)) };
+        }
+        var children = entries.GroupBy(entry => PathNames.Parent(entry.Path))
+            .ToDictionary(group => group.Key, group => group.OrderBy(entry => PathNames.Key(entry.Path), StringComparer.Ordinal).ToArray());
+        var ordered = new List<Entry>(count);
+        var stack = new Stack<string>();
+        stack.Push("");
+        while (stack.TryPop(out var parent))
+        {
+            if (!children.TryGetValue(parent, out var items)) continue;
+            foreach (var entry in items)
+            {
+                ordered.Add(entry);
+                if (entry.IsFolder) stack.Push(entry.Path);
+            }
+        }
+        Check.Require(ordered.Count == count && ordered.Sum(entry => entry.Path.Length) == count * 132,
+            "scan footprint uses every generated entry at the representative mean path length");
+        var shuffled = Enumerable.Range(0, count).ToArray();
+        var random = new Random(0); // Fixed seed makes the undocumented provider order reproducibly adverse.
+        for (var index = shuffled.Length - 1; index > 0; index--)
+        {
+            var other = random.Next(index + 1);
+            (shuffled[index], shuffled[other]) = (shuffled[other], shuffled[index]);
+        }
+        return (ordered.ToArray(), shuffled.Select(index => ordered[index] with
+        {
+            Id = "id:" + index.ToString("D22", System.Globalization.CultureInfo.InvariantCulture),
+            Revision = ordered[index].IsFolder ? "" : index.ToString("x25", System.Globalization.CultureInfo.InvariantCulture),
+            ContentHash = ordered[index].IsFolder ? "" : index.ToString("x64", System.Globalization.CultureInfo.InvariantCulture)
+        }).ToArray());
     }
 
     // One first-run record and a raise-only commit.
@@ -461,7 +571,7 @@ internal static class StorageCostChecks
             (StateSchema.ParamIsFolder, false), (StateSchema.ParamSize, 1L),
             (StateSchema.ParamMtime, Ticks), (StateSchema.ParamId, "L" + Index),
             (StateSchema.ParamRev, ""), (StateSchema.ParamHash, Array.Empty<byte>()),
-            (StateSchema.ParamSkip, Skip),
+            (StateSchema.ParamSkip, Skip), (StateSchema.ParamShared, false),
         ];
 
         public (string Name, object? Value)[] InsertArguments =>

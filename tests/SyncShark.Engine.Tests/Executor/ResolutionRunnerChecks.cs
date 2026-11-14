@@ -1510,7 +1510,8 @@ public static class ResolutionRunnerChecks
         var local = await PutAsync(context.Local, "item", "winner");
         var remote = await context.Dropbox.EnsureFolderAsync("item", CancellationToken.None);
         var child = await context.Dropbox.EnsureFolderAsync("item/nested", CancellationToken.None);
-        var saved = SyncedEntries.From(local with { IsFolder = true }, remote);
+        // A reverse-kind replacement: the bound Local folder became this file, so its old identity is truthfully absent.
+        var saved = SyncedEntries.From(local with { IsFolder = true, Id = "replaced-local-target" }, remote);
         store.Commit(context.Pair.PairId, StateChange.Empty with { Record = [saved] });
         var nested = context.Pair with
         {
@@ -1518,7 +1519,8 @@ public static class ResolutionRunnerChecks
             DropboxRoot = context.Pair.DropboxRoot.TrimEnd('/') + "/item/nested"
         };
         context = context with { Scope = new PathScope(context.Pair, [context.Pair, nested]) };
-        var jobs = SyncJobs.Create(context, new SyncPorts(PassthroughRecoveryBoundary.Instance,
+        var identified = context with { Local = Identified(context.Local), Dropbox = Identified(context.Dropbox) };
+        var jobs = SyncJobs.Create(identified, new SyncPorts(PassthroughRecoveryBoundary.Instance,
             RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0));
         var row = Row.ForOneSide(Side.Local, saved.LocalKey, local, saved, [], null, RowContext.Neutral) with { Dropbox = remote };
         var outcome = await jobs.Items.Dispatch.DispatchPreparedAsync(new SyncAction(ActionKind.ReplaceKind, row,
@@ -2444,6 +2446,14 @@ public static class ResolutionRunnerChecks
             RequestAttempt attempt, CancellationToken ct) =>
             inner.ReadFolderRemovalAsync(jobId, expectedCount, attempt, ct);
     }
+
+    // Both production adapters answer identity; the fakes answer from their own entries, so an absent counterpart is
+    // proven absent and a present one still refuses the delete (the deletion-safe default elsewhere stays untouched).
+    private static ISide Identified(ISide side) =>
+        side is FakeSide fake
+            ? new IdentitySide(fake, (id, _) => Task.FromResult<(IdentityLocation Location, bool InScope)?>(
+                fake.FindById(id) is { } entry ? (new IdentityLocation("1", entry.Path, entry), true) : ((IdentityLocation, bool)?)null))
+            : side;
 
     private static ExecutorContext Context(IAdmission? admission = null)
     {

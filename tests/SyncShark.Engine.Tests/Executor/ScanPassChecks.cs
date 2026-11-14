@@ -136,7 +136,9 @@ public static class ScanPassChecks
     // AutoSync goes on to schedule its folder poll; clearing the debt lets the next wake restore both (3.8).
     private static Task RepairHeldSurvivorsAsync() => WithFolder("repair-held-survivors", async folder =>
     {
-        using var rig = NewRig(Pair());
+        using var plain = NewRig(Pair());
+        // The deleted Local roots answer their saved identities as absent, as LocalSide does.
+        var rig = plain with { Local = IdentitySide.Truthful(plain.Local, (FakeSide)plain.Local) };
         var pairId = rig.Pair.PairId;
         string[] roots = ["docs", "more"];
         var folders = new List<Entry>();
@@ -648,7 +650,9 @@ public static class ScanPassChecks
 
     private static Task RefusedBranchReplansAsync(string refusal) => WithFolder("refused-branch-" + refusal, async folder =>
     {
-        using var rig = NewRig(Pair());
+        using var plain = NewRig(Pair());
+        // The deleted Dropbox root answers its saved identity as absent, as DropboxSide does.
+        var rig = plain with { Dropbox = IdentitySide.Truthful(plain.Dropbox, (FakeSide)plain.Dropbox) };
         const string victim = "docs/victim.txt";
         const string survivor = "docs/survivor.txt";
         await rig.Local.EnsureFolderAsync("docs", default);
@@ -690,9 +694,9 @@ public static class ScanPassChecks
     {
         public string? OperationId { get; private set; }
         public override string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct,
-            Action? admit = null)
+            Action? admit = null, string? preRestoreId = null)
         {
-            var id = base.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, admit);
+            var id = base.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, admit, preRestoreId);
             if (OperationId is null)
             {
                 OperationId = id;
@@ -705,7 +709,9 @@ public static class ScanPassChecks
     // S23-R1: one survivor's failed observation is that item's Failure; the next survivor still runs, and the run lives.
     private static Task UnobservableSurvivorAsync() => WithFolder("unobservable-survivor", async folder =>
     {
-        using var rig = NewRig(Pair());
+        using var plain = NewRig(Pair());
+        // The deleted Local root answers its saved identity as absent, as LocalSide does.
+        var rig = plain with { Local = IdentitySide.Truthful(plain.Local, (FakeSide)plain.Local) };
         var pairId = rig.Pair.PairId;
         var root = await rig.Local.EnsureFolderAsync("docs", default);
         string[] survivors = ["docs/a.txt", "docs/z.txt"];
@@ -729,7 +735,7 @@ public static class ScanPassChecks
             Close = survivors.Select(path => (path, IssueClosure.AfterEffect)).ToArray()
         });
 
-        ((FakeSide)rig.Local).FailNext(survivors[0], new ItemFailedException(survivors[0], TextKey.ReadLocalFailed, null));
+        ((FakeSide)plain.Local).FailNext(survivors[0], new ItemFailedException(survivors[0], TextKey.ReadLocalFailed, null));
         var outcomes = new List<SyncOutcome>();
         using (var log = Log(rig, folder, "finish"))
             await RunOperationAsync(rig, log, Settings, jobs =>
@@ -887,7 +893,9 @@ public static class ScanPassChecks
 
     private static Task HeldSurvivorWakeAsync() => WithFolder("held-survivor-wake", async folder =>
     {
-        using var rig = NewRig(Pair());
+        using var plain = NewRig(Pair());
+        // The deleted Local root answers its saved identity as absent, as LocalSide does.
+        var rig = plain with { Local = IdentitySide.Truthful(plain.Local, (FakeSide)plain.Local) };
         // A real Repair acquires and publishes deleted history before it completes (#36: owed history obligates).
         var generation = rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation;
         var history = rig.Store.BeginScan(rig.Pair.PairId, generation, true);
@@ -912,11 +920,15 @@ public static class ScanPassChecks
             "Repair leaves a durable held survivor even without an ordinary selection");
         var local = new CountingSide(rig.Local);
         var remote = new CountingSide(rig.Dropbox);
-        var counted = rig with { Local = local, Dropbox = remote };
+        var identityReads = 0;
+        var counted = rig with
+        {
+            Local = IdentitySide.Truthful(local, (FakeSide)plain.Local, () => identityReads++), Dropbox = remote
+        };
         using (var log = Log(rig, folder, "still-held"))
             await RunOperationAsync(counted, log, Settings, jobs => jobs.Syncer.SyncWorkAsync(default));
         Check.Require(local.Reads + local.Listings + local.Opens + local.Hashes +
-            remote.Reads + remote.Listings + remote.Opens + remote.Hashes == 0,
+            remote.Reads + remote.Listings + remote.Opens + remote.Hashes + identityReads == 0,
             "an ordinary wake with only a held survivor has no provider observation");
         rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with { Close = [(kept, IssueClosure.AfterEffect)] });
         using (var log = Log(rig, folder, "released-wake"))
@@ -932,7 +944,9 @@ public static class ScanPassChecks
     // keeping the follow-up pending.
     private static Task HeldSurvivorRepairDebtAsync() => WithFolder("held-survivor-debt", async folder =>
     {
-        using var rig = NewRig(Pair());
+        using var plain = NewRig(Pair());
+        // The deleted Local root answers its saved identity as absent, as LocalSide does.
+        var rig = plain with { Local = IdentitySide.Truthful(plain.Local, (FakeSide)plain.Local) };
         var pairId = rig.Pair.PairId;
         var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
         // A real Repair acquires and publishes deleted history before it completes (#36: owed history obligates).
@@ -990,6 +1004,8 @@ public static class ScanPassChecks
         const string kept = "docs/kept.txt";
         var database = Path.Combine(FixtureRoot.Value!, Guid.NewGuid().ToString("N") + ".db");
         var rig = NewRig(Pair(), database);
+        // The deleted Local root answers its saved identity as absent, as LocalSide does.
+        rig = rig with { Local = IdentitySide.Truthful(rig.Local, (FakeSide)rig.Local) };
         try
         {
         var pairId = rig.Pair.PairId;
@@ -1468,13 +1484,13 @@ public static class ScanPassChecks
 
     internal static Task RunOperationAsync(Rig rig, RunLog log, EngineSettings settings,
         Func<(Syncer Syncer, FolderSync Folders, ExclusionRunner Exclusions), Task> operation,
-        Action<RunEvent>? events = null)
+        Action<RunEvent>? events = null, ILiveExecutionBoundary? live = null)
     {
         var context = Context(rig, rig.Store, log, rig.Local, rig.Dropbox, settings, null, null);
         if (events is not null)
             context = context with { Events = value => { log.Event(value); events(value); } };
         var ports = new SyncPorts(new LeaseBoundary(),
-            RefusingExecutionBoundary.Instance, new LeaseBoundary(), LocalSide.HashSlots);
+            live ?? RefusingExecutionBoundary.Instance, new LeaseBoundary(), LocalSide.HashSlots);
         var jobs = SyncJobs.Create(context, ports);
         return operation((new Syncer(context, ports), jobs.Items.Folders, jobs.Exclusions));
     }

@@ -58,8 +58,10 @@ internal static class CliEntry
                 var hosted = Task.Run(() => EngineHostEntry.TryCliAsync(args, standardOutput, standardError,
                     cancellation.Token)).GetAwaiter().GetResult();
                 if (hosted is { } hostExitCode) return hostExitCode;
+                // One retained terminal-startup notice, read at this edge, explains an absent host that no reply can.
+                var startupNotice = EngineHostEntry.AbsentHostStatusNotice(args);
                 return Task.Run(() => SyncCli.ExecuteAsync(args, standardOutput, standardError,
-                    () => new Massdex.SyncShark.Engine.Edge.EngineCliRuntime(width), cancellation.Token)).GetAwaiter().GetResult();
+                    () => new Massdex.SyncShark.Engine.Edge.EngineCliRuntime(width, startupNotice), cancellation.Token)).GetAwaiter().GetResult();
             }
             // The --core switch (or the SYNCSHARK_CORE setting) selects the core before anything else; a
             // usage error is reported without opening state. v2 skips the running-application bridge because

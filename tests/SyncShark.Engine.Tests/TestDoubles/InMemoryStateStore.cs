@@ -913,6 +913,10 @@ public sealed class InMemoryStateStore : IStateStore
         }
     }
 
+    // The shortcut is checked against SQLite; this double keeps the ordinary observation path.
+    public (int Settled, bool More) SettleEchoes(string pairId, long expectedGeneration, PathScope scope,
+        Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize) => (0, false);
+
     public WorkSelection? SelectWork(string pairId, long expectedGeneration, PathScope scope)
     {
         ArgumentNullException.ThrowIfNull(scope);
@@ -2023,14 +2027,14 @@ public sealed class InMemoryStateStore : IStateStore
     }
 
     public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, WorkSelection renameWork,
-        Action? admit = null)
+        Action? admit = null, string? preRestoreId = null)
     {
         lock (_gate)
         {
             admit?.Invoke();
             if (renameWork.PairId != pairId || ReadRenameContinuation(renameWork)?.Destination != plan.Folder.Synced)
                 throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.BaselineChanged);
-            var operation = BeginFolderRemoval(pairId, plan, authority, pageSize, ct);
+            var operation = BeginFolderRemoval(pairId, plan, authority, pageSize, ct, preRestoreId: preRestoreId);
             _folders[(pairId, operation)].RenameWork = renameWork.AnchorWorkId;
             return operation;
         }
@@ -2052,7 +2056,8 @@ public sealed class InMemoryStateStore : IStateStore
         lock (_gate) return _folders[(pairId, operationId)].RenameWork;
     }
 
-    public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, Action? admit = null)
+    public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, Action? admit = null,
+        string? preRestoreId = null)
     {
         lock (_gate)
         {
@@ -2066,7 +2071,7 @@ public sealed class InMemoryStateStore : IStateStore
             {
                 State = new FolderRemovalState(operationId, 0, FolderRemovalPhase.Prepared, plan.DeletingFrom,
                     root, plan.Folder.EntryOn(plan.DeletingFrom == Side.Local ? Side.Dropbox : Side.Local),
-                    plan.Folder.Synced, plan.Folder.Context, null, true, null, null, authority)
+                    plan.Folder.Synced, plan.Folder.Context, null, true, null, null, authority) { PreRestoreId = preRestoreId }
             };
             AddItem(operation, 0, plan.Folder.Key, root.Path, root, plan.Folder.Synced,
                 plan.DeleteWhole ? FolderVerdict.Removed : FolderVerdict.Survives, false, plan.DeleteWhole);
@@ -2915,6 +2920,8 @@ public sealed class InMemoryStateStore : IStateStore
         {
             if (ReadScan(pairId, scanId).Scope is not null) throw new InvalidOperationException();
             if (!_scanIssues[(pairId, scanId)].Contains(expected) || !IssueRows(pairId).Contains(expected)) return false;
+            // A refused close keeps first-run provenance, as the store's rollback does.
+            if (HoldsResponsibility(pairId, expected)) return false;
             ApplyAtomic(pairId, StateChange.Empty with
             {
                 FirstRunAcknowledged = expected.Subject.FirstRunDeletion == IssueSubject.FirstRunDeletionKind.None

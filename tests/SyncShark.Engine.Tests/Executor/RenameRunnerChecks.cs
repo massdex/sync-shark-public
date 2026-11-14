@@ -1319,7 +1319,7 @@ public static class RenameRunnerChecks
                 var issue = f.Store.Issues(f.Pair.PairId).Single();
                 Check.Require(IssuePolicy.Obsolete(issue,
                     (side, path) => f.Store.ScanEntry(f.Pair.PairId, side, PathNames.KeyFor(side, path)),
-                    new PrefixSet(), new PrefixSet(), new PrefixSet(), new PrefixSet(), f.Context.Scope, false),
+                    new PrefixSet(), new PrefixSet(), new PrefixSet(), new PrefixSet(), f.Context.Scope, false, liveEpisode: false),
                     "After the owner removes the live old endpoint, Repair's existing reconciliation obsoletes its clash.");
                 f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Close = [(issue.Path, new[] { issue.Kind })] });
                 Check.Require((await f.RunAsync([local, remote])).Kind == RenameKind.Adopt &&

@@ -829,6 +829,37 @@ class TrustedRatchetChecks(unittest.TestCase):
         for name in ('LiteralsChecks.cs', 'LiteralSites.cs'):
             self.assertIn('POLICY REVIEW changed tests/SyncShark.Engine.Tests/Layout/' + name, output)
 
+    def test_optional_policy_archive_and_review(self):
+        for relative in ratchet.trust.OPTIONAL_POLICY:
+            for change in ('unchanged', 'changed', 'added', 'removed'):
+                with self.subTest(path=relative, change=change):
+                    fixture = TrustedRatchetChecks()
+                    fixture.setUp()
+                    try:
+                        path = fixture.root / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        tag = 'v1.0.0'
+                        if change != 'added':
+                            path.write_text('shipped policy\n', encoding='utf-8')
+                            fixture.commit()
+                            fixture.live = fixture.git('rev-parse', 'HEAD')
+                            tag = 'v1.0.1'
+                            fixture.git('tag', tag)
+                        if change in ('changed', 'added'):
+                            path.write_text('candidate policy\n', encoding='utf-8')
+                        elif change == 'removed':
+                            path.unlink()
+                        code, output = fixture.check(tag)
+                        self.assertEqual(0, code, output)
+                        if change == 'unchanged':
+                            self.assertNotIn('POLICY REVIEW changed ' + relative, output)
+                        else:
+                            verb = 'removed' if change == 'removed' else 'changed'
+                            self.assertIn('POLICY REVIEW ' + verb + ' ' + relative, output)
+                        self.assertNotIn('trusted file missing: ' + relative, output)
+                    finally:
+                        fixture.doCleanups()
+
     def test_literal_artifact_missing_is_incomplete(self):
         code, output = self.check(artifact=False)
         self.assertEqual(2, code, output)

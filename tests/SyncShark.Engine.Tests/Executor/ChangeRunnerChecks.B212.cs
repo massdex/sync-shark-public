@@ -4,10 +4,15 @@ using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Executor;
 
-// B-212 execution witnesses (SPEC-B212-6 9.3, SPEC-B212-7 9.1): each store starts as a genuine version-14 file whose
-// one-time step creates the duplicate-folder obligation, then one public SyncWorkAsync call executes it.
+// B-212 execution witnesses: each store starts as a genuine version-14 file whose one-time step creates the
+// duplicate-folder obligation, then one public SyncWorkAsync call executes it.
 public static partial class ChangeRunnerChecks
 {
+    // The inverse of the unreleased v15 step (StateSchema.DuplicateBindingSchema), the one copy every check uses to turn
+    // a current store back into a genuine older file. It changes whenever that step does.
+    internal const string DuplicateBindingInverse =
+        "DROP TABLE binding_repair;ALTER TABLE folder_removal DROP COLUMN pre_restore_id;ALTER TABLE folder_removal DROP COLUMN authority;";
+
     // T1's names: X is the Local folder at Renamed; A = X@Old <-> R@Old (content), D = X@Renamed <-> E@Renamed
     // (empty). Old sorts before Renamed, so the attempt checks A first (the store's key order).
     private const string RepairOld = "Old";
@@ -457,7 +462,7 @@ public static partial class ChangeRunnerChecks
     }
 
     // The T1 store: the two duplicate bindings and A's saved child, committed and then made a genuine version-14 file
-    // (the two v15 additions removed), so reopening runs the one-time step. Its own schema check refuses any other shape.
+    // (the v15 additions removed), so reopening runs the one-time step. Its own schema check refuses any other shape.
     // With a parent, D sits at parent/Renamed under a synced parent folder (T16).
     private static Fixture RepairFixture(bool victimPresent, string? parent = null)
     {
@@ -482,7 +487,7 @@ public static partial class ChangeRunnerChecks
         {
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "DROP TABLE binding_repair;ALTER TABLE folder_removal DROP COLUMN authority;PRAGMA user_version=14;";
+            command.CommandText = DuplicateBindingInverse + "PRAGMA user_version=14;";
             command.ExecuteNonQuery();
         }
         fixture.RestartStore();

@@ -1,11 +1,11 @@
 namespace Massdex.SyncShark.V2;
 
 /// <summary>
-/// Owns the AutoSync relaunch policy: one durable event per start, exit, stop and delay. A child exit is
-/// never itself a reason to stop; only the supervisor stop event ends supervision. Process start, the
-/// stop wait, the clock and the backoff policy are injected by the app edge, so the policy runs without
-/// real processes or real time.
-/// </summary>
+/// Owns the AutoSync relaunch policy: one durable event per start, exit, stop and delay. A transient child
+/// exit is never itself a reason to stop, and only the supervisor stop event ends supervision; a persistent
+/// startup refusal is terminal, so it is reported once and never relaunched. Process start, the stop wait,
+/// the clock and the backoff policy are injected by the app edge, so the policy runs without real processes
+/// or real time.</summary>
 public sealed class AutoSyncSupervisor
 {
     /// <summary>A started host observed until it exits. AutoSyncProcess.ChildProcess is the production form.</summary>
@@ -37,7 +37,7 @@ public sealed class AutoSyncSupervisor
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
-    /// <summary>Supervises children until the stop event is set. Any exit, including zero, relaunches.</summary>
+    /// <summary>Supervises children until the stop event is set or a persistent startup refusal ends the run.</summary>
     public int Run()
     {
         var delay = _initialDelay;
@@ -57,6 +57,13 @@ public sealed class AutoSyncSupervisor
                 Trace("child exit pid=" + pid + " exit=" + exit + " uptime=" + (long)uptime.TotalSeconds + "s");
                 if (uptime >= _stableAfter) delay = _initialDelay;
                 if (AutoSyncProcess.IsExistingOwnerExit(exit)) RecordExistingOwnerNotice();
+                if (SyncCli.IsPersistentStartupRefusal(exit))
+                {
+                    Trace(EdgeMessages.Text("startup-refused-log",
+                        exit.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                    RecordStartupRefusalNotice(exit);
+                    return exit;
+                }
             }
             catch (Exception error)
             {
@@ -84,6 +91,17 @@ public sealed class AutoSyncSupervisor
     private void RecordExistingOwnerNotice()
     {
         try { AutoSyncProcess.RecordExistingOwnerNotice(AutoSyncProcess.ExistingOwnerNoticePathFor(_productRoot)); }
+        catch (Exception error) { AutoSyncLog.Failure(_productRoot, error); }
+    }
+
+    // Written once per supervisor lifetime: the caller returns immediately after this call.
+    private void RecordStartupRefusalNotice(int exit)
+    {
+        try
+        {
+            AutoSyncProcess.RecordExistingOwnerNotice(AutoSyncProcess.PersistentStartupNoticePath,
+                SyncCli.PersistentStartupRefusalNoticeKey(exit));
+        }
         catch (Exception error) { AutoSyncLog.Failure(_productRoot, error); }
     }
 

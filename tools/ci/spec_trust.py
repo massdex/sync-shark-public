@@ -17,6 +17,7 @@ _spec.loader.exec_module(literal_sites)
 BASELINE = 'tools/ci/spec-baseline.jsonl'
 MANIFEST = 'tools/ci/spec-baseline-files.jsonl'
 POLICY = ('tools/ci/spec-verdicts.json', 'tools/ci/structure-debt.md')
+OPTIONAL_POLICY = ('docs/OWNERSHIP.md', 'tools/Test-PreReview.ps1')
 ENFORCEMENT = ('tools/ci/check-spec-ratchet.py', 'tools/ci/spec_file_identity.py',
                'tools/ci/spec_cslex.py', 'tools/ci/spec_reviews.py',
                'tools/ci/test-spec-ratchet.py', '.github/workflows/sync-shark-ci.yml')
@@ -38,10 +39,12 @@ def snapshot(root, tag, commit, target):
     resolved = git(root, 'rev-parse', '--verify', 'refs/tags/' + tag + '^{commit}')
     if resolved != commit:
         raise ValueError('live tag does not match the owner-pinned commit')
+    optional = git(root, 'ls-tree', '-r', '--name-only', commit, '--', *OPTIONAL_POLICY).splitlines()
     archive = target.parent / 'release.tar'
     with archive.open('wb') as stream:
         result = subprocess.run(['git', '-C', str(root), 'archive', commit,
-                                 'src', 'tools/ci', '.github/workflows', 'tests/SyncShark.Engine.Tests/Layout'], stdout=stream,
+                                 'src', 'tools/ci', '.github/workflows', 'tests/SyncShark.Engine.Tests/Layout',
+                                 *optional], stdout=stream,
                                 stderr=subprocess.PIPE)
     if result.returncode:
         raise ValueError('trusted release archive unavailable')
@@ -63,11 +66,11 @@ def snapshot(root, tag, commit, target):
 def policy_findings(root, trusted):
     """Report every candidate policy edit; candidate review evidence remains usable."""
     failures = 0
-    paths = {BASELINE, MANIFEST, *POLICY, *ENFORCEMENT}
+    paths = {BASELINE, MANIFEST, *POLICY, *ENFORCEMENT, *OPTIONAL_POLICY}
     for folder in ('tools/ci', '.github/workflows'):
         paths.update(p.relative_to(trusted).as_posix() for p in (trusted / folder).glob('*') if p.is_file())
         paths.update(p.relative_to(root).as_posix() for p in (root / folder).glob('*') if p.is_file())
-    paths.update(('tools/Test-PreReview.ps1', 'tests/SyncShark.Engine.Tests/Layout/LiteralsChecks.cs',
+    paths.update(('tests/SyncShark.Engine.Tests/Layout/LiteralsChecks.cs',
                   'tests/SyncShark.Engine.Tests/Layout/LiteralSites.cs'))
     for relative in sorted(paths):
         old, new = trusted / relative, root / relative

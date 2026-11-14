@@ -593,6 +593,8 @@ public static partial class ChangeRunnerChecks
                 Owe(fixture);
                 var counter = new CountingSide(fixture.Local);
                 fixture.LocalView = counter;
+                // The Dropbox folder was deleted above, so Dropbox answers its saved identity as absent.
+                fixture.DropboxView = IdentitySide.Truthful(fixture.Dropbox, fixture.Dropbox);
                 var refused = await RunAsync(fixture, selected);
                 var folderKept = await fixture.Local.ReadOneAsync(Folder, default) == parent;
                 var unseenKept = await fixture.Local.ReadOneAsync(unseen.Path, default) == unseen &&
@@ -1133,7 +1135,9 @@ public static partial class ChangeRunnerChecks
         // the second row relocates onto it. In this order the primary branch is refused before the old-path branch,
         // so this fixture reports the primary; the old-path refusal has its own public case below.
         var (work, epoch, domain) = AcquireRemotePage(fixture,
-            new ChangeNotice(Side.Dropbox, ChangeKind.Changed, Item, null, DropboxId, remote, false, false),
+            // B-214 settles exact saved echoes before selection; a case-change hint keeps the anchor selectable.
+            new ChangeNotice(Side.Dropbox, ChangeKind.Changed, Item, null, DropboxId,
+                remote with { Path = remote.Path.ToUpperInvariant() }, false, false),
             new ChangeNotice(Side.Dropbox, ChangeKind.Changed, stale, legacy, DropboxId, null, false, false),
             new ChangeNotice(Side.Dropbox, ChangeKind.Changed, target.Path, null, DropboxId, target, false, false));
         var memberWork = work - 1;
@@ -1599,6 +1603,8 @@ public static partial class ChangeRunnerChecks
         ClearObligations(fixture);
         var localCounter = new CountingSide(fixture.Local);
         fixture.LocalView = localCounter;
+        // The deleted Dropbox folder was never seeded, so Dropbox answers its saved identity as absent.
+        fixture.DropboxView = IdentitySide.Truthful(fixture.Dropbox, fixture.Dropbox);
         var lost = false;
         fixture.Hooks.BeforeCall = method =>
         {
@@ -2058,7 +2064,8 @@ public static partial class ChangeRunnerChecks
             });
             fixture.Local.Seed(localFolder, null);
             fixture.Local.Seed(child, [1]);
-            var selected = SeedRemote(fixture, remoteFolder);
+            // B-214 settles exact saved echoes before selection; a case-change hint keeps the folder plan selectable.
+            var selected = SeedRemote(fixture, remoteFolder with { Path = remoteFolder.Path.ToUpperInvariant() });
             var other = RemoteEntry("Other.txt", "other-remote");
             fixture.Dropbox.Seed(other, [1]);
             SeedRemote(fixture, other);
@@ -2120,7 +2127,8 @@ public static partial class ChangeRunnerChecks
             });
             fixture.Local.Seed(localFolder, null);
             fixture.Local.Seed(child with { Size = 2, Modified = Stamp.AddMinutes(1) }, [2, 2]);
-            var selected = SeedRemote(fixture, remoteFolder);
+            // B-214 settles exact saved echoes before selection; a case-change hint keeps the folder plan selectable.
+            var selected = SeedRemote(fixture, remoteFolder with { Path = remoteFolder.Path.ToUpperInvariant() });
             if (real) RepairDone(fixture);
             else fixture.Hooks.RepairDone = true;
             ClearObligations(fixture);
@@ -2135,6 +2143,8 @@ public static partial class ChangeRunnerChecks
                         { Disposition = FailureDisposition.TemporaryNoEffect };
                 }
             };
+            // The deleted Dropbox folder was never seeded, so Dropbox answers its saved identity as absent.
+            fixture.DropboxView = IdentitySide.Truthful(fixture.Dropbox, fixture.Dropbox);
             var attempts = new TemporaryAttempts();
             var events = new List<RunEvent>();
             var boundary = new Boundary(_ => new Lease());
@@ -2902,6 +2912,8 @@ public static partial class ChangeRunnerChecks
         ClearObligations(fixture);
         var localCounter = new CountingSide(fixture.Local);
         fixture.LocalView = localCounter;
+        // The deleted Dropbox folder was never seeded, so Dropbox answers its saved identity as absent.
+        fixture.DropboxView = IdentitySide.Truthful(fixture.Dropbox, fixture.Dropbox);
         LiveAdmissionStaleException? refused = null;
         // The first admission runs the deferred folder row; the second is the folder plan's own (SelectionPass.cs:234-246).
         var admissions = 0;
@@ -7735,7 +7747,9 @@ public static partial class ChangeRunnerChecks
             {
                 var localParent = FolderEntry(parent.Path, "local-parent");
                 fixture.Local.Seed(localParent, null);
-                fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(localParent, parent)] });
+                // B-214 needs a non-echo replacement; discovery is stubbed because this checks held-ancestor scheduling.
+                fixture.Inner.Commit(PairId, StateChange.Empty with
+                    { Record = [SyncedEntries.From(localParent, parent with { Id = "remote-prior-parent" })] });
             }
             var opportunity = SeedRemote(fixture, parent);
             var children = Enumerable.Range(0, dependents)
@@ -7813,7 +7827,8 @@ public static partial class ChangeRunnerChecks
                 Events = value => { if (value.Kind == RunEventKind.Failed) failures.Add(value); }
             };
             await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-                RefusingExecutionBoundary.Instance, 1)).SyncWorkAsync(default);
+                RefusingExecutionBoundary.Instance, 1) { RunBatchAsync = (_, _, _, _, _, _) => Task.CompletedTask })
+                .SyncWorkAsync(default);
             Check.Require(rounds == (held ? 1 : 2) && completions == 0 && fixture.Inner.Issues(PairId).Count == 0 &&
                 PendingAt(fixture, Side.Dropbox, parent.Path).Count == 1,
                 "B84-01: only genuine refusal causes contention replay; skipped dependencies credit no retirement.");
@@ -8358,6 +8373,9 @@ public static partial class ChangeRunnerChecks
         fixture.Dropbox.Seed(side == Side.Dropbox ? remote with { Path = "Other/File" } : remote, [1]);
         (side == Side.Local ? fixture.Dropbox : fixture.Local).Seed(side == Side.Local ? remoteFolder : localFolder, null);
         (side == Side.Local ? fixture.Local : fixture.Dropbox).Seed(FolderEntry("Other", "other-folder"), null);
+        // The folder is deleted on side, which answers its saved identity as absent and the moved file as present.
+        if (side == Side.Local) fixture.LocalView = IdentitySide.Truthful(fixture.Local, fixture.Local);
+        else fixture.DropboxView = IdentitySide.Truthful(fixture.Dropbox, fixture.Dropbox);
         var entry = side == Side.Local ? local : remote;
         var notices = new[]
         {
@@ -8431,6 +8449,8 @@ public static partial class ChangeRunnerChecks
                     ContentHash = DropboxContentHash.Compute(new byte[] { 2, 2 }) }, [2, 2]);
             }
             var own = Seed(fixture, Deleting(ownEntry.Path, ownEntry.Id));
+            // The deleted Local folder was never seeded, so Local answers its saved identity as absent.
+            fixture.LocalView = IdentitySide.Truthful(fixture.Local, fixture.Local);
             var context = fixture.Context(own) with
             {
                 CaptureFolderCursorAsync = _ => Task.FromResult(Cursor),
@@ -8495,6 +8515,8 @@ public static partial class ChangeRunnerChecks
             fixture.Dropbox.Seed(remote, null);
             fixture.Dropbox.Seed(child with { Id = "replacement-child" }, null);
             var root = Seed(fixture, Deleting(local.Path, local.Id));
+            // The deleted Local folder was never seeded, so Local answers its saved identity as absent.
+            fixture.LocalView = IdentitySide.Truthful(fixture.Local, fixture.Local);
             ExecutorContext Context() => fixture.Context(root) with
             {
                 CaptureFolderCursorAsync = _ => Task.FromResult(Cursor),
@@ -8618,6 +8640,8 @@ public static partial class ChangeRunnerChecks
                 "the dependency selection carries the requested number of work rows");
             var events = new List<RunEvent>();
             var boundary = new Boundary(_ => new Lease { AllowsRelease = true });
+            // The deleted Local folder was never seeded, so Local answers its saved identity as absent.
+            fixture.LocalView = IdentitySide.Truthful(fixture.Local, fixture.Local);
             await LiveSyncer(fixture, root, boundary, events).SyncWorkAsync(default);
             var issues = fixture.Inner.Issues(PairId).Where(value => value.Cause == TextKey.FailFolderDependencyCycle).ToArray();
             var issue = issues.Single(value => value.Path == remoteLeaf.Path);
@@ -8747,6 +8771,9 @@ public static partial class ChangeRunnerChecks
                 parent: "changed", control: "later-local"));
             FolderPlanFenceArms(realStore, failures);
         }
+        // B-214 settles exact saved echoes before selection; the later tombstone must still delete the keeping side.
+        await Case(() => FolderDeletionCoversItsChildrenAsync(realStore: true, deletedOn: Side.Dropbox,
+            parent: "echo-deleted", whole: true));
         FolderPlanValidationCost(failures);
         if (failures.Count != 0) throw new AggregateException(failures);
     }
@@ -8775,6 +8802,10 @@ public static partial class ChangeRunnerChecks
     {
         var fixture = new Fixture(realStore: realStore);
         ClearObligations(fixture);
+        // Both production adapters answer identity: the absent side proves absence while a reappeared root stays
+        // present and still refuses the plan.
+        fixture.LocalView = IdentitySide.Truthful(fixture.Local, fixture.Local);
+        fixture.DropboxView = IdentitySide.Truthful(fixture.Dropbox, fixture.Dropbox);
         var keeping = PathNames.Other(deletedOn);
         var keep = keeping == Side.Local ? fixture.Local : fixture.Dropbox;
         var localFolder = FolderEntry(Folder, FolderId);
@@ -8811,11 +8842,12 @@ public static partial class ChangeRunnerChecks
         }
         else
         {
-            // DropboxFeed.Notices: a deletion is path-only and a change carries its observed entry. Non-plain here is a
-            // restatement of the saved folder observed before it went; its fresh read is absent.
+            // DropboxFeed.Notices: a deletion is path-only and a change carries its observed entry.
+            // B-214 settles exact saved echoes before selection; a case-change hint still needs the fresh absence read.
+            var observed = parent == "changed" ? remoteFolder with { Path = remoteRoot.ToUpperInvariant() } : remoteFolder;
             var notice = parent == "plain"
                 ? new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, remoteRoot, null, null, null, false, false)
-                : new ChangeNotice(Side.Dropbox, ChangeKind.Changed, remoteRoot, null, DropboxId, remoteFolder, false, false);
+                : new ChangeNotice(Side.Dropbox, ChangeKind.Changed, observed.Path, null, DropboxId, observed, false, false);
             // A live pair always holds a Local journal position before admission (CaptureLiveCoverage).
             if (page == 1)
             {
@@ -8823,6 +8855,9 @@ public static partial class ChangeRunnerChecks
                 page++;
             }
             folder = SeedRemote(fixture, remoteFolder, notice) with { Identity = notice.Id };
+            if (parent == "echo-deleted")
+                AcquireRemotePage(fixture,
+                    new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, remoteRoot, null, null, null, false, false));
         }
         return new FolderPlanCase(fixture, child, folder!, editedNow, localFolder, remoteFolder, page);
     }
@@ -8958,7 +8993,10 @@ public static partial class ChangeRunnerChecks
                 { } member) siblingVerdicts.Add(member.Verdict);
         };
         var root = seeded.Child ?? seeded.Folder;
-        Task Pass(CancellationToken ct = default) => LiveSyncer(fixture, root, boundary, events, recovery).SyncWorkAsync(ct);
+        // B-214: only the echo-deleted row proves its exact echo settled; every other row keeps the unchanged store.
+        var counters = parent == "echo-deleted" ? new StoreCounters(fixture.Store) : null;
+        Task Pass(CancellationToken ct = default) => LiveSyncer(fixture, root, boundary, events, recovery,
+            configure: counters is null ? null : context => context with { Store = counters }).SyncWorkAsync(ct);
         int Deletes(EffectKind kind) => events.Count(item => item.EffectKind == kind);
         using var statements = new StatementCount(fixture);
         // Printed per case for the CI record (3.7): cumulative admissions, validations, publications and SQL.
@@ -9094,6 +9132,10 @@ public static partial class ChangeRunnerChecks
             (await keep.ReadOneAsync(On(keeping, "/unchanged"), default) is null) == !reappeared &&
             (whole || await fixture.Dropbox.ReadOneAsync(On(Side.Dropbox, "/edited"), default) is not null),
             $"A109 {name}: nothing comes back and nothing is restored on the next pass");
+        // The echo-deleted row's exact saved echo must reach settlement exactly once before the tombstone selects.
+        if (parent == "echo-deleted")
+            Check.Require(counters!.EchoesSettled == 1,
+                $"B-214 {name}: exactly one saved echo settles before selection; settled={counters.EchoesSettled}");
     }
 
     // B-159 (DIAG-B159-1): the engine uploads a file into a folder, then the folder is removed locally. The live
@@ -9154,6 +9196,8 @@ public static partial class ChangeRunnerChecks
             $"{name}: the file's evidence is acquired one id after the folder's last row");
         events.Clear();
         var refusals = fixture.Hooks.Refusals.Count;
+        // The Local folder was deleted above, so Local answers its saved identity as absent.
+        fixture.LocalView = IdentitySide.Truthful(fixture.Local, fixture.Local);
         await LiveSyncer(fixture, folder!, boundary, events).SyncWorkAsync(default);
         Check.Require(events.All(item => item.Error is not LiveAdmissionStaleException) &&
             fixture.Hooks.Refusals.Count == refusals && events.Any(item => item.EffectKind == EffectKind.DeletedDropbox) &&
@@ -9519,8 +9563,10 @@ public static partial class ChangeRunnerChecks
             {
                 BlockPublish = (_, _) => throw new ItemFailedException(Plain, TextKey.FailChanged, null)
             };
-            if (deletedSide == Side.Dropbox) fixture.DropboxView = failedDestination;
-            else fixture.LocalView = failedDestination;
+            // The deleted side never held the folder again, so it answers the saved identity as absent.
+            var answering = IdentitySide.Truthful(failedDestination, deletedSide == Side.Dropbox ? fixture.Dropbox : fixture.Local);
+            if (deletedSide == Side.Dropbox) fixture.DropboxView = answering;
+            else fixture.LocalView = answering;
             var selection = deletedSide == Side.Dropbox ? SeedRemote(fixture, remoteFolder) :
                 Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Deleted, Folder, null, FolderId, null, false, true), page: 2);
             await RunSelectionAsync(fixture, selection);
@@ -11379,7 +11425,7 @@ public static partial class ChangeRunnerChecks
 
     /// <summary>One borrowed lease that records the generation it is required to authorize and can reject after
     /// the surrounding test advances Storage.</summary>
-    private sealed class Lease : IAdmittedExecution
+    internal sealed class Lease : IAdmittedExecution
     {
         public long? Generation { get; private set; }
         public int RequireCalls { get; private set; }
@@ -11432,7 +11478,7 @@ public static partial class ChangeRunnerChecks
         public bool AllowsRelease { get; init; } = true;
     }
 
-    private sealed class Boundary(Func<LiveExecutionRequest, IAdmittedExecution> leaseFor) : ILiveExecutionBoundary
+    internal sealed class Boundary(Func<LiveExecutionRequest, IAdmittedExecution> leaseFor) : ILiveExecutionBoundary
     {
         public bool TryHoldGeneration(string pairId) => true;
 

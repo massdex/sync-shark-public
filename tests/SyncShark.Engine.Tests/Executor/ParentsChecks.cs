@@ -487,8 +487,11 @@ public static class ParentsChecks
             try { await new Parents(context).EnsureAsync(target, item, CancellationToken.None); }
             catch (Exception actual) when (ReferenceEquals(actual, error)) { propagated = true; }
             Check.Require(propagated, "Parent creation propagates the original error.");
-            Check.Require(counted.Ensures.SequenceEqual(failure == "target-read"
-                    ? Array.Empty<string>() : failAtRoot ? new[] { root } : new[] { root, child }),
+            // Read-before-create order: an other-side read failure at a folder
+            // now stops before that folder is created.
+            Check.Require(counted.Ensures.SequenceEqual(failure == "target-read" ? Array.Empty<string>() :
+                    failure == "other-read" ? failAtRoot ? Array.Empty<string>() : new[] { root } :
+                    failAtRoot ? new[] { root } : new[] { root, child }),
                 "Upward read failures create nothing; later failures stop creation at the failed folder.");
             var rootRecord = store.SyncedByKey(context.Pair.PairId, target, PathNames.Key(root));
             Check.Require((rootRecord is null) == (failAtRoot || failure == "target-read"),
@@ -506,8 +509,9 @@ public static class ParentsChecks
                 await targetSide.ReadOneAsync(leaf, CancellationToken.None) is null &&
                 await targetSide.ReadOneAsync(item, CancellationToken.None) is null,
                 "A failed parent is not recorded and no later ancestor or item is created.");
-            Check.Require((await targetSide.ReadOneAsync(failedPath, CancellationToken.None) is not null) == (failure == "other-read"),
-                "An other-side read failure preserves the parent already created on the target.");
+            // Read-before-create order: no failure leaves the failed folder behind.
+            Check.Require(await targetSide.ReadOneAsync(failedPath, CancellationToken.None) is null,
+                "Every failure stops before the failed folder is created on the target: the counterpart is read first.");
             Check.Require(store.Issues(context.Pair.PairId).Count == 0,
                 "Parents leaves failure notices to the action executor.");
         }

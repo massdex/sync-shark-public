@@ -41,6 +41,10 @@ public sealed record StateChange(
     /// <summary>Process-local provenance for a listed Record or Adopt, revalidated after its queue wait.</summary>
     internal Guid? ListedScanId { get; init; }
 
+    /// <summary>Process-local proof that this opportunity's pre-send check found the root's own path absent on the
+    /// opposite side and the settled effect removed the Close path. Never persisted or carried into later recovery.</summary>
+    internal bool CloseProvenAbsent { get; init; }
+
     /// <summary>Row 43a: only identity-preserving case-only respellings of the wait's own saved file, inside an
     /// ordinary in-use wait with no unknown move: each rename's before-image carries the wait's Local identity and key,
     /// and its Dropbox identity and key when the wait records one. It records, forgets, raises, closes and

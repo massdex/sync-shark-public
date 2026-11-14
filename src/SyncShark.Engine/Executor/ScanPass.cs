@@ -487,11 +487,11 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
                 if (id is not null && !continued.Contains(id)) operations.Add((folder, id));
                 else FolderProgress(folder.Key, completed: true);
             }
-            await _folders.RunPreparedFolderRemovalsAsync(operations.Select(operation => operation.Id), ct);
+            var absent = await _folders.RunPreparedFolderRemovalsAsync(operations.Select(operation => operation.Id), ct);
             foreach (var (folder, id) in operations)
             {
                 FolderProgress(folder.Key);
-                var result = await _folders.FinishFolderRemovalAsync(id, null, ct, completed);
+                var result = await _folders.FinishFolderRemovalAsync(id, null, ct, completed, absent: absent);
                 FolderProgress(folder.Key, completed: true);
                 foreach (var key in Row.Keys(folder))
                 {
@@ -519,12 +519,15 @@ internal sealed class ScanPass(ExecutorContext context, ItemSync items, FolderSy
             return entry;
         }
         var protection = store.RetryNoticeProtection(pair.PairId);
+        // The closing scan fence rejects any episode changed since capture.
+        var episodes = store.ReadItemEpisodeIssues(pair.PairId).ToHashSet();
         foreach (var issue in store.Issues(pair.PairId, IssueClosure.AfterHeldInSync))
         {
             _context.Events(RunEvent.Stage(TextKey.StageAfterListing, inProgress: true, path: issue.Path));
-            var protectedByOwner = protection(issue.Id);
+            var liveEpisode = episodes.Contains(issue.Id);
+            var protectedByOwner = liveEpisode || protection(issue.Id);
             if (IssuePolicy.Obsolete(issue, Scanned, localUntrusted, remoteUntrusted, appliedExclusions,
-                pendingExclusions, _context.Scope, protectedByOwner))
+                pendingExclusions, _context.Scope, protectedByOwner, liveEpisode))
             {
                 store.CloseScanIssue(pair.PairId, _context.ScanId, issue);
                 continue;

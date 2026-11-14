@@ -34,6 +34,7 @@ public static partial class EngineHostChecks
         {
             using var productRoot = OverrideProductRoot(root);
             RunAsync(root).GetAwaiter().GetResult();
+            PrintSlowestStep();
         }
         finally
         {
@@ -53,71 +54,79 @@ public static partial class EngineHostChecks
                 .All(constructor => constructor.IsPrivate),
             "AutoSync opportunities and session construction remain private to their owners");
         // First, so a wake-retention control fails here rather than in an earlier settle-based check.
-        await FinalRewriteWakeSettlesAsync(root).ConfigureAwait(false);
-        await QuietWorkingStatusHasNoEmptyNameAsync(root).ConfigureAwait(false);
-        await HostStartupReadsSavedPreferencesBeforeReadyAsync(root).ConfigureAwait(false);
-        await HostStartupWithoutPreferencesReturnsDefaultsWithoutSeedingAsync(root).ConfigureAwait(false);
-        await HostPreferenceFailureKeepsReadyAndPreservesFailureAsync(root).ConfigureAwait(false);
-        await HostPreferenceFailureKeepsAdmittedWorkAndStopAsync(root).ConfigureAwait(false);
-        await PreferenceOperationsDoNoPairWorkAsync(root).ConfigureAwait(false);
-        HostCompositionFailurePreventsReady(root);
-        await DispatchRegistrationIsVisiblyRunningAndCancellableAsync(root).ConfigureAwait(false);
-        await BackgroundFailureLeavesSupervisionAsync(root).ConfigureAwait(false);
-        await AcceptedStopSignalsSupervisionBeforeDrainAsync(root).ConfigureAwait(false);
-        await RejectedStopDoesNotSignalSupervisionAsync(root).ConfigureAwait(false);
-        await PageWaitFirstFailureRaisesOneNoticeWithoutPairAccountingAsync(root).ConfigureAwait(false);
-        await PageWaitRepeatedFailuresKeepOneNoticeAsync(root).ConfigureAwait(false);
-        await PageWaitSuccessClosesOnlyPageWaitNoticeAsync(root).ConfigureAwait(false);
-        await PageWaitCancelClosesContributionAsync(root).ConfigureAwait(false);
-        await PageWaitStaleIdentityRefusesAsync(root).ConfigureAwait(false);
-        await PageWaitPreservesIndependentFailedRepairDebtAsync(root).ConfigureAwait(false);
-        await PageWaitStoreFailureSurfacesErrorAsync(root).ConfigureAwait(false);
-        await FailedRepairRecordsOnePrerequisiteFailureAsync(root).ConfigureAwait(false);
-        await SelectedPrerequisiteScheduleIsRevalidatedAsync(root);
-        await PrerequisiteAccountingFailureReleasesAsync(root);
-        await RefusedPrerequisiteOpportunitiesAsync(root, scheduled: false);
-        await RefusedPrerequisiteOpportunitiesAsync(root, scheduled: true);
-        await RefusedUnchangedScheduleAsync(root, remove: false);
-        await RefusedUnchangedScheduleAsync(root, remove: true);
-        await WaitingEligibilityAsync(root);
-        await WholeDropboxPairIsAffectedAsync(root);
-        await ItemAttemptAuthorityAsync(root).ConfigureAwait(false);
-        await ItemRenameAuthorityAsync(root).ConfigureAwait(false);
-        await ItemRetryHostCasesAsync(root).ConfigureAwait(false);
-        await ItemRetryWaitValuesAsync(root).ConfigureAwait(false);
+        await StepAsync(nameof(FinalRewriteWakeSettlesAsync), () => FinalRewriteWakeSettlesAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(QuietWorkingStatusHasNoEmptyNameAsync), () => QuietWorkingStatusHasNoEmptyNameAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostStartupReadsSavedPreferencesBeforeReadyAsync), () => HostStartupReadsSavedPreferencesBeforeReadyAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostStartupWithoutPreferencesReturnsDefaultsWithoutSeedingAsync), () => HostStartupWithoutPreferencesReturnsDefaultsWithoutSeedingAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostPreferenceFailureKeepsReadyAndPreservesFailureAsync), () => HostPreferenceFailureKeepsReadyAndPreservesFailureAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostPreferenceFailureKeepsAdmittedWorkAndStopAsync), () => HostPreferenceFailureKeepsAdmittedWorkAndStopAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PreferenceOperationsDoNoPairWorkAsync), () => PreferenceOperationsDoNoPairWorkAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HostCompositionFailurePreventsReady), () =>
+        {
+            HostCompositionFailurePreventsReady(root);
+            return Task.CompletedTask;
+        }).ConfigureAwait(false);
+        await StepAsync(nameof(DispatchRegistrationIsVisiblyRunningAndCancellableAsync), () => DispatchRegistrationIsVisiblyRunningAndCancellableAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(BackgroundFailureLeavesSupervisionAsync), () => BackgroundFailureLeavesSupervisionAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(AcceptedStopSignalsSupervisionBeforeDrainAsync), () => AcceptedStopSignalsSupervisionBeforeDrainAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RejectedStopDoesNotSignalSupervisionAsync), () => RejectedStopDoesNotSignalSupervisionAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitFirstFailureRaisesOneNoticeWithoutPairAccountingAsync), () => PageWaitFirstFailureRaisesOneNoticeWithoutPairAccountingAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitRepeatedFailuresKeepOneNoticeAsync), () => PageWaitRepeatedFailuresKeepOneNoticeAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitSuccessClosesOnlyPageWaitNoticeAsync), () => PageWaitSuccessClosesOnlyPageWaitNoticeAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitCancelClosesContributionAsync), () => PageWaitCancelClosesContributionAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitStaleIdentityRefusesAsync), () => PageWaitStaleIdentityRefusesAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitPreservesIndependentFailedRepairDebtAsync), () => PageWaitPreservesIndependentFailedRepairDebtAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PageWaitStoreFailureSurfacesErrorAsync), () => PageWaitStoreFailureSurfacesErrorAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(FailedRepairRecordsOnePrerequisiteFailureAsync), () => FailedRepairRecordsOnePrerequisiteFailureAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(SelectedPrerequisiteScheduleIsRevalidatedAsync), () => SelectedPrerequisiteScheduleIsRevalidatedAsync(root));
+        await StepAsync(nameof(PrerequisiteAccountingFailureReleasesAsync), () => PrerequisiteAccountingFailureReleasesAsync(root));
+        await StepAsync(nameof(RefusedPrerequisiteOpportunitiesAsync), () => RefusedPrerequisiteOpportunitiesAsync(root, scheduled: false));
+        await StepAsync(nameof(RefusedPrerequisiteOpportunitiesAsync), () => RefusedPrerequisiteOpportunitiesAsync(root, scheduled: true));
+        await StepAsync(nameof(RefusedUnchangedScheduleAsync), () => RefusedUnchangedScheduleAsync(root, remove: false));
+        await StepAsync(nameof(RefusedUnchangedScheduleAsync), () => RefusedUnchangedScheduleAsync(root, remove: true));
+        await StepAsync(nameof(WaitingEligibilityAsync), () => WaitingEligibilityAsync(root));
+        await StepAsync(nameof(WholeDropboxPairIsAffectedAsync), () => WholeDropboxPairIsAffectedAsync(root));
+        await StepAsync(nameof(ItemAttemptAuthorityAsync), () => ItemAttemptAuthorityAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemRenameAuthorityAsync), () => ItemRenameAuthorityAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemRetryHostCasesAsync), () => ItemRetryHostCasesAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemRetryWaitValuesAsync), () => ItemRetryWaitValuesAsync(root)).ConfigureAwait(false);
         await ItemRetryChecksAsync(root).ConfigureAwait(false);
-        await ReservationWorkAsync(root).ConfigureAwait(false);
-        await SelectedOpportunityAuthorityAsync(root).ConfigureAwait(false);
-        await RequestAttemptIsNotRetriedAsync(root).ConfigureAwait(false);
-        await TransferRetryRequiresProofAsync(root).ConfigureAwait(false);
-        await PauseAdmissionRoutingAsync(root).ConfigureAwait(false);
+        await StepAsync(nameof(ReservationWorkAsync), () => ReservationWorkAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(SelectedOpportunityAuthorityAsync), () => SelectedOpportunityAuthorityAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RequestAttemptIsNotRetriedAsync), () => RequestAttemptIsNotRetriedAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(TransferRetryRequiresProofAsync), () => TransferRetryRequiresProofAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PauseAdmissionRoutingAsync), () => PauseAdmissionRoutingAsync(root)).ConfigureAwait(false);
         foreach (var real in new[] { true, false })
-            await FailedRepairPauseAndFloorAsync(root, real).ConfigureAwait(false);
-        await PausedPrerequisiteLogsAnAdmissionErrorAsync(root).ConfigureAwait(false);
-        StoppedPrerequisiteLogKeepsDistinctFailures(root);
-        await ExternalClientOwnershipAsync(root).ConfigureAwait(false);
-        await ExternalClientFailureAsync(root).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: false, opportunity: false).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: false).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false, shared: true).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: true).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false, paused: true).ConfigureAwait(false);
-        await StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: true, startup: true).ConfigureAwait(false);
-        await InProgressFolderJobRepollsToTerminalUnknownAsync(root);
-        await InProgressFolderJobSettlesWithoutWakeAsync(root);
-        await InProgressFolderJobSettlesWithoutWakeAsync(root, itemWait: true);
+            await StepAsync(nameof(FailedRepairPauseAndFloorAsync), () => FailedRepairPauseAndFloorAsync(root, real)).ConfigureAwait(false);
+        await StepAsync(nameof(PausedPrerequisiteLogsAnAdmissionErrorAsync), () => PausedPrerequisiteLogsAnAdmissionErrorAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(StoppedPrerequisiteLogKeepsDistinctFailures), () =>
+        {
+            StoppedPrerequisiteLogKeepsDistinctFailures(root);
+            return Task.CompletedTask;
+        }).ConfigureAwait(false);
+        await StepAsync(nameof(ExternalClientOwnershipAsync), () => ExternalClientOwnershipAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ExternalClientFailureAsync), () => ExternalClientFailureAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: false, opportunity: false)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: false)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false, shared: true)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: true)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: false, paused: true)).ConfigureAwait(false);
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: false, jobs: true, opportunity: true, startup: true)).ConfigureAwait(false);
+        await StepAsync(nameof(InProgressFolderJobRepollsToTerminalUnknownAsync), () => InProgressFolderJobRepollsToTerminalUnknownAsync(root));
+        await StepAsync(nameof(InProgressFolderJobSettlesWithoutWakeAsync), () => InProgressFolderJobSettlesWithoutWakeAsync(root));
+        await StepAsync(nameof(InProgressFolderJobSettlesWithoutWakeAsync), () => InProgressFolderJobSettlesWithoutWakeAsync(root, itemWait: true));
         foreach (var memory in new[] { false, true })
         foreach (var ordinaryFirst in new[] { true, false })
-            await InProgressFolderJobSettlesWithoutWakeAsync(root, itemWait: true, ordinaryFirst, memory);
-        await RepairHeldSurvivorPollAsync(root);
-        await FolderPollLifecycleAsync(root, "pause");
-        await FolderPollLifecycleAsync(root, "disable");
-        await FolderPollLifecycleAsync(root, "restart");
-        await FolderPollLifecycleAsync(root, "stop");
+            await StepAsync(nameof(InProgressFolderJobSettlesWithoutWakeAsync), () => InProgressFolderJobSettlesWithoutWakeAsync(root, itemWait: true, ordinaryFirst, memory));
+        await StepAsync(nameof(RepairHeldSurvivorPollAsync), () => RepairHeldSurvivorPollAsync(root));
+        await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "pause"));
+        await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "disable"));
+        await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "restart"));
+        await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "stop"));
         try
         {
-            await StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: true).ConfigureAwait(false);
+            await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: true)).ConfigureAwait(false);
             throw new Exception("background storage failure was lost at shutdown");
         }
         catch (AggregateException error) when (error.InnerExceptions.Count == 1 &&
@@ -540,22 +549,24 @@ public static partial class EngineHostChecks
         Check.Require(RetryNotices(store, PairId) == 0, "the failed notice write raised nothing");
     }
 
-    public static void ReviewedPrerequisiteRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: true);
-    public static void ReviewedObligationRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: false);
-    public static void ReviewedRecoveryRetry() => ReviewedRetryCase(prerequisite: false, hasRetry: false);
-    public static void ReviewedSourceWaitRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: true, secondWait: true);
-    public static void ReviewedDispatchWaitRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: false, secondWait: true);
+    public static void ReviewedPrerequisiteRetry() => ReviewedRetryCase(nameof(ReviewedPrerequisiteRetry), prerequisite: true, hasRetry: true);
+    public static void ReviewedObligationRetry() => ReviewedRetryCase(nameof(ReviewedObligationRetry), prerequisite: true, hasRetry: false);
+    public static void ReviewedRecoveryRetry() => ReviewedRetryCase(nameof(ReviewedRecoveryRetry), prerequisite: false, hasRetry: false);
+    public static void ReviewedSourceWaitRetry() => ReviewedRetryCase(nameof(ReviewedSourceWaitRetry), prerequisite: true, hasRetry: true, secondWait: true);
+    public static void ReviewedDispatchWaitRetry() => ReviewedRetryCase(nameof(ReviewedDispatchWaitRetry), prerequisite: true, hasRetry: false, secondWait: true);
 
-    public static void ReviewedRepairDispatchRetry() => ReviewedRetryCase(prerequisite: true, hasRetry: false, secondWait: true, clearDebt: true);
+    public static void ReviewedRepairDispatchRetry() => ReviewedRetryCase(nameof(ReviewedRepairDispatchRetry), prerequisite: true, hasRetry: false, secondWait: true, clearDebt: true);
 
-    private static void ReviewedRetryCase(bool prerequisite, bool hasRetry, bool secondWait = false, bool clearDebt = false)
+    private static void ReviewedRetryCase(string name, bool prerequisite, bool hasRetry, bool secondWait = false, bool clearDebt = false)
     {
         var root = Path.Combine(Path.GetTempPath(), "reviewed-retry-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try
         {
             using var productRoot = OverrideProductRoot(root);
-            ReviewedRetryDuringRecompositionAsync(root, prerequisite, hasRetry, secondWait, clearDebt).GetAwaiter().GetResult();
+            StepAsync(name, () => ReviewedRetryDuringRecompositionAsync(root, prerequisite, hasRetry, secondWait, clearDebt))
+                .GetAwaiter().GetResult();
+            PrintSlowestStep();
         }
         finally { Directory.Delete(root, recursive: true); }
     }

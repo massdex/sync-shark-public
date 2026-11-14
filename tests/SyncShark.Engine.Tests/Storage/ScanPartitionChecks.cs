@@ -26,6 +26,7 @@ public static class ScanPartitionChecks
             foreach (var wholeFirst in new[] { false, true })
                 await PartitionsAsync(Path.Combine(folder, wholeFirst ? "first.db" : "last.db"), wholeFirst);
             await IssuesAsync(Path.Combine(folder, "issues.db"));
+            await AbsentEpisodeAsync(folder);
             await LiveFactsAsync(Path.Combine(folder, "facts.db"));
             await WalAsync(Path.Combine(folder, "wal.db"));
         }
@@ -164,6 +165,40 @@ public static class ScanPartitionChecks
             Check.Require(store.CloseScanIssue(PairId, token, issue), "a later owned listing can settle its own unchanged first-run subject");
         Check.Require(store.RetainedFirstRun(PairId).Count == 0, "acknowledgment and exact closure commit together");
         await store.EndScanAsync(PairId, token, 1);
+    }
+
+    private static async Task AbsentEpisodeAsync(string folder)
+    {
+        foreach (var memory in new[] { false, true })
+        foreach (var firstRun in new[] { false, true })
+        foreach (var active in new[] { false, true })
+        foreach (var pending in new[] { false, true })
+        {
+            var attempt = Guid.NewGuid();
+            using IStateStore store = memory ? new InMemoryStateStore() : StateStore.Open(
+                Path.Combine(folder, Path.GetRandomFileName()), (id, _, _, _, _) => id == attempt || active);
+            var pair = SourceFixture.Bound(Pair);
+            store.SavePair(pair);
+            var subject = new IssueSubject([new IssueItem(Side.Local, Child, "old-id")], null);
+            if (firstRun) store.Commit(PairId, Raise(Child, "old-id", true));
+            if (pending) store.ArmPending(PairId, new PendingEffect(1, "held-operation", 0, PendingKind.LocalDelete,
+                PendingPhase.Armed, Child, new RemovalProof(Entry(Child, "old-id"), "volume-a", "hash"),
+                null, null, null, null, null, false, null));
+            var episode = store.RecordInUseFailure(PairId, 0, 0, Child, subject, TextKey.FailLocalInUse,
+                null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+            var expected = store.Issues(PairId).Single();
+            var scan = store.BeginScan(PairId, Guid.NewGuid(), 0, false);
+            var closed = store.CloseScanIssue(PairId, scan, expected);
+            var retained = memory || firstRun || active || pending;
+            Check.Require(closed == !retained, "B222 scan closes only an unretained real-store episode");
+            Check.Require((store.ReadItemRetryState(PairId, [episode.Token.IssueId])[episode.Token.IssueId] is not null) == retained,
+                "B222 scan episode and notice settle together");
+            Check.Require(store.Issues(PairId).Count == (retained ? 1 : 0), "B222 scan retained notice survives");
+            Check.Require(store.RetainedFirstRun(PairId).Count == (firstRun ? 1 : 0),
+                "B222 S3 refused scan close preserves first-run provenance");
+            if (!retained) Check.Require(store.CountWork(PairId, 0, store.ReadWorkWatermark()) == (0, 0), "B222 scan source-less work settles atomically");
+            await store.EndScanAsync(PairId, scan, 1);
+        }
     }
 
     private static async Task LiveFactsAsync(string path)

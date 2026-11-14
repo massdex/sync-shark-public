@@ -143,6 +143,9 @@ public partial interface IStateStore : IDisposable
         SourceObligation? obligation);
 
     WorkSelection? SelectWork(string pairId, long expectedGeneration, PathScope scope);
+    /// <summary>Settles one bounded page of exact, no-effect Dropbox echoes before ordinary selection.</summary>
+    (int Settled, bool More) SettleEchoes(string pairId, long expectedGeneration, PathScope scope,
+        Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize);
     /// <summary>Ends the opportunity's finite selection pass without retiring unfinished work.</summary>
     bool EndWorkPass(string pairId);
     /// <summary>Streams immutable Acquired membership; issue-origin work is reached through its issue owner instead.</summary>
@@ -259,11 +262,12 @@ public partial interface IStateStore : IDisposable
     IReadOnlyList<long> ReadItemEpisodeIssues(string pairId);
 
     /// <summary>Streams a completed plan into durable operation evidence before any submission is permitted. A live
-    /// caller's admit runs under the same storage serialization as the publication, before it, and refuses it.</summary>
+    /// caller's admit runs under the same storage serialization as the publication, before it, and refuses it.
+    /// preRestoreId is the original absent-side identity of a root this run restored; null otherwise.</summary>
     string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize,
-        CancellationToken ct, Action? admit = null);
+        CancellationToken ct, Action? admit = null, string? preRestoreId = null);
     string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize,
-        CancellationToken ct, WorkSelection renameWork, Action? admit = null);
+        CancellationToken ct, WorkSelection renameWork, Action? admit = null, string? preRestoreId = null);
     long? RenameRemovalWork(string pairId, string operationId);
     string? RenameRemoval(WorkSelection selection);
     /// <summary>Durably adds an observed recovery path without changing frozen effect membership or operation generation.</summary>
@@ -296,6 +300,12 @@ public partial interface IStateStore : IDisposable
         long afterOrdinal, int pageSize);
     /// <summary>The operation's frozen member at one exact key on its deleting side, or null when none is known.</summary>
     FolderRemovalItem? FolderRemovalItemByKey(string pairId, string operationId, string key);
+    /// <summary>One keyset page of issues whose exact path has this operation's present Planned member,
+    /// with its frozen binding. The descendant range generates candidates, never absence proof.</summary>
+    IReadOnlyList<(Issue Issue, SyncedEntry? Saved)> HeldFolderMembers(string pairId, string operationId, IssueKind kind,
+        (string Key, long IssueId) after, string high, int pageSize) => [];
+    /// <summary>Closes still-matching issues whose identity absence was proved; their exact-path waits end atomically.</summary>
+    void CloseIdentityAbsent(string pairId, IReadOnlyList<Issue> expected) => throw new NotSupportedException();
     void AdvanceFolderRemoval(string pairId, string operationId, long expectedGeneration,
         FolderRemovalPhase expectedPhase, FolderRemovalState next);
     /// <summary>Commits only the verified member change with its exact saved-binding and generation checks.</summary>

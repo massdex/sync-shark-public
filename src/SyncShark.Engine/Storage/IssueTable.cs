@@ -108,7 +108,8 @@ public static class IssueTable
     /// associations, leaving any row its owner still retains. A non-null scope spares an issue the result does not
     /// resolve (IssuePolicy.ScopedCloseAllowed).</summary>
     public static bool Close(SqliteConnection connection, SqliteTransaction transaction, string pairId, string path,
-        IReadOnlyList<IssueKind> kinds, (SyncedEntry? Binding, bool Absent)? scope = null, Func<Issue, bool>? only = null)
+        IReadOnlyList<IssueKind> kinds, (SyncedEntry? Binding, bool Absent)? scope = null, Func<Issue, bool>? only = null,
+        Func<Issue, bool>? endEpisode = null)
     {
         var key = PathNames.Key(path);
         var closed = false;
@@ -122,7 +123,7 @@ public static class IssueTable
             foreach (var issue in matches)
                 if ((scope is not { } scoped || IssuePolicy.ScopedCloseAllowed(issue, scoped.Binding, scoped.Absent)) &&
                     (only is null || only(issue)))
-                    closed |= DeleteIssue(connection, transaction, pairId, issue);
+                    closed |= DeleteIssue(connection, transaction, pairId, issue, endEpisode);
         }
         return closed;
     }
@@ -155,7 +156,7 @@ public static class IssueTable
     /// <summary>Deletes one issue with its member associations only while the stored row still equals expected.
     /// False means it changed, is gone or stays retained by its owner, and nothing was written.</summary>
     internal static bool CloseExact(SqliteConnection connection, SqliteTransaction transaction, string pairId,
-        Issue expected, bool acknowledgeFirstRun = false)
+        Issue expected, bool acknowledgeFirstRun = false, Func<Issue, bool>? endEpisode = null)
     {
         var stored = ReadOne(connection, transaction, StateSchema.SelectIssueById,
             (StateSchema.ParamPair, pairId), (StateSchema.ParamId, expected.Id));
@@ -168,7 +169,7 @@ public static class IssueTable
                 (StateSchema.ParamPair, pairId), (StateSchema.ParamId, expected.Id));
             if (stored is null) return true;
         }
-        return DeleteIssue(connection, transaction, pairId, stored);
+        return DeleteIssue(connection, transaction, pairId, stored, endEpisode);
     }
 
     internal static bool SetIgnored(SqliteConnection connection, SqliteTransaction transaction,
@@ -773,7 +774,7 @@ public static class IssueTable
     }
 
     private static bool DeleteIssue(SqliteConnection connection, SqliteTransaction transaction, string pairId,
-        Issue issue)
+        Issue issue, Func<Issue, bool>? endEpisode = null)
     {
         if (issue.Kind != IssueKind.Failure)
         {
@@ -789,7 +790,7 @@ public static class IssueTable
         // closes it in the settling transaction.
         if (HasFirstRunWork(issue) || IsRecoveryNotice(issue) &&
             AtPendingPath(issue, PendingPath(connection, transaction, pair)) || (issue.Cause == TextKey.FailDropboxDeleteJobInvalid
-            ? invalid : HoldsResponsibility(connection, transaction, pair, issue))) return false;
+            ? invalid : HoldsResponsibility(connection, transaction, pair, issue) && endEpisode?.Invoke(issue) != true)) return false;
         var members = CaptureMembers(connection, transaction, issue.Id);
         if (Execute(connection, transaction, StateSchema.CloseIssueExact,
             ExactArguments(connection, transaction, pair, issue)) == 0) return false;

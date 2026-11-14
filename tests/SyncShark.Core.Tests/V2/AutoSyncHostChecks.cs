@@ -59,6 +59,7 @@ internal static class AutoSyncHostChecks
         NoticePathFollowsRuntimeRoot();
         AutoSyncProcess.ClearExistingOwnerNotice(ownerNotice);
         Require(File.ReadAllText(ownerNotice).Length == 0, "successful ownership clears the stale notice");
+        ClearStartupNoticesIndependently();
         Require(AutoSyncProcess.StartupCommand(Path.Combine(Path.GetTempPath(), "Product", "SyncShark.exe"))
             .EndsWith("--cli engine host start --yes", StringComparison.Ordinal), "startup uses the readiness-gated Engine host start command");
         if (OperatingSystem.IsWindows()) await AutoSyncProcessChecks.RunAsync();
@@ -568,6 +569,35 @@ internal static class AutoSyncHostChecks
         Require(AutoSyncProcess.ExistingOwnerNoticePath == normal,
             "disposing the override restores normal notice selection");
         Directory.Delete(root, recursive: true);
+    }
+
+    // B-227 R3: an inaccessible old owner notice never blocks clearing the terminal startup notice.
+    private static void ClearStartupNoticesIndependently()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "autosync-clear-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (SyncSharkRuntimePaths.OverrideProductRootForTest(root))
+            {
+                var owner = AutoSyncProcess.ExistingOwnerNoticePathFor(root);
+                var terminal = AutoSyncProcess.PersistentStartupNoticePath;
+                Directory.CreateDirectory(Path.GetDirectoryName(owner)!);
+                File.WriteAllText(owner, "owned");
+                File.WriteAllText(terminal, "terminal");
+                using (new FileStream(owner, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                    AutoSyncProcess.ClearStartupNotices(root);
+                Require(File.ReadAllText(terminal).Length == 0,
+                    "an inaccessible owner notice never blocks clearing the terminal startup notice");
+                Require(File.ReadAllText(owner) == "owned", "the inaccessible owner notice is left untouched");
+            }
+            Require(File.ReadAllLines(AutoSyncLog.FilePath(root)).Length == 1,
+                "the failed clear is logged exactly once");
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
     }
 
     private static void Require(bool condition, string message)

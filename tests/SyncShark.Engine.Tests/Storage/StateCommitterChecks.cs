@@ -1177,7 +1177,7 @@ public static class StateCommitterChecks
             (StateSchema.ParamJoinKey, Key(side, path)), (StateSchema.ParamOwnKey, PathNames.Key(path)),
             (StateSchema.ParamPath, path), (StateSchema.ParamIsFolder, isFolder), (StateSchema.ParamSize, 0L),
             (StateSchema.ParamMtime, 0L), (StateSchema.ParamId, ""), (StateSchema.ParamRev, ""),
-            (StateSchema.ParamHash, ""), (StateSchema.ParamSkip, null));
+            (StateSchema.ParamHash, ""), (StateSchema.ParamSkip, null), (StateSchema.ParamShared, false));
 
     private static string Key(Side side, string path) =>
         side == Side.Local ? PathNames.Key(path) : PathNames.DropboxKey(path);

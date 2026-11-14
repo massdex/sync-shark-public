@@ -31,6 +31,7 @@ internal static class NtfsUsnPageChecks
         LinkResponseValidation();
         EmptyPageCompletesAtTheSameCursor();
         EmptyPageWithBackwardContinuationDoesNotProgress();
+        EmptyFiniteResponseShortOfItsEndConsumesNothing();
         OpenPageReportsMoreAndAdvances();
         RecordsBeforeTheStartAreCoveredWithoutDelivery();
         FiniteEndReachedExactlyIsComplete();
@@ -106,6 +107,14 @@ internal static class NtfsUsnPageChecks
             var multiple = NtfsIdentityPaths.ResolveLinksById(inside, rootIdentity, fileId, false, default);
             Require(multiple.Links is not null && multiple.Links.ToHashSet(StringComparer.OrdinalIgnoreCase)
                 .SetEquals(new[] { original, alias, third }), "native enumeration includes all outside and inside names before filtering");
+            var queries = 0;
+            var replies = 0;
+            var parentOpens = 0;
+            var parentReads = 0;
+            var counted = NtfsIdentityPaths.ResolveLinksById(inside, rootIdentity, fileId, true, default,
+                () => queries++, () => replies++, (_, completed) => { if (completed) parentReads++; else parentOpens++; });
+            Require(queries == 1 && replies == 1 && parentOpens == 2 && parentReads == 2 && counted.Links?.Count == 3,
+                "three link names query once and open and observe their two distinct parents once each");
             QualifyLinkAccess(inside, outside, original, fileId, rootIdentity, [original, alias, third]);
             File.Delete(alias);
             var removed = NtfsIdentityPaths.ResolveLinksById(inside, rootIdentity, fileId, true, default);
@@ -118,6 +127,11 @@ internal static class NtfsUsnPageChecks
             var overflow = NtfsIdentityPaths.ResolveLinksById(inside, rootIdentity, fileId, true, default);
             Require(overflow.Links is not null && overflow.Links.ToHashSet(StringComparer.OrdinalIgnoreCase)
                 .SetEquals(longLinks.Append(original)), "Natural overflow returns every long-named link, never a partial response.");
+            queries = parentOpens = 0;
+            counted = NtfsIdentityPaths.ResolveLinksById(inside, rootIdentity, fileId, true, default,
+                () => queries++, null, (_, completed) => { if (!completed) parentOpens++; });
+            Require(queries == 1 && parentOpens == 2 && counted.Links?.Count == 13,
+                "thirteen long link names still open only their two distinct parents");
             foreach (var link in longLinks) File.Delete(link);
             var forced = NtfsIdentityPaths.ResolveLinksById(inside, rootIdentity, fileId, true, default);
             Require(forced.Links is [var remaining] && string.Equals(remaining, original, StringComparison.OrdinalIgnoreCase),
@@ -298,6 +312,18 @@ internal static class NtfsUsnPageChecks
             (record, boundary) => { });
         Require(status == NtfsUsnPageStatus.NoProgress && consumed == 500,
             "a native continuation behind the requested start is NoProgress, not an empty complete page");
+    }
+
+    private static void EmptyFiniteResponseShortOfItsEndConsumesNothing()
+    {
+        foreach (var continuation in new ulong[] { 500, 600 })
+        {
+            var delivered = 0;
+            var status = NtfsUsnJournal.WalkUsnRecords(ReadOnlySpan<byte>.Empty, 500, 600, continuation,
+                out var consumed, (record, boundary) => delivered++);
+            Require(status == NtfsUsnPageStatus.Complete && consumed == 500 && delivered == 0,
+                "an empty response over a non-empty finite interval consumes nothing and does not reach its end");
+        }
     }
 
     private static void OpenPageReportsMoreAndAdvances()

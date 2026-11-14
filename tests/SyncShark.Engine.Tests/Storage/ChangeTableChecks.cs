@@ -707,7 +707,7 @@ public static partial class ChangeTableChecks
     }
 
     // Statements the real store runs for one action, counted by sqlite3_trace; 0 on the double.
-    private static int Statements(IStateStore store, Action action)
+    private static int Statements(IStateStore store, Action action, string? traceLabel = null, List<string>? captured = null)
     {
         if (store is not StateStore real)
         {
@@ -717,9 +717,23 @@ public static partial class ChangeTableChecks
         var connection = (Microsoft.Data.Sqlite.SqliteConnection)typeof(StateStore).GetField("_connection",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(real)!;
         var statements = 0;
-        SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, _) => statements++), null);
+        var groups = traceLabel is null ? null : new Dictionary<string, int>();
+        SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, sql) =>
+        {
+            statements++;
+            captured?.Add(sql.utf8_to_string());
+            if (groups is null) return;
+            var text = sql.utf8_to_string();
+            var kind = text.TrimStart().StartsWith("--", StringComparison.Ordinal) ? "subprogram" : "statement";
+            text = System.Text.RegularExpressions.Regex.Replace(text, @"'(?:''|[^'])*'|\b\d+\b", "?");
+            text = kind + " " + System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+            groups[text] = groups.GetValueOrDefault(text) + 1;
+        }), null);
         try { action(); }
         finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
+        if (groups is not null)
+            foreach (var (sql, count) in groups.OrderBy(group => group.Key, StringComparer.Ordinal))
+                Console.WriteLine($"B214 SQL {traceLabel} count={count} {sql}");
         return statements;
     }
 
@@ -793,7 +807,7 @@ public static partial class ChangeTableChecks
             "B-133 carried Local dirty evidence under a saved exclusion keeps its ordinary path" + name);
     }
 
-    private static void PersistedRenameBootstrap(StateStore store, bool replaceClash)
+    private static void PersistedRenameBootstrap(StateStore store, bool replaceClash, bool settleFirst = false)
     {
         var provenance = InstallWithoutObligations(store);
         var incoming = new SyncedEntry(PathNames.Key(File), File, PathNames.DropboxKey(File), File,
@@ -812,6 +826,8 @@ public static partial class ChangeTableChecks
             [(Notice(Side.Dropbox, Renamed, Identity, kind: ChangeKind.Renamed, oldPath: File), false, incoming)]);
         store.CompleteWork(parent, null);
         store.EndWorkPass(PairId);
+        // B-214: live work settles echoes before selecting, so that walk is the first to bootstrap the clash.
+        if (settleFirst) Check.Require(SettleEchoPage(store) == (0, false), "B214-M-D1 setup: the settlement walk retires nothing");
         var selected = store.SelectWork(PairId, provenance.PairGeneration, new PathScope(store.Pair(PairId)!, store.Pairs()));
         Check.Require(selected is not null && store.ReadRenameContinuation(selected) is { Clash: not null } continuation &&
             continuation.Destination == destination,

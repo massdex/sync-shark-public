@@ -18,6 +18,767 @@ public static class FolderDeleteRunnerChecks
 
     public static void Run() => RunAsync().GetAwaiter().GetResult();
 
+    public static void AbsentEpisode()
+    {
+        AbsentEpisodeAsync().GetAwaiter().GetResult();
+        HeldIdentityEpisodesAsync().GetAwaiter().GetResult();
+        HeldFolderMembershipAsync().GetAwaiter().GetResult();
+    }
+
+    public static void AbsentEpisodeCosts()
+    {
+        AbsentEpisodeCostsAsync().GetAwaiter().GetResult();
+        HeldIdentityCostsAsync().GetAwaiter().GetResult();
+    }
+
+    private static async Task AbsentEpisodeCostsAsync()
+    {
+        foreach (var mode in new[] { "flow", "settlement" })
+        foreach (var count in new[] { 3, 12 })
+        foreach (var wait in new[] { false, true })
+        foreach (var proven in new[] { false, true })
+        // Warm the same call before recording SQL and allocations in separate fresh fixtures.
+        foreach (var measure in new[] { "warm", "sql", "allocation" })
+        {
+            if (mode == "settlement" && (count != 3 || wait)) continue;
+            var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var attempt = Guid.NewGuid();
+                using var f = new Fixture(folder, "Pair A", localEvidence: true,
+                    registry: (id, _, _, _, _) => id == attempt, pageSize: count + 2);
+                SourceFixture.AcquireJournal(f.Store, f.Pair);
+                var root = await f.DropboxEntries.EnsureFolderAsync("Folder", default);
+                var savedRoot = Saved(root.Path, root.Path);
+                var records = new List<SyncedEntry> { savedRoot };
+                await f.DropboxEntries.EnsureFolderAsync("Folder/Keep", default);
+                for (var index = 0; index < count; index++)
+                {
+                    var child = await f.DropboxEntries.EnsureFolderAsync("Folder/Child-" + index, default);
+                    records.Add(Saved(child.Path, child.Path));
+                }
+                f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Record = records });
+                var operation = await BeginAsync(f, root, savedRoot, pageSize: count + 2);
+                var members = f.Store.FolderRemovalItems(f.Pair.PairId, operation, -1, count + 2).ToArray();
+                Check.Require(members.Length == count + 2 &&
+                    !f.Store.FolderRemovalItems(f.Pair.PairId, operation, members[^1].Ordinal, count + 2).Any(),
+                    "B222 B4/B5: every frozen member fits in the same single page");
+                var target = members.Single(item => item.Path == "Folder/Child-1");
+                var subject = new IssueSubject([new IssueItem(Side.Local, target.Path, "absent-id")], null);
+                if (wait) f.Store.RecordInUseFailure(f.Pair.PairId, 0,
+                    f.Store.ReadSource(f.Pair.PairId, Side.Local)!.Value.Epoch, target.Path, subject,
+                    TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                else f.Store.Commit(f.Pair.PairId, StateChange.Empty with
+                {
+                    Raise = [(IssueKind.Failure, TextKey.FailLocalInUse, target.Path, subject)]
+                });
+                var issue = f.Store.Issues(f.Pair.PairId).Single();
+                var effects = f.Store.ReadyFolderEffects(f.Pair.PairId, operation, -1, count + 2).ToArray();
+                Check.Require(effects.Length == count && effects.Any(effect => effect.ItemOrdinal == target.Ordinal),
+                    "B222 B4/B5: M independent child effects include the notice target");
+                f.Dropbox.Returns(new FolderSubmitResult.Terminal(effects.Select((effect, index) =>
+                    (FolderMemberResult)new FolderMemberResult.Receipt(index, effect.Expected!)).ToArray()));
+                var statements = 0;
+                var commits = 0;
+                var clears = 0;
+                var connection = (SqliteConnection)typeof(StateStore).GetField("_connection",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(f.RawStore)!;
+                var clearPrefix = StateSchema.ClearItemEpisode[..StateSchema.ClearItemEpisode.IndexOf('$')];
+                void Trace(bool enabled) => SQLitePCL.raw.sqlite3_trace(connection.Handle, enabled && measure == "sql"
+                    ? (SQLitePCL.delegate_trace)((_, text) =>
+                    {
+                        var sql = text.utf8_to_string().TrimStart();
+                        statements++;
+                        if (sql.StartsWith("COMMIT", StringComparison.OrdinalIgnoreCase)) commits++;
+                        if (sql.StartsWith(clearPrefix, StringComparison.Ordinal)) clears++;
+                    }) : null!, null);
+                long allocated = 0;
+                ISet<string> absent;
+                Trace(mode == "flow");
+                var before = GC.GetTotalAllocatedBytes(precise: true);
+                try { absent = await f.Runner.RunPreparedAsync([effects], default); }
+                finally
+                {
+                    if (mode == "flow") allocated += GC.GetTotalAllocatedBytes(precise: true) - before;
+                    Trace(false);
+                }
+                Check.Require(absent.Contains(operation), "B222 B5: the measured removal has null source evidence");
+                foreach (var effect in effects) await f.DropboxEntries.DeleteAsync(effect.Expected!, null, default);
+                var current = f.Store.FolderRemoval(f.Pair.PairId, operation);
+                target = Item(f, operation, target.Ordinal);
+                var change = StateChange.Empty with
+                {
+                    ForgetSubtrees = [(Side.Local, target.Saved!.LocalKey), (Side.Dropbox, target.Saved.DropboxKey)],
+                    Close = [(target.Path, IssueClosure.AfterEffect)], CloseProvenAbsent = proven
+                };
+                (long ExpectedGeneration, FolderRemovalItem Next, StateChange Change)[] settlement =
+                [(target.Generation, target with
+                {
+                    Generation = target.Generation + 1, EffectGeneration = target.EffectGeneration + 1,
+                    EffectState = FolderRemovalItem.EffectStatus.Settled,
+                    Phase = FolderRemovalItem.RecoveryPhase.Settled, Cause = null
+                }, change)];
+                IReadOnlyList<bool>? settled = null;
+                Trace(true);
+                before = mode == "flow" ? GC.GetTotalAllocatedBytes(precise: true) : GC.GetAllocatedBytesForCurrentThread();
+                try
+                {
+                    if (mode == "flow") await f.Runner.ResumeAsync(current, null, default, proven ? absent : null);
+                    else settled = f.RawStore.SettleFolderRemovalItems(f.Pair.PairId, operation, settlement);
+                }
+                finally
+                {
+                    allocated += (mode == "flow" ? GC.GetTotalAllocatedBytes(precise: true) :
+                        GC.GetAllocatedBytesForCurrentThread()) - before;
+                    Trace(false);
+                }
+                Check.Require(mode == "flow" ? effects.All(effect =>
+                    Item(f, operation, effect.ItemOrdinal).EffectState == FolderRemovalItem.EffectStatus.Settled) :
+                    settled is not null && settled.SequenceEqual(new[] { true }),
+                    "B222 B4/B5: every selected effect settles while the unsaved survivor stays untouched");
+                Check.Require(await f.DropboxEntries.ReadOneAsync("Folder/Keep", default) is not null &&
+                    f.Store.FolderRemoval(f.Pair.PairId, operation).Active,
+                    "B222 B4/B5: the unsaved survivor and its unfinished root are preserved");
+                var remains = f.Store.Issues(f.Pair.PairId).Any(row => row.Id == issue.Id);
+                var episodeRemains = f.Store.ReadItemRetryState(f.Pair.PairId, [issue.Id])[issue.Id] is not null;
+                Check.Require(wait ? remains == episodeRemains : !remains,
+                    "B222 B4/B5: ordinary notices close and live notice/episode lifetimes agree");
+                if (measure == "sql") Check.Require(clears == (wait && !episodeRemains ? 1 : 0),
+                    "B222 B4: each ended wait executes exactly one episode clear");
+                if (measure != "warm") Console.WriteLine("B222 B4/B5 mode=" + mode + " M=" + count +
+                    " W=" + (wait ? 1 : 0) + " proven=" + proven + " measure=" + measure +
+                    (measure == "sql" ? " statements=" + statements + " commits=" + commits + " clear=" + clears :
+                        " allocated-bytes=" + allocated) + " notice-remains=" + remains);
+            }
+            finally { Directory.Delete(folder, true); }
+        }
+    }
+
+    private static bool SameStoredToken(ItemRetryToken? actual, ItemRetryToken expected) =>
+        actual is not null && actual.Subject.HasSameItems(expected.Subject) &&
+        actual with { Subject = actual.Subject with { Items = expected.Subject.Items } } == expected;
+
+    private static async Task AbsentEpisodeAsync()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(folder);
+        try
+        {
+            foreach (var scenario in new[] { "R1", "R2", "R2-control", "R3", "R4", "RL3a", "RL1", "RL3b", "R5", "R7", "R10", "R11", "R12", "RL2b", "RL2b-unreadable", "RL4b", "F1", "F2", "F3", "F4" })
+            {
+                var attempt = Guid.NewGuid();
+                using var f = new Fixture(folder, scenario, localEvidence: true,
+                    registry: (id, _, _, subject, _) => id == attempt || scenario == "R5" ||
+                        scenario == "R12" && subject.Items.Any(item => item.Path == "Folder/Held"));
+                SourceFixture.AcquireJournal(f.Store, f.Pair);
+                var sourceEpoch = f.Store.ReadSource(f.Pair.PairId, Side.Local)!.Value.Epoch;
+                var root = await f.DropboxEntries.EnsureFolderAsync("Folder", default);
+                var rootWait = scenario is "RL3a" or "RL3b" or "F1" or "F2" or "F3" or "F4";
+                Entry target;
+                if (rootWait) target = root;
+                else
+                {
+                    await f.DropboxEntries.EnsureFolderAsync("Folder/Kept", default);
+                    target = await f.DropboxEntries.EnsureFolderAsync("Folder/Gone", default);
+                }
+                var revoked = scenario is "RL2b" or "RL2b-unreadable";
+                var heldMember = scenario is "R7" or "R12" || revoked
+                    ? await f.DropboxEntries.EnsureFolderAsync("Folder/Held", default) : null;
+                var savedRoot = Saved(scenario == "R10" ? "Other" : root.Path, root.Path);
+                f.Store.Commit(f.Pair.PairId, StateChange.Empty with
+                {
+                    Record = rootWait ? [savedRoot] : [savedRoot, Saved(target.Path, target.Path)]
+                });
+                if (heldMember is not null) f.Store.Commit(f.Pair.PairId,
+                    StateChange.Empty with { Record = [Saved(heldMember.Path, heldMember.Path)] });
+                string operation;
+                if (scenario == "R3")
+                {
+                    var counterpart = await f.Local.EnsureFolderAsync(root.Path, default);
+                    using var captured = f.Store.OpenFolderPlan(f.Pair.PairId,
+                        Row(root, savedRoot) with { Local = counterpart }, Side.Dropbox);
+                    await captured.CaptureAsync(f.Dropbox.ReadAllAsync(root.Path,
+                        new ListOptions(Recursive: true, IncludeOutOfScope: true), default), default);
+                    var excluded = await new FolderPlanBuilder(f.Context).BuildExcludedAsync(captured,
+                        new Exclusion(Side.Dropbox, root.Path, false), default);
+                    operation = f.Store.BeginFolderRemoval(f.Pair.PairId, excluded, FolderRemovalAuthority.Excluded,
+                        StateSchema.OneRow, default);
+                }
+                else operation = await BeginAsync(f, root, savedRoot);
+                var effects = f.Store.ReadyFolderEffects(f.Pair.PairId, operation, -1, PageSize).ToArray();
+                Check.Require(effects.Length == (heldMember is null ? 1 : 2),
+                    "B222 removal fixture selects exactly its saved branches");
+                var subject = new IssueSubject([new IssueItem(Side.Local, target.Path, "old-id")], null);
+                if (scenario == "R11") subject = subject with { Items = [.. subject.Items, new(Side.Dropbox, "Elsewhere", "remote-id")] };
+                if (scenario == "R7") subject = subject with
+                {
+                    Move = new IssueSubject.UnknownMove("remote-id", "Source", "Destination", "Intermediate", false)
+                };
+                WorkSelection? acquired = null;
+                var openPass = scenario is "R1" or "R2" or "R2-control" or "R7";
+                if (openPass)
+                {
+                    var local = f.Store.ReadSource(f.Pair.PairId, Side.Local)!.Value;
+                    var path = scenario == "R1" ? target.Path : "Unrelated";
+                    var identity = scenario == "R1" ? "old-id" : "unrelated-id";
+                    Check.Require(f.Store.AcquireJournalPage(
+                        f.Pair.Roots!.Local.VolumeSerialNumber.ToString(CultureInfo.InvariantCulture),
+                        new JournalPosition(1, 1), new JournalPosition(1, 2),
+                        [(f.Pair.PairId, 0, local.Epoch, local.Revision, false)],
+                        [(f.Pair.PairId, new ChangeNotice(Side.Local, ChangeKind.Changed, path, null, identity, null, false, false))]) is not null,
+                        "B222 acquired fixture publishes its Local notice");
+                    var selected = f.RawStore.SelectWork(f.Pair.PairId, 0, f.Context.Scope);
+                    Check.Require(selected is { } row && row.Key == PathNames.Key(path),
+                        "B222 " + scenario + ": runnable selection opens the work pass");
+                    if (scenario == "R1") acquired = selected;
+                }
+                var episode = f.Store.RecordInUseFailure(f.Pair.PairId, 0, sourceEpoch, target.Path, subject,
+                    TextKey.FailLocalInUse, acquired, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                var untouched = new List<ItemRetryCandidate>();
+                if (scenario == "R4")
+                    foreach (var path in new[] { "Folder/Kept", "Folder/NonMember" })
+                        untouched.Add(f.Store.RecordInUseFailure(f.Pair.PairId, 0, sourceEpoch, path,
+                            new IssueSubject([new IssueItem(Side.Local, path, "unselected-id")], null),
+                            TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt));
+                var heldEpisode = scenario != "R12" ? null : f.Store.RecordInUseFailure(f.Pair.PairId, 0, sourceEpoch,
+                    heldMember!.Path, new IssueSubject([new IssueItem(Side.Local, heldMember.Path, "held-id")], null),
+                    TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                var composed = scenario is "F1" or "F2" or "F3" or "F4";
+                var jobs = SyncJobs.Create(f.Context, new SyncPorts(new PassthroughBoundary(),
+                    RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0));
+                var folders = jobs.Items.Folders;
+                if (scenario is "F2" or "F3" or "F4")
+                {
+                    f.Dropbox.Returns(new FolderSubmitResult.Accepted("job"));
+                    // RunPrepared and the first Resume each observe a failure; F3/F4 defer the second Resume too.
+                    var joins = scenario == "F2" ? 2 : 3;
+                    for (var join = 0; join < joins; join++)
+                        f.Dropbox.Throws(new ItemFailedException(root.Path, TextKey.DropboxRefused, null));
+                    if (scenario == "F2")
+                        f.Dropbox.Returns(new FolderJobResult.Terminal([new FolderMemberResult.Receipt(0, target)]));
+                }
+                var submitted = revoked ? effects.Take(1).ToArray() : effects;
+                if (scenario is not ("F2" or "F3" or "F4"))
+                    f.Dropbox.Returns(new FolderSubmitResult.Terminal(submitted.Select((effect, index) =>
+                        (FolderMemberResult)new FolderMemberResult.Receipt(index, effect.Expected!)).ToArray()));
+                var absent = composed ? await folders.RunPreparedFolderRemovalsAsync([operation], default)
+                    : await f.Runner.RunPreparedAsync([submitted], default);
+                Check.Require(absent.Contains(operation) == (scenario is not ("R3" or "R10")),
+                    "B222 pre-send proof is confined to the deleting root's own opposite path");
+                await f.DropboxEntries.DeleteAsync(target, null, default);
+                if (heldMember is not null && !revoked) await f.DropboxEntries.DeleteAsync(heldMember, null, default);
+                if (scenario == "RL2b") await f.Local.EnsureFolderAsync(root.Path, default);
+                if (scenario == "RL2b-unreadable") f.LocalEntries.FailNext(root.Path,
+                    new ItemFailedException(root.Path, TextKey.FailLocalInUse, null));
+                var restarted = scenario is "RL1" or "RL3b";
+                if (restarted) await f.Local.EnsureFolderAsync(target.Path, default);
+                if (scenario == "RL4b")
+                {
+                    var connection = (SqliteConnection)typeof(StateStore).GetField("_connection",
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(f.RawStore)!;
+                    using var fault = StateStore.Connect(connection.DataSource, SqliteOpenMode.ReadWrite);
+                    using var corrupt = fault.CreateCommand();
+                    corrupt.CommandText = "UPDATE change_work SET issue_work_key='fixture-mismatch' WHERE work_id=$work;";
+                    corrupt.Parameters.AddWithValue("$work", episode.Token.WorkId);
+                    Check.Require(corrupt.ExecuteNonQuery() == 1, "B222 RL4b alters exactly the owned issue-work key");
+                    var refused = false;
+                    try { await f.Runner.ResumeAsync(f.Store.FolderRemoval(f.Pair.PairId, operation), null, default, absent); }
+                    catch (InvalidOperationException) { refused = true; }
+                    Check.Require(refused, "B222 RL4b: a mismatched issue-work key refuses settlement");
+                    Check.Require(SameStoredToken(f.Store.ReadItemRetryState(f.Pair.PairId, [episode.Token.IssueId])[episode.Token.IssueId]?.Token, episode.Token) &&
+                        f.Store.Issues(f.Pair.PairId).Any(issue => issue.Id == episode.Token.IssueId) &&
+                        f.Store.CountWork(f.Pair.PairId, 0, f.Store.ReadWorkWatermark()) == (0, 0) &&
+                        Item(f, operation, effects[0].ItemOrdinal).EffectState == FolderRemovalItem.EffectStatus.Verified &&
+                        f.Store.SyncedByKey(f.Pair.PairId, Side.Dropbox, PathNames.DropboxKey(target.Path)) is not null,
+                        "B222 RL4b: failed work deletion rolls back member, binding, notice and episode together");
+                    continue;
+                }
+                if (composed)
+                {
+                    await folders.FinishFolderRemovalAsync(operation, null, default, absent: absent);
+                    if (scenario is "F3" or "F4")
+                    {
+                        Check.Require(f.Store.ReadItemRetryState(f.Pair.PairId, [episode.Token.IssueId])[episode.Token.IssueId] is not null,
+                            "B222 deferred first and second joins keep their wait");
+                        if (scenario == "F3")
+                        {
+                            f.Dropbox.Returns(new FolderJobResult.InProgress());
+                            await jobs.Recovery.ReconcileReceiptsAsync(default);
+                            f.Dropbox.Returns(new FolderJobResult.Terminal([new FolderMemberResult.Receipt(0, target)]));
+                            var finishes = 0;
+                            await jobs.Recovery.ReconcileReceiptsAsync(default, progressOnly: true, async (id, ct) =>
+                            {
+                                finishes++;
+                                await folders.FinishFolderRemovalAsync(id, null, ct);
+                            });
+                            Check.Require(finishes == 1, "B222 F3 reaches its progress-only finish callback");
+                        }
+                        else
+                        {
+                            f.Dropbox.Returns(new FolderJobResult.Terminal([new FolderMemberResult.Receipt(0, target)]));
+                            var pending = f.Store.FolderRemoval(f.Pair.PairId, operation);
+                            await jobs.Recovery.RecoverAsync(new RecoveryTarget(operation, pending.Generation, null, null),
+                                RecoveryChoice.Check, default);
+                        }
+                    }
+                }
+                else
+                {
+                    var statements = new List<string>();
+                    var connection = scenario is not ("R1" or "R2") ? null : (SqliteConnection)typeof(StateStore).GetField("_connection",
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(f.RawStore)!;
+                    if (connection is not null) SQLitePCL.raw.sqlite3_trace(connection.Handle,
+                        (SQLitePCL.delegate_trace)((_, sql) => statements.Add(sql.utf8_to_string().Trim())), null);
+                    try
+                    {
+                        await (restarted ? f.NewRunner() : f.Runner).ResumeAsync(
+                            f.Store.FolderRemoval(f.Pair.PairId, operation), null, default,
+                            restarted || scenario == "R2-control" ? null : absent);
+                    }
+                    finally
+                    {
+                        if (connection is not null) SQLitePCL.raw.sqlite3_trace(connection.Handle,
+                            (SQLitePCL.delegate_trace)null!, null);
+                    }
+                    if (connection is not null)
+                    {
+                        static bool Matches(string actual, string template) =>
+                            actual.StartsWith(template[..template.IndexOf('$')], StringComparison.Ordinal);
+                        var clear = statements.FindIndex(sql => Matches(sql, StateSchema.ClearItemEpisode));
+                        Check.Require(clear >= 0 && statements.Count(sql => Matches(sql, StateSchema.ClearItemEpisode)) == 1,
+                            "B222 RL4: the exact episode is cleared once");
+                        var begin = statements.FindLastIndex(clear, sql => sql.StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase));
+                        var commit = statements.FindIndex(clear, sql => sql.StartsWith("COMMIT", StringComparison.OrdinalIgnoreCase));
+                        var transaction = statements.Skip(begin).Take(commit - begin + 1).ToArray();
+                        Check.Require(begin >= 0 && commit > clear &&
+                            transaction.Any(sql => Matches(sql, StateSchema.SettleEffect)) &&
+                            (scenario != "R2" || transaction.Any(sql => Matches(sql, StateSchema.DeleteSettledIssueWork))) &&
+                            transaction.Any(sql => Matches(sql, StateSchema.DeleteSyncedDropboxKey)) &&
+                            transaction.Any(sql => Matches(sql, StateSchema.CloseIssueExact)) &&
+                            transaction.Count(sql => sql.StartsWith("COMMIT", StringComparison.OrdinalIgnoreCase)) == 1,
+                            "B222 RL4 " + scenario + ": member, binding, episode, applicable source-less work and notice settle in one transaction");
+                    }
+                }
+                if (revoked) Check.Require(!absent.Contains(operation) &&
+                    f.Store.ReadyFolderEffects(f.Pair.PairId, operation, -1, PageSize).Count() == 1,
+                    "B222 " + scenario + ": a failed fresh opposite check revokes proof and leaves its effect unsent");
+                if (scenario == "RL2b-unreadable")
+                    Check.Require(await f.LocalEntries.ReadOneAsync(root.Path, default) is null,
+                        "B222 RL2b-unreadable: the fresh check consumed the queued root fault");
+                var retained = scenario is not ("R1" or "R2" or "R4" or "R12" or "RL3a" or "F1");
+                Check.Require(f.Store.FolderRemovalItems(f.Pair.PairId, operation, -1, int.MaxValue)
+                    .Single(item => item.Ordinal == effects[0].ItemOrdinal).EffectState == FolderRemovalItem.EffectStatus.Settled,
+                    "B222 " + scenario + ": ordinary verified settlement still completes");
+                Check.Require((f.Store.ReadItemRetryState(f.Pair.PairId, [episode.Token.IssueId])[episode.Token.IssueId] is not null) == retained,
+                    "B222 " + scenario + ": episode retirement obeys proof lifetime and retention");
+                Check.Require(f.Store.Issues(f.Pair.PairId).Any(issue => issue.Id == episode.Token.IssueId) == retained,
+                    "B222 " + scenario + ": notice and episode retire together");
+                if (openPass)
+                {
+                    Check.Require(f.RawStore.EndWorkPass(f.Pair.PairId) == !retained,
+                        "B222 " + scenario + ": only an ended episode requests a repeat pass");
+                    if (scenario == "R1")
+                    {
+                        var drain = f.RawStore.SelectWork(f.Pair.PairId, 0, f.Context.Scope);
+                        Check.Require(drain is { } row && row.AnchorWorkId == episode.Token.WorkId,
+                            "B222 R1: acquired work is unheld and selected after episode retirement");
+                        Check.Require(f.RawStore.CompleteWork(drain!, null),
+                            "B222 R1: ordinary completion drains acquired work");
+                    }
+                }
+                if (scenario == "R7")
+                {
+                    Check.Require(effects.All(effect => Item(f, operation, effect.ItemOrdinal).EffectState ==
+                            FolderRemovalItem.EffectStatus.Settled &&
+                            f.Store.SyncedByKey(f.Pair.PairId, Side.Dropbox, PathNames.DropboxKey(effect.Expected!.Path)) is null),
+                        "B222 R7: both verified members settle and forget their bindings despite retained responsibility");
+                    Check.Require(SameStoredToken(f.Store.ReadItemRetryState(f.Pair.PairId, [episode.Token.IssueId])[episode.Token.IssueId]?.Token, episode.Token) &&
+                        f.Store.Issues(f.Pair.PairId).Single(issue => issue.Id == episode.Token.IssueId).Subject.Move == subject.Move,
+                        "B222 R7: the unknown-move notice and exact episode token remain");
+                }
+                if (heldEpisode is not null)
+                {
+                    Check.Require(SameStoredToken(f.Store.ReadItemRetryState(f.Pair.PairId, [heldEpisode.Token.IssueId])[heldEpisode.Token.IssueId]?.Token, heldEpisode.Token) &&
+                        f.Store.Issues(f.Pair.PairId).Any(issue => issue.Id == heldEpisode.Token.IssueId),
+                        "B222 R12: a previous close never authorizes a retained member's notice close");
+                    Check.Require(f.Store.FolderRemovalItems(f.Pair.PairId, operation, -1, int.MaxValue)
+                        .Single(item => item.Path == heldMember!.Path).EffectState == FolderRemovalItem.EffectStatus.Settled,
+                        "B222 R12: retained member still settles its verified effect");
+                }
+                if (scenario == "R4")
+                {
+                    var syncer = new Syncer(f.Context with { ItemAttempts = new PassingItemAttempts() },
+                        new SyncPorts(new PassthroughBoundary(), RefusingExecutionBoundary.Instance,
+                            RefusingExecutionBoundary.Instance, 0));
+                    await syncer.SyncWorkAsync(default);
+                }
+                if (scenario is "R1" or "R2")
+                    Check.Require(f.Store.SyncedByKey(f.Pair.PairId, Side.Dropbox, PathNames.DropboxKey(target.Path)) is null,
+                        "B222 " + scenario + ": settled member forgets its saved binding");
+                foreach (var unselected in untouched)
+                    Check.Require(SameStoredToken(f.Store.ReadItemRetryState(f.Pair.PairId, [unselected.Token.IssueId])[unselected.Token.IssueId]?.Token, unselected.Token) &&
+                        f.Store.Issues(f.Pair.PairId).Any(issue => issue.Id == unselected.Token.IssueId),
+                        "B222 R4: survivor and non-member waits never retire by root prefix");
+                // U is Acquired and counted; P is Issue work excluded by StateSchema.EligibilitySuffix (:775) and CountWork (:793-797).
+                var expected = scenario == "R2" ? (1L, 0L) : (0L, 0L);
+                if (!retained) Check.Require(f.Store.CountWork(f.Pair.PairId, 0, f.Store.ReadWorkWatermark()) == expected,
+                    "B222 " + scenario + ": ended episode leaves only unrelated work");
+                else if (openPass)
+                {
+                    Check.Require(SameStoredToken(f.Store.ReadItemRetryState(f.Pair.PairId,
+                        [episode.Token.IssueId])[episode.Token.IssueId]?.Token, episode.Token),
+                        "B222 " + scenario + ": joined retry candidate retains its exact episode and associated work");
+                    var count = f.Store.CountWork(f.Pair.PairId, 0, f.Store.ReadWorkWatermark());
+                    Check.Require(count == (1, 0), "B222 " + scenario +
+                        ": unrelated acquired work remains beside the joined retained episode; count=" + count);
+                }
+            }
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
+    private static async Task HeldIdentityCostsAsync()
+    {
+        foreach (var (branches, descendants, held) in new[] { (1, 3, 0), (1, 12, 0), (4, 3, 0), (1, 3, 1), (1, 3, 2) })
+        {
+            var baseline = 0;
+            var baselineCommits = 0;
+            foreach (var capable in new[] { false, true })
+            {
+                var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+                Directory.CreateDirectory(folder);
+                try
+                {
+                    var attempt = Guid.NewGuid();
+                    var calls = new List<(Side Side, string Id)>();
+                    Task<(IdentityLocation Location, bool InScope)?> ReadIdentity(Side side, string id, bool documented, CancellationToken ct)
+                    {
+                        calls.Add((side, id));
+                        Check.Require(side != Side.Local || documented, "B222 B9: Local lookup uses documented absence");
+                        return Task.FromResult<(IdentityLocation Location, bool InScope)?>(null);
+                    }
+                    using var f = new Fixture(folder, "B9", localEvidence: true,
+                        registry: (id, _, _, _, _) => id == attempt, pageSize: 3, byId: capable ? ReadIdentity : null);
+                    SourceFixture.AcquireJournal(f.Store, f.Pair);
+                    var source = f.Store.ReadSource(f.Pair.PairId, Side.Local)!.Value;
+                    var root = await f.DropboxEntries.EnsureFolderAsync("Folder", default);
+                    await f.DropboxEntries.EnsureFolderAsync("Folder/Keep", default);
+                    var savedRoot = Saved(root.Path, root.Path) with { LocalId = "local-root", DropboxId = "dropbox-root" };
+                    var records = new List<SyncedEntry> { savedRoot };
+                    var hash = DropboxContentHash.Compute(new byte[] { 1 });
+                    for (var branch = 0; branch < branches; branch++)
+                    {
+                        var path = "Folder/Branch-" + branch;
+                        await f.DropboxEntries.EnsureFolderAsync(path, default);
+                        records.Add(Saved(path, path) with { LocalId = "local-branch-" + branch, DropboxId = "dropbox-branch-" + branch });
+                    }
+                    var targets = new List<SyncedEntry>();
+                    foreach (var path in Enumerable.Range(0, descendants).Select(index => "Folder/Branch-0/Child-" + index)
+                        .Append("Folder/File"))
+                    {
+                        var entry = new Entry(path, false, 1, default, "dropbox-" + path, "revision", hash, null);
+                        f.DropboxEntries.Seed(entry, [1]);
+                        var saved = Saved(path, path) with { IsFolder = false, LocalId = "local-" + path,
+                            DropboxId = entry.Id, DropboxContentHash = hash };
+                        records.Add(saved);
+                        if (path != "Folder/File") targets.Add(saved);
+                    }
+                    records.Add(Saved("Folder/Absent", "Folder/Absent") with { IsFolder = false,
+                        LocalId = "local-absent", DropboxId = "dropbox-absent", DropboxContentHash = hash });
+                    f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Record = records });
+                    var operation = await BeginAsync(f, root, savedRoot, pageSize: 3);
+                    var members = f.Store.FolderRemovalItems(f.Pair.PairId, operation, -1, int.MaxValue).ToArray();
+                    Check.Require(members.Count(item => item.EffectKind == FolderEffectKind.RecursiveFolder) == branches &&
+                        members.Single(item => item.Path == "Folder/File").EffectKind == FolderEffectKind.ConditionalFile &&
+                        members.Single(item => item.Path == "Folder/Absent").EffectKind == FolderEffectKind.StateOnly,
+                        "B222 B9: R recursive branches share their window with conditional-file and state-only controls");
+                    var episodes = targets.Take(held).Select(saved => f.Store.RecordInUseFailure(f.Pair.PairId, 0,
+                        source.Epoch, saved.LocalPath, new IssueSubject([new IssueItem(Side.Local, saved.LocalPath, saved.LocalId)], null),
+                        TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt)).ToArray();
+                    var effects = f.Store.ReadyFolderEffects(f.Pair.PairId, operation, -1, int.MaxValue).ToArray();
+                    var submitted = effects.Where(effect => Item(f, operation, effect.ItemOrdinal).EffectKind != FolderEffectKind.StateOnly).ToArray();
+                    f.Dropbox.Returns(new FolderSubmitResult.Terminal(submitted.Select((effect, index) =>
+                        (FolderMemberResult)new FolderMemberResult.Receipt(index, effect.Expected!)).ToArray()));
+                    var connection = (SqliteConnection)typeof(StateStore).GetField("_connection",
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(f.RawStore)!;
+                    var statements = 0;
+                    var identityReads = 0;
+                    var writes = 0;
+                    SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, text) =>
+                    {
+                        var sql = text.utf8_to_string().TrimStart();
+                        statements++;
+                        if (sql.StartsWith("SELECT i.issue_id,i.kind,i.cause,i.path,i.subject_json,i.at_ticks,i.dismissed,i.ignored,m.saved_json", StringComparison.Ordinal)) identityReads++;
+                        if (sql.StartsWith("COMMIT", StringComparison.OrdinalIgnoreCase)) writes++;
+                    }), null);
+                    try
+                    {
+                        await f.Runner.RunPreparedAsync([effects], default);
+                        foreach (var effect in submitted) await f.DropboxEntries.DeleteAsync(effect.Expected!, null, default);
+                        await f.Runner.ResumeAsync(f.Store.FolderRemoval(f.Pair.PairId, operation), null, default);
+                    }
+                    finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
+                    Check.Require(members.Where(item => item.SelectedBranch).All(item =>
+                        Item(f, operation, item.Ordinal).EffectState == FolderRemovalItem.EffectStatus.Settled),
+                        "B222 B9: all selected recursive and non-recursive controls completed");
+                    Check.Require(episodes.All(episode =>
+                        (f.Store.ReadItemRetryState(f.Pair.PairId, [episode.Token.IssueId])[episode.Token.IssueId] is null) == capable),
+                        "B222 B9: only identity-capable settlement retires descendant episodes");
+                    Check.Require(calls.SequenceEqual(capable ? targets.Take(held).SelectMany(saved =>
+                        new[] { (Side.Local, saved.LocalId), (Side.Dropbox, saved.DropboxId) }) : []),
+                        "B222 B9: exactly two logical calls per held member, no control or unheld IDs");
+                    Check.Require(identityReads == (capable ? branches + (held == 0 ? 0 : 1) : 0),
+                        "B222 B9: only completed recursive effects enumerate; incapable sides execute no query");
+                    if (!capable)
+                    {
+                        baseline = statements;
+                        baselineCommits = writes;
+                    }
+                    else
+                    {
+                        if (held == 0) Check.Require(statements - baseline == branches,
+                            "B222 B9: H=0 costs exactly R reads, flat in descendant count and excluding non-recursive controls");
+                        else Check.Require(statements - baseline == 5 + 19 * held,
+                            "B222 B9 Measured: absolute held-member settlement statement delta");
+                        Check.Require(writes - baselineCommits == (held == 0 ? 0 : 1),
+                            "B222 B9 Measured: only a nonempty identity closure adds one commit");
+                    }
+                    Console.WriteLine("B222 B9 Measured R=" + branches + " m=" + descendants + " H=" + held +
+                        " capable=" + capable + " statements=" + statements + " delta=" + (statements - baseline) +
+                        " identity-reads=" + identityReads + " commits=" + writes + " logical-calls=" + calls.Count);
+                }
+                finally { Directory.Delete(folder, true); }
+            }
+        }
+    }
+
+    private static async Task HeldFolderMembershipAsync()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(folder);
+        try
+        {
+            using var f = new Fixture(folder, "T8");
+            var root = await f.DropboxEntries.EnsureFolderAsync("Folder", default);
+            var child = await f.DropboxEntries.EnsureFolderAsync("Folder/Child", default);
+            var savedRoot = Saved(root.Path, root.Path);
+            var saved = Saved(child.Path, child.Path) with { LocalId = "local-child", DropboxId = "dropbox-child" };
+            var absent = Saved("Folder/Absent", "Folder/Absent") with { LocalId = "local-absent", DropboxId = "dropbox-absent" };
+            f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Record = [savedRoot, saved, absent] });
+            var operation = await BeginAsync(f, root, savedRoot);
+            f.Store.InsertFolderMember(f.Pair.PairId, operation, f.Store.FolderRemoval(f.Pair.PairId, operation).Generation,
+                FolderRemovalItem.ProvenanceKind.Unexpected, child.Path, child, null);
+            foreach (var item in new[] { saved, absent })
+                f.Store.Commit(f.Pair.PairId, StateChange.Empty with
+                { Raise = [(IssueKind.Failure, TextKey.FailLocalInUse, item.LocalPath,
+                    new IssueSubject([new IssueItem(Side.Local, item.LocalPath, item.LocalId)], null))] });
+            var members = f.Store.FolderRemovalItems(f.Pair.PairId, operation, -1, int.MaxValue).ToArray();
+            Check.Require(members.Count(item => item.Path == child.Path) == 2 &&
+                members.Single(item => item.Path == absent.LocalPath) is { Expected: null, Saved: not null,
+                    Provenance: FolderRemovalItem.ProvenanceKind.Planned },
+                "B222 T8: public paths create a same-key Planned/Unexpected pair and a distinct saved-only Planned control");
+            var (low, high) = PathNames.DescendantBounds(PathNames.Key(root.Path));
+            var page = f.Store.HeldFolderMembers(f.Pair.PairId, operation, IssueKind.Failure, (low, -1), high, int.MaxValue);
+            Check.Require(page.Count == 1 && page[0].Issue.Path == child.Path && page[0].Saved == saved,
+                "B222 T8: exactly the present Planned binding joins each held issue; Unexpected and saved-only rows never join");
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
+    private static async Task HeldIdentityEpisodesAsync()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(folder);
+        try
+        {
+            foreach (var scenario in new[] { "T1-root", "T1-branches", "T2", "T3a", "T3b", "T4a", "T4b", "T4c",
+                "T4d", "T4e", "T4f", "T4g", "T5a", "T5b", "T5c", "T7", "T9", "T10", "T11" })
+            {
+                var attempt = Guid.NewGuid();
+                using var cancellation = new CancellationTokenSource();
+                var calls = new List<(Side Side, string Id, bool Documented)>();
+                Action? duringRead = null;
+                Task<(IdentityLocation Location, bool InScope)?> ReadIdentity(Side side, string id, bool documented,
+                    CancellationToken ct)
+                {
+                    calls.Add((side, id, documented));
+                    if (side == Side.Local)
+                    {
+                        duringRead?.Invoke();
+                        if (scenario == "T5c") { cancellation.Cancel(); ct.ThrowIfCancellationRequested(); }
+                        if (scenario == "T5a" || scenario == "T9" && documented) throw new IOException();
+                    }
+                    else if (scenario == "T5b") throw new IOException();
+                    (IdentityLocation Location, bool InScope)? found = null;
+                    if (side == Side.Local && scenario is "T2" or "T3a" || side == Side.Dropbox && scenario == "T3b")
+                        found = (new IdentityLocation("domain", "Elsewhere", new Entry("Elsewhere", true, 0, default,
+                            id, "revision", "", null)), scenario == "T2");
+                    return Task.FromResult(found);
+                }
+                using var f = new Fixture(folder, scenario, localEvidence: true,
+                    registry: (id, _, _, _, _) => id == attempt,
+                    pageSize: scenario == "T5c" ? 2 : 1, byId: scenario == "T10" ? null : ReadIdentity);
+                SourceFixture.AcquireJournal(f.Store, f.Pair);
+                var source = f.Store.ReadSource(f.Pair.PairId, Side.Local)!.Value;
+                var root = await f.DropboxEntries.EnsureFolderAsync("Folder", default);
+                var savedRoot = Saved(root.Path, root.Path) with { LocalId = "local-root", DropboxId = "dropbox-root" };
+                var partial = scenario is "T1-branches" or "T7";
+                var records = new List<SyncedEntry> { savedRoot };
+                var targets = new List<(Entry Entry, SyncedEntry Saved)>();
+                var branches = scenario == "T1-branches" ? 2 : 1;
+                for (var branch = 0; branch < branches; branch++)
+                {
+                    var parent = "Folder/Branch-" + branch;
+                    await f.DropboxEntries.EnsureFolderAsync(parent, default);
+                    records.Add(Saved(parent, parent) with { LocalId = "local-branch-" + branch, DropboxId = "dropbox-branch-" + branch });
+                    var target = await f.DropboxEntries.EnsureFolderAsync(parent + "/Child", default);
+                    var saved = Saved(target.Path, target.Path) with { LocalId = "local-" + branch, DropboxId = "dropbox-" + branch };
+                    if (scenario == "T4a") saved = saved with { LocalId = "" };
+                    if (scenario == "T4b") saved = saved with { DropboxId = "" };
+                    if (scenario != "T4d") records.Add(saved);
+                    targets.Add((target, saved));
+                }
+                if (partial) await f.DropboxEntries.EnsureFolderAsync("Folder/Keep", default);
+                f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Record = records });
+                string operation;
+                if (scenario == "T4d")
+                {
+                    using var plan = f.Store.OpenFolderPlan(f.Pair.PairId, Row(root, savedRoot), Side.Dropbox);
+                    await plan.CaptureAsync(f.Dropbox.ReadAllAsync(root.Path,
+                        new ListOptions(Recursive: true, IncludeOutOfScope: true), default), default);
+                    foreach (var child in plan.Children(default))
+                        plan.MarkClassified(child.Key, child.NativeKey,
+                            new FolderChild(child.Entry, child.Synced, FolderVerdict.Removed), false, default);
+                    plan.Complete(true, default);
+                    operation = f.Store.BeginFolderRemoval(f.Pair.PairId, plan, FolderRemovalAuthority.Inferred, 1, default);
+                }
+                else operation = await BeginAsync(f, root, savedRoot);
+                var effects = f.Store.ReadyFolderEffects(f.Pair.PairId, operation, -1, int.MaxValue).ToArray();
+                Check.Require(effects.Length == (partial ? branches : 1) &&
+                    effects.All(effect => Item(f, operation, effect.ItemOrdinal).EffectKind == FolderEffectKind.RecursiveFolder),
+                    "B222 " + scenario + ": only maximal recursive effects enclose the held descendants");
+                WorkSelection? acquired = null;
+                if (scenario.StartsWith("T1-", StringComparison.Ordinal))
+                {
+                    Check.Require(f.Store.AcquireJournalPage(
+                        f.Pair.Roots!.Local.VolumeSerialNumber.ToString(CultureInfo.InvariantCulture),
+                        new JournalPosition(1, 1), new JournalPosition(1, 2),
+                        [(f.Pair.PairId, 0, source.Epoch, source.Revision, false)],
+                        [(f.Pair.PairId, new ChangeNotice(Side.Local, ChangeKind.Changed, targets[0].Entry.Path,
+                            null, targets[0].Saved.LocalId, null, false, false))]) is not null,
+                        "B222 T1: acquired child work is published");
+                    acquired = f.RawStore.SelectWork(f.Pair.PairId, 0, f.Context.Scope);
+                    Check.Require(acquired is not null && acquired.Key == PathNames.Key(targets[0].Entry.Path),
+                        "B222 T1: selecting acquired work opens the retirement pass");
+                }
+                var episodes = new List<ItemRetryCandidate>();
+                var expected = new List<Issue>();
+                foreach (var (target, saved) in targets)
+                {
+                    var subject = new IssueSubject([new IssueItem(Side.Local, target.Path,
+                        scenario == "T4c" ? "other-id" : saved.LocalId)], null);
+                    if (scenario == "T4e") subject = subject with
+                    {
+                        Items = [.. subject.Items, new IssueItem(Side.Dropbox, "Elsewhere", saved.DropboxId)]
+                    };
+                    if (scenario == "T4f") subject = subject with { Items = [] };
+                    if (scenario == "T4g") subject = subject with
+                    {
+                        Move = new IssueSubject.UnknownMove(saved.DropboxId, "Source", "Destination", "Intermediate", false)
+                    };
+                    if (scenario is "T4f" or "T4g" or "T11")
+                        f.Store.Commit(f.Pair.PairId, StateChange.Empty with
+                        { Raise = [(IssueKind.Failure, TextKey.FailLocalInUse, target.Path, subject)] });
+                    else episodes.Add(f.Store.RecordInUseFailure(f.Pair.PairId, 0, source.Epoch, target.Path, subject,
+                        TextKey.FailLocalInUse, expected.Count == 0 ? acquired : null,
+                        ItemRetryDispatch.OrdinaryItem, null, null, attempt));
+                    expected.Add(f.Store.Issues(f.Pair.PairId).Single(issue => issue.Path == target.Path));
+                    if (scenario.StartsWith("T1-", StringComparison.Ordinal) || scenario == "T5c")
+                    {
+                        var variant = target.Path.ToLowerInvariant();
+                        f.Store.Commit(f.Pair.PairId, StateChange.Empty with
+                        { Raise = [(IssueKind.Failure, TextKey.FailLocalInUse, variant,
+                            new IssueSubject([new IssueItem(Side.Local, variant, saved.LocalId)], null))] });
+                        expected.Add(f.Store.Issues(f.Pair.PairId).Single(issue => issue.Path == variant));
+                    }
+                }
+                var excluded = new List<long>();
+                if (partial)
+                    foreach (var path in scenario == "T7"
+                        ? new[] { "Folder/Keep", "Folder/NonMember", "Folder2/x", "Folder" } : new[] { "Folder/Keep" })
+                    {
+                        f.Store.Commit(f.Pair.PairId, StateChange.Empty with
+                        { Raise = [(IssueKind.Failure, TextKey.FailLocalInUse, path,
+                            new IssueSubject([new IssueItem(Side.Local, path, "excluded-" + path)], null))] });
+                        excluded.Add(f.Store.Issues(f.Pair.PairId).Single(issue => issue.Path == path).Id);
+                    }
+                if (scenario == "T7")
+                {
+                    var branch = records.Single(saved => saved.LocalPath == "Folder/Branch-0");
+                    var branchWait = f.Store.RecordInUseFailure(f.Pair.PairId, 0, source.Epoch, branch.LocalPath,
+                        new IssueSubject([new IssueItem(Side.Local, branch.LocalPath, branch.LocalId)], null),
+                        TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                    excluded.Add(branchWait.Token.IssueId);
+                }
+                if (scenario == "T11") duringRead = () =>
+                {
+                    f.Store.Commit(f.Pair.PairId, StateChange.Empty with
+                    {
+                        Raise = [(IssueKind.Failure, TextKey.FailLocalInUse, targets[0].Entry.Path,
+                            new IssueSubject([new IssueItem(Side.Local, targets[0].Entry.Path, "changed-id")], null))]
+                    });
+                    Check.Require(f.Store.Issues(f.Pair.PairId).Single(issue => issue.Id == expected[0].Id)
+                        .Subject.Items.Single().Id == "changed-id", "B222 T11: the stored issue changes semantically during proof");
+                };
+                f.Dropbox.Returns(new FolderSubmitResult.Terminal(effects.Select((effect, index) =>
+                    (FolderMemberResult)new FolderMemberResult.Receipt(index, effect.Expected!)).ToArray()));
+                await f.Runner.RunPreparedAsync([effects], default);
+                foreach (var effect in effects) await f.DropboxEntries.DeleteAsync(effect.Expected!, null, default);
+                var cancelled = false;
+                Exception? escaped = null;
+                try { await f.Runner.ResumeAsync(f.Store.FolderRemoval(f.Pair.PairId, operation), null, cancellation.Token); }
+                catch (OperationCanceledException) when (scenario == "T5c") { cancelled = true; }
+                catch (Exception error) when (scenario is "T5a" or "T5b") { escaped = error; }
+                Check.Require(escaped is null, "B222 " + scenario + ": identity inspection failure never escapes the continuation; " + escaped);
+                Check.Require(cancelled == (scenario == "T5c"), "B222 T5c: entry-point cancellation propagates");
+                if (scenario is "T5a" or "T5b") Check.Require(!f.Store.FolderRemoval(f.Pair.PairId, operation).Active,
+                    "B222 " + scenario + ": failed identity inspection retains the issue without preventing operation conclusion");
+                var closes = scenario.StartsWith("T1-", StringComparison.Ordinal) || scenario == "T7";
+                foreach (var issue in expected)
+                    Check.Require(f.Store.Issues(f.Pair.PairId).Any(row => row.Id == issue.Id) != closes,
+                        "B222 " + scenario + ": only trustworthy frozen-identity absence closes the exact held issue");
+                foreach (var episode in episodes)
+                    Check.Require((f.Store.ReadItemRetryState(f.Pair.PairId, [episode.Token.IssueId])[episode.Token.IssueId] is null) == closes,
+                        "B222 " + scenario + ": the notice and its episode share the identity-proof outcome");
+                Check.Require(excluded.All(id => f.Store.Issues(f.Pair.PairId).Any(issue => issue.Id == id)),
+                    "B222 T7: root, prefix sibling, non-member and survivor issues stay untouched");
+                var localCalls = calls.Count(call => call.Side == Side.Local);
+                var dropboxCalls = calls.Count - localCalls;
+                var noCalls = scenario is "T4a" or "T4b" or "T4c" or "T4d" or "T4f" or "T4g" or "T10";
+                var shortCircuit = scenario is "T2" or "T3a" or "T5a" or "T5c" or "T9";
+                Check.Require(localCalls == (noCalls ? 0 : scenario == "T5c" ? 1 : expected.Count) &&
+                    dropboxCalls == (noCalls || shortCircuit ? 0 : expected.Count),
+                    "B222 " + scenario + ": identity guards and Local-first short circuit bound logical calls");
+                if (scenario == "T7")
+                    Check.Require(calls.Select(call => call.Id).OrderBy(id => id, StringComparer.Ordinal).SequenceEqual(
+                        targets.SelectMany(target => new[] { target.Saved.LocalId, target.Saved.DropboxId })
+                            .OrderBy(id => id, StringComparer.Ordinal)),
+                        "B222 T7: delegates receive exactly the eligible frozen IDs, never excluded IDs");
+                if (scenario.StartsWith("T1-", StringComparison.Ordinal))
+                {
+                    Check.Require(f.RawStore.EndWorkPass(f.Pair.PairId), "B222 T1: identity retirement requests the repeat pass");
+                    var drain = f.RawStore.SelectWork(f.Pair.PairId, 0, f.Context.Scope);
+                    Check.Require(drain is not null && drain.AnchorWorkId == acquired!.AnchorWorkId &&
+                        f.RawStore.CompleteWork(drain, null), "B222 T1: the ordinary selector drains acquired held-child work");
+                    Check.Require(f.Store.CountWork(f.Pair.PairId, 0, f.Store.ReadWorkWatermark()) == (0, 0),
+                        "B222 T1: no acquired work remains after the repeat pass");
+                }
+            }
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
     public static void RunRepairHeld()
     {
         var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
@@ -364,6 +1125,7 @@ public static class FolderDeleteRunnerChecks
             await ProtectionAfterFreezeAsync(folder);
             await DeleteWholeAsync(folder);
             await BatchBoundSplitsAsync(folder);
+            await RootIdentityBetweenChunksAsync(folder);
             await PagePipelineBatchesAsync(folder);
             await UnfinishedRootReadsDoNotScaleAsync(folder);
             await WrappedRecoveryCauseAsync(folder);
@@ -888,11 +1650,11 @@ public static class FolderDeleteRunnerChecks
         public FolderPlan? Plan { get; private set; }
 
         public override string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct,
-            Action? admit = null)
+            Action? admit = null, string? preRestoreId = null)
         {
             Plan = plan;
             return base.BeginFolderRemoval(pairId, new CancellingFolderPlan(plan, cancel, after: 1), authority, pageSize,
-                cancel.Token, admit);
+                cancel.Token, admit, preRestoreId);
         }
     }
 
@@ -1681,17 +2443,8 @@ public static class FolderDeleteRunnerChecks
     private static async Task BatchBoundSplitsAsync(string folder)
     {
         using var f = new Fixture(folder, nameof(BatchBoundSplitsAsync));
-        var root = await f.DropboxEntries.EnsureFolderAsync("Folder", default);
-        await f.DropboxEntries.EnsureFolderAsync(PathNames.Child(root.Path, nameof(FolderVerdict.Survives)), default);
-        var savedRoot = Saved(root.Path, root.Path);
-        var records = new List<SyncedEntry> { savedRoot };
+        var (root, savedRoot) = await BoundChildrenAsync(f);
         var bound = FolderDeleteRunner.MaxEffectsPerSubmission;
-        for (var index = 0; index <= bound; index++)
-        {
-            var child = await f.DropboxEntries.EnsureFolderAsync($"Folder/C{index}", default);
-            records.Add(Saved(child.Path, child.Path));
-        }
-        f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Record = records });
         var id = await BeginAsync(f, root, savedRoot);
         var effects = f.Store.ReadyFolderEffects(f.Pair.PairId, id, -1, int.MaxValue).ToArray();
         Check.Require(effects.Length == bound + 1, $"The frozen plan holds one effect above the bound ({effects.Length}).");
@@ -1706,12 +2459,65 @@ public static class FolderDeleteRunnerChecks
             "A page above the provider bound is split into provider-legal submissions and no member is lost.");
     }
 
+    // The bound arrangement: a saved Dropbox root with one unsaved survivor and saved removed children one above the
+    // provider bound.
+    private static async Task<(Entry Root, SyncedEntry SavedRoot)> BoundChildrenAsync(Fixture f, string? localId = null)
+    {
+        var root = await f.DropboxEntries.EnsureFolderAsync("Folder", default);
+        await f.DropboxEntries.EnsureFolderAsync(PathNames.Child(root.Path, nameof(FolderVerdict.Survives)), default);
+        var savedRoot = localId is null ? Saved(root.Path, root.Path) : Saved(root.Path, root.Path) with { LocalId = localId };
+        var records = new List<SyncedEntry> { savedRoot };
+        for (var index = 0; index <= FolderDeleteRunner.MaxEffectsPerSubmission; index++)
+        {
+            var child = await f.DropboxEntries.EnsureFolderAsync($"Folder/C{index}", default);
+            records.Add(Saved(child.Path, child.Path));
+        }
+        f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Record = records });
+        return (root, savedRoot);
+    }
+
+    // The send-time identity read runs at every chunk: a root's Local identity that this run restored and that then
+    // moves, or that was deleted and then returns to its saved path, after the first chunk refuses the rest.
+    private static async Task RootIdentityBetweenChunksAsync(string folder)
+    {
+        foreach (var restored in new[] { true, false })
+        {
+            using var f = new Fixture(folder, nameof(RootIdentityBetweenChunksAsync) + restored);
+            var local = await f.LocalEntries.EnsureFolderAsync("Folder", default);
+            var (root, savedRoot) = await BoundChildrenAsync(f, local.Id);
+            if (!restored) await f.LocalEntries.DeleteAsync(local, null, default);
+            var row = Row(root, savedRoot);
+            var folders = SyncJobs.Create(f.Context, new SyncPorts(new PassthroughBoundary(),
+                RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0)).Items.Folders;
+            var id = (await folders.PrepareFolderRemovalAsync(row, Side.Dropbox, new HashSet<string>(),
+                restored ? new HashSet<string> { row.Key } : new HashSet<string>(), default))!;
+            var effects = f.Store.ReadyFolderEffects(f.Pair.PairId, id, -1, int.MaxValue).ToArray();
+            var changed = false;
+            f.Dropbox.OnSubmit = () =>
+            {
+                if (changed) return;
+                changed = true;
+                if (restored) f.LocalEntries.MoveAsync(local, "Elsewhere", default).GetAwaiter().GetResult();
+                else f.LocalEntries.Seed(local, null);
+            };
+            f.Dropbox.Returns(new FolderSubmitResult.Terminal([]));
+            f.Dropbox.Returns(new FolderSubmitResult.Terminal([]));
+            await f.Runner.RunGroupAsync(effects, default);
+            var bound = FolderDeleteRunner.MaxEffectsPerSubmission;
+            Check.Require(effects.Length == bound + 1 && f.Dropbox.Submitted.Count == 1 && f.Dropbox.Submitted[0].Count == bound &&
+                f.Store.FolderRemovalItems(f.Pair.PairId, id, -1, int.MaxValue).Count(item => item.SubmissionId is not null) == bound,
+                $"A root identity that moves or returns after the first chunk refuses the remaining chunk: restored={restored}.");
+        }
+    }
+
     private static async Task LocalProofRefusalAsync(string folder)
     {
-        foreach (var unknownSaved in new[] { false, true })
+        foreach (var (unknownSaved, liveEpisode) in new[] { (false, false), (true, false), (false, true) })
         {
+            var attempt = Guid.NewGuid();
             var recovery = new FakeRecovery { Evidence = new DriveEvidence(1, null, null) };
-            using var f = new Fixture(folder, nameof(LocalProofRefusalAsync), recovery);
+            using var f = new Fixture(folder, nameof(LocalProofRefusalAsync), recovery,
+                localEvidence: liveEpisode, registry: liveEpisode ? (id, _, _, _, _) => id == attempt : null);
             var root = await f.Local.EnsureFolderAsync("Folder", default);
             var child = new Entry("Folder/Child", false, 1, DateTimeOffset.UnixEpoch, "child", "", "", null);
             f.LocalEntries.Seed(child, [1]);
@@ -1742,11 +2548,30 @@ public static class FolderDeleteRunnerChecks
             var effects = f.Store.ReadyFolderEffects(f.Pair.PairId, id, -1, PageSize).ToArray();
             Check.Require(effects.Length == 1 && effects[0].Kind == FolderEffectKind.ConditionalFile,
                 "The refusal fixture reaches a frozen conditional file.");
-            await f.Runner.RunGroupAsync(effects, default);
-            await f.Runner.ResumeAsync(f.Store.FolderRemoval(f.Pair.PairId, id), null, default);
+            if (liveEpisode) SourceFixture.AcquireJournal(f.Store, f.Pair);
+            var sourceEpoch = liveEpisode ? f.Store.ReadSource(f.Pair.PairId, Side.Local)!.Value.Epoch : 0;
+            var episode = liveEpisode ? f.Store.RecordInUseFailure(f.Pair.PairId, 0, sourceEpoch, child.Path,
+                new IssueSubject([new IssueItem(Side.Local, child.Path, child.Id)], null), TextKey.FailLocalInUse,
+                null, ItemRetryDispatch.OrdinaryItem, null, null, attempt) : null;
+            ISet<string>? absent = null;
+            if (liveEpisode)
+            {
+                absent = await f.Runner.RunPreparedAsync([effects], default);
+                Check.Require(absent.Contains(id), "B222 AJ-E: own-path opposite absence was freshly proven");
+            }
+            else await f.Runner.RunGroupAsync(effects, default);
+            await f.Runner.ResumeAsync(f.Store.FolderRemoval(f.Pair.PairId, id), null, default, absent);
+            if (episode is not null) Check.Require(
+                SameStoredToken(f.Store.ReadItemRetryState(f.Pair.PairId, [episode.Token.IssueId])[episode.Token.IssueId]?.Token, episode.Token) &&
+                f.Store.Issues(f.Pair.PairId).Any(issue => issue.Id == episode.Token.IssueId) &&
+                f.RawStore.SelectWork(f.Pair.PairId, 0, f.Context.Scope) is null,
+                "B222 AJ-E: KnownNoEffect keeps the episode, notice and suppressed work");
             var member = Item(f, id, effects[0].ItemOrdinal);
+            Console.WriteLine($"B222 AJ proof: saved={unknownSaved}; episode={liveEpisode}; hashes={hashCalls}; " +
+                $"events={string.Join(',', f.Events.Select(e => e.Kind))}; effect={member.EffectResult}; " +
+                $"stream={Check.IsSettlementStream(f.Events, f.Store.Issues(f.Pair.PairId).Single())}");
             Check.Require(hashCalls == (unknownSaved ? 0 : 1) &&
-                Check.IsSettlementStream(f.Events, f.Store.Issues(f.Pair.PairId).Single()) &&
+                Check.IsSettlementStream(f.Events, f.Store.Issues(f.Pair.PairId).Single(), isNew: !liveEpisode) &&
                 member.EffectResult is FolderMemberResult.KnownNoEffect receipt &&
                 receipt.Cause == (unknownSaved ? TextKey.FailChanged : TextKey.FailLocalInUse),
                 "AJ-01 never hashes an unknown saved binding; AJ-03 retains the missing-binding read refusal cause.");
@@ -2247,9 +3072,10 @@ public static class FolderDeleteRunnerChecks
             : new(PathNames.DropboxKey(root.Path), null, root, savedRoot, [], null, context);
     }
 
+    // Each binding has its own identity, as real bindings do; a shared id would make every other one a duplicate (B-213).
     private static SyncedEntry Saved(string localPath, string dropboxPath) => new(
         PathNames.Key(localPath), localPath, PathNames.DropboxKey(dropboxPath), dropboxPath,
-        true, nameof(Side.Local), default, default, nameof(Side.Dropbox), "");
+        true, PathNames.Key(localPath), default, default, PathNames.DropboxKey(dropboxPath), "");
 
     private static bool Gone(IStateStore store, string pairId, SyncedEntry saved) =>
         store.SyncedByKey(pairId, Side.Local, saved.LocalKey) is null &&
@@ -2437,23 +3263,31 @@ public static class FolderDeleteRunnerChecks
     private sealed class Fixture : IDisposable
     {
         public Fixture(string folder, string name, ILocalRecovery? recovery = null, IAdmission? limiter = null,
-            bool localEvidence = false)
+            bool localEvidence = false, Func<Guid, string, long, IssueSubject, ItemRetryToken?, bool>? registry = null,
+            int pageSize = PageSize,
+            Func<Side, string, bool, CancellationToken, Task<(IdentityLocation Location, bool InScope)?>>? byId = null)
         {
             Pair = new PairConfig(name, name, Path.GetFullPath(nameof(FakeSide)), nameof(Side.Dropbox),
                 nameof(PairConfig.ConnectionId), [], [], FirstRunPolicy.NewestWins, true, null);
             // A Local deletion reads Local evidence, which needs the bound root a real host saves.
             if (localEvidence) Pair = SourceFixture.Bound(Pair);
             var settings = new EngineSettings("", "", "", "", "", RecycleFallback.Fail, default,
-                FirstRunPolicy.NewestWins, default, "", LogBufferCharacters, ScanTestSettings.BatchRows)  { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes }with { StoragePageSize = PageSize };
-            RawStore = StateStore.Open(Path.Combine(folder, Path.GetRandomFileName()));
+                FirstRunPolicy.NewestWins, default, "", LogBufferCharacters, ScanTestSettings.BatchRows)  { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes }with { StoragePageSize = pageSize };
+            var database = Path.Combine(folder, Path.GetRandomFileName());
+            RawStore = registry is null ? StateStore.Open(database) : StateStore.Open(database, registry);
             Store = new StoreCounters(RawStore);
             Store.SavePair(Pair);
             LocalEntries = new FakeSide(Side.Local);
             DropboxEntries = new FakeSide(Side.Dropbox);
             Local = new ScriptedFolderSide(LocalEntries);
             Dropbox = new ScriptedFolderSide(DropboxEntries);
+            // Both production adapters answer identity: a scenario's absence is proven rather than assumed, and a
+            // present counterpart still refuses the delete.
             Context = new ExecutorContext(
-                Local: Local, Dropbox: Dropbox, Recovery: recovery ?? new FakeRecovery(), Store: Store, Pair: Pair,
+                Local: byId is null ? IdentitySide.Truthful(Local, LocalEntries) : new IdentitySide(Local,
+                    (id, ct) => byId(Side.Local, id, false, ct), (id, ct) => byId(Side.Local, id, true, ct)),
+                Dropbox: byId is null ? IdentitySide.Truthful(Dropbox, DropboxEntries) : new IdentitySide(Dropbox, (id, ct) => byId(Side.Dropbox, id, false, ct)),
+                Recovery: recovery ?? new FakeRecovery(), Store: Store, Pair: Pair,
                 Scope: new PathScope(Pair, [Pair]), Settings: settings, Runtime: new ReplaceTurn(),
                 Admission: new FakeAdmission(), Priority: false, Events: value =>
                 {

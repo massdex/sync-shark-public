@@ -1,5 +1,7 @@
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using Massdex.SyncShark.Engine.Dropbox;
+using Massdex.SyncShark.Engine.Local;
 using Massdex.SyncShark.Engine.Run;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
 using Massdex.SyncShark.V2;
@@ -12,55 +14,300 @@ namespace Massdex.SyncShark.Engine.Tests.Run;
 public static partial class EngineHostChecks
 {
     private static readonly TimeSpan HookBound = TimeSpan.FromSeconds(30);
+    internal static (string Name, TimeSpan Elapsed) SlowestStep { get; private set; }
+
+    internal static void PrintSlowestStep() => Console.WriteLine(FormattableString.Invariant($"engine-host slowest step {SlowestStep.Name} {SlowestStep.Elapsed.TotalSeconds:F3}"));
+
+    internal static async Task StepAsync(string name, Func<Task> body)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var pending = Task.Run(body);
+        try
+        {
+            await pending.WaitAsync(HookBound).ConfigureAwait(false);
+        }
+        catch (TimeoutException) when (!pending.IsCompleted)
+        {
+            Console.Error.WriteLine($"FAIL engine-host step {name}: no completion after {HookBound.TotalSeconds} s; process exits");
+            Console.Error.Flush();
+            Environment.Exit(CheckArguments.Failure);
+        }
+        finally
+        {
+            var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            if (elapsed > SlowestStep.Elapsed) SlowestStep = (name, elapsed);
+        }
+    }
+
+    public static void AbsentEpisodeRepair()
+    {
+        var failures = new List<Exception>();
+        foreach (var scenario in new[] { "D1", "D2", "D3", "D4", "D4b", "D5" })
+        {
+            try
+            {
+                (scenario is "D4" or "D4b" ? AbsentEpisodeAutoSyncAsync(scenario == "D4b") : AbsentEpisodeRepairAsync(scenario))
+                    .GetAwaiter().GetResult();
+            }
+            catch (Exception error) { failures.Add(new InvalidOperationException("B222 " + scenario, error)); }
+        }
+        if (failures.Count != 0) throw new AggregateException(failures);
+    }
+
+    private static async Task AbsentEpisodeRepairAsync(string scenario)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(folder);
+        try
+        {
+            await using var rig = await ItemRig.OpenAsync(folder, ItemRig.NewClock());
+            await rig.BaselineAsync();
+            var generation = rig.Store.ReadPairExecution(rig.PairId)!.Value.Generation;
+            var episode = await CaptureAbsentEpisodeAsync(rig, ItemRig.File);
+            Console.WriteLine("B222 before startup: generation=" + generation + "; epoch=" + episode.Token.SourceEpoch +
+                "; obligated=" + rig.Store.Obligated(rig.PairId) + "; episode=" +
+                (rig.Store.ReadItemRetryState(rig.PairId, [episode.Token.IssueId])[episode.Token.IssueId] is not null));
+            // A real in-use failure must persist until Repair; otherwise startup's ordinary retry succeeds.
+            using (System.IO.File.Open(Path.Combine(rig.Rig.Pair.LocalRoot, ItemRig.File),
+                FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                await rig.StartAsync();
+                await UntilAsync(() => rig.Opportunities > 0 && rig.AutoSyncIdle() && !rig.RepairRegistered(),
+                    "B222 D1: startup observes the held episode before explicit Repair");
+            }
+            Console.WriteLine("B222 startup: token generation=" + episode.Token.PairGeneration + "; generation=" +
+                rig.Store.ReadPairExecution(rig.PairId)!.Value.Generation + "; token epoch=" + episode.Token.SourceEpoch +
+                "; epoch=" + rig.Store.ReadSource(rig.PairId, Side.Local)!.Value.Epoch + "; attempts=" + rig.Attempts +
+                "; work=" + rig.Store.CountWork(rig.PairId, generation, rig.Store.ReadWorkWatermark()) +
+                "; issues=" + string.Join(',', rig.Store.Issues(rig.PairId).Select(issue => issue.Cause)));
+            Check.Require(rig.Store.ReadItemRetryState(rig.PairId, [episode.Token.IssueId])[episode.Token.IssueId] is not null,
+                "B222 " + scenario + ": the started host retains the episode until Repair");
+            System.IO.File.Delete(Path.Combine(rig.Rig.Pair.LocalRoot, ItemRig.File));
+            rig.MarkAttempts();
+            if (scenario == "D1") await rig.Host.Operations.RepairAsync(rig.PairId, default);
+            else await AbsentEpisodeBlockedFinishAsync(rig, episode.Token.IssueId, generation, scenario);
+            await UntilAsync(rig.AutoSyncIdle, "B222 " + scenario + ": the Repair wake completes without another event");
+            var retained = rig.Store.ReadItemRetryState(rig.PairId, [episode.Token.IssueId])[episode.Token.IssueId];
+            var notice = rig.Store.Issues(rig.PairId).Any(issue => issue.Id == episode.Token.IssueId);
+            var work = rig.Store.CountWork(rig.PairId, generation, rig.Store.ReadWorkWatermark());
+            var idle = rig.AutoSyncIdle();
+            Check.Require(retained is null && !notice && work == (0, 0) && idle && rig.Attempts == 0,
+                "B222 " + scenario + ": Repair closes the absent episode and drains acquired work without uploading it; " +
+                "episode=" + (retained is not null) + "; notice=" + notice + "; work=" + work +
+                "; idle=" + idle + "; attempts=" + rig.Attempts);
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
+    private static async Task<ItemRetryCandidate> CaptureAbsentEpisodeAsync(ItemRig rig, string path)
+    {
+        var generation = rig.Store.ReadPairExecution(rig.PairId)!.Value.Generation;
+        await rig.Host.CatchUpLocalAsync(rig.PairId, generation, default);
+        var episode = await rig.Host.DispatchSessionAsync(rig.PairId, () => null, async (session, token) =>
+        {
+            var skipped = new List<string>();
+            var selected = rig.Store.SelectWork(rig.PairId, generation, session.Context.Scope);
+            while (selected is not null && selected.Key != PathNames.Key(path))
+            {
+                skipped.Add(selected.Key);
+                selected = rig.Store.SelectWork(rig.PairId, generation, session.Context.Scope);
+            }
+            Check.Require(selected is not null && selected.Key == PathNames.Key(path),
+                "B222 drain: the production host captures the acquired Local file before its failure; expected=" +
+                PathNames.Key(path) + "; selected=" + selected?.Key + "; skipped=" + string.Join(',', skipped) + "; work=" +
+                rig.Store.CountWork(rig.PairId, generation, rig.Store.ReadWorkWatermark()));
+            var entry = (await session.Local.ReadOneAsync(path, token))!;
+            var subject = new IssueSubject([new IssueItem(Side.Local, path, entry.Id)], null);
+            var port = session.Context.ItemAttempts;
+            return await port.ExecuteAsync(session.Context.Opportunity, null, subject, (attempt, _) =>
+                Task.FromResult(port.ReportFailure(attempt, selected!.SourceEpoch, path, subject,
+                    TextKey.FailLocalInUse, selected, ItemRetryDispatch.OrdinaryItem, null, null)), token);
+        }, default);
+        rig.Store.EndWorkPass(rig.PairId);
+        return episode;
+    }
+
+    private static async Task AbsentEpisodeAutoSyncAsync(bool survivor = false)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(folder);
+        try
+        {
+            await using var rig = await ItemRig.OpenAsync(folder, ItemRig.NewClock());
+            const string path = "Parent/Child.txt";
+            var parent = Directory.CreateDirectory(Path.Combine(rig.Rig.Pair.LocalRoot, "Parent")).FullName;
+            System.IO.File.WriteAllText(Path.Combine(parent, "Child.txt"), "baseline");
+            using (var log = rig.Rig.Log(folder, "baseline"))
+                Check.Require((await rig.Rig.RunAsync(log, default)).Completed,
+                    "B222 D4: baseline synchronizes the folder before its deletion");
+            Check.Require(rig.Store.SyncedByKey(rig.PairId, Side.Local, PathNames.Key(path)) is not null,
+                "B222 D4: the child has a saved binding");
+            System.IO.File.WriteAllText(Path.Combine(parent, "Child.txt"), "changed");
+            var episode = await CaptureAbsentEpisodeAsync(rig, path);
+            if (survivor) rig.Rig.Wire.SeedFile("Parent/Keep.txt", "survivor");
+            Directory.Delete(parent, true);
+            await rig.Host.CatchUpLocalAsync(rig.PairId, episode.Token.PairGeneration, default);
+            var repairs = 0;
+            rig.AfterFinish = () => Interlocked.Increment(ref repairs);
+            FolderRemovalItem? frozenChild = null;
+            // The delete request observes the frozen operation before the same dispatch can retire it.
+            if (survivor) rig.Rig.Wire.RequestException = _ =>
+            {
+                frozenChild ??= rig.Store.ActiveFolderRemovals(rig.PairId, default)
+                    .SelectMany(operation => rig.Store.FolderRemovalItems(rig.PairId, operation.OperationId, -1, int.MaxValue))
+                    .SingleOrDefault(item => item.Path == path && item.Provenance == FolderRemovalItem.ProvenanceKind.Planned);
+                return null;
+            };
+            await rig.StartAsync();
+            await UntilAsync(() => rig.Opportunities > 0 && rig.AutoSyncIdle(),
+                "B222 D4: AutoSync's folder removal and repeat pass finish");
+            var retained = rig.Store.ReadItemRetryState(rig.PairId, [episode.Token.IssueId])[episode.Token.IssueId];
+            var notice = rig.Store.Issues(rig.PairId).Any(issue => issue.Id == episode.Token.IssueId);
+            var work = rig.Store.CountWork(rig.PairId, episode.Token.PairGeneration, rig.Store.ReadWorkWatermark());
+            var saved = rig.Store.SyncedByKey(rig.PairId, Side.Local, PathNames.Key(path));
+            var remote = rig.Rig.Wire.Snapshot().Where(entry =>
+                PathNames.IsSelfOrUnderKey(PathNames.Key(entry.Path), PathNames.Key("Parent"))).ToArray();
+            if (survivor)
+            {
+                Check.Require(frozenChild is not null,
+                    "B222 D4b: the request observer captured the frozen Planned child");
+                Check.Require(frozenChild?.EffectKind == FolderEffectKind.ConditionalFile,
+                    "B222 D4b: the survivor makes the held child its own conditional-file effect");
+                Check.Require(retained is null && !notice && saved is null && repairs == 0,
+                    "B222 D4b: the live continuation forwards its proof to retire the exact child without Repair");
+                Check.Require(remote.Any(entry => PathNames.Same(entry.Path, "Parent/Keep.txt")),
+                    "B222 D4b: the Dropbox-only survivor remains");
+                Console.WriteLine("B222 D4b: work=" + work + "; remote=" + string.Join(',', remote.Select(entry => entry.Path)) +
+                    "; attempts=" + rig.Attempts);
+            }
+            else Check.Require(retained is null && !notice && work == (0, 0) && saved is null && remote.Length == 0 &&
+                repairs == 0 && rig.Attempts == 0,
+                "B222 D4: the same AutoSync run retires the episode and drains work without Repair or upload; " +
+                "episode=" + (retained is not null) + "; notice=" + notice + "; work=" + work +
+                "; saved=" + (saved is not null) + "; remote=" + string.Join(',', remote.Select(entry => entry.Path)) +
+                "; repairs=" + repairs + "; attempts=" + rig.Attempts);
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
+    private static async Task AbsentEpisodeBlockedFinishAsync(ItemRig rig, long issueId, long generation, string scenario)
+    {
+        var finishing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFinish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        (long Local, long Dropbox) pending = default;
+        rig.BeforeFinish = () =>
+        {
+            rig.BeforeFinish = null;
+            finishing.TrySetResult();
+            rig.Hold(release.Task, "B222 " + scenario + ": release the covered-work retirement gate");
+        };
+        rig.AfterFinish = () =>
+        {
+            rig.AfterFinish = null;
+            pending = rig.Store.CountWork(rig.PairId, generation, rig.Store.ReadWorkWatermark());
+            Check.Require(pending.Local > 0 && pending.Dropbox == 0 &&
+                rig.Store.ReadItemRetryState(rig.PairId, [issueId])[issueId] is null &&
+                !rig.Store.Issues(rig.PairId).Any(issue => issue.Id == issueId),
+                "B222 " + scenario + ": FinishRepair leaves acquired work pending without its episode or notice");
+            finished.TrySetResult();
+            if (scenario == "D3") rig.Hold(releaseFinish.Task, "B222 D3: pause before Repair's wake");
+        };
+        Task repair;
+        if (scenario == "D5")
+        {
+            rig.Owe();
+            rig.Monitor.Wake(rig.PairId);
+            repair = Task.CompletedTask;
+        }
+        else repair = Task.Run(() => rig.Host.Operations.RepairAsync(rig.PairId, default));
+        try
+        {
+            await finishing.Task.WaitAsync(HookBound);
+            var effects = await SeedOperationAsync(rig.Store, rig.Rig.Pair, "Unrelated");
+            var operation = rig.Store.FolderRemoval(rig.PairId, effects.Single().OperationId);
+            rig.Store.AdvanceFolderRemoval(rig.PairId, operation.OperationId, operation.Generation, operation.Phase,
+                operation with { Generation = operation.Generation + 1, Phase = FolderRemovalPhase.Retained });
+            release.TrySetResult();
+            await finished.Task.WaitAsync(HookBound);
+            var pausing = scenario == "D3" ? rig.Host.PauseAsync(rig.PairId, default) : Task.CompletedTask;
+            if (scenario == "D3") await UntilAsync(() => rig.Host.IsPaused(rig.PairId));
+            releaseFinish.TrySetResult();
+            await pausing;
+            await repair;
+            if (scenario == "D3")
+            {
+                await UntilAsync(rig.AutoSyncIdle, "B222 D3: paused AutoSync consumes no work");
+                Check.Require(rig.Host.IsPaused(rig.PairId) &&
+                    rig.Store.CountWork(rig.PairId, generation, rig.Store.ReadWorkWatermark()) == pending &&
+                    rig.Store.ReadItemRetryState(rig.PairId, [issueId])[issueId] is null &&
+                    !rig.Store.Issues(rig.PairId).Any(issue => issue.Id == issueId),
+                    "B222 D3: pause retains only ordinary pending work, without episode or notice");
+                await rig.Host.ResumeAsync(rig.PairId, default);
+            }
+            await UntilAsync(() => !rig.RepairRegistered() && rig.AutoSyncIdle() &&
+                rig.Store.CountWork(rig.PairId, generation, rig.Store.ReadWorkWatermark()) == (0, 0),
+                "B222 " + scenario + ": the Repair owner's own kick drains the pending row");
+            Console.WriteLine("B222 " + scenario + " pending after FinishRepair=" + pending + "; drained=(0,0)");
+        }
+        finally
+        {
+            release.TrySetResult();
+            releaseFinish.TrySetResult();
+            rig.BeforeFinish = null;
+            rig.AfterFinish = null;
+        }
+    }
 
     private static async Task ItemRetryChecksAsync(string root)
     {
         // G0c first: the B-161 checks below take their unrelated work from this explicit local delivery.
-        await LocalDeliveryUploadsAsync(root).ConfigureAwait(false);
-        await ItemWaitHeldThroughEventsAsync(root).ConfigureAwait(false);
-        await JoinedTurnHeldWithWaitAsync(root).ConfigureAwait(false);
-        await ConsumedWaitReleasesSyncedFileAsync(root).ConfigureAwait(false);
-        await StaleWaitHoldsNothingAsync(root).ConfigureAwait(false);
-        await RowClearedDuringDispatchAsync(root).ConfigureAwait(false);
-        await ConcurrentItemsAccountOnceAsync(root).ConfigureAwait(false);
-        await StaleRefreshKeepsObservedWaitAsync(root).ConfigureAwait(false);
-        await ItemWaitFiresWithoutEventAsync(root).ConfigureAwait(false);
-        await ItemWaitAcrossRestartAsync(root).ConfigureAwait(false);
-        await ItemWaitWallClockStepAsync(root, forward: false).ConfigureAwait(false);
-        await ItemWaitWallClockStepAsync(root, forward: true).ConfigureAwait(false);
-        await EventAfterDeadlineAttemptsOnceAsync(root).ConfigureAwait(false);
-        await DueDispatchFailureAsync(root, fatal: true).ConfigureAwait(false);
-        await DueDispatchFailureAsync(root, fatal: false).ConfigureAwait(false);
-        await PausedDueDispatchKeepsRowAsync(root).ConfigureAwait(false);
-        await RepairWithoutTurnReleasesRowAsync(root).ConfigureAwait(false);
+        await StepAsync(nameof(LocalDeliveryUploadsAsync), () => LocalDeliveryUploadsAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitHeldThroughEventsAsync), () => ItemWaitHeldThroughEventsAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(JoinedTurnHeldWithWaitAsync), () => JoinedTurnHeldWithWaitAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ConsumedWaitReleasesSyncedFileAsync), () => ConsumedWaitReleasesSyncedFileAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(StaleWaitHoldsNothingAsync), () => StaleWaitHoldsNothingAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RowClearedDuringDispatchAsync), () => RowClearedDuringDispatchAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ConcurrentItemsAccountOnceAsync), () => ConcurrentItemsAccountOnceAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(StaleRefreshKeepsObservedWaitAsync), () => StaleRefreshKeepsObservedWaitAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitFiresWithoutEventAsync), () => ItemWaitFiresWithoutEventAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitAcrossRestartAsync), () => ItemWaitAcrossRestartAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitWallClockStepAsync), () => ItemWaitWallClockStepAsync(root, forward: false)).ConfigureAwait(false);
+        await StepAsync(nameof(ItemWaitWallClockStepAsync), () => ItemWaitWallClockStepAsync(root, forward: true)).ConfigureAwait(false);
+        await StepAsync(nameof(EventAfterDeadlineAttemptsOnceAsync), () => EventAfterDeadlineAttemptsOnceAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, fatal: true)).ConfigureAwait(false);
+        await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, fatal: false)).ConfigureAwait(false);
+        await StepAsync(nameof(PausedDueDispatchKeepsRowAsync), () => PausedDueDispatchKeepsRowAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RepairWithoutTurnReleasesRowAsync), () => RepairWithoutTurnReleasesRowAsync(root)).ConfigureAwait(false);
         // N-161 before C2-C5: their settles after a Repair turn also cross its window, so N-161 owns that protection.
-        await RepairTurnHoldsOnlyRetainedAsync(root, afterFinish: false).ConfigureAwait(false);
-        await RepairTurnHoldsOnlyRetainedAsync(root, afterFinish: true).ConfigureAwait(false);
-        await CancelledRepairHandsBackRetainedAsync(root).ConfigureAwait(false);
-        await TransitionRefusalWakesRefusedPairAsync(root).ConfigureAwait(false);
-        await PauseRetiresKeysAsync(root).ConfigureAwait(false);
-        await RepairTurnStartsItemWaitAsync(root).ConfigureAwait(false);
-        await FailedRepairTurnAdvancesOnceAsync(root).ConfigureAwait(false);
-        await PausedRepairCompletionAccountsNothingAsync(root, providerWait: false).ConfigureAwait(false);
-        await PausedRepairCompletionAccountsNothingAsync(root, providerWait: true).ConfigureAwait(false);
-        await ResolveRunsBesideItemWaitAsync(root).ConfigureAwait(false);
-        await RefreshInterleavingKeepsSignalAsync(root).ConfigureAwait(false);
+        await StepAsync(nameof(RepairTurnHoldsOnlyRetainedAsync), () => RepairTurnHoldsOnlyRetainedAsync(root, afterFinish: false)).ConfigureAwait(false);
+        await StepAsync(nameof(RepairTurnHoldsOnlyRetainedAsync), () => RepairTurnHoldsOnlyRetainedAsync(root, afterFinish: true)).ConfigureAwait(false);
+        await StepAsync(nameof(CancelledRepairHandsBackRetainedAsync), () => CancelledRepairHandsBackRetainedAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(TransitionRefusalWakesRefusedPairAsync), () => TransitionRefusalWakesRefusedPairAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PauseRetiresKeysAsync), () => PauseRetiresKeysAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RepairTurnStartsItemWaitAsync), () => RepairTurnStartsItemWaitAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(FailedRepairTurnAdvancesOnceAsync), () => FailedRepairTurnAdvancesOnceAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(PausedRepairCompletionAccountsNothingAsync), () => PausedRepairCompletionAccountsNothingAsync(root, providerWait: false)).ConfigureAwait(false);
+        await StepAsync(nameof(PausedRepairCompletionAccountsNothingAsync), () => PausedRepairCompletionAccountsNothingAsync(root, providerWait: true)).ConfigureAwait(false);
+        await StepAsync(nameof(ResolveRunsBesideItemWaitAsync), () => ResolveRunsBesideItemWaitAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(RefreshInterleavingKeepsSignalAsync), () => RefreshInterleavingKeepsSignalAsync(root)).ConfigureAwait(false);
         foreach (var memory in new[] { false, true })
         {
             foreach (var liveFirst in new[] { false, true })
             foreach (var outcome in new[] { LiveOutcome.Succeeds, LiveOutcome.Fails })
-                await RepairCollisionFailsItemAsync(root, memory, liveFirst, outcome).ConfigureAwait(false);
-            await RepairCollisionFailsItemAsync(root, memory, liveFirst: false, LiveOutcome.Stale).ConfigureAwait(false);
-            await RepairCaptureRefusalFailsItemAsync(root, memory).ConfigureAwait(false);
-            await CompletedRepairBesideNewDebtAsync(root, memory).ConfigureAwait(false);
+                await StepAsync(nameof(RepairCollisionFailsItemAsync), () => RepairCollisionFailsItemAsync(root, memory, liveFirst, outcome)).ConfigureAwait(false);
+            await StepAsync(nameof(RepairCollisionFailsItemAsync), () => RepairCollisionFailsItemAsync(root, memory, liveFirst: false, LiveOutcome.Stale)).ConfigureAwait(false);
+            await StepAsync(nameof(RepairCaptureRefusalFailsItemAsync), () => RepairCaptureRefusalFailsItemAsync(root, memory)).ConfigureAwait(false);
+            await StepAsync(nameof(CompletedRepairBesideNewDebtAsync), () => CompletedRepairBesideNewDebtAsync(root, memory)).ConfigureAwait(false);
             foreach (var shape in new[] { "own", "older", "concurrent", "settled" })
-                await OrdinaryRepairItemWaitAsync(root, memory, shape).ConfigureAwait(false);
+                await StepAsync(nameof(OrdinaryRepairItemWaitAsync), () => OrdinaryRepairItemWaitAsync(root, memory, shape)).ConfigureAwait(false);
         }
-        await RepairAdmissionRefusalPropagatesAsync(root).ConfigureAwait(false);
-        await DrainedOrdinaryDispatchIsStaleAsync(root, stop: false).ConfigureAwait(false);
-        await DrainedOrdinaryDispatchIsStaleAsync(root, stop: true).ConfigureAwait(false);
-        await ExplicitRepairBesideRunningRepairAsync(root, afterFinish: false).ConfigureAwait(false);
-        await ExplicitRepairBesideRunningRepairAsync(root, afterFinish: true).ConfigureAwait(false);
+        await StepAsync(nameof(RepairAdmissionRefusalPropagatesAsync), () => RepairAdmissionRefusalPropagatesAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(DrainedOrdinaryDispatchIsStaleAsync), () => DrainedOrdinaryDispatchIsStaleAsync(root, stop: false)).ConfigureAwait(false);
+        await StepAsync(nameof(DrainedOrdinaryDispatchIsStaleAsync), () => DrainedOrdinaryDispatchIsStaleAsync(root, stop: true)).ConfigureAwait(false);
+        await StepAsync(nameof(ExplicitRepairBesideRunningRepairAsync), () => ExplicitRepairBesideRunningRepairAsync(root, afterFinish: false)).ConfigureAwait(false);
+        await StepAsync(nameof(ExplicitRepairBesideRunningRepairAsync), () => ExplicitRepairBesideRunningRepairAsync(root, afterFinish: true)).ConfigureAwait(false);
     }
 
     // A1: quiet pair, item-only row; events before the deadline attempt nothing, and the deadline attempts once.
@@ -1160,8 +1407,29 @@ public static partial class EngineHostChecks
         }
 
         // New content each time, so every write is a change the next sync must carry.
-        internal void WriteRetained() => System.IO.File.WriteAllText(Path.Combine(Rig.Pair.LocalRoot, File),
+        internal void WriteRetained() => WriteContent(Path.Combine(Rig.Pair.LocalRoot, File),
             Retained(Interlocked.Increment(ref _version)));
+
+        // A real user's app retries a write that the engine's read briefly excludes.
+        private static void WriteContent(string path, string content)
+        {
+            Exception? excluded = null;
+            if (SpinWait.SpinUntil(() =>
+            {
+                try
+                {
+                    System.IO.File.WriteAllText(path, content);
+                    return true;
+                }
+                catch (Exception error) when (LocalErrors.Cause(error, TextKey.FailChanged) == TextKey.FailLocalInUse)
+                {
+                    excluded = error;
+                    return false;
+                }
+            }, HookBound))
+                return;
+            ExceptionDispatchInfo.Capture(excluded!).Throw();
+        }
 
         // B-167, B-175: this rig has no journal until its first local catch-up (EngineHost.WithVolumeStoppedAsync), and
         // every host Repair and every live upload's coverage capture runs one, so after that a write is acquired and
@@ -1177,7 +1445,7 @@ public static partial class EngineHostChecks
         private async Task<string> DeliverAsync(string name, string content)
         {
             var before = Store.ReadWorkWatermark();
-            System.IO.File.WriteAllText(Path.Combine(Rig.Pair.LocalRoot, name), content);
+            WriteContent(Path.Combine(Rig.Pair.LocalRoot, name), content);
             var caught = await Host.CatchUpLocalAsync(PairId, Store.ReadPairExecution(PairId)!.Value.Generation, default)
                 .ConfigureAwait(false);
             Check.Require(caught.ThroughWorkId > before, "setup: the edit to " + name + " is committed as work");
@@ -1599,7 +1867,7 @@ public static partial class EngineHostChecks
     }
 
     // AutoSync has no opportunity running or queued for the pair, so every earlier hold decision has completed.
-    private static bool AutoSyncIdle(EngineHost host, string pairId)
+    internal static bool AutoSyncIdle(EngineHost host, string pairId)
     {
         const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
         var auto = typeof(EngineHost).GetField("_auto", Private)!.GetValue(host)!;

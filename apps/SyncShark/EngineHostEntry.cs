@@ -22,25 +22,11 @@ namespace Massdex.SyncShark;
 /// source.</summary>
 internal static class EngineHostEntry
 {
-    // Private process-start results (RC05-V5-X); never public CLI exit codes or IPC frame kinds.
-    internal const int StartupReleaseRecoveryRequired = 20;
-    internal const int StartupInvalidDataLocation = 21;
-    internal const int StartupLegacyFootprintRefused = 22;
-
-    internal static int CheckStartupAdmission(string? userSid = null)
-    {
-        var productRoot = SyncSharkRuntimePaths.ProductRoot;
-        try
-        {
-            _ = EngineStartupAdmission.Require(productRoot, userSid);
-            return (int)SyncCliExitCode.Success;
-        }
-        catch (EngineStartupRefusedException refusal)
-        {
-            AutoSyncLog.StartupRefused(productRoot, refusal);
-            return StartupLegacyFootprintRefused;
-        }
-    }
+    // Private process-start results (RC05-V5-X); never public CLI command exit codes or IPC frame kinds.
+    // The values live with the one result-code owner, SyncCliExitCode.
+    internal const int StartupReleaseRecoveryRequired = (int)SyncCliExitCode.StartupReleaseRecoveryRequired;
+    internal const int StartupInvalidDataLocation = (int)SyncCliExitCode.StartupInvalidDataLocation;
+    internal const int StartupLegacyFootprintRefused = (int)SyncCliExitCode.StartupLegacyFootprintRefused;
 
     // Private readiness frame: one marker byte, and a four-byte signed result for the first child's outcome.
     private const byte ReadyFrame = 0;
@@ -122,8 +108,8 @@ internal static class EngineHostEntry
         {
             var admission = EngineStartupAdmission.Require(productRoot);
             // One clear attempt per acquired host lifetime; a failed write leaves the host healthy and logged.
-            try { AutoSyncProcess.ClearExistingOwnerNotice(AutoSyncProcess.ExistingOwnerNoticePath); }
-            catch (Exception noticeError) { AutoSyncLog.Failure(productRoot, noticeError); }
+            // A host past admission is no longer in a terminal startup refusal, so its retained notice is cleared too.
+            AutoSyncProcess.ClearStartupNotices(productRoot);
             return await RunOwnedAsync(productRoot, authority.StateAuthority, admission, readiness, ct).ConfigureAwait(false);
         }
         catch (EngineStartupRefusedException refusal)
@@ -191,7 +177,14 @@ internal static class EngineHostEntry
         // The read-only log view is one local file read: it must not pass through the bounded host frame, and the
         // client's own terminal supplies its width (R1 review 2/8).
         if (key is EngineCommandKey.Logs) return null;
-        var result = await ExecuteOnHostResultAsync(args, stdout, stderr, ct).ConfigureAwait(false);
+        (int? ExitCode, bool ReceivedExit) result;
+        try { result = await ExecuteOnHostResultAsync(args, stdout, stderr, ct).ConfigureAwait(false); }
+        catch (InvalidDataException) when (key == EngineCommandKey.HostStatus)
+        {
+            // An invalid data-location pointer prevents pipe-name derivation; the retained notice explains why.
+            WriteStartupNotice(stderr);
+            throw;
+        }
         if (requireRunningHost && result.ExitCode is not null && !result.ReceivedExit)
             throw new AutoSyncHostUncertainException(invocation.Command,
                 new IOException(EngineCliCatalog.Message(EngineMessageKey.NeedsEngine)));
@@ -397,7 +390,28 @@ internal static class EngineHostEntry
     private static int Unavailable(TextWriter stderr)
     {
         stderr.WriteLine(EngineCliCatalog.Message(EngineMessageKey.NeedsEngine));
+        WriteStartupNotice(stderr);
         return (int)SyncCliExitCode.NeedsReview;
+    }
+
+    /// <summary>The retained persistent-startup notice to show beside an absent-host status, or null. The status
+    /// result is formed by the shared runtime, which cannot read the notice owner, so the edge reads it once here.</summary>
+    internal static string? AbsentHostStatusNotice(string[] args)
+    {
+        SyncCliInvocation invocation;
+        try { invocation = SyncCliRegistry.Parse(args); }
+        catch (SyncCliException) { return null; }
+        if (!EngineCliCatalog.Owns(invocation.Command) ||
+            EngineCliCatalog.CommandKey(invocation.Command) != EngineCommandKey.HostStatus) return null;
+        try { return AutoSyncProcess.ReadPersistentStartupNotice(); }
+        catch (Exception) { return null; }
+    }
+
+    // A retained notice explains why no host answers; an unreadable notice never hides the refusal.
+    private static void WriteStartupNotice(TextWriter stderr)
+    {
+        try { if (AutoSyncProcess.ReadPersistentStartupNotice() is { } notice) stderr.WriteLine(notice); }
+        catch (Exception) { /* the existing refusal is still reported */ }
     }
 
     private static bool IsHostOnly(EngineCommandKey key) => key is

@@ -3,6 +3,7 @@ using System.Net;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using Massdex.SyncShark.Engine.Dropbox;
 using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Local;
@@ -67,6 +68,13 @@ public static partial class CallBudgetChecks
         PageAttemptCosts();
         RecordAtomicityCosts();
         ReconciliationPendingReads();
+        AbsentEpisodeSqlCosts();
+        HeldFolderSqlCosts();
+        AbsentEpisodeReconcileCosts();
+        AbsentEpisodeAllocations();
+        AbsentEpisodeScanAllocationsAsync().GetAwaiter().GetResult();
+        AbsentEpisodePassCosts();
+        FolderDeleteRunnerChecks.AbsentEpisodeCosts();
         InBudgetFolder(folder =>
             ParentsChecks.OwnFolderBudgetAsync(folder, SmallShape.Items, LargeShape.Items).GetAwaiter().GetResult());
     }
@@ -141,6 +149,120 @@ public static partial class CallBudgetChecks
 
     public static void RunBudgetComposedProvider() => InBudgetFolder(folder =>
         ComposedProviderCostsAsync(folder).GetAwaiter().GetResult());
+
+    public static void RunDropboxEchoMoves() => InBudgetFolder(folder =>
+        DropboxEchoMovesAsync(folder).GetAwaiter().GetResult());
+
+    private static async Task DropboxEchoMovesAsync(string folder)
+    {
+        var failures = new List<Exception>();
+        foreach (var origin in new[] { Side.Local, Side.Dropbox })
+        {
+            (int Metadata, int Begins)? previous = null;
+            foreach (var children in new[] { 50, 5_000 })
+            {
+                try
+                {
+                    var root = Path.Combine(folder, origin + "-" + children);
+                    var begins = 0;
+                    await using var rig = await RepairChecks.ComposeRigAsync(root, level: 1,
+                        decorate: inner => new HookStore(inner) { BeforeBeginSelection = () => begins++ });
+                    Directory.CreateDirectory(Path.Combine(rig.Pair.LocalRoot, "Old"));
+                    rig.Wire.SeedFolder("Old");
+                    for (var index = 0; index < children; index++)
+                    {
+                        var path = $"Old/{index:D5}";
+                        await File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, path), "content");
+                        File.SetLastWriteTimeUtc(Path.Combine(rig.Pair.LocalRoot, path), BaseTime.UtcDateTime);
+                        rig.Wire.SeedFile(path, "content", BaseTime);
+                    }
+                    using (var baseline = rig.Log(root, "baseline"))
+                    {
+                        Check.Require((await rig.RunAsync(baseline, default)).Completed,
+                            "B214-T1/T2 setup: the composed baseline completes");
+                        await rig.DrainWorkAsync(baseline, default);
+                    }
+                    var pairId = rig.Pair.PairId;
+                    var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
+                    var childIds = Enumerable.Range(0, children).Select(index =>
+                        rig.Store.SyncedByKey(pairId, Side.Local, PathNames.Key($"Old/{index:D5}"))!.DropboxId).ToHashSet();
+                    using var log = rig.Log(root, "move-echo");
+                    await rig.Host.DispatchSessionAsync(pairId, () => log, async (session, ct) =>
+                    {
+                        var side = session.Context.For(origin);
+                        var old = (await side.ReadOneAsync("Old", ct))!;
+                        var moved = await side.MoveAsync(old, "New", ct);
+                        var source = rig.Store.ReadSource(pairId, origin)!.Value;
+                        var notice = new ChangeNotice(origin, origin == Side.Local ? ChangeKind.Renamed : ChangeKind.Changed,
+                            "New", origin == Side.Local ? "Old" : null, moved.Id, moved, false, false);
+                        if (origin == Side.Dropbox)
+                            rig.Store.AcquireDropboxPage(pairId, generation, source.Epoch, source.Revision,
+                                source.Provenance!, source.Cursor, [notice], source.Cursor!);
+                        else
+                            await rig.Host.CatchUpLocalAsync(pairId, generation, ct);
+                        rig.Wire.Calls.Clear();
+                        rig.Wire.MetadataPaths.Clear();
+                        begins = 0;
+                        var local = new CountingSide(session.Local);
+                        var context = session.Context with { Local = local };
+                        var ports = new SyncPorts(new RecoveryExecutionBoundary(() => session),
+                            new LiveExecutionBoundary(_ => session), PairSafety.SelectedBoundaryFor(session), LocalSide.HashSlots);
+                        var syncer = new Syncer(context, ports with
+                        {
+                            RunBatchAsync = async (selection, batchSide, scope, retries, settles, token) =>
+                            {
+                                await PairSafety.CheckRootsAsync(session, token);
+                                await FolderBatch.RunAsync(context, ports, session.PrerequisiteDropbox, log,
+                                    selection, batchSide, scope, retries, settles,
+                                    next => PairSafety.CheckRootsAsync(session, next), session.Scans,
+                                    () => session.Host.TryHoldGeneration(session.Registration), token);
+                            }
+                        });
+                        await syncer.SyncWorkAsync(ct);
+                        var moves = rig.Wire.Calls.Count(route => route.EndsWith("/move_v2", StringComparison.Ordinal));
+                        Console.WriteLine($"B214 move origin={origin} children={children} remoteMoves={moves} localMoves={local.Moves} " +
+                            $"new={Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "New"))} old={Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "Old"))} " +
+                            $"queue={rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark())} " +
+                            $"metadata={string.Join(',', rig.Wire.MetadataPaths)} issues={string.Join(';', rig.Store.Issues(pairId))}");
+                        Check.Require(moves == (origin == Side.Local ? 1 : 0) && local.Moves == (origin == Side.Dropbox ? 1 : 0) &&
+                            Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "New")) &&
+                            !Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "Old")),
+                            "B214-T1/T2: one counterpart native move leaves the entire Local tree at New");
+                        var remote = rig.Store.ReadSource(pairId, Side.Dropbox)!.Value;
+                        var echo = Enumerable.Range(0, children).Select(index =>
+                                rig.Wire.ChangeDeleted(rig.Pair.DropboxRoot + $"/Old/{index:D5}"))
+                            .Concat(new[] { rig.Wire.ChangeExistingFile("New") })
+                            .Concat(Enumerable.Range(0, children).Select(index => rig.Wire.ChangeExistingFile($"New/{index:D5}")))
+                            .ToArray();
+                        rig.Wire.SeedChangePage(remote.Cursor!, echo, false, "echo-terminal");
+                        await rig.Host.CatchUpDropboxAsync(session.Registration, pairId, generation, ct);
+                        var metadata = rig.Wire.Calls.Count(route => route.EndsWith("/get_metadata", StringComparison.Ordinal));
+                        await syncer.SyncWorkAsync(ct);
+                        Check.Require(rig.Wire.Calls.Count(route => route.EndsWith("/get_metadata", StringComparison.Ordinal)) == metadata &&
+                            rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark()) == (0L, 0L),
+                            "B214-T1/T2: one echo opportunity drains all feed rows with zero additional HTTP metadata");
+                        return true;
+                    }, default);
+                    Check.Require(rig.Wire.MetadataPaths.All(path => !childIds.Contains(path) &&
+                        !path.Contains("/Old/", StringComparison.OrdinalIgnoreCase) &&
+                        !path.Contains("/New/", StringComparison.OrdinalIgnoreCase)),
+                        "B214-T1/T2: the move and its echo make zero child metadata requests");
+                    var measured = (rig.Wire.Calls.Count(route => route.EndsWith("/get_metadata", StringComparison.Ordinal)), begins);
+                    Check.Require(measured == (origin == Side.Local ? 4 : 6, 1),
+                        "B214-T1/T2: native move and echo meet the absolute metadata and selection budgets");
+                    if (previous is { } before)
+                        Check.Require(measured == before, "B214-T1/T2: HTTP metadata and BeginSelection counts stay flat at 50/5000 children");
+                    previous = measured;
+                    Console.WriteLine($"B214 HTTP move origin={origin} children={children} metadata={measured.Item1} begins={begins}");
+                }
+                catch (Exception error)
+                {
+                    failures.Add(new InvalidOperationException($"B214 move origin={origin} children={children}", error));
+                }
+            }
+        }
+        if (failures.Count != 0) throw new AggregateException(failures);
+    }
 
     private static void GrowthBySize(string name, Func<Shape, Cost> run)
     {
@@ -738,7 +860,8 @@ public static partial class CallBudgetChecks
         var local = new FakeSide(Side.Local);
         var dropbox = new FakeSide(Side.Dropbox);
         Seed(local, dropbox, shape, changedTimes: 0);
-        using var rig = NewRig(folder, local, dropbox);
+        // Inferred folder removals read the absent side's saved identity (B-213), one provider call each.
+        using var rig = NewRig(folder, local, dropbox) with { AnswersIdentity = true };
         Check.Require(RepairAsync(rig, "seed").GetAwaiter().GetResult().Summary.Completed,
             "folder budget starts from a completed identical Repair");
         var localRoot = local.ReadOneAsync(TreeRoot, CancellationToken.None).GetAwaiter().GetResult()!;
@@ -858,7 +981,7 @@ public static partial class CallBudgetChecks
                 (StateSchema.ParamMtime, entry.Modified.UtcTicks),
                 (StateSchema.ParamId, StateEncoding.IdFor(Side.Local, entry.Id)),
                 (StateSchema.ParamRev, entry.Revision), (StateSchema.ParamHash, StateEncoding.Hash(entry.ContentHash)),
-                (StateSchema.ParamSkip, entry.Skip)));
+                (StateSchema.ParamSkip, entry.Skip), (StateSchema.ParamShared, entry.SharedRoot)));
         }
         probe.Commit();
         probe.Begin();
@@ -894,7 +1017,8 @@ public static partial class CallBudgetChecks
                 (StateSchema.ParamEntryId, StateEncoding.IdFor(Side.Local, entry.Id)),
                 (StateSchema.ParamEntryRev, entry.Revision),
                 (StateSchema.ParamEntryHash, StateEncoding.Hash(entry.ContentHash)),
-                (StateSchema.ParamEntrySkip, null), (StateSchema.ParamSavedLocalKey, record.LocalKey),
+                (StateSchema.ParamEntrySkip, null), (StateSchema.ParamEntryShared, entry.SharedRoot),
+                (StateSchema.ParamSavedLocalKey, record.LocalKey),
                 (StateSchema.ParamSavedLocalPath, record.LocalPath),
                 (StateSchema.ParamSavedDropboxDelta, record.DropboxKey == record.LocalKey ? null : record.DropboxKey),
                 (StateSchema.ParamSavedDropboxPathDelta,
@@ -1004,7 +1128,8 @@ public static partial class CallBudgetChecks
         var local = new FakeSide(Side.Local);
         var dropbox = new FakeSide(Side.Dropbox);
         Seed(local, dropbox, shape, changedTimes: 0);
-        using var rig = NewRig(folder, local, dropbox);
+        // Inferred folder removals read the absent side's saved identity (B-213), one provider call each.
+        using var rig = NewRig(folder, local, dropbox) with { AnswersIdentity = true };
         Check.Require(RepairAsync(rig, "seed").GetAwaiter().GetResult().Summary.Completed,
             "independent deletions start from a completed Repair");
         for (var top = 0; top < shape.TopFolders; top++)
@@ -1233,8 +1358,13 @@ public static partial class CallBudgetChecks
             Directory.CreateDirectory(folder);
             try
             {
-                using var rig = NewRig(folder, new FakeSide(Side.Local), new FakeSide(Side.Dropbox));
+                var attempt = Guid.NewGuid();
+                using var rig = NewRig(folder, new FakeSide(Side.Local), new FakeSide(Side.Dropbox),
+                    registry: (id, _, _, _, _) => id == attempt);
                 var pairId = rig.Pair.PairId;
+                var subject = new IssueSubject([new IssueItem(Side.Local, "Absent", "absent-id")], null);
+                var episode = rig.Store.RecordInUseFailure(pairId, 0, 0, "Absent", subject,
+                    TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
                 if (failures > 0)
                 {
                     var held = new Entry("held", false, 1, DateTimeOffset.UnixEpoch, "held-id", "", "hash", null);
@@ -1273,15 +1403,36 @@ public static partial class CallBudgetChecks
                 {
                     SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null);
                 }
-                Check.Require(prepared == 1 && answered == 0 && issues == failures,
+                Check.Require(prepared == 1 && answered == 0 && issues == failures + 1,
                     "RG-R1b: F=" + failures + " production pending reads: preparation=" + prepared + ", answers=" + answered +
                     " over " + issues + "/" + failures + " issues");
                 var before = new Dictionary<string, long>(rig.Counters.MemberCalls);
-                RepairAsync(rig, "protection-" + failures).GetAwaiter().GetResult();
+                var episodeReads = 0;
+                var episodeCloses = 0;
+                SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, sql) =>
+                {
+                    var statement = sql.utf8_to_string().TrimStart();
+                    if (statement.StartsWith(StateSchema.PairItemEpisodes[..StateSchema.PairItemEpisodes.IndexOf('$')], StringComparison.Ordinal))
+                        episodeReads++;
+                    if (statement.StartsWith(StateSchema.ClearItemEpisode[..StateSchema.ClearItemEpisode.IndexOf('$')], StringComparison.Ordinal))
+                        episodeCloses++;
+                }), null);
+                try { RepairAsync(rig, "protection-" + failures).GetAwaiter().GetResult(); }
+                finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
                 long Delta(string member) =>
                     rig.Counters.MemberCalls.GetValueOrDefault(member) - before.GetValueOrDefault(member);
                 // The scan harness runs no settlement, so the held note raises no notice: the F failures are listed.
                 var listed = failures;
+                Check.Require(episodeReads == 2 && episodeCloses == 1 &&
+                    Delta(nameof(IStateStore.CloseScanIssue)) == failures + 1 &&
+                    Delta(nameof(IStateStore.ReadItemEpisodeIssues)) == 2 &&
+                    rig.Store.ReadItemRetryState(pairId, [episode.Token.IssueId])[episode.Token.IssueId] is null &&
+                    !rig.Store.Issues(pairId).Any(issue => issue.Id == episode.Token.IssueId),
+                    "B222 B1: two episode reads per Repair and absent episode closes at fixed E=1, F=" + failures +
+                    ", SQL reads=" + episodeReads);
+                Console.WriteLine("B222 B1 F=" + failures + " E=1 episode reads=" + episodeReads +
+                    " protection answers=" + Delta(StoreCounters.RetryNoticeAnswer) +
+                    " scan closes=" + Delta(nameof(IStateStore.CloseScanIssue)) + " episode clears=" + episodeCloses);
                 Check.Require(Delta(nameof(IStateStore.RetryNoticeProtection)) == 1 &&
                     Delta(nameof(IStateStore.RetryNoticeProtected)) == 0 && Delta(StoreCounters.RetryNoticeAnswer) == listed,
                     "RG-R1b: F=" + failures + " prepares once and answers each listed issue from it: preparations=" +
@@ -1296,6 +1447,675 @@ public static partial class CallBudgetChecks
         }
     }
 
+    private static void HeldFolderSqlCosts()
+    {
+        // Fourfold single-factor arms separate pair/member independence from involved-issue growth; P=3 cuts a same-key pair.
+        var measured = new List<(int Outside, int Members, int Nonmembers, int Held, StatementCost Cost)>();
+        foreach (var (outside, members, nonmembers, held) in new[]
+            { (100, 100, 4, 5), (400, 100, 4, 5), (100, 400, 4, 5), (100, 100, 16, 5), (100, 100, 4, 20) })
+        {
+            const int pageSize = 3;
+            var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var remote = new FakeSide(Side.Dropbox);
+                using var rig = NewRig(folder, new FakeSide(Side.Local), remote);
+                var root = remote.EnsureFolderAsync("Folder", default).GetAwaiter().GetResult();
+                var paths = Enumerable.Range(0, held - 1).Select(index => "Folder/A" + index.ToString("D2")).ToList();
+                paths.Insert(3, paths[2].ToLowerInvariant());
+                var rows = new List<SyncedEntry>();
+                foreach (var path in paths.DistinctBy(PathNames.Key).Prepend(root.Path)
+                    .Concat(Enumerable.Range(0, members).Select(index => "Folder/Member-" + index)))
+                {
+                    var entry = remote.EnsureFolderAsync(path, default).GetAwaiter().GetResult();
+                    rows.Add(new SyncedEntry(PathNames.Key(path), path, PathNames.DropboxKey(path), path, true,
+                        "local-" + path, 0, 0, entry.Id, ""));
+                }
+                rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with { Record = rows });
+                var rootRow = new Row(PathNames.Key(root.Path), null, root, rows.Single(row => row.LocalPath == root.Path),
+                    [], null, new RowContext(false, false, false, null, false, false, true, true));
+                using var plan = rig.Store.OpenFolderPlan(rig.Pair.PairId, rootRow, Side.Dropbox);
+                plan.CaptureAsync(remote.ReadAllAsync(root.Path, new ListOptions(Recursive: true, IncludeOutOfScope: true), default),
+                    default).GetAwaiter().GetResult();
+                foreach (var child in plan.Children(default))
+                    plan.MarkClassified(child.Key, child.NativeKey,
+                        new FolderChild(child.Entry, child.Synced, FolderVerdict.Removed), false, default);
+                plan.Complete(true, default);
+                var operation = rig.Store.BeginFolderRemoval(rig.Pair.PairId, plan, FolderRemovalAuthority.Inferred,
+                    pageSize, default);
+                rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with
+                {
+                    Raise = paths.Concat(Enumerable.Range(0, outside).Select(index => "Other/Issue-" + index))
+                        .Concat(Enumerable.Range(0, nonmembers).Select(index => "Folder/Z-" + index))
+                        .Select(path => (IssueKind.Failure, TextKey.FailLocalInUse, path,
+                            new IssueSubject([new IssueItem(Side.Local, path, "local-" + path)], null))).ToArray()
+                });
+                var expected = rig.Store.Issues(rig.Pair.PairId).Where(issue => paths.Contains(issue.Path))
+                    .OrderBy(issue => PathNames.Key(issue.Path), StringComparer.Ordinal).ThenBy(issue => issue.Id).ToArray();
+                var seen = new List<long>();
+                var (low, high) = PathNames.DescendantBounds(PathNames.Key(root.Path));
+                var after = (Key: low, IssueId: (long)StateSchema.BeforeFirstOrdinal);
+                var total = new StatementCost();
+                using var probe = new CostProbe(rig.Database);
+                while (true)
+                {
+                    var arguments = new (string Name, object? Value)[]
+                    {
+                        (StateSchema.ParamPair, rig.Pair.PairId), (StateSchema.ParamOperation, operation),
+                        (StateSchema.ParamKind, (int)IssueKind.Failure), (StateSchema.ParamLow, after.Key),
+                        (StateSchema.ParamHigh, high), (StateSchema.ParamAfter, after.IssueId), (StateSchema.ParamTake, pageSize)
+                    };
+                    var access = string.Join("; ", probe.ExplainPlan(StateSchema.HeldFolderMembers, arguments));
+                    Check.Require(access.Contains("SEARCH i USING INDEX issue_path_key", StringComparison.Ordinal) &&
+                        access.Contains("SEARCH m USING INDEX folder_item_identity", StringComparison.Ordinal) &&
+                        access.Contains("SEARCH pair USING COVERING INDEX sqlite_autoindex_pair_1", StringComparison.Ordinal) &&
+                        !access.Contains("SCAN ", StringComparison.Ordinal) && !access.Contains("USE TEMP B-TREE", StringComparison.Ordinal),
+                        "B222 B8 Structural: issue range and exact member seeks use existing indexes; " + access);
+                    var page = rig.Store.HeldFolderMembers(rig.Pair.PairId, operation, IssueKind.Failure, after, high, pageSize);
+                    var cost = probe.Execute(StateSchema.HeldFolderMembers, arguments);
+                    Check.Require(cost.ProbePrepares == 1 && cost.ChangedRows == 0 && cost.PairSourceOccurrences == 1,
+                        "B222 B8 Structural: one scalar pair-subquery occurrence per read, not an executed resolution count");
+                    total += cost;
+                    if (page.Count == 0) break;
+                    Check.Require(page.All(item => item.Saved is not null) && page.Select(item => item.Issue.Id)
+                        .SequenceEqual(expected.Skip(seen.Count).Take(pageSize).Select(issue => issue.Id)),
+                        "B222 B8 Measured: each complete page has the expected rows and cursor order");
+                    seen.AddRange(page.Select(item => item.Issue.Id));
+                    after = (PathNames.Key(page[^1].Issue.Path), page[^1].Issue.Id);
+                }
+                Check.Require(seen.SequenceEqual(expected.Select(issue => issue.Id)) && seen.Count == held &&
+                    total.ProbePrepares == (held + pageSize - 1) / pageSize + 1 &&
+                    rig.Store.Issues(rig.Pair.PairId).Count == outside + nonmembers + held,
+                    "B222 B8 Measured: full pagination includes the partial final page, same-key boundary and empty read; all candidates stay open");
+                Console.WriteLine("B222 B8 Measured outside=" + outside + " M=" + members + " I_nonmember=" + nonmembers +
+                    " H=" + held + " statements=" + total.ProbePrepares + " VM=" + total.VmSteps + " pathkey=" + total.PathKeyCalls);
+                Console.WriteLine("B222 B8 Not measured by this stack: executed pair resolutions, index-entry visits and folder_item_identity seeks");
+                measured.Add((outside, members, nonmembers, held, total));
+            }
+            finally { Directory.Delete(folder, true); }
+        }
+        Check.Require(measured[0].Cost == measured[1].Cost && measured[0].Cost == measured[2].Cost,
+            "B222 B8 Measured: complete-enumeration cost is flat in unrelated pair issues and non-held members");
+        Check.Require(measured.Select(arm => arm.Cost.VmSteps).SequenceEqual(new long[] { 507, 507, 507, 1035, 1322 }) &&
+            measured.All(arm => arm.Cost.PathKeyCalls == 0),
+            "B222 B8 Measured: complete-enumeration absolute VM and pathkey budgets");
+        Check.Require(measured[3].Cost.VmSteps - measured[0].Cost.VmSteps ==
+                44 * (measured[3].Nonmembers - measured[0].Nonmembers) &&
+            measured[4].Cost.VmSteps * measured[0].Held <= measured[0].Cost.VmSteps * measured[4].Held,
+            "B222 B8 Measured: non-member slope is 44 VM steps and held-member growth is at most linear");
+    }
+
+    private static void AbsentEpisodeSqlCosts()
+    {
+        // Fourfold I and E_all=1/16 isolate issue/episode growth; 15 acquired rows detect a work-table scan.
+        var episodeSteps = new Dictionary<string, long>();
+        foreach (var (population, allEpisodes, extraWork) in new[] { (100, 1, 0), (400, 1, 0), (100, 16, 0), (100, 16, 15) })
+        {
+            var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var attempt = Guid.NewGuid();
+                using var rig = NewRig(folder, new FakeSide(Side.Local), new FakeSide(Side.Dropbox),
+                    registry: (id, _, _, _, _) => id == attempt);
+                rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with
+                {
+                    Raise = [.. Enumerable.Range(0, population - 1).Select(index =>
+                        (IssueKind.Failure, TextKey.LocalNameInvalid, "Other-" + index, new IssueSubject([], null)))]
+                });
+                var episode = rig.Store.RecordInUseFailure(rig.Pair.PairId, 0, 0, "Absent",
+                    new IssueSubject([new IssueItem(Side.Local, "Absent", "absent-id")], null),
+                    TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                var other = rig.Pair with { PairId = "other-budget-pair", Name = "Other Pair" };
+                rig.Store.SavePair(other);
+                SourceFixture.AcquireJournal(rig.Store, other);
+                var otherEpoch = rig.Store.ReadSource(other.PairId, Side.Local)!.Value.Epoch;
+                for (var index = 0; index < 15; index++)
+                {
+                    var path = "Foreign-" + index;
+                    var subject = new IssueSubject([new IssueItem(Side.Local, path, "foreign-" + index)], null);
+                    if (index < allEpisodes - 1)
+                        rig.Store.RecordInUseFailure(other.PairId, 0, otherEpoch, path, subject,
+                            TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                    else rig.Store.Commit(other.PairId, StateChange.Empty with
+                    {
+                        Raise = [(IssueKind.Failure, TextKey.LocalNameInvalid, path, subject)]
+                    });
+                }
+                if (extraWork != 0)
+                {
+                    var local = rig.Store.ReadSource(rig.Pair.PairId, Side.Local)!.Value;
+                    Check.Require(rig.Store.AcquireJournalPage(
+                        rig.Pair.Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        new JournalPosition(1, 1), new JournalPosition(1, 2),
+                        [(rig.Pair.PairId, 0, local.Epoch, local.Revision, false)],
+                        Enumerable.Range(0, extraWork).Select(index => (rig.Pair.PairId,
+                            new ChangeNotice(Side.Local, ChangeKind.Changed, "Work-" + index, null,
+                                "work-id-" + index, null, false, false)))) is not null &&
+                        rig.Store.CountWork(rig.Pair.PairId, 0, rig.Store.ReadWorkWatermark()) == (extraWork, 0),
+                        "B222 B7: the work-growth shape contains every unrelated acquired row");
+                }
+                Check.Require(rig.Store.ReadItemEpisodeIssues(rig.Pair.PairId).SequenceEqual([episode.Token.IssueId]),
+                    "B222 B7: the episode lookup returns only the target pair despite foreign retries");
+                var (_, connection) = ProductionConnection(rig.Counters);
+                using var command = connection.CreateCommand();
+                command.CommandText = StateSchema.PairFence;
+                command.Parameters.AddWithValue(StateSchema.ParamPair, rig.Pair.PairId);
+                var pair = (long)command.ExecuteScalar()!;
+                var issue = rig.Store.Issues(rig.Pair.PairId).Single(row => row.Id == episode.Token.IssueId);
+                var arguments = new (string Name, object? Value)[]
+                {
+                    (StateSchema.ParamPair, rig.Pair.PairId), (StateSchema.ParamPairRow, pair),
+                    (StateSchema.ParamSide, null), (StateSchema.ParamIssue, episode.Token.IssueId),
+                    (StateSchema.ParamId, episode.Token.IssueId), (StateSchema.ParamWork, episode.Token.WorkId),
+                    (StateSchema.ParamIds, "[" + episode.Token.IssueId.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]"),
+                    (StateSchema.ParamEpisode, episode.Token.EpisodeId), (StateSchema.ParamRevision, episode.Token.Revision),
+                    (StateSchema.ParamSubject, JsonSerializer.Serialize(episode.Token.Subject)),
+                    (StateSchema.ParamJoinKey, StateEncoding.IssueWorkKey(issue.Id, issue.Subject)),
+                    (StateSchema.ParamPath, issue.Path), (StateSchema.ParamKind, (int)issue.Kind),
+                    (StateSchema.ParamExpectedCause, issue.Cause.ToString()),
+                    (StateSchema.ParamExpected, JsonSerializer.Serialize(issue.Subject)),
+                    (StateSchema.ParamExpectedAt, issue.At.UtcTicks), (StateSchema.ParamExpectedDismissed, issue.Dismissed)
+                };
+                using var probe = new CostProbe(rig.Database);
+                foreach (var (name, sql) in new[]
+                {
+                    (nameof(StateSchema.PairItemEpisodes), StateSchema.PairItemEpisodes),
+                    (nameof(StateSchema.ReadIssueRetryViews), StateSchema.ReadIssueRetryViews),
+                    (nameof(StateSchema.PendingRead), StateSchema.PendingRead),
+                    (nameof(StateSchema.WorkDispatch), StateSchema.WorkDispatch),
+                    (nameof(StateSchema.PairFence), StateSchema.PairFence),
+                    (nameof(StateSchema.ReadIssueMembers), StateSchema.ReadIssueMembers),
+                    (nameof(StateSchema.ReadItemEpisode), StateSchema.ReadItemEpisode),
+                    (nameof(StateSchema.SelectIssueById), StateSchema.SelectIssueById)
+                })
+                {
+                    var plan = string.Join("; ", probe.ExplainPlan(sql, arguments));
+                    var cost = probe.Execute(sql, arguments);
+                    Check.Require(cost.ProbePrepares == 1 && cost.ChangedRows == 0,
+                        "B222 B7: each read uses one statement without writes: " + name);
+                    Console.WriteLine("B222 B7 I=" + population + " E=1 E_all=" + allEpisodes + " W_extra=" + extraWork + " " + name +
+                        " VM=" + cost.VmSteps + " keys=" + cost.PathKeyCalls + " JSON-source=" +
+                        cost.JsonSourceOccurrences + " pair-source=" + cost.PairSourceOccurrences + " plan=" + plan);
+                    if (name is nameof(StateSchema.PairItemEpisodes) or nameof(StateSchema.ReadIssueRetryViews))
+                    {
+                        var pairs = name == nameof(StateSchema.PairItemEpisodes);
+                        var access = pairs ? "SCAN i USING INDEX issue_item_retry_work" : "SEARCH i USING INTEGER PRIMARY KEY";
+                        Check.Require(plan.Contains(access, StringComparison.Ordinal) &&
+                            plan.Contains("SEARCH w USING INTEGER PRIMARY KEY", StringComparison.Ordinal),
+                            "B222 B7: episode lookup pins its measured issue and work access: " + name + "; " + plan);
+                        // Measured at E_all=1/16: PairItemEpisodes 21/81 VM; exact issue lookup 47/47.
+                        var expected = pairs ? 21 + 4 * (allEpisodes - 1) : 47;
+                        Check.Require(cost.VmSteps == expected,
+                            "B222 B7: episode lookup is linear only in E_all and flat in I and unrelated W: " + name +
+                            "; expected=" + expected + "; actual=" + cost.VmSteps);
+                        if (allEpisodes == 1)
+                        {
+                            if (episodeSteps.TryGetValue(name, out var baseline))
+                                Check.Require(cost.VmSteps == baseline,
+                                    "B222 B7: fixed E_all lookup is flat in total issues: " + name +
+                                    "; VM=" + baseline + "->" + cost.VmSteps);
+                            else episodeSteps.Add(name, cost.VmSteps);
+                        }
+                    }
+                }
+                probe.Execute("PRAGMA foreign_keys=ON;");
+                probe.Begin();
+                try
+                {
+                    foreach (var (name, sql) in new[]
+                    {
+                        (nameof(StateSchema.ClearItemEpisode), StateSchema.ClearItemEpisode),
+                        (nameof(StateSchema.DeleteSettledIssueWork), StateSchema.DeleteSettledIssueWork),
+                        (nameof(StateSchema.CloseIssueExact), StateSchema.CloseIssueExact)
+                    })
+                    {
+                        var bound = name == nameof(StateSchema.CloseIssueExact)
+                            ? arguments.Select(arg => arg.Name is StateSchema.ParamEpisode or StateSchema.ParamRevision or StateSchema.ParamWork
+                                ? (arg.Name, (object?)null) : arg).ToArray() : arguments;
+                        var plan = string.Join("; ", probe.ExplainPlan(sql, bound));
+                        var cost = probe.Execute(sql, bound);
+                        Check.Require(cost.ChangedRows >= 1, "B222 B7: the measured write reaches its owned row: " + name);
+                        Console.WriteLine("B222 B7 I=" + population + " E=1 E_all=" + allEpisodes + " " + name + " VM=" + cost.VmSteps +
+                            " keys=" + cost.PathKeyCalls + " rows=" + cost.ChangedRows + " plan=" + plan);
+                    }
+                }
+                finally { probe.Execute("ROLLBACK;"); }
+            }
+            finally { Directory.Delete(folder, true); }
+        }
+    }
+
+    private static void AbsentEpisodeReconcileCosts()
+    {
+        var shapes = new List<(int Issues, int Episodes, bool Present, bool Distinct, Shape? Pair)>();
+        foreach (var present in new[] { false, true })
+        foreach (var distinct in new[] { false, true })
+        foreach (var count in new[] { 1, 4 }) shapes.Add((8, count, present, distinct, null));
+        foreach (var pair in new[] { SmallShape, LargeShape }) shapes.Add((2, 1, false, false, pair));
+        foreach (var (issues, count, present, distinct, pairShape) in shapes)
+        {
+            var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var local = new FakeSide(Side.Local);
+                var dropbox = new FakeSide(Side.Dropbox);
+                if (pairShape is not null) Seed(local, dropbox, pairShape, changedTimes: 0);
+                var attempt = Guid.NewGuid();
+                using var rig = NewRig(folder, local, dropbox,
+                    registry: (id, _, _, _, _) => id == attempt);
+                if (pairShape is not null) RepairAsync(rig, "baseline").GetAwaiter().GetResult();
+                var epoch = rig.Store.ReadSource(rig.Pair.PairId, Side.Local)!.Value.Epoch;
+                var episodes = new List<ItemRetryCandidate>();
+                for (var index = 0; index < issues; index++)
+                {
+                    var path = "Item-" + index;
+                    if (index < count)
+                    {
+                        var subject = new IssueSubject([new IssueItem(Side.Local, path, "local-id")], null);
+                        if (distinct) subject = subject with
+                        {
+                            Items = [.. subject.Items, new(Side.Dropbox, "Endpoint-" + index, "remote-id")]
+                        };
+                        if (present) local.EnsureFolderAsync(path, default).GetAwaiter().GetResult();
+                        episodes.Add(rig.Store.RecordInUseFailure(rig.Pair.PairId, 0, epoch, path, subject,
+                            TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null, attempt));
+                    }
+                    else rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with
+                    {
+                        Raise = [(IssueKind.Failure, TextKey.LocalNameInvalid, path, new IssueSubject([], null))]
+                    });
+                }
+                var (_, connection) = ProductionConnection(rig.Counters);
+                var statements = 0;
+                var scans = 0;
+                var commits = 0;
+                var envelopes = 0;
+                var ingestionStatements = 0;
+                var upserts = 0;
+                var envelopeUpserts = 0;
+                var envelopeStart = 0;
+                var envelopesValid = true;
+                var previousPairFence = false;
+                var beganAfterPairFence = false;
+                var pairFencePrefix = StateSchema.PairFence[..StateSchema.PairFence.IndexOf('$')];
+                var upsertPrefix = StateSchema.ScanUpsert[..StateSchema.ScanUpsert.IndexOf('$')];
+                SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)((_, text) =>
+                {
+                    var sql = text.utf8_to_string().TrimStart();
+                    statements++;
+                    var commit = sql.StartsWith("COMMIT", StringComparison.OrdinalIgnoreCase);
+                    if (commit) commits++;
+                    if (sql.StartsWith(StateSchema.SelectScanEntry[..StateSchema.SelectScanEntry.IndexOf('$')],
+                        StringComparison.Ordinal)) scans++;
+                    if (pairShape is not null) return;
+                    if (sql.StartsWith(upsertPrefix, StringComparison.Ordinal))
+                    {
+                        if (envelopeUpserts == 0)
+                        {
+                            envelopeStart = statements - 2;
+                            envelopesValid &= beganAfterPairFence;
+                        }
+                        envelopeUpserts++;
+                        upserts++;
+                    }
+                    else if (commit && envelopeUpserts != 0)
+                    {
+                        var size = statements - envelopeStart + 1;
+                        envelopesValid &= size == envelopeUpserts + 3;
+                        ingestionStatements += size;
+                        envelopes++;
+                        envelopeUpserts = 0;
+                    }
+                    beganAfterPairFence = previousPairFence && sql == "BEGIN IMMEDIATE;";
+                    previousPairFence = sql.StartsWith(pairFencePrefix, StringComparison.Ordinal);
+                }), null);
+                var calls = new Dictionary<string, long>(rig.Counters.MemberCalls);
+                var before = GC.GetTotalAllocatedBytes(precise: true);
+                try { RepairAsync(rig, "episodes").GetAwaiter().GetResult(); }
+                finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
+                var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+                Check.Require(rig.Counters.MemberCalls.GetValueOrDefault(nameof(IStateStore.ReadItemEpisodeIssues)) -
+                        calls.GetValueOrDefault(nameof(IStateStore.ReadItemEpisodeIssues)) == 2 &&
+                    rig.Counters.MemberCalls.GetValueOrDefault(StoreCounters.RetryNoticeAnswer) -
+                        calls.GetValueOrDefault(StoreCounters.RetryNoticeAnswer) == issues - count,
+                    "B222 B2/B3: two episode reads and no protection callback per live issue at either size");
+                var remaining = rig.Store.ReadItemRetryState(rig.Pair.PairId, episodes.Select(e => e.Token.IssueId).ToArray());
+                Check.Require(episodes.All(episode => (remaining[episode.Token.IssueId] is not null) == present),
+                    "B222 B3: the reconcile matrix retains only present live paths");
+                if (pairShape is null)
+                {
+                    var entries = present ? count : 0;
+                    Console.WriteLine("B222 B3 Measured E=" + count + " present=" + present + " distinct=" + distinct +
+                        " ingestion-envelopes=" + envelopes + " ingestion-statements=" + ingestionStatements + " upserts=" + upserts);
+                    Check.Require(envelopesValid && envelopeUpserts == 0 && upserts == entries &&
+                        (entries == 0 ? envelopes == 0 : envelopes >= 1) && ingestionStatements == 3 * envelopes + entries,
+                        "B222 B3: each ingestion envelope is one fenced transaction containing exactly its upserts");
+                    // Measured 248/272 minus one envelope (4/7) gives 244/265; scheduling changes only the envelope count.
+                    var expectedStatements = (present ? 237 : 235) + count * (present ? 7 : distinct ? 12 : 8);
+                    Check.Require(statements - ingestionStatements == expectedStatements &&
+                        scans == 16 + (!present && distinct ? 2 * count : 0) && commits - envelopes == 11,
+                        "B222 B3: absolute and per-episode statement, memo-read and commit budgets; expected=" +
+                        expectedStatements + "; other-statements=" + (statements - ingestionStatements) +
+                        "; scans=" + scans + "; other-commits=" + (commits - envelopes));
+                }
+                Console.WriteLine("B222 " + (pairShape is null ? "B3/B5viii" : "B2 N=" + pairShape.Items) +
+                    " I=" + issues + " E=" + count + " present=" + present + " distinct=" + distinct +
+                    " statements=" + statements + " scan-entry=" + scans + " commits=" + commits + " whole-repair-bytes=" + allocated);
+            }
+            finally { Directory.Delete(folder, true); }
+        }
+    }
+
+    private static async Task AbsentEpisodeScanAllocationsAsync()
+    {
+        foreach (var present in new[] { false, true })
+        foreach (var distinct in new[] { false, true })
+        foreach (var count in new[] { 1, 4 })
+        // The first fresh identical fixture warms the path; two further fixtures expose measurement noise.
+        for (var repeat = 0; repeat < 3; repeat++)
+        {
+            var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var local = new FakeSide(Side.Local);
+                var remote = new FakeSide(Side.Dropbox);
+                var attempt = Guid.NewGuid();
+                using var rig = NewRig(folder, local, remote, registry: (id, _, _, _, _) => id == attempt);
+                var pair = rig.Pair.PairId;
+                var epoch = rig.Store.ReadSource(pair, Side.Local)!.Value.Epoch;
+                var entries = new List<(Entry Local, Entry Remote)>();
+                for (var index = 0; index < 8; index++)
+                {
+                    var path = "Item-" + index;
+                    if (index >= count)
+                    {
+                        rig.Store.Commit(pair, StateChange.Empty with
+                        {
+                            Raise = [(IssueKind.Failure, TextKey.LocalNameInvalid, path, new IssueSubject([], null))]
+                        });
+                        continue;
+                    }
+                    var subject = new IssueSubject([new IssueItem(Side.Local, path, "local-id")], null);
+                    if (distinct) subject = subject with
+                    {
+                        Items = [.. subject.Items, new(Side.Dropbox, "Endpoint-" + index, "remote-id")]
+                    };
+                    rig.Store.RecordInUseFailure(pair, 0, epoch, path, subject, TextKey.FailLocalInUse,
+                        null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                    if (!present) continue;
+                    var left = await local.EnsureFolderAsync(path, default);
+                    var right = await remote.EnsureFolderAsync(path, default);
+                    entries.Add((left, right));
+                    rig.Store.Commit(pair, StateChange.Empty with
+                    {
+                        Record = [new SyncedEntry(PathNames.Key(path), path, PathNames.DropboxKey(path), path,
+                            true, left.Id, 0, left.Modified.UtcTicks, right.Id, "")]
+                    });
+                }
+                var token = rig.Store.BeginScan(pair, 0, includeDeleted: false);
+                foreach (var side in new[] { Side.Local, Side.Dropbox })
+                {
+                    var sink = rig.Store.OpenScan(pair, side, ScanTestSettings.BatchRows);
+                    foreach (var entry in entries)
+                    {
+                        var value = side == Side.Local ? entry.Local : entry.Remote;
+                        await sink.AddAsync(new Listed(value.Path, value), default);
+                    }
+                    await sink.CompleteAsync();
+                }
+                var scanRig = new ScanPassChecks.Rig(rig.Pair, rig.Store, rig.Local, rig.Dropbox,
+                    rig.Recovery, rig.Admission, rig.Scope);
+                using var log = RunLog.Open(folder, pair, "allocation", _ => { }, Settings.LogBufferCharacters);
+                var listed = new ListedSkips([], [], [], []);
+                long allocated = 0;
+                await ScanPassChecks.RunOperationAsync(scanRig, log, Settings, async jobs =>
+                {
+                    var before = GC.GetTotalAllocatedBytes(precise: true);
+                    await jobs.Syncer.SyncScannedAsync(token, listed, null, default);
+                    allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+                });
+                Check.Require(!log.HasFailed && rig.Local.Listings == 0 && rig.Dropbox.Listings == 0,
+                    "B222 B5viii: the public scan consumes identical preseeded listings without provider relisting");
+                if (repeat != 0) Console.WriteLine("B222 B5viii public-path I=8 E=" + count +
+                    " present=" + present + " distinct=" + distinct + " repeat=" + repeat +
+                    " allocated-bytes=" + allocated + " preseeded-rows=" + entries.Count + "; renames=0");
+                await rig.Store.EndScanAsync(pair, token, 1);
+            }
+            finally { Directory.Delete(folder, true); }
+        }
+    }
+
+    private static void AbsentEpisodeAllocations()
+    {
+        foreach (var probe in new[] { "i", "ii", "iv", "vii-W0", "vii-W1", "vii-R0", "vii-R1", "ix" })
+        // The first identical invocation warms the managed call path; only the second is measured evidence.
+        foreach (var measured in new[] { false, true })
+        {
+            var folder = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            Directory.CreateDirectory(folder);
+            try
+            {
+                var attempt = Guid.NewGuid();
+                var retained = probe == "vii-R1";
+                using var rig = NewRig(folder, new FakeSide(Side.Local), new FakeSide(Side.Dropbox),
+                    registry: (id, _, _, _, _) => id == attempt || retained);
+                var store = ProductionConnection(rig.Counters).Store;
+                var pair = rig.Pair.PairId;
+                var subject = new IssueSubject([new IssueItem(Side.Local, "Absent", "absent-id")], null);
+                if (probe is "vii-W1" or "vii-R1")
+                    store.RecordInUseFailure(pair, 0, 0, "Absent", subject, TextKey.FailLocalInUse,
+                        null, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                else store.Commit(pair, StateChange.Empty with
+                {
+                    Raise = [(IssueKind.Failure, TextKey.FailLocalInUse, "Absent", subject)]
+                });
+                var issue = store.Issues(pair).Single();
+                var scan = store.BeginScan(pair, Guid.NewGuid(), 0, false);
+                var emptySubject = issue with { Subject = new IssueSubject([], null) };
+                var prefixes = new PrefixSet();
+                Func<Side, string, Entry?> absent = static (_, _) => null;
+                var change = StateChange.Empty with { Close = [(issue.Path, new[] { IssueKind.Failure })] };
+                StateChange? allocatedChange = null;
+                var closed = false;
+                Action invoke = probe switch
+                {
+                    "i" => () => closed = IssuePolicy.Obsolete(emptySubject, absent, prefixes, prefixes,
+                        prefixes, prefixes, rig.Scope, retainedByOwner: false, liveEpisode: false),
+                    "ii" => () => store.Commit(pair, change),
+                    "ix" => () => allocatedChange = new StateChange([], [], [], [], [], [], []),
+                    _ => () => closed = store.CloseScanIssue(pair, scan, issue)
+                };
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                invoke();
+                var bytes = GC.GetAllocatedBytesForCurrentThread() - before;
+                GC.KeepAlive(allocatedChange);
+                var remains = store.Issues(pair).Any(row => row.Id == issue.Id);
+                Check.Require(probe switch
+                {
+                    "i" => closed && remains,
+                    "ii" => !remains,
+                    "ix" => allocatedChange is not null && remains,
+                    "vii-R1" => !closed && remains,
+                    _ => closed == !remains
+                }, "B222 B5 " + probe + ": the measured call and persisted notice outcome agree");
+                if (measured) Console.WriteLine("B222 B5 " + probe + " thread-allocated-bytes=" + bytes +
+                    "; closed=" + closed + "; notice-remains=" + remains);
+                store.EndScanAsync(pair, scan, 1).GetAwaiter().GetResult();
+            }
+            finally { Directory.Delete(folder, true); }
+        }
+    }
+
+    private static void AbsentEpisodePassCosts()
+    {
+        // One of each reachable class per quartet; the fourfold fixture isolates per-candidate selection cost.
+        foreach (var (quartets, predecessors, rename) in new[]
+            { (1, 0, false), (4, 0, false), (0, 1, false), (0, 2, false), (0, 0, true) })
+        foreach (var retirement in quartets == 0 ? new[] { "none" } : new[] { "episode", "ordinary", "both" })
+        InBudgetFolder(folder =>
+        {
+            var attempt = Guid.NewGuid();
+            using var rig = NewRig(folder, new FakeSide(Side.Local), new FakeSide(Side.Dropbox),
+                registry: (id, _, _, _, _) => id == attempt);
+            var (store, connection) = ProductionConnection(rig.Counters);
+            var pair = rig.Pair.PairId;
+            var source = store.ReadSource(pair, Side.Local)!.Value;
+            var domain = rig.Pair.Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            ulong position = 1;
+            ChangeNotice Notice(string path, string? identity) =>
+                new(Side.Local, ChangeKind.Changed, path, null, identity, null, false, false);
+            void Acquire(ChangeNotice notice)
+            {
+                Check.Require(store.AcquireJournalPage(domain, new JournalPosition(1, position),
+                    new JournalPosition(1, position + 1), [(pair, 0, source.Epoch, source.Revision, false)],
+                    [(pair, notice)]) is not null, "B222 B6: acquisition accepts the fixture notice");
+                position++;
+            }
+            for (var index = 0; index < quartets + predecessors; index++)
+            {
+                var path = "Held-" + index;
+                var identity = predecessors == 0 ? "held-id-" + index : "group-id";
+                Acquire(Notice(path, identity));
+                var selected = store.SelectWork(pair, 0, rig.Scope);
+                Check.Require(selected?.Key == PathNames.Key(path), "B222 B6: class A owns its acquired row");
+                store.RecordInUseFailure(pair, 0, source.Epoch, path,
+                    new IssueSubject([new IssueItem(Side.Local, path, identity)], null), TextKey.FailLocalInUse,
+                    selected, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                store.EndWorkPass(pair);
+                if (predecessors != 0) continue;
+                var parentPath = "Parent-" + index;
+                Acquire(Notice(parentPath, "parent-id-" + index));
+                var parent = store.SelectWork(pair, 0, rig.Scope)!;
+                Check.Require(parent?.Key == PathNames.Key(parentPath) && store.BeginSelection(parent) is not null,
+                    "B222 B6: class C registration starts from its real acquired parent");
+                var child = "Associated-" + index;
+                var childId = "associated-id-" + index;
+                store.Commit(pair, StateChange.Empty with
+                {
+                    Raise = [(IssueKind.Failure, TextKey.FailDropboxNoPermission, child,
+                        new IssueSubject([new IssueItem(Side.Local, child, childId)], null))]
+                });
+                var issue = store.Issues(pair).Single(row => row.Path == child);
+                Check.Require(store.AttachIssueWork(parent!, issue, [(Notice(child, childId), false, null)]) &&
+                    store.CompleteWork(parent!, null), "B222 B6: class C keeps only its held residual");
+                store.EndWorkPass(pair);
+            }
+            for (var index = 0; index < quartets; index++)
+            {
+                Acquire(Notice("Runnable-" + index, "runnable-id-" + index));
+                Acquire(Notice("PathOnly-" + index, null));
+            }
+            if (predecessors != 0) Acquire(Notice("Runnable-group", "group-id"));
+            SyncedEntry? destination = null;
+            if (rename)
+            {
+                var incoming = new SyncedEntry(PathNames.Key("Before"), "Before", PathNames.DropboxKey("Before"), "Before",
+                    false, "incoming-local", 0, 0, "incoming-remote", "");
+                destination = new SyncedEntry(PathNames.Key("After"), "After", PathNames.DropboxKey("After"), "After",
+                    false, "occupant-local", 0, 0, "occupant-remote", "");
+                store.Commit(pair, StateChange.Empty with { Record = [incoming, destination] });
+                var notice = new ChangeNotice(Side.Local, ChangeKind.Renamed, "After", "Before",
+                    incoming.LocalId, null, false, false);
+                Acquire(notice);
+                var parent = store.SelectWork(pair, 0, rig.Scope)!;
+                Check.Require(parent.Key == PathNames.Key("After") && store.BeginSelection(parent) is not null,
+                    "B222 B6: the rename clash starts from its acquired parent");
+                store.Commit(pair, StateChange.Empty with { Raise = [(IssueKind.NameClash, TextKey.ClashNameTaken,
+                    "After", new IssueSubject([new IssueItem(Side.Local, "After", incoming.LocalId),
+                        new IssueItem(Side.Dropbox, "After", destination.DropboxId)], Side.Local))] });
+                var clash = store.Issues(pair).Single();
+                Check.Require(store.AttachIssueWork(parent, clash, [(notice, false, incoming)]) &&
+                    store.CompleteWork(parent, null), "B222 B6: the captured rename has one residual row");
+                store.EndWorkPass(pair);
+            }
+            var expectedRows = rename ? 1 : predecessors == 0 ? 4L * quartets : predecessors + 1;
+            var expectedSelected = rename ? 1 : predecessors == 0 ? 2 * quartets : 1;
+            var through = store.ReadWorkWatermark();
+            Check.Require(store.CountWork(pair, 0, through) == (expectedRows, 0),
+                "B222 B6: the pass contains exactly its class mix or held-predecessor group");
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            SQLitePCL.delegate_trace trace = (_, text) =>
+            {
+                var sql = text.utf8_to_string().Trim();
+                counts[sql] = counts.GetValueOrDefault(sql) + 1;
+            };
+            for (var pass = 0; pass < 2; pass++)
+            {
+                var selected = new List<WorkSelection>();
+                counts.Clear();
+                SQLitePCL.raw.sqlite3_trace(connection.Handle, trace, null);
+                try
+                {
+                    while (store.SelectWork(pair, 0, rig.Scope) is { } selection) selected.Add(selection);
+                }
+                finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
+                Check.Require(selected.Count == expectedSelected && selected.All(row => rename
+                    ? store.ReadRenameContinuation(row) is { Clash: not null } continuation &&
+                        continuation.Destination == destination
+                    : row.Key.StartsWith(PathNames.Key("Runnable-"), StringComparison.Ordinal) ||
+                        row.Key.StartsWith(PathNames.Key("PathOnly-"), StringComparison.Ordinal)),
+                    "B222 B6: B, path-only D and the matching captured rename select; held classes do not");
+                Check.Require(!store.EndWorkPass(pair) && store.CountWork(pair, 0, through) == (expectedRows, 0),
+                    "B222 B6: selection alone neither retires rows nor requests a repeat");
+                Console.WriteLine("B222 B6 Q=" + expectedRows + " g=" + predecessors + " rename=" + rename +
+                    " retirement=" + retirement + " pass=" + pass + " statements=" + counts.Values.Sum() +
+                    " selected=" + selected.Count);
+                foreach (var (sql, count) in counts)
+                    Console.WriteLine("B222 B6 statement count=" + count + " SQL=" + sql.Replace('\n', ' ').Replace('\r', ' '));
+            }
+            if (retirement == "none") return;
+            var ordinary = store.SelectWork(pair, 0, rig.Scope)!;
+            while (store.SelectWork(pair, 0, rig.Scope) is not null) { }
+            if (retirement != "episode")
+                Check.Require(store.BeginSelection(ordinary) is not null && store.CompleteWork(ordinary, null),
+                    "B222 B6: the comparison has an independent ordinary retirement");
+            if (retirement != "ordinary")
+            {
+                var issue = store.Issues(pair).Single(row => row.Path == "Held-0");
+                var scan = store.BeginScan(pair, Guid.NewGuid(), 0, false);
+                Check.Require(store.CloseScanIssue(pair, scan, issue), "B222 B6: the absent acquired episode retires");
+                store.EndScanAsync(pair, scan, 1).GetAwaiter().GetResult();
+            }
+            Check.Require(store.EndWorkPass(pair) && !store.EndWorkPass(pair),
+                "B222 B6: episode, ordinary and combined retirements each signal exactly one repeat, not two");
+            var localReads = rig.Local.Reads;
+            var remoteReads = rig.Dropbox.Reads;
+            counts.Clear();
+            var scanRig = new ScanPassChecks.Rig(rig.Pair, rig.Store, rig.Local, rig.Dropbox,
+                rig.Recovery, rig.Admission, rig.Scope);
+            using var log = RunLog.Open(folder, pair, "repeat", _ => { }, Settings.LogBufferCharacters);
+            ScanPassChecks.RunOperationAsync(scanRig, log, Settings, async jobs =>
+            {
+                SQLitePCL.raw.sqlite3_trace(connection.Handle, trace, null);
+                try { await jobs.Syncer.SyncWorkAsync(default); }
+                finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
+            }, live: new ChangeRunnerChecks.Boundary(_ => new ChangeRunnerChecks.Lease())
+            {
+                Capture = (selection, _, _) =>
+                {
+                    var journal = store.ReadJournal(domain)!;
+                    var remote = store.ReadSource(pair, Side.Dropbox)!.Value;
+                    return Task.FromResult(store.CaptureLiveCoverage(selection,
+                        new LocalCatchUp(pair, selection.PairGeneration, source.Epoch,
+                            new NtfsUsnCheckpoint(journal.JournalId, 0, (long)journal.NextUsn, 0), selection.ThroughWorkId),
+                        new DropboxCatchUp(pair, selection.PairGeneration, remote.Epoch, remote.Cursor!, selection.ThroughWorkId)));
+                }
+            }).GetAwaiter().GetResult();
+            var heldRows = 2L * quartets - (retirement == "ordinary" ? 0 : 1);
+            Check.Require(!log.HasFailed && store.CountWork(pair, 0, store.ReadWorkWatermark()) == (heldRows, 0),
+                "B222 B6: ordinary execution drains every unheld row and retains every other responsibility");
+            Console.WriteLine("B222 B6 execution Q=" + expectedRows + " retirement=" + retirement +
+                " statements=" + counts.Values.Sum() + " local-reads=" + (rig.Local.Reads - localReads) +
+                " remote-reads=" + (rig.Dropbox.Reads - remoteReads) + " retained=" + heldRows);
+            foreach (var (sql, count) in counts)
+                Console.WriteLine("B222 B6 execution statement count=" + count + " SQL=" + sql.Replace('\n', ' ').Replace('\r', ' '));
+        });
+    }
+
     private static (StateStore Store, SqliteConnection Connection) ProductionConnection(StoreCounters counters)
     {
         var inner = (StateStore)typeof(StoreCounters).GetFields(System.Reflection.BindingFlags.Instance |
@@ -1305,12 +2125,13 @@ public static partial class CallBudgetChecks
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(inner)!);
     }
 
-    private static Rig NewRig(string folder, FakeSide local, FakeSide dropbox, bool seedSources = true)
+    private static Rig NewRig(string folder, FakeSide local, FakeSide dropbox, bool seedSources = true,
+        Func<Guid, string, long, IssueSubject, ItemRetryToken?, bool>? registry = null)
     {
         var database = Path.Combine(folder, "engine", "state.db");
         var root = Path.Combine(folder, "roots", "BudgetFixture");
         Directory.CreateDirectory(root);
-        var counters = new StoreCounters(StateStore.Open(database));
+        var counters = new StoreCounters(registry is null ? StateStore.Open(database) : StateStore.Open(database, registry));
         var pair = new PairConfig("budget-pair", "budget-pair", root, "/BudgetFixture",
             "connection-a", [], [], FirstRunPolicy.NewestWins, true, null,
             new RootBinding(root, "/BudgetFixture", "connection-a",
@@ -1333,7 +2154,8 @@ public static partial class CallBudgetChecks
         CancellationToken ct = default, Func<(Syncer Syncer, FolderSync Folders, ExclusionRunner Exclusions), Task>? operation = null)
     {
         using var log = RunLog.Open(rig.Folder, rig.Pair.PairId, runId, _ => { }, Settings.LogBufferCharacters);
-        var scanRig = new ScanPassChecks.Rig(rig.Pair, rig.Store, rig.Local, rig.Dropbox,
+        var scanRig = new ScanPassChecks.Rig(rig.Pair, rig.Store,
+            rig.AnswersIdentity ? rig.Local.Identified : rig.Local, rig.AnswersIdentity ? rig.Dropbox.Identified : rig.Dropbox,
             rig.Recovery, rig.Admission, rig.Scope);
         var started = DateTimeOffset.UtcNow;
         RepairSummary summary;
@@ -1518,12 +2340,12 @@ public static partial class CallBudgetChecks
 
     private static int ProviderCalls(Rig rig) =>
         rig.Local.Reads + rig.Dropbox.Reads + rig.Local.Hashes + rig.Dropbox.Hashes +
-        rig.Local.Work + rig.Dropbox.Work;
+        rig.Local.Work + rig.Dropbox.Work + rig.Local.IdentityReads + rig.Dropbox.IdentityReads;
 
     private static string Counts(string name, CountingSide side) =>
         name + " list=" + side.Listings + " read=" + side.Reads + " hash=" + side.Hashes + " open=" + side.Opens +
         " stage=" + side.Stages + " publish=" + side.Publishes + " ensure=" + side.Ensures +
-        " delete=" + side.Deletes + " move=" + side.Moves;
+        " delete=" + side.Deletes + " move=" + side.Moves + " identity=" + side.IdentityReads;
 
     private static long FileSize(string path)
     {
@@ -1651,6 +2473,8 @@ public static partial class CallBudgetChecks
         : IDisposable
     {
         public IStateStore Store => Counters;
+        /// <summary>The sides answer by-id reads, as both production adapters do, and count each as a provider call.</summary>
+        public bool AnswersIdentity { get; init; }
         public void Dispose() => Counters.Dispose();
     }
 
@@ -1668,6 +2492,7 @@ public static partial class CallBudgetChecks
         private int _ensures;
         private int _deletes;
         private int _moves;
+        private int _identityReads;
 
         public Side Side => inner.Side;
         public int Listings => _listings;
@@ -1681,6 +2506,9 @@ public static partial class CallBudgetChecks
         public int Ensures => _ensures;
         public int Deletes => _deletes;
         public int Moves => _moves;
+        public int IdentityReads => _identityReads;
+        /// <summary>This side answering by id from its fake (B-213's identity read), counted as the provider call it is.</summary>
+        public ISide Identified => IdentitySide.Truthful(this, (FakeSide)inner, () => Interlocked.Increment(ref _identityReads));
         public bool FailSubtreeAfterListing { get; set; }
         public string? RefuseStagePath { get; set; }
         public CancellationTokenSource? CancelOnStage { get; set; }
@@ -1690,7 +2518,7 @@ public static partial class CallBudgetChecks
 
         public void Reset() =>
             _listings = _subtreeListings = _siblingListings = _reads = _hashes = _opens = _stages =
-                _publishes = _ensures = _deletes = _moves = 0;
+                _publishes = _ensures = _deletes = _moves = _identityReads = 0;
 
         public async IAsyncEnumerable<Listed> ReadAllAsync(string under, ListOptions options,
             [EnumeratorCancellation] CancellationToken ct)

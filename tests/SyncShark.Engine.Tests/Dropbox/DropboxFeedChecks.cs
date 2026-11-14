@@ -59,6 +59,79 @@ public static class DropboxFeedChecks
 
     public static void Run() => RunAsync().GetAwaiter().GetResult();
 
+    public static void RunDropboxEchoPartialPage() => DropboxEchoPartialPageAsync().GetAwaiter().GetResult();
+
+    private static async Task DropboxEchoPartialPageAsync()
+    {
+        var folder = Directory.CreateTempSubdirectory("SyncSharkEchoPage-");
+        try
+        {
+            var time = new LedgerTime();
+            await using var rig = await Massdex.SyncShark.Engine.Tests.Run.RepairChecks.ComposeRigAsync(folder.FullName,
+                time: time, level: 1);
+            foreach (var path in new[] { "A", "B" })
+            {
+                await System.IO.File.WriteAllTextAsync(Path.Combine(rig.Pair.LocalRoot, path), "content");
+                rig.Wire.SeedFile(path, "content");
+            }
+            using (var baseline = rig.Log(folder.FullName, "baseline"))
+            {
+                Check.Require((await rig.RunAsync(baseline, default)).Completed, "B214-T5a: baseline completes");
+                await rig.DrainWorkAsync(baseline, default);
+            }
+            var pairId = rig.Pair.PairId;
+            var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
+            var bindings = new[] { "A", "B" }.Select(path => rig.Store.SyncedByKey(pairId, Side.Local, PathNames.Key(path))!).ToArray();
+            var source = rig.Store.ReadSource(pairId, Side.Dropbox)!.Value;
+            rig.Wire.SeedChangePage(source.Cursor!,
+                [rig.Wire.ChangeDeleted(rig.Pair.DropboxRoot + "/OldA"), rig.Wire.ChangeExistingFile("A")], true, CursorOne);
+            rig.Wire.SeedChangePage(CursorOne,
+                [rig.Wire.ChangeDeleted(rig.Pair.DropboxRoot + "/OldB"), rig.Wire.ChangeExistingFile("B")], false, CursorTwo);
+            rig.Wire.AfterContinueResponse = cursor =>
+            {
+                if (cursor == source.Cursor)
+                    rig.Wire.Script("/2/files/list_folder/continue", HttpStatusCode.InternalServerError, 1);
+            };
+            rig.Wire.Calls.Clear();
+            rig.Wire.ContinueCursors.Clear();
+            using var log = rig.Log(folder.FullName, "partial-echo");
+            var opportunity = rig.Host.DispatchSessionAsync(pairId, () => log, async (session, ct) =>
+            {
+                Exception? failure = null;
+                try { await rig.Host.CatchUpDropboxAsync(session.Registration, pairId, generation, ct); }
+                catch (LiveAdmissionStaleException error) { failure = error; }
+                Console.WriteLine($"B214 partial failure={failure?.GetType().Name} cursor={rig.Store.ReadSource(pairId, Side.Dropbox)!.Value.Cursor} " +
+                    $"queue={rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark())} " +
+                    $"bindings={bindings.All(saved => rig.Store.SyncedByKey(pairId, Side.Local, saved.LocalKey) == saved)} " +
+                    $"cursors={string.Join(',', rig.Wire.ContinueCursors)}");
+                Check.Require(failure is not null && rig.Store.ReadSource(pairId, Side.Dropbox)!.Value.Cursor == CursorOne &&
+                    rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark()) == (0L, 2L) &&
+                    bindings.All(saved => rig.Store.SyncedByKey(pairId, Side.Local, saved.LocalKey) == saved),
+                    "B214-T5a: failed second continue preserves bindings, cursor and only the first page's rows");
+                await rig.Host.CatchUpDropboxAsync(session.Registration, pairId, generation, ct);
+                await session.Syncer.SyncWorkAsync(ct);
+                return true;
+            }, default);
+            var bounded = opportunity.WaitAsync(TimeSpan.FromSeconds(30));
+            while (!bounded.IsCompleted)
+            {
+                await Task.Yield();
+                time.Advance(Tick);
+            }
+            Check.Require(await bounded,
+                "B214-T5a: native Local execution returns after the recovered page");
+            Check.Require(rig.Wire.ContinueCursors.Count >= 3 && rig.Wire.ContinueCursors[1] == CursorOne &&
+                rig.Wire.ContinueCursors[2] == CursorOne &&
+                rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark()) == (0L, 0L) &&
+                bindings.All(saved => rig.Store.SyncedByKey(pairId, Side.Local, saved.LocalKey) == saved) &&
+                bindings.All(saved => System.IO.File.ReadAllText(Path.Combine(rig.Pair.LocalRoot, saved.LocalPath)) == "content") &&
+                log.Effects.GetValueOrDefault(nameof(EffectKind.DeletedLocal)) == 0 &&
+                !rig.Wire.Calls.Any(route => route.EndsWith("/get_metadata", StringComparison.Ordinal)),
+                "B214-T5a: retry drains exact echoes with no HTTP metadata, Local deletion or changed binding");
+        }
+        finally { Directory.Delete(folder.FullName, true); }
+    }
+
     private static async Task RunAsync()
     {
         await InstallAndPageAsync();

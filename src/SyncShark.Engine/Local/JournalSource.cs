@@ -33,8 +33,10 @@ public sealed class JournalSource
     private CancellationTokenSource? _stop;
     private Task? _run;
     private bool _acknowledged;
-    // Recovery belongs to the volume's current members, not a refused member's old generation.
-    private bool _refusedCatchUp;
+    // A refused catch-up or a replacement base owes the current members one recovery wake at the next durable boundary.
+    private bool _membersOwedWake;
+    // A failed source owes one resume from its committed position until a finite capture confirms it.
+    private bool _resuming;
     private ulong _firstUsn;
     private ulong _lowestValidUsn;
     private long _entryObservations;
@@ -98,8 +100,12 @@ public sealed class JournalSource
     /// refresh fails. Closed membership separately prevents a successful catch-up.</summary>
     public bool Available { get; private set; } = true;
 
+    /// <summary>Whether the failed source's one resume failed before a finite capture confirmed continuity.</summary>
+    internal bool ContinuityLost { get; private set; }
+
     internal void Invalidate()
     {
+        ContinuityLost |= _resuming;
         Available = false;
         DiscardRead();
     }
@@ -107,14 +113,14 @@ public sealed class JournalSource
     private IOException Unavailable(NtfsUsnPageStatus status, int? nativeError)
     {
         Invalidate();
-        return new IOException(Text.Get(TextKey.JournalSourceFailed,
+        return new JournalSourceException(status, nativeError, Text.Get(TextKey.JournalSourceFailed,
             (TextArg.Reason, status.ToString()),
             (TextArg.Value, nativeError?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty)));
     }
 
     /// <summary>Checks drive evidence and journal retention. A missing or recreated journal publishes a fresh base
     /// with every member's recovery responsibility, never a clean listing. The pair entries call it themselves; no
-    /// caller owes this step.</summary>
+    /// caller owes this step. A failed source resumes once from a still-valid committed position.</summary>
     private Task<bool> CompareAsync(CancellationToken ct) => Task.Run(() => Compare(ct), ct);
 
     /// <summary>Consumes immediately available pages and acknowledges their durable boundary. Closed or empty
@@ -196,7 +202,7 @@ public sealed class JournalSource
 
     internal async Task<LocalCatchUp> CheckpointForPairAsync(string pairId, long generation, CancellationToken ct)
     {
-        // A failed source needs a new pre-list base, never a replacement base after this Repair's listing.
+        // A failed source resumes or rebases only before listing, never after this Repair's listing.
         if (!Available) throw Stale();
         if (!await CompareAsync(ct).ConfigureAwait(false)) throw Stale();
         IReadOnlyList<Member> captured;
@@ -262,8 +268,11 @@ public sealed class JournalSource
             DiscardRead();
             return null;
         }
-        if (CommitRead(out var staleStorage, fences, refreshStale: fences is null)) return _position;
-        return fences is null && staleStorage && CommitRead(out _) ? _position : null;
+        if (!CommitRead(out var staleStorage, fences, refreshStale: fences is null) &&
+            !(fences is null && staleStorage && CommitRead(out _))) return null;
+        // Only durable coverage through the captured end confirms a failed source's one resume; a return alone does not.
+        if (_position!.NextUsn == throughNextUsn) _resuming = false;
+        return _position;
     }
 
     private bool Compare(CancellationToken ct)
@@ -287,7 +296,7 @@ public sealed class JournalSource
         _firstUsn = firstUsn;
         _lowestValidUsn = lowestValidUsn;
         ApplyRetention(maximumSize, allocationDelta);
-        if (!Available || _position is not { } saved || saved.JournalId != journalId ||
+        if (ContinuityLost || _position is not { } saved || saved.JournalId != journalId ||
             !InRetention(saved, firstUsn, nextUsn, lowestValidUsn))
         {
             PageOutcome outcome;
@@ -299,6 +308,7 @@ public sealed class JournalSource
             return outcome is PageOutcome.Restarted;
         }
         _read ??= saved;
+        _resuming |= !Available;
         Available = true;
         return true;
     }
@@ -324,9 +334,13 @@ public sealed class JournalSource
         ApplyRetention(maximumSize, allocationDelta);
         ct.ThrowIfCancellationRequested();
         var repair = members.Select(member => member.Pair.PairId).ToHashSet(StringComparer.Ordinal);
+        // A replacement base wakes every member whose lost interval its publication commits.
+        if (_position is not null) lock (_membershipGate) _membersOwedWake = true;
         if (TryPublish(new JournalPosition(journalId, nextUsn), members,
                 Array.Empty<(string PairId, ChangeNotice Notice)>(), repair, frozen: null, out var staleStorage))
         {
+            ContinuityLost = false;
+            _resuming = false;
             Available = true;
             return PageOutcome.Restarted;
         }
@@ -487,7 +501,7 @@ public sealed class JournalSource
                 return false;
             }
             if (_read is not { } read) return false;
-            if (read == _position && _acknowledged && !_refusedCatchUp) return true;
+            if (read == _position && _acknowledged && !_membersOwedWake) return true;
             classified = expected;
         }
         if (TryPublish(_read!, classified, Array.Empty<(string PairId, ChangeNotice Notice)>(),
@@ -523,9 +537,9 @@ public sealed class JournalSource
             var candidates = fences.Where(member => member.LostInterval)
                 .Select(member => member.PairId).ToArray();
             if (candidates.Length != 0 && !RefreshCandidates(installed!, candidates, frozen)) return false;
-            if (_refusedCatchUp)
+            if (_membersOwedWake)
             {
-                _refusedCatchUp = false;
+                _membersOwedWake = false;
                 foreach (var member in _members()!) WorkCommitted?.Invoke(member.Pair.PairId);
             }
             return true;
@@ -624,7 +638,7 @@ public sealed class JournalSource
 
     private LiveAdmissionStaleException RefuseCatchUp()
     {
-        lock (_membershipGate) _refusedCatchUp = true;
+        lock (_membershipGate) _membersOwedWake = true;
         return Stale();
     }
 

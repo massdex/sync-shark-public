@@ -5,6 +5,7 @@ using Massdex.SyncShark.DropboxCli;
 using Massdex.SyncShark.Engine.Edge;
 using Massdex.SyncShark.Engine.Run;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
+using Massdex.SyncShark.V2;
 
 namespace Massdex.SyncShark.Engine.Tests.Edge;
 
@@ -40,6 +41,43 @@ public static class EngineCliRuntimeChecks
         WithProductRoot(FailedConstructionReleasesOwnedResources);
         WithProductRoot(HostBoundBorrowsAuthority);
         WithProductRoot(ObsoleteLegacyStoreRefusesBeforeAnyProviderCall);
+        WithProductRoot(StandaloneStatusCarriesRetainedNotice);
+    }
+
+    // B-227 R1: an absent-host status reports the retained terminal-startup notice in human and JSON form.
+    private static void StandaloneStatusCarriesRetainedNotice(string root)
+    {
+        foreach (var exit in new[]
+                 {
+                     (int)SyncCliExitCode.StartupReleaseRecoveryRequired,
+                     (int)SyncCliExitCode.StartupInvalidDataLocation,
+                     (int)SyncCliExitCode.StartupLegacyFootprintRefused
+                 })
+        {
+            AutoSyncProcess.RecordExistingOwnerNotice(AutoSyncProcess.PersistentStartupNoticePath,
+                SyncCli.PersistentStartupRefusalNoticeKey(exit));
+            var expected = File.ReadAllText(AutoSyncProcess.PersistentStartupNoticePath);
+            // The one read the app edge performs before constructing the standalone runtime.
+            var notice = AutoSyncProcess.ReadPersistentStartupNotice();
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exitCode = SyncCli.ExecuteAsync(["--cli", "engine", "host", "status"], output, error,
+                () => new EngineCliRuntime(80, notice)).GetAwaiter().GetResult();
+            Check.Require(exitCode == (int)SyncCliExitCode.Success,
+                "absent-host status stays a successful read for exit " + exit);
+            Check.Require(output.ToString().Contains(expected, StringComparison.Ordinal),
+                "absent-host status prints the retained notice for exit " + exit);
+
+            var json = new StringWriter();
+            exitCode = SyncCli.ExecuteAsync(["--cli", "engine", "host", "status", "--json"], json, error,
+                () => new EngineCliRuntime(80, notice)).GetAwaiter().GetResult();
+            using var parsed = JsonDocument.Parse(json.ToString());
+            var data = parsed.RootElement.GetProperty("data");
+            Check.Require(exitCode == (int)SyncCliExitCode.Success &&
+                data.GetProperty("state").GetString() == "StatusUnavailable" &&
+                data.GetProperty("message").GetString()!.Contains(expected, StringComparison.Ordinal),
+                "absent-host JSON status also carries the retained notice for exit " + exit);
+        }
     }
 
     // 1A's admission owner refuses an obsolete legacy store on the standalone path, before any provider call.

@@ -57,24 +57,24 @@
     {
       "Route": "cli-autosync-pipe",
       "Path": "apps/SyncShark/CliEntry.cs",
-      "First": 110,
-      "Last": 111,
+      "First": 112,
+      "Last": 113,
       "Hash": "0a7d1c19ff58",
       "Gui": false
     },
     {
       "Route": "cli-core-v2",
       "Path": "apps/SyncShark/CliEntry.cs",
-      "First": 114,
-      "Last": 115,
+      "First": 116,
+      "Last": 117,
       "Hash": "7ed62fb1638d",
       "Gui": false
     },
     {
       "Route": "cli-core-v1",
       "Path": "apps/SyncShark/CliEntry.cs",
-      "First": 117,
-      "Last": 132,
+      "First": 119,
+      "Last": 134,
       "Hash": "2f50e2ec5694",
       "Gui": false
     },
@@ -123,7 +123,7 @@
     "src/SyncShark.Core/WindowsCloudFiles.cs": "1f84ba3c9f1d",
     "src/SyncShark.Core/WindowsDirectoryListing.cs": "ce5901a9510e",
     "src/SyncShark.Core/WindowsPlaceholderCompatibility.cs": "369ed67d2610",
-    "src/SyncShark.Core/V2/Adapters/AutoSyncProcess.cs": "35186d24123f",
+    "src/SyncShark.Core/V2/Adapters/AutoSyncProcess.cs": "4bf19dad3886",
     "src/SyncShark.Core/V2/Local/LinkContentCopy.cs": "145dc6c41846",
     "src/SyncShark.Core/V2/Local/LocalFileAbsence.cs": "9dda5ef703dc",
     "src/SyncShark.Core/V2/Local/LocalGapIo.cs": "fb6e67437585",
@@ -131,7 +131,7 @@
     "src/SyncShark.Core/V2/Local/OnlineOnlyHydration.cs": "4b3d2e1c161d",
     "src/SyncShark.Engine/Local/LocalBin.cs": "5ea53dc7d4b9",
     "src/SyncShark.Engine/Local/VolumeSpace.cs": "cd8b314510c5",
-    "apps/SyncShark/CliEntry.cs": "aa0a3100e8ac",
+    "apps/SyncShark/CliEntry.cs": "ecdf86cd1ddc",
     "apps/SyncShark/ExistingWindowActivation.cs": "f0cf54dec847",
     "apps/SyncShark/ExplorerIntegration.cs": "c4f425f4912c",
     "apps/SyncShark/MainWindow.xaml.cs": "943c3fcd5ed3",

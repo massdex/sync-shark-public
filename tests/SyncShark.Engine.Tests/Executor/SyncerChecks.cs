@@ -85,8 +85,10 @@ public static class SyncerChecks
         {
             await PlannedReplacementInLiveContextAsync(folder);
             await FolderPlansAsync(folder);
+            await UnansweredIdentityRefusesAsync(folder);
             await RestoredFolderAsync(folder);
             await CrossLinkedRestoredAsync(folder);
+            await RestoredAncestorMovedAsync(folder);
             await UnreadableFoldersAsync(folder);
             await CounterpartCollisionAsync(folder);
             await CounterpartSelectedBranchAsync(folder);
@@ -2014,8 +2016,12 @@ public static class SyncerChecks
                     local = await PutAsync(context.Local, local.Path);
                 }
                 using var cancellation = new CancellationTokenSource();
-                await NewJobs(context).Items.Folders.RemoveFolderAsync(Row(local, null, saved), Side.Local,
-                    cancellation.Token);
+                // A changed kind replaced the saved Local folder with a new file, so its old identity is proven absent.
+                await NewJobs(context with
+                {
+                    Local = IdentitySide.Truthful(context.Local, (FakeSide)context.Local),
+                    Dropbox = IdentitySide.Truthful(context.Dropbox, (FakeSide)context.Dropbox)
+                }).Items.Folders.RemoveFolderAsync(Row(local, null, saved), Side.Local, cancellation.Token);
                 Check.Require(await context.Local.ReadOneAsync(local.Path, default) == local &&
                     await context.Dropbox.ReadOneAsync(remote.Path, default) is { } current &&
                     current.IsFolder == !changedKind && store.Issues(context.Pair.PairId).Count == 0,
@@ -2034,9 +2040,10 @@ public static class SyncerChecks
                 var local = await context.Local.EnsureFolderAsync("folder", default);
                 var remote = await context.Dropbox.EnsureFolderAsync("folder", default);
                 var saved = Save(context, local, remote);
+                var counterpart = new FakeSide(PathNames.Other(side));
                 context = side == Side.Local
-                    ? context with { Dropbox = new FakeSide(Side.Dropbox) }
-                    : context with { Local = new FakeSide(Side.Local) };
+                    ? context with { Dropbox = IdentitySide.Truthful(counterpart, counterpart) }
+                    : context with { Local = IdentitySide.Truthful(counterpart, counterpart) };
                 Entry? child = survivor ? await PutAsync(context.For(side), "folder/arrived") : null;
                 using var cancellation = new CancellationTokenSource();
                 var boundary = new FakeBoundary(context.Admission);
@@ -2073,6 +2080,24 @@ public static class SyncerChecks
         }
     }
 
+    // B-213's deletion-safe default: an absent side that cannot answer by id keeps the folder,
+    // while the same binding answered truthfully as absent is not kept, so the refusal comes from the missing answer.
+    private static async Task UnansweredIdentityRefusesAsync(string root)
+    {
+        using var store = StateStore.Open(Path.Combine(root, "unanswered-identity.db"));
+        var context = Context(store);
+        var local = await context.Local.EnsureFolderAsync("folder", default);
+        var remote = await context.Dropbox.EnsureFolderAsync("folder", default);
+        var saved = store.SyncedByKey(context.Pair.PairId, Side.Local, Save(context, local, remote).LocalKey)!;
+        await context.Dropbox.DeleteAsync(remote, null, default);
+        var answered = context with { Dropbox = IdentitySide.Truthful(context.Dropbox, (FakeSide)context.Dropbox) };
+        Check.Require(context.Dropbox is not IIdentitySide &&
+            await FolderIdentity.KeptElsewhereAsync(context, saved, Side.Local, default) &&
+            await FolderIdentity.KeptElsewhereAsync(context, saved, Side.Local, default, remote.Id, remote.Path) &&
+            !await FolderIdentity.KeptElsewhereAsync(answered, saved, Side.Local, default),
+            "A side that cannot answer by id refuses an inferred folder delete; a proven absence does not.");
+    }
+
     private static async Task RestoredFolderAsync(string root)
     {
         using var store = StateStore.Open(Path.Combine(root, "restored.db"));
@@ -2090,6 +2115,7 @@ public static class SyncerChecks
         scan.AddAsync(new Listed(removed.Path, removed), default).GetAwaiter().GetResult();
         await scan.CompleteAsync();
         using var cancellation = new CancellationTokenSource();
+        context = context with { Dropbox = IdentitySide.Truthful(context.Dropbox, (FakeSide)context.Dropbox) };
         var folders = NewJobs(context).Items.Folders;
         var id = await folders.PrepareFolderRemovalAsync(Row(local, null, saved), Side.Local,
             new HashSet<string> { PathNames.Key(kept.Path) },
@@ -2129,6 +2155,7 @@ public static class SyncerChecks
                 await scan.CompleteAsync();
             }
             ((FakeSide)context.Local).FailNext(kept.Path, new InvalidOperationException("Unexpected survivor observation"));
+            context = context with { Local = IdentitySide.Truthful(context.Local, (FakeSide)context.Local) };
             var folders = NewJobs(context).Items.Folders;
             var id = await folders.PrepareFolderRemovalAsync(Row(null, remote, saved) with { Key = saved.LocalKey }, Side.Dropbox,
                 new HashSet<string> { binding.LocalKey }, new HashSet<string> { PathNames.Key(local.Path) }, default);
@@ -2144,6 +2171,69 @@ public static class SyncerChecks
                 ((FakeAdmission)context.Admission).Admitted == 1 &&
                 ((FakeAdmission)context.Admission).Completed == (mappedRoot ? 1 : 0),
                 "Canonical Local ancestors justify a mapped Dropbox plan; restored survivors add no observation or permit.");
+        }
+    }
+
+    // A root this run restored is asked about its original identity, read now. Gone elsewhere before the plan, gone
+    // elsewhere after the freeze, or back at the saved path once the restored folder has gone, it is never taken for the
+    // restored folder, and nothing is deleted.
+    private static async Task RestoredAncestorMovedAsync(string root)
+    {
+        foreach (var when in new[] { "plan", "send", "returned" })
+        {
+            using var store = StateStore.Open(Path.Combine(root, $"restored-moved-{when}.db"));
+            var context = Context(store);
+            var dropbox = (FakeSide)context.Dropbox;
+            var local = await context.Local.EnsureFolderAsync("folder", default);
+            var original = await dropbox.EnsureFolderAsync("folder", default);
+            var saved = Save(context, local, original);
+            var kept = await PutAsync(context.Local, "folder/kept");
+            var removed = await PutAsync(context.Local, "folder/removed");
+            // The restore: the original identity leaves its path, a new folder takes it and the root is re-bound to it.
+            if (when == "plan") await dropbox.MoveAsync(original, "Elsewhere", default);
+            else await dropbox.DeleteAsync(original, null, default);
+            var restoredRoot = await dropbox.EnsureFolderAsync("folder", default);
+            Save(context, kept, await PutAsync(dropbox, "folder/kept"));
+            var rebound = Save(context, local, restoredRoot);
+            if (when == "returned") await dropbox.DeleteAsync(restoredRoot, null, default);
+            var returned = false;
+            context = context with
+            {
+                ScanId = store.BeginScan(context.Pair.PairId, 0, false),
+                // The original identity returns at its saved path just before it is read by id.
+                Dropbox = IdentitySide.Truthful(dropbox, dropbox, () =>
+                {
+                    if (when != "returned" || returned) return;
+                    returned = true;
+                    dropbox.Seed(original, null);
+                })
+            };
+            var scan = store.OpenScan(context.Pair.PairId, Side.Local, ScanTestSettings.BatchRows);
+            await scan.AddAsync(new Listed(kept.Path, kept), default);
+            await scan.AddAsync(new Listed(removed.Path, removed), default);
+            await scan.CompleteAsync();
+            var folders = NewJobs(context).Items.Folders;
+            var id = await folders.PrepareFolderRemovalAsync(Row(local, null, saved), Side.Local,
+                new HashSet<string> { PathNames.Key(kept.Path) }, new HashSet<string> { PathNames.Key(local.Path) }, default);
+            if (when == "send" && id is not null)
+            {
+                dropbox.Seed(original with { Path = "Elsewhere" }, null);
+                await folders.RunPreparedFolderRemovalsAsync([id], default);
+                await folders.FinishFolderRemovalAsync(id, null, default);
+            }
+            var issues = store.Issues(context.Pair.PairId);
+            var bound = store.SyncedByKey(context.Pair.PairId, Side.Local, rebound.LocalKey) == rebound;
+            var outcome = when switch
+            {
+                "plan" => id is null && !store.ActiveFolderRemovals(context.Pair.PairId, default).Any() &&
+                    issues.Count == 0 && bound,
+                "send" => id is not null && store.FolderRemoval(context.Pair.PairId, id).Phase != FolderRemovalPhase.Complete &&
+                    issues.Any(issue => issue.Kind == IssueKind.Failure && issue.Cause == TextKey.FailChanged &&
+                        issue.Path == local.Path) && bound,
+                _ => id is null && returned,
+            };
+            Check.Require(outcome && await context.Local.ReadOneAsync(removed.Path, default) == removed,
+                $"A restored root's original identity found anywhere but the kept path refuses its removal: {when}.");
         }
     }
 
@@ -2163,8 +2253,9 @@ public static class SyncerChecks
             var deleting = (FakeSide)context.For(side);
             var child = (side == Side.Local ? localChild : remoteChild) with { Id = "replacement-folder" };
             deleting.Seed(child, null);
-            context = side == Side.Local ? context with { Dropbox = new FakeSide(Side.Dropbox) }
-                : context with { Local = new FakeSide(Side.Local) };
+            var counterpart = new FakeSide(PathNames.Other(side));
+            context = side == Side.Local ? context with { Dropbox = IdentitySide.Truthful(counterpart, counterpart) }
+                : context with { Local = IdentitySide.Truthful(counterpart, counterpart) };
             var boundary = new FakeBoundary(context.Admission, context);
             var jobs = NewJobs(context, boundary);
             var folders = jobs.Items.Folders;
@@ -2212,8 +2303,9 @@ public static class SyncerChecks
             var local = await context.Local.EnsureFolderAsync("Parent", default);
             var remote = await context.Dropbox.EnsureFolderAsync("Parent", default);
             var saved = Save(context, local, remote);
-            context = side == Side.Local ? context with { Dropbox = new FakeSide(Side.Dropbox) }
-                : context with { Local = new FakeSide(Side.Local) };
+            var counterpart = new FakeSide(PathNames.Other(side));
+            context = side == Side.Local ? context with { Dropbox = IdentitySide.Truthful(counterpart, counterpart) }
+                : context with { Local = IdentitySide.Truthful(counterpart, counterpart) };
             var deleting = (FakeSide)context.For(side);
             var first = await PutAsync(deleting, "Parent/First");
             var later = await PutAsync(deleting, "Parent/Last");
@@ -2254,8 +2346,9 @@ public static class SyncerChecks
             var local = await context.Local.EnsureFolderAsync("folder", default);
             var remote = await context.Dropbox.EnsureFolderAsync("folder", default);
             var saved = Save(context, local, remote);
-            context = side == Side.Local ? context with { Dropbox = new FakeSide(Side.Dropbox) }
-                : context with { Local = new FakeSide(Side.Local) };
+            var counterpart = new FakeSide(PathNames.Other(side));
+            context = side == Side.Local ? context with { Dropbox = IdentitySide.Truthful(counterpart, counterpart) }
+                : context with { Local = IdentitySide.Truthful(counterpart, counterpart) };
             var child = await PutAsync(context.For(side), "folder/arrived");
             ((FakeSide)context.For(side)).FailNext(child.Path,
                 new ItemFailedException(child.Path, Text.ReadFailedOn(side), null));
@@ -2302,8 +2395,9 @@ public static class SyncerChecks
             var outside = await PutAsync(deleting, "U/X");
             var savedOutside = Bind(outside, await PutAsync(other, "Q/X"));
             if (!present) await deleting.DeleteAsync(child, null, default);
-            context = side == Side.Local ? context with { Dropbox = new FakeSide(Side.Dropbox) }
-                : context with { Local = new FakeSide(Side.Local) };
+            var otherFake = new FakeSide(PathNames.Other(side));
+            context = side == Side.Local ? context with { Dropbox = IdentitySide.Truthful(otherFake, otherFake) }
+                : context with { Local = IdentitySide.Truthful(otherFake, otherFake) };
             var folders = NewJobs(context).Items.Folders;
             var id = await folders.PrepareFolderRemovalAsync(Row(side == Side.Local ? target : null,
                 side == Side.Dropbox ? target : null, savedRoot), side,
@@ -2355,8 +2449,9 @@ public static class SyncerChecks
             var outside = await PutAsync(deleting, "U/X");
             var savedOutside = Bind(outside, await PutAsync(other, "Q/C/X"));
             var survivor = await PutAsync(deleting, "R/Keep");
-            context = side == Side.Local ? context with { Dropbox = new FakeSide(Side.Dropbox) }
-                : context with { Local = new FakeSide(Side.Local) };
+            var otherFake = new FakeSide(PathNames.Other(side));
+            context = side == Side.Local ? context with { Dropbox = IdentitySide.Truthful(otherFake, otherFake) }
+                : context with { Local = IdentitySide.Truthful(otherFake, otherFake) };
             var folders = NewJobs(context).Items.Folders;
             var id = await folders.PrepareFolderRemovalAsync(Row(side == Side.Local ? target : null,
                 side == Side.Dropbox ? target : null, savedRoot), side, new HashSet<string>(), new HashSet<string>(), default);
@@ -2393,7 +2488,8 @@ public static class SyncerChecks
             var protectedRemote = await PutAsync(context.Dropbox, "Elsewhere/Child");
             var protectedBinding = Save(context, protectedLocal, protectedRemote);
             var effects = new List<RunEvent>();
-            context = context with { Dropbox = new FakeSide(Side.Dropbox), Events = effects.Add };
+            var counterpart = new FakeSide(Side.Dropbox);
+            context = context with { Dropbox = IdentitySide.Truthful(counterpart, counterpart), Events = effects.Add };
             UnreadableMember.Record(store, context.Pair.PairId, blockedPath);
             var row = Row(local, null, saved);
             var jobs = NewJobs(context);
@@ -2673,7 +2769,13 @@ public static class SyncerChecks
         var row = Row(local, remote, saved) with { Context = Facts() with
             { FirstRun = true, CompleteInventory = true, FirstRunDeletion = IssueSubject.FirstRunDeletionKind.Item } };
         var action = new SyncAction(ActionKind.ReplaceKind, row, Side: Side.Dropbox, Target: remote.Path);
-        var outcome = await NewJobs(context).Items.Dispatch.DispatchPreparedAsync(action, default);
+        // The saved Local folder was replaced by the file above, so its old identity is truthfully absent.
+        var identified = context with
+        {
+            Local = IdentitySide.Truthful(context.Local, (FakeSide)context.Local),
+            Dropbox = IdentitySide.Truthful(context.Dropbox, (FakeSide)context.Dropbox)
+        };
+        var outcome = await NewJobs(identified).Items.Dispatch.DispatchPreparedAsync(action, default);
         Check.Require(outcome.Succeeded() && await context.Dropbox.ReadOneAsync(child.Path, default) is null &&
             await context.Dropbox.ReadOneAsync(remote.Path, default) is { IsFolder: false },
             "null-selection planned replacement keeps its ordinary child classification even in a live context; " +

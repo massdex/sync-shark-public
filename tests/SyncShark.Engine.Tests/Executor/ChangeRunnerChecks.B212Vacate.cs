@@ -3,10 +3,9 @@ using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Executor;
 
-// B-212 vacate witnesses through the checked entry (SPEC-B212-7 1.5, SPEC-B212-8 1-2, its addendum 1, 3.3 and 4): a
-// folder X moved on side S from Old to New, where the destination binding B still names New on the other side O and
-// its folder there is the occupant, while B's S identity is gone. The rename selection vacates B's occupant, then
-// moves X's counterpart onto New.
+// B-212 vacate witnesses through the checked entry: a folder X moved on side S from Old to New, where the
+// destination binding B still names New on the other side O and its folder there is the occupant, while B's S
+// identity is gone. The rename selection vacates B's occupant, then moves X's counterpart onto New.
 public static partial class ChangeRunnerChecks
 {
     private const string VacateOld = "Old";
@@ -56,10 +55,10 @@ public static partial class ChangeRunnerChecks
         }
     }
 
-    // VAC-reuse (-7 9.1, -8 1): an active Ordinary operation frozen over the occupant itself (Ready, a whole plan) is
-    // continued by the vacate through D6: no second freeze, one operation, and the rename lands. B's saved S path is
-    // not the moved path, so the operation's premise (nothing at that path) still holds: SPEC-B212-9 rule G's
-    // divergent witness. At the same path the operation is superseded instead (VAC-supersede).
+    // VAC-reuse: an active Ordinary operation frozen over the occupant itself (Ready, a whole plan) is continued by
+    // the vacate through D6: no second freeze, one operation, and the rename lands. B's saved S path is not the moved
+    // path, so the operation's premise (nothing at that path) still holds: the divergent witness of D6's one
+    // exception. At the same path the operation is superseded instead (VAC-supersede).
     private static async Task VacateReuseAsync()
     {
         foreach (var moved in new[] { Side.Local, Side.Dropbox })
@@ -83,7 +82,7 @@ public static partial class ChangeRunnerChecks
             "; operation=" + fixture.Inner.FolderRemoval(PairId, existing) + "; moved=" + moved);
     }
 
-    // VAC-supersede (SPEC-B212-9 1.4-1.6, rule G): B's saved S path is the moved path, so the unsent Inferred operation
+    // VAC-supersede (D6's one exception): B's saved S path is the moved path, so the unsent Inferred operation
     // over the occupant recorded X absent where the vacate observes it. Once the vacate's own plan is accepted, that
     // operation retires NoEffect with no notice, the vacate freezes its own operation, and the rename lands.
     private static async Task VacateSupersedeAsync()
@@ -216,7 +215,7 @@ public static partial class ChangeRunnerChecks
             "; clash=" + clash);
     }
 
-    // VAC-supersede-gap-retry and -gap-restart (1.6, RULINGS-B212-10 1): retire and begin are two store calls, so a begin
+    // VAC-supersede-gap-retry and -gap-restart: retire and begin are two store calls, so a begin
     // that fails after the retirement leaves the root with no operation. The first BeginFolderRemoval after the
     // retirement throws the live admission's own stale refusal, once. Opportunity 1 then leaves the old operation
     // retired and nothing outstanding but W; opportunity 2, on the same LiveSyncer (retry, M-B83: its unfinished map
@@ -295,7 +294,7 @@ public static partial class ChangeRunnerChecks
         }
     }
 
-    // VAC-supersede-cost (SPEC-B212-9 1.8; RULINGS-B212-12 2, -13 1). Executed SQL is every statement SQLite started on
+    // VAC-supersede-cost. Executed SQL is every statement SQLite started on
     // the store's main connection (SqlStatementsAsync): BEGIN, COMMIT and empty probes included. Not covered: the
     // folder-plan scratch connection (the plan build and the freeze's frozen-evidence pages), read-only connections and
     // in-statement work (VM steps, rows, path-key calls). M is the old operation's member rows: the root and M - 1 bound

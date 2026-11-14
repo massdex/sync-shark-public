@@ -12,10 +12,58 @@ internal static class AutoSyncSupervisorChecks
         BackoffResetsAfterStableUptime();
         EventsAreLogged();
         BackoffIsUnchanged();
+        PersistentStartupRefusalEndsSupervision();
+        PersistentStartupRefusalPredicate();
         FailedRotationDoesNotGrow();
         ConcurrentWritersStayBounded();
         PrivateDetailsAreOmitted();
         Console.WriteLine("AutoSync supervisor checks passed.");
+    }
+
+    private static void PersistentStartupRefusalEndsSupervision()
+    {
+        foreach (var (exit, key) in new[]
+        {
+            ((int)SyncCliExitCode.StartupReleaseRecoveryRequired, "startup-release-recovery-required-notice"),
+            ((int)SyncCliExitCode.StartupInvalidDataLocation, "startup-invalid-data-location-notice"),
+            ((int)SyncCliExitCode.StartupLegacyFootprintRefused, "startup-legacy-footprint-refused-notice")
+        })
+        {
+            var root = NewRoot();
+            try
+            {
+                // The terminal notice lives next to the installation; the test root stands in for it.
+                using var productRoot = SyncSharkRuntimePaths.OverrideProductRootForTest(root);
+                var starts = 0;
+                var relaunchWaits = 0;
+                var supervisor = NewSupervisor(root,
+                    () => new FakeChild(500 + Interlocked.Increment(ref starts), exitCode: exit),
+                    wait =>
+                    {
+                        if (wait > TimeSpan.Zero) relaunchWaits++;
+                        return starts > 1;
+                    });
+                Require(supervisor.Run() == exit, "a persistent startup refusal ends supervision with its exit " + exit);
+                Require(starts == 1, "a persistent startup refusal never relaunches exit " + exit);
+                Require(relaunchWaits == 0, "a persistent startup refusal waits for no relaunch delay " + exit);
+                Require(File.ReadAllText(AutoSyncProcess.PersistentStartupNoticePath) == EdgeMessages.Text(key),
+                    "one notice explains the persistent refusal " + exit);
+            }
+            finally { Remove(root); }
+        }
+    }
+
+    private static void PersistentStartupRefusalPredicate()
+    {
+        foreach (var exit in new[] { 0, 3, 6, 130, -1 })
+            Require(!SyncCli.IsPersistentStartupRefusal(exit), "transient exit " + exit + " keeps the existing backoff");
+        foreach (var exit in new[]
+                 {
+                     (int)SyncCliExitCode.StartupReleaseRecoveryRequired,
+                     (int)SyncCliExitCode.StartupInvalidDataLocation,
+                     (int)SyncCliExitCode.StartupLegacyFootprintRefused
+                 })
+            Require(SyncCli.IsPersistentStartupRefusal(exit), "startup refusal " + exit + " ends supervision");
     }
 
     private static void ZeroExitWithoutStopRelaunches()

@@ -131,6 +131,7 @@ public sealed class Syncer
             (rows ??= _items.Rows).ForConcurrentSelection(), progress, _ports.RunBatchAsync, RecordTemporary,
             TemporaryThisRun);
         var serial = false;
+        var settling = true;
         bool repeat;
         bool waiting;
         do
@@ -155,8 +156,15 @@ public sealed class Syncer
                 SelectionPass? serialPass = null;
                 try
                 {
-                    while (_context.Store.SelectWork(pairId, _context.ExpectedGeneration, _context.Scope) is { } selection)
+                    while (true)
                     {
+                        while (settling && SettleEchoPage(pairId) is var page)
+                        {
+                            if (page is null) settling = false;
+                            else if (!page.Value.More) break;
+                            cancel.Token.ThrowIfCancellationRequested();
+                        }
+                        if (_context.Store.SelectWork(pairId, _context.ExpectedGeneration, _context.Scope) is not { } selection) break;
                         cancel.Token.ThrowIfCancellationRequested();
                         if (!_ports.Live.TryHoldGeneration(pairId))
                         {
@@ -189,6 +197,21 @@ public sealed class Syncer
             serial = competed && Volatile.Read(ref progress0) == 0;
         } while (repeat);
         return waiting;
+    }
+
+    private (int Settled, bool More)? SettleEchoPage(string pairId)
+    {
+        try
+        {
+            return _context.Store.SettleEchoes(pairId, _context.ExpectedGeneration, _context.Scope,
+                SelectionObservation.SettlesDropboxEcho, _context.Settings.StoragePageSize);
+        }
+        catch (ItemStoreMutationException error)
+        {
+            _context.Events(RunEvent.Failed(error, path: error.Selection.Key)
+                with { Side = error.Selection.Side, WorkId = error.Selection.AnchorWorkId });
+            return null;
+        }
     }
 
     // Reason: one traversal state machine; the pending stack, visited set and stale-run boundary share one selection

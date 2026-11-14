@@ -91,16 +91,39 @@ public static class AutoSyncProcess
     internal static string ExistingOwnerNoticePathFor(string productRoot) =>
         Path.Combine(productRoot, "autosync-owner-notice.txt");
 
-    public static void RecordExistingOwnerNotice(string path)
+    /// <summary>The terminal notice for a persistent startup refusal. The product data root may be unusable
+    /// (an invalid location pointer), so the notice lives next to the installation instead.</summary>
+    public static string PersistentStartupNoticePath =>
+        Path.Combine(SyncSharkRuntimePaths.InstallationUserRoot, "autosync-startup-refused-notice.txt");
+
+    public static void RecordExistingOwnerNotice(string path, string messageKey = "startup-owner-notice")
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         // One overwrite-only spool notice: the other owner holds the database, so never open it here.
-        File.WriteAllText(path, EdgeMessages.Text("startup-owner-notice"));
+        File.WriteAllText(path, EdgeMessages.Text(messageKey));
+    }
+
+    /// <summary>The retained persistent-startup notice text, or null when none is retained.</summary>
+    public static string? ReadPersistentStartupNotice()
+    {
+        var path = PersistentStartupNoticePath;
+        return File.Exists(path) && new FileInfo(path).Length > 0 ? File.ReadAllText(path) : null;
     }
 
     public static void ClearExistingOwnerNotice(string path)
     {
         if (File.Exists(path)) File.WriteAllText(path, string.Empty);
+    }
+
+    /// <summary>Clears each retained startup notice independently, so an inaccessible notice never blocks the
+    /// other and a healthy host keeps running; a failed clear is logged once.</summary>
+    public static void ClearStartupNotices(string productRoot)
+    {
+        foreach (var path in new[] { ExistingOwnerNoticePathFor(productRoot), PersistentStartupNoticePath })
+        {
+            try { ClearExistingOwnerNotice(path); }
+            catch (Exception error) { AutoSyncLog.Failure(productRoot, error); }
+        }
     }
 
     /// <summary>Ownership follows the product command, never its deployment directory.</summary>

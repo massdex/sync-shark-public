@@ -11,6 +11,7 @@ public static class IssuePolicyChecks
         HoldingPolicy();
         LocalAccessRetryCause();
         PublicCategories();
+        AbsentLiveEpisodes();
         RetainedByOwner();
         ObsoleteSubjects();
         ConfiguredScopeRetirement();
@@ -271,6 +272,40 @@ public static class IssuePolicyChecks
         }
     }
 
+    private static void AbsentLiveEpisodes()
+    {
+        var local = Observed("Parent/Item.txt", "local-id");
+        var issue = Notice(IssueKind.Failure, local.Path, local, null) with { Cause = TextKey.FailLocalInUse };
+        foreach (var scenario in new[] { "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P8b", "P9" })
+        {
+            var current = scenario == "P3" ? issue with
+            {
+                Subject = issue.Subject with { Items = [.. issue.Subject.Items, new(Side.Dropbox, "Mapped/Item.txt", "remote-id")] }
+            } : scenario == "P6" ? issue with
+            {
+                Subject = issue.Subject with { Move = new IssueSubject.UnknownMove("remote-id", "Source", "Destination", "Intermediate", false) }
+            } : issue;
+            var skipped = new PrefixSet();
+            if (scenario == "P5") skipped.Add(PathNames.Key("Parent"));
+            var exclusions = scenario is "P4" or "P8b" ? new[] { new Exclusion(Side.Local, "Parent", true) } : [];
+            var scope = Scope(scenario == "P8" ? "FileName:Item.txt" : null, exclusions);
+            var applied = new PrefixSet();
+            var pending = new PrefixSet();
+            if (scenario == "P4") pending.Add(PathNames.Key("Parent"));
+            if (scenario == "P8b") applied.Add(PathNames.Key("Parent"));
+            Entry? Scanned(Side side, string path) => scenario switch
+            {
+                "P2" when side == Side.Dropbox && PathNames.Same(path, local.Path) => local,
+                "P3" when side == Side.Dropbox && path == "Mapped/Item.txt" => Observed(path, "remote-id"),
+                "P7" when side == Side.Local && PathNames.Same(path, local.Path) => local with { Path = "PARENT/ITEM.TXT" },
+                _ => null
+            };
+            Check.Require(IssuePolicy.Obsolete(current, Scanned, skipped, new PrefixSet(), applied, pending,
+                scope, retainedByOwner: true, liveEpisode: scenario != "P9") == (scenario == "P1"),
+                "B222 " + scenario + ": only trusted bilateral absence retires a live episode");
+        }
+    }
+
     // The owner's retention answer must win before any scope or scan lookup, including the empty root.
     private static void RetainedByOwner()
     {
@@ -289,7 +324,7 @@ public static class IssuePolicyChecks
             var retired = IssuePolicy.Obsolete(issue,
                 (Side side, string path) => { calls++; return null; },
                 new PrefixSet(), new PrefixSet(), new PrefixSet(), new PrefixSet(), Scope(),
-                retainedByOwner: true);
+                retainedByOwner: true, liveEpisode: false);
             Check.Require(!retired && calls == 0,
                 "Obsolete: owner-retained debt wins before every scan lookup: " + what);
         }
@@ -421,7 +456,7 @@ public static class IssuePolicyChecks
             untrustedBoth || untrustedSide == Side.Dropbox ? SkippedKeys(issue, Side.Dropbox) : new PrefixSet(),
             applied ? CoveredKeys(issue) : new PrefixSet(),
             pending ? CoveredKeys(issue) : new PrefixSet(),
-            scope, retainedByOwner: false);
+            scope, retainedByOwner: false, liveEpisode: false);
         Check.Require(actual == expected, "Obsolete: " + issue.Kind + "/dismissed=" + issue.Dismissed + ": " + what);
     }
 
@@ -462,7 +497,7 @@ public static class IssuePolicyChecks
             Check.Require(IssuePolicy.Obsolete(issue,
                     (side, _) => side == Side.Local ? local : dropbox,
                     new PrefixSet(), new PrefixSet(), new PrefixSet(), new PrefixSet(), scope,
-                    retainedByOwner: false),
+                    retainedByOwner: false, liveEpisode: false),
                 "each repeated issue is outside the one derived configured scope");
         Check.Require(ReferenceEquals(scope.Configured, scope.Configured),
             "repeated retirement asks do not rebuild the configured scope");

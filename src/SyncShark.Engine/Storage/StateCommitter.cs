@@ -11,7 +11,7 @@ public static class StateCommitter
     // Each stage reads what the previous stage wrote within the caller's transaction.
     internal static void Commit(SqliteConnection connection, SqliteTransaction transaction, ChangeTable changes, string pairId,
         StateChange change, DateTimeOffset now, bool narrowRecordUpdates, ICollection<Issue>? raised, IReadOnlyList<ScanPartition> scans,
-        ICollection<(Issue Issue, bool IsNew)>? settled = null)
+        ICollection<(Issue Issue, bool IsNew)>? settled = null, Func<Issue, bool>? endEpisode = null)
     {
         ValidateChange(change, scans);
         // Before any stage writes: a settle's own forget would otherwise hide the binding it checks (-7 2).
@@ -35,7 +35,7 @@ public static class StateCommitter
         foreach (var item in change.FirstRunAcknowledged)
             IssueTable.AcknowledgeFirstRun(connection, transaction, pairId, item);
         foreach (var (path, kinds) in change.Close)
-            IssueTable.Close(connection, transaction, pairId, path, kinds, change.CloseScope);
+            IssueTable.Close(connection, transaction, pairId, path, kinds, change.CloseScope, endEpisode: endEpisode);
         foreach (var (kind, cause, path, subject) in change.Raise)
             IssueTable.Raise(connection, transaction, pairId, kind, cause, path, subject, now, raised, settled);
         // The hold commit raises exactly its one Failure; the hold binds to whatever Failure that raise left there.

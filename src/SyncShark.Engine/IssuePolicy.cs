@@ -275,9 +275,12 @@ public static class IssuePolicy
         PrefixSet appliedExclusions,
         PrefixSet pendingExclusions,
         PathScope scope,
-        bool retainedByOwner)
+        bool retainedByOwner, bool liveEpisode)
     {
-        if (retainedByOwner || !IssueClosure.AfterHeldInSync.Contains(issue.Kind)) return false;
+        if (!IssueClosure.AfterHeldInSync.Contains(issue.Kind)) return false;
+        // A live wait yields only to trustworthy absence, never to a change of configured scope.
+        if (liveEpisode) return !UnknownMove(issue.Kind, issue.Subject) && AbsentOnBothSides();
+        if (retainedByOwner) return false;
         // Asked only for an issue that can retire; the scope derives it once and keeps it.
         var configuredScope = scope.Configured;
         if (Covered(Outside) || Covered(AppliedExclusion)) return true;
@@ -294,9 +297,17 @@ public static class IssuePolicy
             if (entry is null || entry.Path != item.Path || entry.Id != item.Id) return true;
         }
 
-        return issue.Kind == IssueKind.Failure && issue.Subject.Items.Count == 0 &&
-            !Untrusted(Side.Local, issue.Path) && !Untrusted(Side.Dropbox, issue.Path) &&
-            scanEntry(Side.Local, issue.Path) is null && scanEntry(Side.Dropbox, issue.Path) is null;
+        return issue.Kind == IssueKind.Failure && issue.Subject.Items.Count == 0 && AbsentOnBothSides();
+
+        bool AbsentOnBothSides()
+        {
+            if (Untrusted(Side.Local, issue.Path) || Untrusted(Side.Dropbox, issue.Path) ||
+                scanEntry(Side.Local, issue.Path) is not null || scanEntry(Side.Dropbox, issue.Path) is not null) return false;
+            for (var index = 0; index < issue.Subject.Items.Count; index++)
+                if (Untrusted(issue.Subject.Items[index].Side, issue.Subject.Items[index].Path) ||
+                    scanEntry(issue.Subject.Items[index].Side, issue.Subject.Items[index].Path) is not null) return false;
+            return true;
+        }
 
         bool Skipped(Side side, string path) =>
             (side == Side.Local ? localSkipped : dropboxSkipped).Covers(PathNames.KeyFor(side, path));

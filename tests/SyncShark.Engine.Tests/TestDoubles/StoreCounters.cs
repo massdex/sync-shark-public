@@ -9,6 +9,8 @@ namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 internal sealed class StoreCounters(IStateStore inner) : IStateStore
 {
     private long _commands;
+    private long _echoesSettled;
+    public long EchoesSettled => Interlocked.Read(ref _echoesSettled);
     private long _commits;
     private long _readConnections;
     private long _rowsRead;
@@ -71,6 +73,7 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
     public void Reset()
     {
         Interlocked.Exchange(ref _commands, 0);
+        Interlocked.Exchange(ref _echoesSettled, 0);
         Interlocked.Exchange(ref _commits, 0);
         Interlocked.Exchange(ref _readConnections, 0);
         Interlocked.Exchange(ref _rowsRead, 0);
@@ -198,7 +201,11 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
 
     internal IStateStore FixtureInner => inner;
     public Task EndScanAsync(string pairId, Guid scanId, int pageSize) => inner.EndScanAsync(pairId, scanId, pageSize);
-    public bool CloseScanIssue(string pairId, Guid scanId, Issue expected) => inner.CloseScanIssue(pairId, scanId, expected);
+    public bool CloseScanIssue(string pairId, Guid scanId, Issue expected)
+    {
+        Command();
+        return inner.CloseScanIssue(pairId, scanId, expected);
+    }
     public ScanRecord ReadScan(string pairId, Guid scanToken)
     {
         Command();
@@ -432,6 +439,15 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
     {
         Command();
         return inner.SelectWork(pairId, expectedGeneration, scope);
+    }
+
+    public (int Settled, bool More) SettleEchoes(string pairId, long expectedGeneration, PathScope scope,
+        Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize)
+    {
+        Command();
+        var result = inner.SettleEchoes(pairId, expectedGeneration, scope, settles, pageSize);
+        Interlocked.Add(ref _echoesSettled, result.Settled);
+        return result;
     }
 
     public (long Local, long Dropbox) CountWork(string pairId, long expectedGeneration, long through)
@@ -690,13 +706,15 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
     public Action? BeforePlanDispose { get; set; }
 
     public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, WorkSelection renameWork,
-        Action? admit = null) => inner.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, renameWork, admit);
+        Action? admit = null, string? preRestoreId = null) =>
+        inner.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, renameWork, admit, preRestoreId);
     public string? RenameRemoval(WorkSelection selection) => inner.RenameRemoval(selection);
     public long? RenameRemovalWork(string pairId, string operationId) => inner.RenameRemovalWork(pairId, operationId);
-    public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, Action? admit = null)
+    public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, Action? admit = null,
+        string? preRestoreId = null)
     {
         Command();
-        return inner.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, admit);
+        return inner.BeginFolderRemoval(pairId, plan, authority, pageSize, ct, admit, preRestoreId);
     }
 
     public FolderRemovalState FolderRemoval(string pairId, string operationId)
@@ -762,6 +780,19 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
     {
         Command();
         return inner.FolderRemovalItems(pairId, operationId, afterOrdinal, pageSize);
+    }
+
+    public IReadOnlyList<(Issue Issue, SyncedEntry? Saved)> HeldFolderMembers(string pairId, string operationId,
+        IssueKind kind, (string Key, long IssueId) after, string high, int pageSize)
+    {
+        Command();
+        return inner.HeldFolderMembers(pairId, operationId, kind, after, high, pageSize);
+    }
+
+    public void CloseIdentityAbsent(string pairId, IReadOnlyList<Issue> expected)
+    {
+        Command();
+        inner.CloseIdentityAbsent(pairId, expected);
     }
 
     public void AdvanceFolderRemoval(string pairId, string operationId, long expectedGeneration,

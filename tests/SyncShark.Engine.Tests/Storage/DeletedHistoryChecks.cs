@@ -706,8 +706,26 @@ public static class DeletedHistoryChecks
         foreach (var size in sizes) RestoreSpeedAt(size);
     }
 
+    /// <summary>B-232 storage cost: write-log footprint and logical bytes after a deleted-history restore at two sizes.</summary>
+    internal static void RunRestoreFootprint()
+    {
+        // Four versus sixteen blocks separates a retained whole-history WAL from the default checkpoint high-water mark.
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        var small = RestoreSpeedAt(4 * StateSchema.DeletedHistoryBatchSize);
+        var large = RestoreSpeedAt(16 * StateSchema.DeletedHistoryBatchSize);
+        var walBounded = large.WalFileBytes <= 2 * small.WalFileBytes;
+        var linear = large.LogicalBytes * small.Names <= 2 * small.LogicalBytes * large.Names;
+        // Measured one-copy fill is below twice the key bytes; the old two-copy layout exceeds it.
+        var oneCopy = large.LogicalBytes < 2 * large.Names * large.MeanLength;
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"RESTORE-FOOTPRINT wal_file_bytes={small.WalFileBytes}->{large.WalFileBytes} logical_bytes={small.LogicalBytes}->{large.LogicalBytes} " +
+            $"names={small.Names}->{large.Names} mean_key={large.MeanLength} wal_bounded={walBounded} linear={linear} one_copy={oneCopy} " +
+            $"elapsed_total_ms={timer.ElapsedMilliseconds}"));
+        Check.Require(walBounded && linear && oneCopy, $"restore footprint: wal_bounded={walBounded} linear={linear} one_copy={oneCopy}");
+    }
+
     // Each size uses a fresh store and the same deterministic name generator, so the smaller set is a prefix of the larger.
-    private static void RestoreSpeedAt(int names)
+    private static (long Names, long MeanLength, long LogicalBytes, long DbFileBytes, long WalFileBytes) RestoreSpeedAt(int names)
     {
         var folder = Path.Combine(Path.GetTempPath(), "history-speed-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
@@ -770,12 +788,23 @@ public static class DeletedHistoryChecks
             if (probeFailure is not null) throw new InvalidOperationException("The lock probe failed.", probeFailure);
             allocated = GC.GetTotalAllocatedBytes(true) - allocated;
             process.Refresh();
+            // Read retained WAL bytes first; page_count includes logical pages still in the WAL.
+            var scanFile = Directory.EnumerateFiles(folder, "state.db" + StateSchema.ScanFileSuffix + "*" + StateSchema.DatabaseExtension).Single();
+            var walFileBytes = new FileInfo(scanFile + StateSchema.WalSuffix).Length;
+            var dbFileBytes = new FileInfo(scanFile).Length;
+            var logicalBytes = Number(connection, "PRAGMA scan_state.page_count;") * Number(connection, "PRAGMA scan_state.page_size;");
+            var autocheckpoint = Number(connection, "PRAGMA wal_autocheckpoint;");
+            var sqlite = Keys(connection, "SELECT sqlite_version();").Single();
             var restored = Number(connection, "SELECT count(*) FROM scan_state.deleted_name;");
             Check.Require(cursor == Cursor && restored == seeded, "The measured restore restores every seeded name.");
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
                 $"HISTORY-RESTORE names={seeded} mean_length={meanLength} elapsed_ms={timer.Elapsed.TotalMilliseconds:F0} allocated_bytes={allocated} " +
                 $"heap_before={heapBefore} largest_heap={largestHeap} peak_working_set_before={peakBefore} peak_working_set_after={process.PeakWorkingSet64} " +
-                $"longest_lock_wait_ms={longestWait * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} probes={probes}"));
+                $"longest_lock_wait_ms={longestWait * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} probes={probes} " +
+                $"scan_wal_file_bytes={walFileBytes} scan_db_file_bytes={dbFileBytes} footprint=physical " +
+                $"scan_logical_bytes={logicalBytes} logical_bytes_per_name={(double)logicalBytes / seeded:F2} " +
+                $"autocheckpoint={autocheckpoint} sqlite={sqlite}"));
+            return (seeded, meanLength, logicalBytes, dbFileBytes, walFileBytes);
         }
         finally { Directory.Delete(folder, recursive: true); }
     }

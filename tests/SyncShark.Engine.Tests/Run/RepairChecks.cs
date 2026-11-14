@@ -39,6 +39,85 @@ public static class RepairChecks
 
     public static void DirectRepair() => ProductionDirectRepairAsync().GetAwaiter().GetResult();
 
+    public static void AbsentEpisodes() => AbsentEpisodesAsync().GetAwaiter().GetResult();
+
+    private static async Task AbsentEpisodesAsync()
+    {
+        foreach (var scenario in new[] { "S1", "S2", "S4", "R6r" })
+            await WithFolder("absent-episode", async folder =>
+            {
+                const string path = "Parent/Child";
+                var attempt = Guid.NewGuid();
+                var pair = Pair(exclusions: scenario == "S2" ? [new Exclusion(Side.Local, "Parent", false)] : null);
+                var store = StateStore.Open(Path.Combine(folder, "state.db"),
+                    (id, _, _, _, _) => id == attempt || scenario == "S4");
+                using var rig = NewRig(pair, store);
+                SourceFixture.AcquireJournal(store, pair);
+                var local = store.ReadSource(pair.PairId, Side.Local)!.Value;
+                var domain = pair.Roots!.Local.VolumeSerialNumber.ToString(CultureInfo.InvariantCulture);
+                Check.Require(store.AcquireJournalPage(domain, new JournalPosition(1, 1), new JournalPosition(1, 2),
+                    [(pair.PairId, 0, local.Epoch, local.Revision, false)],
+                    [(pair.PairId, new ChangeNotice(Side.Local, ChangeKind.Changed, path, null, "absent-id", null, false, false))]) is not null,
+                    "B222 Repair fixture acquires its absent Local item");
+                var selected = store.SelectWork(pair.PairId, 0, rig.Scope);
+                Check.Require(selected is not null, "B222 Repair fixture captures acquired work before the wait");
+                if (scenario == "R6r")
+                {
+                    var absent = new Entry(path, false, 1, DateTimeOffset.UnixEpoch, "absent-id", "", "hash", null);
+                    store.ArmPending(pair.PairId, new PendingEffect(1, "held-operation", 0, PendingKind.LocalDelete,
+                        PendingPhase.Armed, path, new RemovalProof(absent, "volume-a", "hash"),
+                        null, null, null, null, null, false, null));
+                    rig.Recovery.Result = new RemovalResult(RemovalOutcome.Unknown, null, null, null);
+                }
+                var episode = store.RecordInUseFailure(pair.PairId, 0, local.Epoch, path,
+                    new IssueSubject([new IssueItem(Side.Local, path, "absent-id")], null), TextKey.FailLocalInUse,
+                    selected, ItemRetryDispatch.OrdinaryItem, null, null, attempt);
+                store.EndWorkPass(pair.PairId);
+                using var log = Log(rig, folder, "repair");
+                var summary = await RunScanRepairAsync(Session(rig, log), default);
+                var retained = scenario != "S1";
+                Check.Require(summary.Completed &&
+                    (store.ReadItemRetryState(pair.PairId, [episode.Token.IssueId])[episode.Token.IssueId] is not null) == retained &&
+                    store.Issues(pair.PairId).Any(issue => issue.Id == episode.Token.IssueId) == retained,
+                    "B222 " + scenario + ": full Repair retires only trustworthy, unretained bilateral absence");
+                if (!retained) Check.Require(store.CountWork(pair.PairId, 0, store.ReadWorkWatermark()) == (0, 0),
+                    "B222 S1: FinishRepair drains the formerly held acquired work");
+            });
+        await AbsentEpisodeRecoveryAsync();
+    }
+
+    private static Task AbsentEpisodeRecoveryAsync() => WithFolder("absent-recovery", async folder =>
+    {
+        const string path = "Parent/Child";
+        var recovery = new FakeRecovery { Result = new RemovalResult(RemovalOutcome.Unknown, null, null, null) };
+        await using var rig = await ComposeRigAsync(folder, recovery: recovery);
+        using (var baseline = rig.Log(folder, "baseline"))
+            Check.Require((await rig.RunAsync(baseline, default)).Completed,
+                "B222 R6r: the composed host completes its first Repair before recovery custody");
+        var pair = rig.Pair.PairId;
+        var absent = new Entry(path, false, 1, DateTimeOffset.UnixEpoch, "absent-id", "", "hash", null);
+        var pending = new PendingEffect(1, "held-operation", 0, PendingKind.LocalDelete,
+            PendingPhase.Armed, path, new RemovalProof(absent, "volume-a", "hash"),
+            null, null, null, null, null, false, null);
+        rig.Store.ArmPending(pair, pending);
+        var episode = await rig.Host.DispatchSessionAsync(pair, () => null, async (session, token) =>
+        {
+            var subject = new IssueSubject([new IssueItem(Side.Local, path, absent.Id)], null);
+            var attempts = session.Context.ItemAttempts;
+            return await attempts.ExecuteAsync(session.Context.Opportunity, null, subject, (attempt, _) =>
+                Task.FromResult(attempts.ReportFailure(attempt, rig.Store.ReadSource(pair, Side.Local)!.Value.Epoch,
+                    path, subject, TextKey.FailLocalInUse, null, ItemRetryDispatch.OrdinaryItem, null, null)), token);
+        }, default);
+        using var log = rig.Log(folder, "recovery");
+        var summary = await rig.RunAsync(log, default);
+        Check.Require(summary.Completed &&
+            recovery.Resolved.SequenceEqual(new[] { ((PendingRead)new CurrentPending(pending), RecoveryChoice.Check) }) &&
+            rig.Store.Pending(pair) == new CurrentPending(pending) &&
+            rig.Store.ReadItemRetryState(pair, [episode.Token.IssueId])[episode.Token.IssueId] is not null &&
+            rig.Store.Issues(pair).Any(issue => issue.Id == episode.Token.IssueId),
+            "B222 R6r: composed Repair reaches Unknown recovery and retains its absent episode and notice");
+    });
+
     public static void UnknownMoveRepairOutcomes() => UnknownMoveRepairOutcomesAsync().GetAwaiter().GetResult();
 
     // G1 rows 17, 20 and 21 and the U4 map through a scan plus its completion (K-2, R4, X7, X8, E6(3); K-1 and O1 as pins).
@@ -2627,10 +2706,13 @@ public static class RepairChecks
                     Extra = [protectedFolder with { Skip = nameof(TextKey.SkipUnreadable) }],
                     LateMarkers = lateMarker
                 };
+                // The deleted Dropbox folders answer their saved identities as absent, as DropboxSide does.
+                var answering = IdentitySide.Truthful(rig.Dropbox, rig.Dropbox);
                 for (var attempt = 0; attempt < 2; attempt++)
                 {
                     using var log = Log(rig, folder, "blocked-" + attempt);
-                    var summary = await RunScanRepairAsync(Session(rig, log, local: listing), CancellationToken.None);
+                    var summary = await RunScanRepairAsync(Session(rig, log, local: listing, dropbox: answering),
+                        CancellationToken.None);
                     Check.Require(summary.Completed &&
                         rig.Store.SyncedByKey(rig.Pair.PairId, Side.Local, PathNames.Key(child.Path)) is not null &&
                         await rig.Local.ReadOneAsync(localRoot.Path, CancellationToken.None) is not null,
@@ -2651,7 +2733,7 @@ public static class RepairChecks
                     await rig.Local.DeleteAsync(kept!, null, CancellationToken.None);
                 }
                 using var readable = Log(rig, folder, "readable");
-                await RunScanRepairAsync(Session(rig, readable), CancellationToken.None);
+                await RunScanRepairAsync(Session(rig, readable, dropbox: answering), CancellationToken.None);
                 Check.Require(await rig.Local.ReadOneAsync(localRoot.Path, CancellationToken.None) is null &&
                     rig.Store.SyncedByKey(rig.Pair.PairId, Side.Local, PathNames.Key(child.Path)) is null &&
                     rig.Store.Issues(rig.Pair.PairId).All(issue => issue.Kind is not (IssueKind.Skipped or IssueKind.Failure)),
@@ -2784,7 +2866,9 @@ public static class RepairChecks
             AfterPublish = _ => published = true
         };
         using var log = Log(rig, folder, "run");
-        var run = RunScanRepairAsync(Session(rig, log, local, dropbox), CancellationToken.None);
+        // The deleted Dropbox folder answers its saved identity as absent, as DropboxSide does.
+        var run = RunScanRepairAsync(Session(rig, log, local, IdentitySide.Truthful(dropbox, rig.Dropbox)),
+            CancellationToken.None);
         try
         {
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
@@ -2843,7 +2927,8 @@ public static class RepairChecks
                     }
                 };
                 using var log = Log(rig, folder, "run");
-                var summary = await RunScanRepairAsync(Session(rig, log, dropbox: dropbox), CancellationToken.None);
+                var summary = await RunScanRepairAsync(Session(rig, log, dropbox: IdentitySide.Truthful(dropbox, rig.Dropbox)),
+                    CancellationToken.None);
                 Check.Require(summary.Completed && rig.Store.Issues(rig.Pair.PairId).All(issue =>
                     issue.Kind != IssueKind.Failure) &&
                     await rig.Local.ReadOneAsync("FoLdEr/Child/removed", CancellationToken.None) is null &&
@@ -3444,7 +3529,9 @@ public static class RepairChecks
             OnSubmit = effects => deleted.AddRange(effects.Select(effect => effect.Expected!.Path))
         };
         using var log = Log(rig, folder, "run-1");
-        var summary = await RunScanRepairAsync(Session(rig, log, dropbox: dropbox), CancellationToken.None);
+        // a, x/y and d were never created locally, so Local answers their saved identities as absent.
+        var summary = await RunScanRepairAsync(Session(rig, log, IdentitySide.Truthful(rig.Local, rig.Local), dropbox),
+            CancellationToken.None);
 
         Check.Require(deleted.SequenceEqual(new[] { "x/y", "a", "d" }),
             "deferred folders run deepest first, then by canonical policy key");
@@ -4970,7 +5057,8 @@ public static class RepairChecks
         Func<IStateStore, HookStore>? decorate = null, int level = 3,
         Func<PairConfig, PairConfig>? configure = null, TimeProvider? time = null, EngineSettings? settings = null,
         Action<string>? progress = null, Massdex.SyncShark.Engine.Run.Monitor? monitor = null,
-        Func<string, RunLog?>? openLog = null, EngineHost.Mode mode = EngineHost.Mode.Direct, DropboxWire? wire = null)
+        Func<string, RunLog?>? openLog = null, EngineHost.Mode mode = EngineHost.Mode.Direct, DropboxWire? wire = null,
+        bool composeBeforeStart = true)
     {
         var root = Path.Combine(folder, "local");
         Directory.CreateDirectory(root);
@@ -5006,8 +5094,11 @@ public static class RepairChecks
             host.Store.SaveLimiterLevel(connection, level);
             // The host keys the account limiter by account id; the case checks the connection-keyed save.
             host.Store.SaveLimiterLevel("account-id", level);
-            await host.RecomposeCurrentAsync(pair.PairId, CancellationToken.None);
-            if (enabled) await host.EnsureSourceBasesAsync(pair.PairId, CancellationToken.None);
+            if (composeBeforeStart)
+            {
+                await host.RecomposeCurrentAsync(pair.PairId, CancellationToken.None);
+                if (enabled) await host.EnsureSourceBasesAsync(pair.PairId, CancellationToken.None);
+            }
             return new ComposedRig(pair, (HookStore)host.Store, wire, transport, host, instance, http);
         }
         catch
@@ -5060,6 +5151,16 @@ public static class RepairChecks
                     if (before is not null) await before(session.Context, token);
                     return await Repair.RunAsync(session, token, retryIssues);
                 }, ct);
+
+        // Baseline journal rows would otherwise precede echo acquisition.
+        public Task<bool> DrainWorkAsync(RunLog log, CancellationToken ct) =>
+            Host.DispatchSessionAsync(Pair.PairId, () => log, async (session, token) =>
+            {
+                await session.Syncer.SyncWorkAsync(token);
+                Check.Require(Store.CountWork(Pair.PairId, session.Context.ExpectedGeneration, Store.ReadWorkWatermark()) == (0L, 0L),
+                    "The composed baseline queue is empty before acquiring test work.");
+                return true;
+            }, ct);
 
         public async ValueTask DisposeAsync()
         {

@@ -25,8 +25,10 @@ public static partial class ChangeRunnerChecks
                 var local = LocalEntry(paths[index], LocalId + "-" + index);
                 var remote = RemoteEntry(paths[index], DropboxId + "-" + index);
                 fixture.Local.Seed(local, [1]);
-                fixture.Dropbox.Seed(remote, [1]);
                 fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(local, remote)] });
+                // B-214 settles exact saved echoes before selection; changed content exercises ordinary row progress.
+                remote = remote with { ContentHash = DropboxContentHash.Compute(new byte[] { 2 }) };
+                fixture.Dropbox.Seed(remote, [2]);
                 var work = SeedRemote(fixture, remote,
                     new ChangeNotice(Side.Dropbox, ChangeKind.Changed, paths[index], null, remote.Id, remote, false, false));
                 selected ??= work;

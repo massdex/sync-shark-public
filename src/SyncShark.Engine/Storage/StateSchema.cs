@@ -525,7 +525,6 @@ public static class StateSchema
     public const string DeletedDeltaPage = "SELECT path_key FROM discovery_deleted_delta WHERE pair_id=$pair AND spent=0 AND path_key>coalesce($after,'') ORDER BY path_key LIMIT $take;";
     public const string RetireFoldedDeletedNames = "DELETE FROM discovery_deleted_delta WHERE pair_id=$pair AND spent=0 AND path_key IN (SELECT path_key FROM scan_state.deleted_name WHERE pair_id=$pair);";
     public const string ClearScanDropbox = "DELETE FROM scan_state.scan WHERE pair_id=" + PairRow + " AND scan_id=$scan AND side=1;";
-    public const string ClearScanDeletedNames = "DELETE FROM scan_state.deleted_name WHERE pair_id=" + PairRow + ";";
     public const string DeletedNameLive = "DELETE FROM scan_state.deleted_name WHERE pair_id=$pair AND path_key=$path;";
 
 
@@ -704,6 +703,7 @@ public static class StateSchema
          PRIMARY KEY(pair_id,side,identity)) STRICT;
         ALTER TABLE folder_removal ADD COLUMN authority TEXT NOT NULL DEFAULT 'Legacy'
          CHECK(authority IN ('Inferred','Chosen','Excluded','Vacate','Repair','Legacy'));
+        ALTER TABLE folder_removal ADD COLUMN pre_restore_id TEXT CHECK(pre_restore_id IS NULL OR length(pre_restore_id)>0);
         """;
     public const string BackfillVacateAuthority = "UPDATE folder_removal SET authority='Vacate' WHERE rename_work_id IS NOT NULL;";
     // Column ordinals: DuplicateLocalIds and DuplicateDropboxIds.
@@ -741,7 +741,8 @@ public static class StateSchema
     public const string CaptureScanIssues = "INSERT INTO scan_state.scan_issue SELECT $scan,issue_id,path,kind,cause,subject_json,at_ticks,dismissed,item_retry_episode,item_retry_revision,item_retry_work_id FROM issue WHERE pair_id=$pair;";
     public const string ScanIssueUnchanged = "SELECT EXISTS(SELECT 1 FROM scan_state.scan_issue s JOIN issue i ON i.issue_id=s.issue_id WHERE s.scan_id=$scan AND s.issue_id=$issue AND i.pair_id=$pair AND i.path=s.path AND i.kind=s.kind AND i.cause=s.cause AND i.subject_json=s.subject_json AND i.at_ticks=s.at_ticks AND i.dismissed=s.dismissed AND i.item_retry_episode IS s.episode AND i.item_retry_revision IS s.revision AND i.item_retry_work_id IS s.work_id);";
     public const string DeleteScanIssueBatch = "DELETE FROM scan_state.scan_issue WHERE rowid IN (SELECT rowid FROM scan_state.scan_issue WHERE scan_id=$scan LIMIT $take);";
-    public const string CreateDeletedName = "CREATE TABLE IF NOT EXISTS scan_state.deleted_name(pair_id INTEGER NOT NULL,path_key TEXT NOT NULL,PRIMARY KEY(pair_id,path_key)) STRICT;";
+    // Key-only relation: WITHOUT ROWID stores each name once instead of in a rowid table plus its key index.
+    public const string CreateDeletedName = "CREATE TABLE IF NOT EXISTS scan_state.deleted_name(pair_id INTEGER NOT NULL,path_key TEXT NOT NULL,PRIMARY KEY(pair_id,path_key)) STRICT, WITHOUT ROWID;";
     // The plan's one classified relation; create exactly one of the two root index variants.
     public const string PlanCreateClassified = "CREATE TABLE scan_state.classified(id INTEGER PRIMARY KEY," + PlanFields + ",verdict TEXT NOT NULL CHECK(verdict IN ('Survives','Removed')),follow_up INTEGER NOT NULL CHECK(follow_up IN (0,1)),selected INTEGER NOT NULL DEFAULT 0 CHECK(selected IN (0,1)),UNIQUE(policy_key,native_key,present)) STRICT;CREATE INDEX scan_state.classified_order ON classified(-plandepth(policy_key),policy_key,native_key,present);CREATE INDEX scan_state.classified_survivor ON classified(policy_key,native_key,present) WHERE verdict='Survives';CREATE INDEX scan_state.classified_selected_order ON classified(-plandepth(policy_key),policy_key,native_key,present) WHERE selected=1;";
     // SQLite's CREATE INDEX grammar qualifies the index name, not its table name; all targets are in scan_state.
@@ -765,7 +766,8 @@ public static class StateSchema
 
     // Schema 5 statements. $pair is the integer row from PairFence, resolved once per operation. A mutation expected to
     // match one row must affect exactly 1 or its whole transaction rolls back; RetireCoveredWork alone may affect none.
-    private const string WorkEvidence = "SELECT " + WorkColumns + " FROM change_work w WHERE w.pair_id=$pair AND w.pair_generation=$generation AND w.side=$side AND w.source_epoch=$epoch AND w.domain=$domain AND ";
+    private const string WorkEvidenceWhere = " WHERE w.pair_id=$pair AND w.pair_generation=$generation AND w.side=$side AND w.source_epoch=$epoch AND w.domain=$domain AND ";
+    private const string WorkEvidence = "SELECT " + WorkColumns + " " + ClaimWorkFrom + WorkEvidenceWhere;
     private const string ItemWorkFence = "EXISTS(SELECT 1 FROM pair p JOIN change_work w ON w.pair_id=p.id JOIN source_state s ON s.pair_id=w.pair_id AND s.side=w.side JOIN issue_member m ON m.work_id=w.work_id AND m.issue_id=issue.issue_id AND m.pair_id=p.id WHERE p.id=$pair AND p.execution_generation=$generation AND w.work_id=$work AND w.pair_generation=$generation AND w.source_epoch=$epoch AND s.source_epoch=$epoch AND w.dispatch_kind=$dispatch AND w.pending_operation_id IS $pendingOperation AND w.pending_generation IS $pendingGeneration";
     private const string ItemPendingFence = " AND (w.dispatch_kind<>'LocalRecovery' OR (p.pending_json=$pendingJson AND coalesce(json_extract(p.pending_json,'$.Version'),0)=1 AND json_extract(p.pending_json,'$.OperationId')=w.pending_operation_id AND json_extract(p.pending_json,'$.Generation')=w.pending_generation)))";
     private const string WorkSelectionFence = "w.work_origin='Acquired' AND w.pair_id=$pair AND w.pair_generation=$generation AND w.side=$side AND w.source_epoch=$epoch AND w.domain=$domain AND w.work_id>=$anchor AND w.work_id<=$through AND w.parent_anchor IS $parent AND w.obligation_key IS $obligation AND (w.before_json IS NULL OR w.before_json IS $before) AND";
@@ -781,7 +783,7 @@ public static class StateSchema
     private const string WorkColumns = "w.work_id,w.pair_id,w.pair_generation,w.source_epoch,w.side,w.domain,w.path_key,w.old_path_key,w.identity,w.notice_json,w.before_json,w.acquisition_work_id,w.parent_anchor,w.obligation_key,w.discovery_required";
     private const string FolderItemColumns = "pair_id,operation_id,ordinal,generation,provenance,path,policy_key,native_key,present,expected_json,saved_json,verdict,follow_up,follow_up_state,selected_branch,effect_kind,effect_state,effect_generation,submission_id,submission_member,effect_result_json,phase,selected_json,stage_allocation_json,stage_json,result_json,cause";
     private const string WorkFields = "work_id,pair_id,pair_generation,source_epoch,side,domain,path_key,old_path_key,identity,notice_json,before_json,acquisition_work_id,parent_anchor,obligation_key,discovery_required";
-    private const string FolderColumns = "pair_id,operation_id,generation,phase,deleting_side,root_entry_json,source_evidence_json,saved_root_json,root_context_json,cursor,active,cause,authority";
+    private const string FolderColumns = "pair_id,operation_id,generation,phase,deleting_side,root_entry_json,source_evidence_json,saved_root_json,root_context_json,cursor,active,cause,authority,pre_restore_id";
     public const string PairFence = "SELECT id,execution_generation,first_repair_done,def_json FROM pair WHERE pair_id=$p;";
     /// <summary>Read-only open of a schema-4 pair, which has no execution_generation column: a constant 0 holds that ordinal.</summary>
     public const string LegacyPairFence = "SELECT id,0,first_repair_done,def_json FROM pair WHERE pair_id=$p;";
@@ -796,18 +798,29 @@ public static class StateSchema
     public const string AdvanceSource = "UPDATE source_state SET source_epoch=$nextEpoch,provenance_json=$provenance,cursor=$cursor,repair_reason=CASE WHEN side=0 AND (repair_reason=$gapReason OR ($nextEpoch>source_epoch AND " + CurrentLocalWork + ")) THEN $gapReason ELSE $reason END,repair_revision=$nextRevision WHERE pair_id=$pair AND side=$side AND source_epoch=$epoch AND provenance_json IS $expectedProvenance AND cursor IS $expectedCursor AND repair_revision=$revision AND $nextEpoch>=source_epoch AND ($nextEpoch=source_epoch OR $nextRevision=repair_revision+1) AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND execution_generation=$generation);";
     public const string FinishObligation = "UPDATE source_state SET repair_reason=NULL WHERE pair_id=$pair AND side=$side AND source_epoch=$epoch AND repair_revision=$revision AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND execution_generation=$generation);";
     public const string AdvancePair = "UPDATE pair SET def_json=$definition,execution_generation=$nextGeneration WHERE id=$pair AND execution_generation=$generation AND (NOT " + CurrentLocalWork + " OR EXISTS(SELECT 1 FROM source_state WHERE pair_id=$pair AND side=0 AND repair_reason=$gapReason));";
-    public const string WorkWatermark = "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='change_work'),0);";
+    private const string WorkWatermarkQuery = "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='change_work'),0)";
+    public const string WorkWatermark = WorkWatermarkQuery + ";";
     public const string InsertWork = "INSERT INTO change_work(" + WorkFields + ") VALUES($id,$pair,$generation,$epoch,$side,$domain,$path,$oldPath,$identity,$notice,$before,$acquisition,$parent,$obligation,0);";
     // The one eligibility rule and epoch lookup that selection and counting share, each declared once and
     // closed by its side value: pending Acquired rows of that side's current source. Selection reads the
     // source's epoch in the statement; counting binds the epochs it has already read.
-    private const string EligibilityPrefix = "w.pair_id=$pair AND w.pair_generation=$generation AND w.side=";
+    private const string EligibilityPair = "w.pair_id=";
+    private const string EligibilityGeneration = " AND w.pair_generation=$generation AND w.side=";
+    private const string EligibilityPrefix = EligibilityPair + ParamPairRow + EligibilityGeneration;
     private const string EligibilitySuffix = " AND w.work_origin='Acquired' AND w.source_epoch=";
-    private const string SourceEpochPrefix = "(SELECT source_epoch FROM source_state WHERE pair_id=$pair AND side=";
+    private const string SourceEpochPair = "(SELECT source_epoch FROM source_state WHERE pair_id=";
+    private const string SourceEpochSide = " AND side=";
+    private const string SourceEpochPrefix = SourceEpochPair + ParamPairRow + SourceEpochSide;
     private const string LocalEligibility = EligibilityPrefix + "0" + EligibilitySuffix;
     private const string RemoteEligibility = EligibilityPrefix + "1" + EligibilitySuffix;
     private const string LocalSourceEpoch = SourceEpochPrefix + "0)";
     private const string RemoteSourceEpoch = SourceEpochPrefix + "1)";
+
+    internal const string EchoWorkPending =
+        "SELECT EXISTS(SELECT 1 FROM pair p CROSS JOIN change_work w INDEXED BY work_source_order WHERE p.pair_id=$p AND " +
+        EligibilityPair + "p.id" + EligibilityGeneration + "1" + EligibilitySuffix +
+        SourceEpochPair + "p.id" + SourceEpochSide + "1)" +
+        " AND w.work_id>$after AND w.work_id<=coalesce($through,(" + WorkWatermarkQuery + ")));";
 
     public const string SelectWork = "WITH local_work AS MATERIALIZED (SELECT " + WorkColumns +
         " FROM change_work w INDEXED BY work_source_order WHERE " + LocalEligibility + LocalSourceEpoch +
@@ -860,7 +873,7 @@ public static class StateSchema
     public const string EvidencePathExact = WorkEvidence + "w.path_key=$key AND w.acquisition_work_id>$watermark AND w.work_origin='Acquired' ORDER BY w.path_key,w.work_id;";
     internal const string ResponsibilityOverlapsFunction = "responsibilityoverlaps";
     private const string EchoOverlap = ResponsibilityOverlapsFunction + "($localKey,$dropboxKey,$isFolder,";
-    internal const string LocalEchoResponsibilities =
+    internal const string EchoResponsibilities =
         "SELECT path,subject_json,NULL FROM issue WHERE pair_id=$pair AND (dismissed=0 OR item_retry_episode IS NOT NULL) " +
         "UNION ALL SELECT json_extract(f.root_entry_json,'$.Value.Path'),NULL,f.saved_root_json " +
         "FROM folder_removal f WHERE f.pair_id=$pair AND " + FolderUnresolved + ";";
@@ -898,12 +911,13 @@ public static class StateSchema
         "b.side=w.side AND b.identity=w.identity WHERE w.work_id=$work);";
     /// <summary>A FailDuplicateFolderBinding Failure is responsible while an obligation names it (-6 3.5.4).</summary>
     internal const string RepairHoldsIssue = "SELECT EXISTS(SELECT 1 FROM binding_repair WHERE pair_id=$pair AND issue_id=$issue);";
-    internal const string LocalEchoPending = "SELECT EXISTS(SELECT 1 FROM pair WHERE id=$pair AND pending_json IS NOT NULL AND (" +
+    internal const string EchoPending = "SELECT EXISTS(SELECT 1 FROM pair WHERE id=$pair AND pending_json IS NOT NULL AND (" +
         "json_extract(pending_json,'$.Version') IS NOT 1 OR " + EchoOverlap + "json_extract(pending_json,'$.Path')) OR " +
         EchoOverlap + "json_extract(pending_json,'$.Saved.LocalPath')) OR " + EchoOverlap + "json_extract(pending_json,'$.Saved.DropboxPath'))));";
     private const string PeerOwnership = "w.path_key=$key AND w.work_id<=$through AND w.work_origin='Acquired' AND w.old_path_key IS NULL AND (w.parent_anchor IS NULL OR NOT EXISTS(SELECT 1 FROM change_work parent WHERE parent.pair_id=w.pair_id AND parent.work_id=w.parent_anchor)) AND (w.before_json IS NULL OR w.before_json=$before) AND NOT EXISTS(SELECT 1 FROM issue_member m WHERE m.work_id=w.work_id) AND NOT EXISTS(SELECT 1 FROM change_work child WHERE child.parent_anchor=w.work_id)";
-    public const string PeerPathPage = WorkEvidence + "w.path_key=$key AND w.work_id>$after AND w.work_id<=$through AND w.work_origin='Acquired' ORDER BY w.path_key,w.work_id LIMIT $take;";
-    public const string OwnedPeerPathPage = WorkEvidence + PeerOwnership + " AND w.work_id>$after ORDER BY w.path_key,w.work_id LIMIT $take;";
+    private const string WorkEvidenceByPath = "SELECT " + WorkColumns + " " + ClaimPeerFrom + WorkEvidenceWhere;
+    public const string PeerPathPage = WorkEvidenceByPath + "w.path_key=$key AND w.work_id>$after AND w.work_id<=$through AND w.work_origin='Acquired' ORDER BY w.path_key,w.work_id LIMIT $take;";
+    public const string OwnedPeerPathPage = WorkEvidenceByPath + PeerOwnership + " AND w.work_id>$after ORDER BY w.path_key,w.work_id LIMIT $take;";
     private const string ClaimedWork = "SELECT w.work_id FROM change_work w INDEXED BY work_identity WHERE " + IdentitySelection + " UNION ALL SELECT w.work_id FROM change_work w WHERE " + PathSelection + " UNION ALL SELECT w.work_id FROM change_work w WHERE w.parent_anchor=$anchor";
     internal const int EchoSubject = 1;
     internal const int EchoSaved = 2;
@@ -932,8 +946,7 @@ public static class StateSchema
     private const string ExcludeClaimedWork = " AND w.work_id NOT IN (";
     private const string UnionAll = " UNION ALL ";
     private const string StatementClose = ");";
-    private static readonly string ClaimedPeers = (WorkEvidence.Replace(WorkColumns, ClaimWorkColumn, StringComparison.Ordinal)
-        .Replace(ClaimWorkFrom, ClaimPeerFrom, StringComparison.Ordinal) + PeerOwnership)
+    private static readonly string ClaimedPeers = (WorkEvidenceByPath.Replace(WorkColumns, ClaimWorkColumn, StringComparison.Ordinal) + PeerOwnership)
         .Replace(ParameterPrefix, PeerParameterPrefix, StringComparison.Ordinal);
 
     internal static string ClaimParameter(int index, string parameter) =>
@@ -1002,6 +1015,8 @@ public static class StateSchema
     public const string FolderItemByKey = "SELECT " + FolderItemColumns + " FROM folder_removal_item INDEXED BY folder_item_identity WHERE pair_id=$pair AND operation_id=$operation AND native_key=$k AND ordinal>$after ORDER BY ordinal LIMIT $take;";
     internal const string RecoveryMember = "SELECT " + FolderItemColumns + " FROM folder_removal_item INDEXED BY folder_item_identity WHERE pair_id=$pair AND operation_id=$operation AND native_key=$k AND provenance=$provenance;";
     internal const string SelectedFolderBranch = "SELECT " + FolderItemColumns + " FROM folder_removal_item INDEXED BY folder_item_identity WHERE pair_id=$pair AND operation_id=$operation AND native_key=$k AND provenance='Planned' AND selected_branch=1;";
+    // Unary + keeps the fixed kind predicate from hiding the index's rowid ordering from SQLite.
+    public const string HeldFolderMembers = "SELECT i.issue_id,i.kind,i.cause,i.path,i.subject_json,i.at_ticks,i.dismissed,i.ignored,m.saved_json FROM issue i INDEXED BY issue_path_key CROSS JOIN folder_removal_item m INDEXED BY folder_item_identity WHERE i.pair_id=(SELECT id FROM pair WHERE pair_id = $p) AND +i.kind=$kind AND pathkey(i.path)>=$low AND pathkey(i.path)<$high AND (pathkey(i.path),i.kind,i.issue_id)>($low,$kind,$after) AND m.pair_id=i.pair_id AND m.operation_id=$operation AND m.native_key=pathkey(i.path) AND m.provenance='Planned' AND m.present=1 ORDER BY pathkey(i.path),i.kind,i.issue_id LIMIT $take;";
     internal const string LastFolderOrdinal = "SELECT ordinal FROM folder_removal_item WHERE pair_id=$pair AND operation_id=$operation ORDER BY ordinal DESC LIMIT 1;";
     public const string FolderItem = "SELECT " + FolderItemColumns + " FROM folder_removal_item WHERE pair_id=$pair AND operation_id=$operation AND ordinal=$ordinal;";
     public const string PendingFollowUps = "SELECT " + FolderItemColumns + " FROM folder_removal_item WHERE pair_id=$pair AND operation_id=$operation AND follow_up_state='Pending' AND ordinal>$after ORDER BY ordinal LIMIT $take;";
@@ -1040,7 +1055,7 @@ public static class StateSchema
     public const string SettleEffect = "UPDATE folder_removal_item SET generation=$nextGeneration,effect_generation=$nextEffectGeneration,effect_state='Settled',phase='Settled',cause=$cause WHERE pair_id=$pair AND operation_id=$operation AND ordinal=$ordinal AND generation=$generation AND effect_generation=$effectGeneration AND effect_state=$state AND stage_allocation_json IS NULL AND stage_json IS NULL;";
     public const string TerminalFolder = "UPDATE folder_removal SET generation=$nextGeneration,phase=$nextPhase,active=0,cause=$cause WHERE pair_id=$pair AND operation_id=$operation AND generation=$generation AND active=1;";
     public const string FolderHasUnsettled = "SELECT EXISTS(SELECT 1 FROM folder_removal_item WHERE pair_id=$pair AND operation_id=$operation AND ((effect_kind<>'None' AND effect_state<>'Settled') OR follow_up_state='Pending' OR stage_allocation_json IS NOT NULL OR stage_json IS NOT NULL));";
-    public const string InsertFolder = "INSERT INTO folder_removal(" + FolderColumns + ") VALUES($pair_id,$operation_id,$generation,$phase,$deleting_side,$root_entry_json,$source_evidence_json,$saved_root_json,$root_context_json,$cursor,$active,$cause,$authority);";
+    public const string InsertFolder = "INSERT INTO folder_removal(" + FolderColumns + ") VALUES($pair_id,$operation_id,$generation,$phase,$deleting_side,$root_entry_json,$source_evidence_json,$saved_root_json,$root_context_json,$cursor,$active,$cause,$authority,$pre_restore_id);";
     public const string InsertFolderItem = "INSERT INTO folder_removal_item(pair_id,operation_id,ordinal,generation,provenance,path,policy_key,expected_json,saved_json,verdict,follow_up,follow_up_state,selected_branch,effect_kind,effect_state,effect_generation,submission_id,submission_member,effect_result_json,phase,selected_json,stage_allocation_json,stage_json,result_json,cause) VALUES($pair_id,$operation_id,$ordinal,$generation,$provenance,$path,$policy_key,$expected_json,$saved_json,$verdict,$follow_up,$follow_up_state,$selected_branch,$effect_kind,$effect_state,$effect_generation,$submission_id,$submission_member,$effect_result_json,$phase,$selected_json,$stage_allocation_json,$stage_json,$result_json,$cause);";
     public const string FrozenEvidence = "SELECT id," + PlanPayload + ",verdict,follow_up,selected FROM scan_state.classified WHERE (policy_key,native_key,present)>($policy,$native,$present) ORDER BY policy_key,native_key,present LIMIT $take;";
     public const string ClassifiedSelect = "UPDATE scan_state.classified SET selected=1 WHERE id=$id;";
@@ -1062,6 +1077,17 @@ public static class StateSchema
         "AND kind=$kind AND cause=$retryCause AND EXISTS(SELECT 1 FROM pair WHERE id=$pair " +
         "AND execution_generation=$generation AND ($pageOnly OR (retry_attempts IS NULL AND retry_after_ticks IS NULL)));";
     public const string TransferLocalEvidenceGap = "UPDATE source_state SET repair_reason=$gapReason WHERE pair_id=$pair AND side=0 AND source_epoch=$epoch AND repair_revision=$revision AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND execution_generation=$generation) AND " + CurrentLocalWork + ";";
+    /// <summary>Exact Dropbox keys in either representation, or an explicit Dropbox descendant.</summary>
+    internal const string SyncedDropboxBound = "SELECT " +
+        "EXISTS(SELECT 1 FROM synced_entry INDEXED BY synced_dropbox_key WHERE pair_id=" + PairRow + " AND dropbox_key_delta=$k) OR " +
+        "EXISTS(SELECT 1 FROM synced_entry INDEXED BY synced_local_key WHERE pair_id=" + PairRow + " AND " + KeyOf + "local_path)=$k AND dropbox_key_delta IS NULL) OR " +
+        "EXISTS(SELECT 1 FROM synced_entry INDEXED BY synced_dropbox_key WHERE pair_id=" + PairRow + " AND dropbox_key_delta>=$k||'/' AND dropbox_key_delta<$k||'0');";
+    /// <summary>At most $take Local-index rows, flagged when their Dropbox key is inherited.</summary>
+    internal const string SyncedInheritedUnderPage =
+        "SELECT dropbox_key_delta IS NULL FROM synced_entry INDEXED BY synced_local_key WHERE pair_id=" +
+        PairRow + " AND " + KeyOf + "local_path)>=$k||'/' AND " + KeyOf +
+        "local_path)<$k||'0' ORDER BY " + KeyOf + "local_path) LIMIT $take;";
+
     internal const string LocalEvidenceTouchedFunction = "localevidencetouched";
     internal const string LocalPositionKind = "position";
     internal const string CreateLocalEvidenceTriggers = """
@@ -1088,7 +1114,7 @@ public static class StateSchema
     public const string HasCurrentLocalWork = "SELECT EXISTS(SELECT 1 FROM change_work INDEXED BY work_identity WHERE pair_id=$pair AND pair_generation=$generation AND side=0 AND work_origin='Acquired');";
     public const string RetryNoticeProtected = "SELECT EXISTS(SELECT 1 FROM issue i WHERE i.pair_id=$pair AND i.issue_id=$issue AND i.path='' AND i.kind=$kind AND i.cause=$retryCause AND " + PrerequisiteOutstanding + ");";
     public const string RetireCoveredWork = "WITH retained_dirty AS MATERIALIZED (SELECT max(work_id) AS work_id FROM change_work WHERE pair_id=$pair AND work_origin='Acquired' AND side=0 AND $side=0 AND work_id<=$through AND pair_generation<=$generation AND json_extract(notice_json,'$.Value.LocalContentDirty')=1 AND path_key IN (SELECT " + KeyOf + "path) FROM issue WHERE pair_id=$pair AND kind=0) GROUP BY domain,identity,path_key) DELETE FROM change_work AS w WHERE w.pair_id=$pair" + NoRenameResponsibility + " AND w.work_origin='Acquired' AND w.work_id<=$through AND w.pair_generation<=$generation AND w.side=$side AND w.work_id NOT IN (SELECT work_id FROM retained_dirty) AND NOT EXISTS(SELECT 1 FROM issue_member m WHERE m.work_id=w.work_id) AND EXISTS(SELECT 1 FROM pair p WHERE p.id=$pair AND p.execution_generation=$generation AND p.pending_json IS NULL) AND EXISTS(SELECT 1 FROM source_state WHERE pair_id=$pair AND side=$side AND source_epoch=$epoch) AND NOT EXISTS(SELECT 1 FROM source_state WHERE pair_id=$pair AND repair_reason IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM folder_removal f WHERE f.pair_id=$pair AND " + FolderUnresolved + ");";
-    public const string PairItemEpisodes = "SELECT i.issue_id FROM issue i JOIN change_work w ON w.work_id=i.item_retry_work_id WHERE i.pair_id=$pair AND i.item_retry_episode IS NOT NULL AND ($side IS NULL OR w.side=$side);";
+    public const string PairItemEpisodes = "SELECT i.issue_id FROM issue i INDEXED BY issue_item_retry_work JOIN change_work w ON w.work_id=i.item_retry_work_id WHERE i.pair_id=$pair AND i.item_retry_episode IS NOT NULL AND ($side IS NULL OR w.side=$side);";
     public const string ItemEpisodeByWork = "SELECT issue_id,item_retry_episode,item_retry_revision FROM issue WHERE item_retry_work_id=$work;";
     public const string ItemEpisodeBySubject = "SELECT i.issue_id,i.item_retry_episode,i.item_retry_revision,i.item_retry_work_id FROM issue_member m INDEXED BY issue_member_retry_subject JOIN issue i ON i.issue_id=m.issue_id WHERE m.pair_id=$pair AND m.side=$side AND m.path_key=$path AND m.identity IS $identity AND m.work_id IS NOT NULL AND i.item_retry_episode IS NOT NULL;";
     public const string ItemEpisodesAtPath = "SELECT i.item_retry_work_id,m.subject_json,i.issue_id,m.identity FROM issue_member m INDEXED BY issue_member_retry_subject JOIN issue i ON i.issue_id=m.issue_id WHERE m.pair_id=$pair AND m.side=$side AND m.path_key=$path AND m.work_id IS NOT NULL AND i.item_retry_episode IS NOT NULL;";
@@ -1102,7 +1128,7 @@ public static class StateSchema
     public const string CompleteFailedItemAttempt = "UPDATE issue SET item_retry_revision=$nextRevision WHERE pair_id=$pair AND issue_id=$issue AND kind=$failureKind AND localaccessretrycause(cause)=1 AND subject_json=$subject AND item_retry_episode=$episode AND item_retry_revision=$revision AND $nextRevision=item_retry_revision+1 AND item_retry_work_id=$work AND " + ItemWorkFence + ItemPendingFence + ";";
     public const string ClearItemEpisode = "UPDATE issue SET item_retry_episode=NULL,item_retry_revision=NULL,item_retry_work_id=NULL WHERE pair_id=$pair AND issue_id=$issue AND item_retry_episode=$episode AND item_retry_revision=$revision AND item_retry_work_id=$work AND subject_json=$subject;";
     public const string DeleteSettledIssueWork = "DELETE FROM change_work WHERE pair_id=$pair AND work_id=$work AND work_origin='Issue' AND issue_work_key=$key AND NOT EXISTS(SELECT 1 FROM issue WHERE item_retry_work_id=$work);";
-    public const string ReadIssueRetryViews = "SELECT i.issue_id,i.cause,i.item_retry_episode,i.item_retry_revision,i.item_retry_work_id,w.work_origin,w.dispatch_kind,w.pending_operation_id,w.pending_generation,w.pair_generation,w.source_epoch,w.side,i.subject_json FROM issue i LEFT JOIN change_work w ON w.work_id=i.item_retry_work_id WHERE i.pair_id=$pair AND i.issue_id IN (SELECT value FROM json_each($ids));";
+    public const string ReadIssueRetryViews = "SELECT i.issue_id,i.cause,i.item_retry_episode,i.item_retry_revision,i.item_retry_work_id,w.work_origin,w.dispatch_kind,w.pending_operation_id,w.pending_generation,w.pair_generation,w.source_epoch,w.side,i.subject_json FROM issue i NOT INDEXED LEFT JOIN change_work w ON w.work_id=i.item_retry_work_id WHERE i.pair_id=$pair AND i.issue_id IN (SELECT value FROM json_each($ids));";
     public const string RebindIssueWork = "UPDATE change_work SET pair_generation=$generation,source_epoch=$epoch WHERE pair_id=$pair AND work_id=$work AND work_origin='Issue' AND issue_work_key=$key AND pair_generation=$oldGeneration AND source_epoch=$oldEpoch AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND execution_generation=$generation) AND EXISTS(SELECT 1 FROM source_state WHERE pair_id=$pair AND side=change_work.side AND source_epoch=$epoch);";
     public const string RefreshPendingRetryBinding = "UPDATE change_work SET pending_generation=$nextPendingGeneration WHERE pair_id=$pair AND work_id=$work AND dispatch_kind='LocalRecovery' AND pending_operation_id=$pendingOperation AND pending_generation=$pendingGeneration AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND execution_generation=$generation AND pending_json=$pendingJson AND coalesce(json_extract(pending_json,'$.Version'),0)=1 AND json_extract(pending_json,'$.OperationId')=$pendingOperation AND json_extract(pending_json,'$.Generation')=$nextPendingGeneration);";
     public const string CloseSupersededRetryNotice = "DELETE FROM issue WHERE pair_id=$pair AND issue_id=$issue AND path='' AND kind=$kind AND cause=$retryCause AND EXISTS(SELECT 1 FROM pair WHERE id=$pair AND execution_generation=$generation AND " + BothSourceFences + " AND retry_attempts=$expectedAttempts AND retry_after_ticks=$expectedRetryAfter);";
@@ -1126,6 +1152,7 @@ public static class StateSchema
     public const string ParamConnection = "$c";
     public const string ParamCause = "$cause";
     public const string ParamAuthority = "$authority";
+    public const string ParamPreRestoreId = "$pre_restore_id";
     public const string ParamCompleted = "$completed";
     public const string ParamKeepRetry = "$keepRetry";
     public const string ParamDef = "$def";
@@ -1346,6 +1373,7 @@ public static class StateSchema
     public const int IssueAt = 5;
     public const int IssueDismissed = 6;
     public const int IssueIgnored = 7;
+    public const int HeldMemberSavedJson = 8;
     public const string ParamIgnored = "$ignored";
 
     // Column ordinals: narrow issue reads.
@@ -1456,6 +1484,7 @@ public static class StateSchema
     public const int FolderActive = 10;
     public const int FolderCause = 11;
     public const int FolderAuthority = 12;
+    public const int FolderPreRestoreId = 13;
 
     // Column ordinals: folder_removal_item rows.
     public const int FolderItemOperationId = 1;

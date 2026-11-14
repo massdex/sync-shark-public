@@ -25,8 +25,8 @@ internal static class SyncJobs
         var empty = new HashSet<string>();
         var id = await folders.PrepareFolderRemovalAsync(row, side, empty, empty, ct);
         if (id is null) return null;
-        await folders.RunPreparedFolderRemovalsAsync([id], ct);
-        return await folders.FinishFolderRemovalAsync(id, null, ct);
+        var absent = await folders.RunPreparedFolderRemovalsAsync([id], ct);
+        return await folders.FinishFolderRemovalAsync(id, null, ct, absent: absent);
     }
 
     internal static (ItemSync Items, FirstRunFolders FirstRunFolders, AncestorFence Ancestors, Recovery Recovery, ExclusionRunner Exclusions, KeepBothRunner KeepBoth, ActionExecutor Actions) Create(

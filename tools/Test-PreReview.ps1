@@ -23,7 +23,8 @@
       6. requires ratchet, Core layout and Engine dependencies/literals/strings
          evidence; missing or skipped checks print INCOMPLETE and exit 2.
 
-    Run this gate on a checkout of the CI run's exact public head, not the private tree.
+    Run this gate on a checkout of the CI run's exact public head. Without its private
+    OWNERSHIP table, the gate skips derived coverage comparison; the helper finalized .ci-lane.json.
     The mirror changes source hashes; its temporary export is removed after publication.
       gh run download <run> -R <ci-repository> -n literal-sites --dir <artifact-dir>
       $env:RATCHET_LITERAL_SITES = '<artifact-dir>/literal-sites.jsonl'
@@ -87,6 +88,9 @@
 .PARAMETER RatchetTimeoutSeconds
     Give up on the ratchet after this many seconds. Default 900.
 
+.PARAMETER OwnershipSelfTest
+    Run the real ownership-table controls privately before export and exit.
+
 .PARAMETER SelfTest
     Run the script's own fixtures and exit.
 
@@ -113,13 +117,14 @@ param(
     [switch]$SkipRatchet,
     [switch]$StaticFence,
     [int]$RatchetTimeoutSeconds = 900,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$OwnershipSelfTest
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-. (Join-Path $PSScriptRoot 'ci/MandatoryChecks.ps1')
+. (Join-Path $PSScriptRoot 'ci/LaneSelection.ps1')
 $script:RequiredChecks = @('ratchet', 'layout') + @(Get-MandatoryEngineGroups)
 $script:CheckResults = @{}
 $script:Attention = [System.Collections.Generic.List[string]]::new()
@@ -180,118 +185,7 @@ function Get-ChangedFiles {
     # --no-renames keeps a rename as its delete and add, which is what the
     # consumers below need; it also avoids parsing status scores.
     $text = Invoke-Git -Root $Root -ArgumentList @('diff', '--name-status', '--no-renames', "$BaseCommit..$HeadCommit")
-    foreach ($line in $text -split "`n") {
-        if (-not $line.Trim()) { continue }
-        $parts = $line -split "`t"
-        [pscustomobject]@{ Status = $parts[0]; Path = ($parts[1..($parts.Count - 1)] -join "`t") }
-    }
-}
-
-function Get-RegistryEntries {
-    param([string]$Text)
-    # One owner of the CheckRegistry text format. Blank // and /* */ comments but
-    # keep "..." string literals, so a URL or "/*" inside a string is not a comment.
-    # shortcut: inline groups and the validated BudgetCatalog shape; upgrade for another registry expression.
-    $clean = [regex]::Replace($Text, '"(?:[^"\\\n]|\\.)*"|//[^\n]*|/\*[\s\S]*?\*/', {
-        param($match)
-        if ($match.Value[0] -eq '"') { $match.Value } else { ' ' }
-    })
-    $entries = [System.Collections.Generic.List[object]]::new()
-    $catalog = [regex]::Match($clean, '\bBudgetCatalog\s*=\s*\[(?<entries>[\s\S]*?)\];')
-    $budget = [regex]::Matches($catalog.Groups['entries'].Value, '\(\s*(?<token>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\s*,\s*(?<shard>\d+)\s*\)')
-    $starts = [regex]::Matches($clean, '(?m)^\s*\["(?<group>[^"]+)"\]\s*=')
-    for ($i = 0; $i -lt $starts.Count; $i++) {
-        $start = $starts[$i].Index
-        $end = if ($i + 1 -lt $starts.Count) { $starts[$i + 1].Index } else { $clean.Length }
-        $chunk = $clean.Substring($start, $end - $start)
-        $group = $starts[$i].Groups['group'].Value
-        $catalogUse = [regex]::Match($chunk, '^\s*\["[^"]+"\]\s*=\s*(?:BudgetChecks\s*,|BudgetShard\(\s*(?<shard>\d+)\s*\)\s*,)')
-        if ($catalogUse.Success) {
-            foreach ($entry in $budget) {
-                if (-not $catalogUse.Groups['shard'].Success -or $entry.Groups['shard'].Value -eq $catalogUse.Groups['shard'].Value) {
-                    $entries.Add([pscustomobject]@{ Group = $group; Token = $entry.Groups['token'].Value })
-                }
-            }
-        }
-        foreach ($entry in [regex]::Matches($chunk, '(?<![A-Za-z0-9_.])([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+(?:\(\))?)')) {
-            $token = $entry.Groups[1].Value -replace '\(\)$', ''
-            $entries.Add([pscustomobject]@{ Group = $group; Token = $token })
-        }
-    }
-    $entries
-}
-
-function Get-CheckRegistryIndex {
-    param([string]$Text)
-    # Groups for CI selection and the method tokens the Python registration check
-    # consumes, both from one parse of the one parser.
-    $groups = @{}
-    $methods = @{}
-    foreach ($entry in (Get-RegistryEntries -Text $Text)) {
-        $cut = $entry.Token.LastIndexOf('.')
-        if ($cut -gt 0) {
-            if (-not $groups.ContainsKey($entry.Group)) { $groups[$entry.Group] = [System.Collections.Generic.List[string]]::new() }
-            $groups[$entry.Group].Add($entry.Token.Substring(0, $cut))
-        }
-        if (-not $methods.ContainsKey($entry.Token)) { $methods[$entry.Token] = [System.Collections.Generic.List[string]]::new() }
-        if (-not $methods[$entry.Token].Contains($entry.Group)) { $methods[$entry.Token].Add($entry.Group) }
-    }
-    foreach ($key in @($groups.Keys)) { $groups[$key] = @($groups[$key] | Sort-Object -Unique) }
-    [pscustomobject]@{ Groups = $groups; Methods = $methods }
-}
-
-function Test-IsSharedTestHelper {
-    param([string]$Path)
-    # Files shared by many groups: their change has no single group to select.
-    if ($Path -match '^tests/SyncShark\.Engine\.Tests/TestDoubles/') { return $true }
-    if ($Path -match '^tests/SyncShark\.Engine\.Tests/Scenarios/') { return $true }
-    $name = [IO.Path]::GetFileName($Path)
-    if ($name -eq 'Program.cs' -or $name -eq 'CheckRegistry.cs' -or $name -eq 'ScanTestSettings.cs') { return $true }
-    $name -like 'Check*.cs'
-}
-
-function Get-GroupsForChangedFiles {
-    param([object[]]$ChangedFiles, [hashtable]$Groups)
-    $selected = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
-    foreach ($group in (Get-MandatoryEngineGroups)) { [void]$selected.Add($group) }
-    $unmapped = [System.Collections.Generic.List[string]]::new()
-    $shared = [System.Collections.Generic.List[string]]::new()
-    $outside = [System.Collections.Generic.List[string]]::new()
-    foreach ($file in $ChangedFiles) {
-        if ($file.Status -eq 'D') { continue }
-        $isTest = $file.Path -match '^tests/SyncShark\.Engine\.Tests/(?<rel>.+)\.cs$'
-        if ($isTest) {
-            $classKey = $Matches['rel'].Replace('/', '.')
-        } elseif ($file.Path -match '^src/SyncShark\.Engine/(?<rel>.+)\.cs$') {
-            # The project convention: src/<rel>.cs is covered by <rel>Checks.
-            $classKey = $Matches['rel'].Replace('/', '.') + 'Checks'
-        } elseif ($file.Path -match '^(?:src|apps)/') {
-            # Not in the Engine CheckRegistry; core/ui/build selection is manual.
-            $outside.Add($file.Path)
-            continue
-        } else {
-            continue
-        }
-        $found = $false
-        foreach ($group in $Groups.Keys) {
-            if ($Groups[$group] -contains $classKey) { [void]$selected.Add($group); $found = $true }
-        }
-        if (-not $found -and $isTest) {
-            # A partial file carries its class name as a prefix: CallBudgetChecks.Speed.
-            $baseName = [IO.Path]::GetFileNameWithoutExtension($file.Path).Split('.')[0]
-            foreach ($group in $Groups.Keys) {
-                foreach ($class in $Groups[$group]) {
-                    if ($class.Split('.')[-1] -eq $baseName) { [void]$selected.Add($group); $found = $true }
-                }
-            }
-        }
-        if (-not $found) {
-            if (-not $isTest) { $unmapped.Add($file.Path) }
-            elseif (Test-IsSharedTestHelper -Path $file.Path) { $shared.Add($file.Path) }
-            else { $unmapped.Add($file.Path) }
-        }
-    }
-    [pscustomobject]@{ Groups = @($selected); Unmapped = @($unmapped); SharedHelpers = @($shared); OutsideRegistry = @($outside) }
+    ConvertFrom-NameStatus -Text $text
 }
 
 function Get-DeclarationNamesFromLines {
@@ -477,50 +371,6 @@ function Get-RatchetReport {
     }
 }
 
-function Get-LiveGroups {
-    param([string]$Root)
-    # One owner for the live-route group list: tools/ci/live-groups.txt.
-    $path = Join-Path $Root 'tools/ci/live-groups.txt'
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
-    @(Get-Content -LiteralPath $path | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
-}
-
-function Get-LaneEngineGroups {
-    param([string]$Root, [string]$Commit)
-    # $null means no .ci-lane.json is committed, so CI runs every group; an empty
-    # array means a lane file exists but selects no engine group.
-    $text = Get-HeadFileText -Root $Root -Commit $Commit -Path '.ci-lane.json'
-    if ($null -eq $text) { return $null }
-    try {
-        $lane = $text | ConvertFrom-Json
-        if ($null -eq $lane -or $null -eq $lane.PSObject.Properties['engine']) { return ,@() }
-        ,@($lane.engine)
-    } catch { ,@() }
-}
-
-function Get-SelectionAttention {
-    param([object[]]$Unmapped, [object[]]$SharedHelpers, [object[]]$OutsideRegistry, [string[]]$HostedGroups, [object]$LaneEngine)
-    # No .ci-lane.json means CI runs every group, so nothing here can hide work.
-    $attention = [System.Collections.Generic.List[string]]::new()
-    if ($null -eq $LaneEngine) { return @($attention) }
-    foreach ($path in $Unmapped) {
-        $attention.Add("cannot verify the .ci-lane.json selection for $path; drop .ci-lane.json or confirm the groups in the report")
-    }
-    foreach ($path in $SharedHelpers) {
-        $attention.Add("shared helper $path affects many groups; drop .ci-lane.json or confirm the groups in the report")
-    }
-    foreach ($path in $OutsideRegistry) {
-        $attention.Add("$path is outside the Engine registry: select core/ui/build by hand or run the full matrix")
-    }
-    $effectiveEngine = @($LaneEngine) + @(Get-MandatoryEngineGroups)
-    foreach ($group in $HostedGroups) {
-        if ($effectiveEngine -cnotcontains $group) {
-            $attention.Add("'.ci-lane.json' engine omits '$group' selected by the diff; add it or drop .ci-lane.json")
-        }
-    }
-    @($attention)
-}
-
 function Get-BasenameMap {
     param([string]$Root, [string]$Commit)
     $map = @{}
@@ -671,24 +521,6 @@ function Get-StaleCitations {
     $findings
 }
 
-function Convert-GlobToRegex {
-    param([string]$Glob)
-    # ** crosses directories; * and ? stay within one path segment.
-    $builder = [System.Text.StringBuilder]::new('^')
-    $i = 0
-    while ($i -lt $Glob.Length) {
-        $char = $Glob[$i]
-        if ($char -eq '*') {
-            if ($i + 1 -lt $Glob.Length -and $Glob[$i + 1] -eq '*') { [void]$builder.Append('.*'); $i += 2; continue }
-            [void]$builder.Append('[^/]*'); $i++; continue
-        }
-        if ($char -eq '?') { [void]$builder.Append('[^/]'); $i++; continue }
-        [void]$builder.Append([regex]::Escape([string]$char)); $i++
-    }
-    [void]$builder.Append('$')
-    $builder.ToString()
-}
-
 function Assert-OwnerArguments {
     param([string]$Owners, [string]$Lane)
     if ($Owners -and -not $Lane) { throw '-Lane is required when -Owners is given.' }
@@ -809,10 +641,84 @@ function Assert-True {
     if (-not $Condition) { throw "SELF-TEST FAILED: $Message" }
 }
 
+function Invoke-OwnershipSelfTest {
+        $tree = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+        $realGroups = (Get-CheckRegistryIndex -Text ([IO.File]::ReadAllText("$tree/tests/SyncShark.Engine.Tests/CheckRegistry.cs"))).Groups
+        $live = @(Get-GroupList -Path "$tree/tools/ci/live-groups.txt")
+        $hosted = @(Get-HostedGroups -Groups $realGroups -Live $live)
+        $rows = @(Get-OwnershipRows -Text ([IO.File]::ReadAllText("$tree/docs/OWNERSHIP.md")))
+        foreach ($row in $rows) {
+            Assert-True ($row.Groups -cin @('all', 'none') -or @($row.Groups -split ' ' | Where-Object { @($realGroups.Keys) -cnotcontains $_ }).Count -eq 0) 'C5 every cell has valid grammar'
+        }
+        $cases = @(
+            @{ Id = 'C1'; Path = 'src/SyncShark.Engine/Storage/StateStore.cs'; Want = @('budget-1','budget-2','budget-3','budget-4','store') },
+            @{ Id = 'C2'; Path = 'src/SyncShark.Engine/Dropbox/DropboxReplyShapes.PageSpool.cs'; Want = $hosted },
+            @{ Id = 'C3'; Path = 'src/SyncShark.Engine/engine-settings.json'; Status = 'D'; Want = $hosted },
+            @{ Id = 'C4'; Path = 'src/SyncShark.Engine/PathScope.cs'; Want = $hosted },
+            @{ Id = 'C11'; Path = 'tests/SyncShark.Core.Tests/DropboxCli/DropboxRouteWire.cs'; Want = @('cli') },
+            @{ Id = 'C13'; Path = 'src/SyncShark.Engine/Edge/IssuePresentation.cs'; Want = @('engine-operations','exclusions','repair','resolutions','settings') },
+            @{ Id = 'C14'; Path = 'tests/SyncShark.Engine.Tests/Layout/LiteralsChecks.cs'; Want = @('settings') }
+        )
+        $paths = @((Invoke-Git -Root $tree -ArgumentList @('ls-files')) -split "`n" | Where-Object { $_ })
+        $inputs = @(Get-ProjectInputs -Paths $paths -Read { param($path) [IO.File]::ReadAllText("$tree/$path") })
+        foreach ($required in @('tests/SyncShark.Core.Tests/DropboxCli/DropboxRouteWire.cs','tests/SyncShark.Core.Tests/V2/DropboxWire.cs','tools/SyncShark.JournalNative.cs')) {
+            Assert-True ($inputs.Path -ccontains $required) "C10 nonvacuity: $required"
+        }
+        Assert-True (@($inputs | Where-Object { $_.Path -eq 'tools/SyncShark.JournalNative.cs' }).Count -eq 2) 'C10 native helper is linked compile and resource'
+        foreach ($input in $inputs) {
+            foreach ($status in @('M','D')) { $cases += @{ Id = 'C10'; Path = $input.Path; Status = $status; Want = $hosted } }
+        }
+        foreach ($path in $paths | Where-Object { $_ -like 'tests/SyncShark.Core.Tests/V2/DropboxWire*.cs' }) {
+            $cases += @{ Id = 'C12'; Path = $path; Want = $hosted }
+        }
+        foreach ($case in $cases) {
+            $status = if ($case.ContainsKey('Status')) { $case.Status } else { 'M' }
+            $mapped = Get-GroupsForChangedFiles -ChangedFiles @(@{ Path = $case.Path; Status = $status }) -Groups $realGroups -OwnershipRows $rows -HostedGroups $hosted
+            $expanded = @(Expand-EngineGroups -Selected $mapped.Groups -Groups @($realGroups.Keys))
+            foreach ($group in $case.Want) { Assert-True ($expanded -ccontains $group) "$($case.Id) $($case.Path) $status covers $group" }
+        }
+        foreach ($path in @('tools/Deploy-SyncShark.ps1','tests/SyncShark.Core.Tests/DropboxCli/DropboxCliVerbChecks.cs')) {
+            $mapped = Get-GroupsForChangedFiles -ChangedFiles @(@{ Path = $path; Status = 'M' }) -Groups $realGroups -OwnershipRows $rows -HostedGroups $hosted
+            Assert-True (($mapped.Groups -join ',') -ceq 'dependencies,literals,strings') "C15 non-input $path is mandatory-only"
+        }
+        $synthetic = @([pscustomobject]@{ Regex = Convert-GlobToRegex 'docs/**'; Groups = 'none' },
+            [pscustomobject]@{ Regex = Convert-GlobToRegex 'src/{a.cs,b.cs}'; Groups = 'store' })
+        foreach ($case in @(@{ Id='C6'; Path='src/new.cs'; Rows=$synthetic; Count=$hosted.Count; Uncertain=1 },
+            @{ Id='C8'; Path='docs/readme.md'; Rows=$synthetic; Count=3; Uncertain=0 },
+            @{ Id='C9'; Path='docs/readme.md'; Rows=@(); Count=$hosted.Count; Uncertain=1 })) {
+            $mapped = Get-GroupsForChangedFiles -ChangedFiles @(@{Path=$case.Path;Status='M'}) -Groups $realGroups -OwnershipRows $case.Rows -HostedGroups $hosted
+            Assert-True ($mapped.Groups.Count -eq $case.Count -and $mapped.Uncertain.Count -eq $case.Uncertain) "$($case.Id) conservative fallback"
+        }
+        $misCased = @([pscustomobject]@{ Regex = Convert-GlobToRegex 'docs/**'; Groups = 'Store' })
+        $mapped = Get-GroupsForChangedFiles -ChangedFiles @(@{Path='docs/a';Status='M'}) -Groups $realGroups -OwnershipRows $misCased -HostedGroups $hosted
+        Assert-True ($mapped.Uncertain.Count -eq 1 -and $mapped.Uncertain[0] -ceq 'UNCERTAIN docs/a: unknown CI group token') 'C5 mis-cased token is uncertain'
+        Assert-True (@(Compare-Object $mapped.Groups $hosted -CaseSensitive).Count -eq 0) 'C5 mis-cased token selects every hosted group'
+        $rejected = $false
+        try { Get-GroupsForChangedFiles -ChangedFiles @(@{Path='docs/a';Status='M'}) -Groups $realGroups -OwnershipRows @($synthetic[0],$synthetic[0]) -HostedGroups $hosted | Out-Null }
+        catch { $rejected = $_.Exception.Message -like '*matches several OWNERSHIP rows' }
+        Assert-True $rejected 'C7 overlapping rows throw'
+    Write-Host 'OWNERSHIP SELF-TEST PASS'
+    Write-Host "OWNERSHIP SELF-TEST assertions: $script:Assertions"
+}
+
 function Invoke-SelfTest {
     $temp = Join-Path ([IO.Path]::GetTempPath()) ('prereview-selftest-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $temp | Out-Null
     try {
+        $tree = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+        $projectTree = @{
+            'tests/SyncShark.Engine.Tests/SyncShark.Engine.Tests.csproj' = '<Project><ItemGroup><ProjectReference Include="../../src/Engine/Engine.csproj"/><Compile Include="../../shared/*.cs"/><Compile Include="Own.cs"/><EmbeddedResource Include="own.json"/><EmbeddedResource Include="../../shared/data.json"/></ItemGroup></Project>'
+            'src/Engine/Engine.csproj' = '<Project/>'; 'shared/A.cs' = ''; 'shared/B.cs' = ''; 'shared/nested/NotLinked.cs' = ''
+        }
+        $inventory = @(Get-ProjectInputs -Paths @($projectTree.Keys) -Read { param($path) $projectTree[$path] } | ForEach-Object { "$($_.Kind):$($_.Path)" } | Sort-Object)
+        $expected = @('implicit:Directory.Build.props','implicit:global.json','project:tests/SyncShark.Engine.Tests/SyncShark.Engine.Tests.csproj','lock:tests/SyncShark.Engine.Tests/packages.lock.json',
+            'linked-compile:shared/A.cs','linked-compile:shared/B.cs','resource:tests/SyncShark.Engine.Tests/own.json','resource:shared/data.json','project:src/Engine/Engine.csproj','lock:src/Engine/packages.lock.json') | Sort-Object
+        Assert-True (@(Compare-Object $inventory $expected).Count -eq 0) 'Synthetic project inventory is exact'
+        $preSelection = (Invoke-Git -Root $tree -ArgumentList @('rev-parse', 'HEAD')).Trim()
+        foreach ($path in @('tools/ci/live-groups.txt','tools/ci/hosted-only.txt')) {
+            $text = Get-HeadFileText -Root $tree -Commit $preSelection -Path $path
+            Assert-True ((@(Get-GroupList -Text $text) -join ',') -ceq (@(Get-GroupList -Path "$tree/$path") -join ',')) 'Tree-text and path list readers agree'
+        }
         $registry = @'
 namespace X;
 public static class CheckRegistry
@@ -827,48 +733,50 @@ public static class CheckRegistry
 }
 '@
         $groups = (Get-CheckRegistryIndex -Text $registry).Groups
+        $mappingInputs = @{ OwnershipRows = @([pscustomobject]@{ Regex = '^.*$'; Groups = 'none' }); HostedGroups = @($groups.Keys) + @(Get-MandatoryEngineGroups) }
         Assert-True ($groups['literals'] -contains 'Layout.LiteralsChecks') 'literal group class'
         Assert-True ($groups['store'] -contains 'Storage.StateStoreChecks') 'store group class'
         Assert-True ($groups['scenarios'] -contains 'Scenarios.ScenarioChecks') 'scenarios group class'
 
         # P1-1: a src change selects the group that owns <rel>Checks.
         $srcOnly = @([pscustomobject]@{ Status = 'M'; Path = 'src/SyncShark.Engine/Storage/StateStore.cs' })
-        $srcMap = Get-GroupsForChangedFiles -ChangedFiles $srcOnly -Groups $groups
+        $srcMap = Get-GroupsForChangedFiles -ChangedFiles $srcOnly -Groups $groups @mappingInputs
         Assert-True ($srcMap.Groups -contains 'store') 'P1-1 src change maps to its Checks group'
         Assert-True ($srcMap.Groups.Count -gt 1) 'P1-1 red proof: src-only change selects more than dependencies'
         Assert-True ($srcMap.Unmapped.Count -eq 0) 'P1-1 mapped src change is not unmapped'
-        # P1-1 red proof: a src file with no Checks class raises ATTENTION, so the run cannot print SUMMARY PASS.
+        # P1-1: an unmatched source path remains visible even when ownership supplies its groups.
         $srcUnknown = @([pscustomobject]@{ Status = 'M'; Path = 'src/SyncShark.Engine/Cloud/Unknown.cs' })
-        $srcUnknownMap = Get-GroupsForChangedFiles -ChangedFiles $srcUnknown -Groups $groups
+        $srcUnknownMap = Get-GroupsForChangedFiles -ChangedFiles $srcUnknown -Groups $groups @mappingInputs
         Assert-True ($srcUnknownMap.Unmapped.Count -eq 1) 'P1-1 unmapped src change is listed'
 
         # P2-3: a partial file maps by its class prefix; shared helpers are not unmapped.
         $partial = @([pscustomobject]@{ Status = 'M'; Path = 'tests/SyncShark.Engine.Tests/Run/CallBudgetChecks.Speed.cs' })
-        $partialMap = Get-GroupsForChangedFiles -ChangedFiles $partial -Groups $groups
+        $partialMap = Get-GroupsForChangedFiles -ChangedFiles $partial -Groups $groups @mappingInputs
         Assert-True ($partialMap.Groups -contains 'speed') 'P2-3 partial file maps to its group'
         Assert-True ($partialMap.Unmapped.Count -eq 0) 'P2-3 partial file is not unmapped'
         $helper = @(
             [pscustomobject]@{ Status = 'M'; Path = 'tests/SyncShark.Engine.Tests/TestDoubles/FakeSide.cs' },
             [pscustomobject]@{ Status = 'M'; Path = 'tests/SyncShark.Engine.Tests/Check.cs' }
         )
-        $helperMap = Get-GroupsForChangedFiles -ChangedFiles $helper -Groups $groups
+        $helperMap = Get-GroupsForChangedFiles -ChangedFiles $helper -Groups $groups @mappingInputs
         Assert-True ($helperMap.SharedHelpers.Count -eq 2) 'P2-3 shared helpers reported'
         Assert-True ($helperMap.Unmapped.Count -eq 0) 'P2-3 shared helpers are not unmapped'
 
         # N3: files outside the Engine registry are listed, not silently ignored.
         $coreOnly = @([pscustomobject]@{ Status = 'M'; Path = 'src/SyncShark.Core/PairSettings.cs' })
-        $coreMap = Get-GroupsForChangedFiles -ChangedFiles $coreOnly -Groups $groups
+        $coreMap = Get-GroupsForChangedFiles -ChangedFiles $coreOnly -Groups $groups @mappingInputs
         Assert-True ($coreMap.OutsideRegistry.Count -eq 1) 'N3 Core src file is outside the Engine registry'
         $appOnly = @([pscustomobject]@{ Status = 'M'; Path = 'apps/SyncShark.App/Main.cs' })
-        $appMap = Get-GroupsForChangedFiles -ChangedFiles $appOnly -Groups $groups
+        $appMap = Get-GroupsForChangedFiles -ChangedFiles $appOnly -Groups $groups @mappingInputs
         Assert-True ($appMap.OutsideRegistry.Count -eq 1) 'N3 app file is outside the Engine registry'
 
-        # N2: unmapped, shared and outside-registry files raise ATTENTION only
-        # when a .ci-lane.json is committed; with none, CI runs every group.
-        $noLaneAttention = Get-SelectionAttention -Unmapped @('src/SyncShark.Engine/Cloud/Unknown.cs') -SharedHelpers @() -OutsideRegistry @('src/SyncShark.Core/PairSettings.cs') -HostedGroups @('dependencies') -LaneEngine $null
-        Assert-True (@($noLaneAttention).Count -eq 0) 'N2 no lane file: unmapped and outside-registry are information only'
-        $laneAttention = Get-SelectionAttention -Unmapped @('src/SyncShark.Engine/Cloud/Unknown.cs') -SharedHelpers @() -OutsideRegistry @('src/SyncShark.Core/PairSettings.cs') -HostedGroups @('dependencies', 'speed') -LaneEngine @('dependencies')
-        Assert-True (@($laneAttention).Count -eq 3) 'N2 lane file: unmapped, outside-registry and a missing group raise ATTENTION'
+        # N2: missing selection is distinct from a committed selection that needs expansion.
+        $noLane = Test-SelectionCovers -Selection $null -Required @{ engine = @('dependencies') } -Groups @($groups.Keys)
+        Assert-True (-not $noLane.Covers) 'N2 no lane file: helper must write selection'
+        $laneCoverage = Test-SelectionCovers -Selection @{ engine = @('dependencies') } -Required @{ engine = @('dependencies', 'speed') } -Groups @($groups.Keys)
+        Assert-True (($laneCoverage.Missing -join ',') -ceq 'engine:speed') 'N2 lane file: missing derived group is named'
+        Assert-True ($srcUnknownMap.Unmapped -ccontains 'src/SyncShark.Engine/Cloud/Unknown.cs') 'N2 unmapped source path is named'
+        Assert-True ($coreMap.OutsideRegistry -ccontains 'src/SyncShark.Core/PairSettings.cs') 'N2 outside-registry source path is named'
 
         # P2-6: type names and declaration parsing.
         Assert-True (@(Get-TypeNames -Text 'public class Alpha') -contains 'Alpha') 'P2-6 type names extracted'
@@ -973,13 +881,34 @@ REVIEW SPLIT-PENDING | src/C.cs | file-size |  |  | ~hash
         Assert-True (@($drift | Where-Object { $_.Kind -eq 'removed' -and $_.Name -eq 'Moved' }).Count -eq 0) 'N4 a name still declared in head src is not reported removed'
 
         # N2: the committed .ci-lane.json engine list is read from the head commit.
-        Assert-True ($null -eq (Get-LaneEngineGroups -Root $repo -Commit $headCommit)) 'N2 no lane file reads as null'
+        Assert-True ($null -eq (Get-HeadFileText -Root $repo -Commit $headCommit -Path '.ci-lane.json')) 'N2 no lane file reads as null'
         Set-Content -LiteralPath (Join-Path $repo '.ci-lane.json') -Value '{ "engine": ["dependencies", "store"] }' -NoNewline:$false
         Invoke-Git -Root $repo -ArgumentList @('add', '-A') | Out-Null
         Invoke-Git -Root $repo -ArgumentList @('commit', '-m', 'lane', '--no-gpg-sign') | Out-Null
         $laneCommit = (Invoke-Git -Root $repo -ArgumentList @('rev-parse', 'HEAD')).Trim()
-        $laneRead = Get-LaneEngineGroups -Root $repo -Commit $laneCommit
-        Assert-True ($laneRead -contains 'store') 'N2 lane file engine list is read'
+        $laneRead = (Get-HeadFileText -Root $repo -Commit $laneCommit -Path '.ci-lane.json') | ConvertFrom-Json
+        Assert-True ((Test-SelectionCovers -Selection $laneRead -Required @{ engine = @('store') } -Groups @($groups.Keys)).Covers) 'N2 lane file covers its committed group'
+
+        # Run the actual coverage-report branch on public and private head inputs.
+        $gateText = [IO.File]::ReadAllText($PSCommandPath)
+        $coverageStart = $gateText.LastIndexOf('if ($null -eq $ownershipText)')
+        $coverageEnd = $gateText.IndexOf('foreach ($path in $selection.Unmapped)', $coverageStart)
+        $coverageBlock = [scriptblock]::Create($gateText.Substring($coverageStart, $coverageEnd - $coverageStart))
+        $savedAttention = $script:Attention
+        try {
+            foreach ($hasOwnership in @($false, $true)) {
+                $script:Attention = [Collections.Generic.List[string]]::new()
+                $ownershipText = if ($hasOwnership) { 'private table' } else { $null }
+                $laneText = '{ "engine": [] }'
+                $hostedSelected = @('store')
+                $output = (& $coverageBlock 6>&1) -join "`n"
+                if ($hasOwnership) {
+                    Assert-True ($script:Attention.Count -eq 1 -and $script:Attention[0] -ceq 'the helper will add engine:store; a mutant must carry engine:store') 'N4 private coverage still names omissions'
+                } else {
+                    Assert-True ($script:Attention.Count -eq 0 -and $output -ceq "derived selection is private; the committed .ci-lane.json is the helper's finalized selection") 'N4 public head trusts finalized selection without false omissions'
+                }
+            }
+        } finally { $script:Attention = $savedAttention }
 
         # P2-1: a lane file that selects no engine group (no engine key, or an
         # empty engine list) must not read as "no lane file" (which means CI runs
@@ -993,13 +922,20 @@ REVIEW SPLIT-PENDING | src/C.cs | file-size |  |  | ~hash
             Invoke-Git -Root $repo -ArgumentList @('add', '-A') | Out-Null
             Invoke-Git -Root $repo -ArgumentList @('commit', '-m', 'lane', '--no-gpg-sign') | Out-Null
             $emptyLaneCommit = (Invoke-Git -Root $repo -ArgumentList @('rev-parse', 'HEAD')).Trim()
-            $emptyLane = Get-LaneEngineGroups -Root $repo -Commit $emptyLaneCommit
-            Assert-True ($null -ne $emptyLane) "P2-1 $($laneCase.Label): an existing lane file is not 'no lane file'"
-            Assert-True (@($emptyLane).Count -eq 0) "P2-1 $($laneCase.Label): lane requests no engine group"
-            $emptyLaneAttention = Get-SelectionAttention -Unmapped @() -SharedHelpers @() -OutsideRegistry @() -HostedGroups @('store') -LaneEngine $emptyLane
-            Assert-True (@($emptyLaneAttention).Count -ge 1) "P2-1 $($laneCase.Label): a selected hosted group is flagged, not hidden"
-            $mandatoryAttention = Get-SelectionAttention -Unmapped @() -SharedHelpers @() -OutsideRegistry @() -HostedGroups @(Get-MandatoryEngineGroups) -LaneEngine $emptyLane
-            Assert-True (@($mandatoryAttention).Count -eq 0) 'Mandatory groups are selected by CI, not omitted'
+            $laneText = Get-HeadFileText -Root $repo -Commit $emptyLaneCommit -Path '.ci-lane.json'
+            Assert-True ($null -ne $laneText) "P2-1 $($laneCase.Label): an existing lane file is not 'no lane file'"
+            if ($laneCase.Label -eq 'invalid JSON') {
+                $rejected = $false
+                try { $laneText | ConvertFrom-Json | Out-Null } catch { $rejected = $true }
+                Assert-True $rejected 'P2-1 invalid JSON: selection is rejected'
+                continue
+            }
+            $emptyLane = $laneText | ConvertFrom-Json
+            $coverage = Test-SelectionCovers -Selection $emptyLane -Required @{ engine = @('store') } -Groups @($groups.Keys)
+            Assert-True ($coverage.Missing -contains 'engine:store') "P2-1 $($laneCase.Label): a selected hosted group is flagged, not hidden"
+            $mandatoryCoverage = Test-SelectionCovers -Selection $emptyLane -Required @{ engine = @(Get-MandatoryEngineGroups) } -Groups @($groups.Keys)
+            Assert-True $mandatoryCoverage.Covers 'Mandatory groups are selected by CI, not omitted'
+
         }
 
         $report = Join-Path $temp 'report.md'
@@ -1434,8 +1370,11 @@ public static class CheckRegistry
     }
 }
 
-if ($SelfTest) {
-    try { Invoke-SelfTest; exit 0 }
+if ($SelfTest -or $OwnershipSelfTest) {
+    try {
+        if ($OwnershipSelfTest) { Invoke-OwnershipSelfTest } else { Invoke-SelfTest }
+        exit 0
+    }
     catch { Write-Host $_.Exception.Message; Write-Host $_.ScriptStackTrace; exit 1 }
 }
 
@@ -1479,24 +1418,26 @@ if ($RunTests) {
 }
 
 # 2. Registry mapping: always printed; the groups run only with -RunTests.
-$registryPath = Join-Path $Repo 'tests/SyncShark.Engine.Tests/CheckRegistry.cs'
-$registryIndex = Get-CheckRegistryIndex -Text (Get-Content -LiteralPath $registryPath -Raw)
+$registryIndex = Get-CheckRegistryIndex -Text (Get-HeadFileText -Root $Repo -Commit $headFull -Path 'tests/SyncShark.Engine.Tests/CheckRegistry.cs')
 $groups = $registryIndex.Groups
-$selection = Get-GroupsForChangedFiles -ChangedFiles $changed -Groups $groups
-$liveGroups = @(Get-LiveGroups -Root $Repo)
-$hostedSelected = @($selection.Groups | Where-Object { $liveGroups -cnotcontains $_ })
-$liveSelected = @($selection.Groups | Where-Object { $liveGroups -ccontains $_ })
-# Unmapped files, shared helpers and files outside the Engine registry raise
-# ATTENTION only when a committed .ci-lane.json can under-select; with none, CI
-# runs every group (sync-shark-ci.yml select step).
-$laneEngine = Get-LaneEngineGroups -Root $Repo -Commit $headFull
-if ($null -eq $laneEngine) { Write-Host 'LANE  no .ci-lane.json: CI runs every group' }
+$liveGroups = @(Get-GroupList -Text (Get-HeadFileText -Root $Repo -Commit $headFull -Path 'tools/ci/live-groups.txt'))
+$hostedGroups = @(Get-HostedGroups -Groups $groups -Live $liveGroups)
+$ownershipText = Get-HeadFileText -Root $Repo -Commit $headFull -Path 'docs/OWNERSHIP.md'
+$ownership = @(Get-OwnershipRows -Text $ownershipText)
+$selection = Get-GroupsForChangedFiles -ChangedFiles $changed -Groups $groups -OwnershipRows $ownership -HostedGroups $hostedGroups
+$hostedSelected = @(Expand-EngineGroups -Selected $selection.Groups -Groups @($groups.Keys))
+$liveSelected = @($selection.DroppedLive)
+$laneText = Get-HeadFileText -Root $Repo -Commit $headFull -Path '.ci-lane.json'
+if ($null -eq $ownershipText) { Write-Host "derived selection is private; the committed .ci-lane.json is the helper's finalized selection" }
+elseif ($null -eq $laneText) { Write-Host 'LANE no .ci-lane.json: the helper writes it; select refuses a lane without it' }
+else {
+    $coverage = Test-SelectionCovers -Selection ($laneText | ConvertFrom-Json) -Required @{ engine = $hostedSelected } -Groups @($groups.Keys)
+    foreach ($item in $coverage.Missing) { $script:Attention.Add("the helper will add $item; a mutant must carry $item") }
+}
 foreach ($path in $selection.Unmapped) { Write-Host "UNMAPPED  $path" }
 foreach ($path in $selection.SharedHelpers) { Write-Host "SHARED HELPER  $path" }
-foreach ($path in $selection.OutsideRegistry) { Write-Host "OUTSIDE REGISTRY  $path (select core/ui/build by hand or run the full matrix)" }
-foreach ($item in (Get-SelectionAttention -Unmapped $selection.Unmapped -SharedHelpers $selection.SharedHelpers -OutsideRegistry $selection.OutsideRegistry -HostedGroups $hostedSelected -LaneEngine $laneEngine)) {
-    $script:Attention.Add($item)
-}
+foreach ($path in $selection.OutsideRegistry) { Write-Host "OUTSIDE REGISTRY  $path (select core/ui/build explicitly)" }
+foreach ($line in $selection.Uncertain) { Write-Host $line }
 Write-Host ''
 Write-Host ('CI CHECK GROUPS  ' + ($hostedSelected -join ', '))
 if ($liveSelected.Count -gt 0) {
@@ -1508,7 +1449,7 @@ if (-not $RunTests) {
     # One fixed path for the build's configuration, matching CI's Debug build.
     $exe = Join-Path $Repo 'tests/SyncShark.Engine.Tests/bin/Debug/net8.0-windows/SyncShark.Engine.Tests.exe'
     $runGroups = $hostedSelected
-    if ($IncludeLive) { $runGroups = @($selection.Groups) }
+    if ($IncludeLive) { $runGroups = @($hostedSelected + $liveSelected) }
     if ($buildOk -and (Test-Path -LiteralPath $exe -PathType Leaf)) {
         $runRoot = Join-Path $ScratchRoot ([guid]::NewGuid().ToString('N'))
         try {

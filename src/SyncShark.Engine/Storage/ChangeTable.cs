@@ -271,33 +271,194 @@ internal sealed partial class ChangeTable
             return null;
         }
         long? observedThrough = null;
-        var pass = _passes.GetValueOrDefault(pairId) is { } open && open.Generation == expectedGeneration
-            ? open.Scope is null ? open with { Scope = scope, Through = observedThrough ??= Watermark(null) } : open
-            : new Pass(expectedGeneration, BeforeFirstWork, observedThrough ??= Watermark(null), scope);
+        var pass = OpenPass(pair, pairId, expectedGeneration, scope, ref observedThrough);
+        if (NextCandidate(pair, pairId, ref pass, null, out _, out _, observedThrough) is not { } candidate) return null;
+        _passes[pairId] = pass;
+        return Selected(pairId, candidate, pass.Through);
+    }
+
+    private Pass OpenPass(PairRow pair, string pairId, long expectedGeneration, PathScope scope, ref long? through) =>
+        _passes.GetValueOrDefault(pairId) is { } open && open.Generation == expectedGeneration
+            ? open.Scope is null ? open with { Scope = scope, Through = through ??= Watermark(null) } : open
+            : new Pass(pair.Generation, BeforeFirstWork, through ??= Watermark(null), scope);
+
+    private WorkRow? NextCandidate(PairRow pair, string pairId, ref Pass pass,
+        IReadOnlySet<long>? staged, out bool flush,
+        out (RenameContinuation? Rename, long? Issue)? responsibility, long? observedThrough = null)
+    {
+        flush = false;
+        responsibility = null;
         var merged = false;
         while (Rows(null, StateSchema.SelectWork, (StateSchema.ParamPairRow, pair.Row),
-                   (StateSchema.ParamGeneration, expectedGeneration), (StateSchema.ParamAfter, pass.After),
+                   (StateSchema.ParamGeneration, pass.Generation), (StateSchema.ParamAfter, pass.After),
                    (StateSchema.ParamThrough, pass.Through), (StateSchema.ParamTake, StateSchema.OneRow)).FirstOrDefault()
                is { } candidate)
         {
+            var after = pass.After;
             pass = pass with { After = candidate.WorkId };
             if (pass.Attempted?.Contains(candidate.WorkId) == true) continue;
-            if (CoalescePathWork(pairId, pair, candidate, pass, ref observedThrough) is > 0 and var retired)
+            if (staged is null && CoalescePathWork(pairId, pair, candidate, pass, ref observedThrough) is > 0 and var retired)
             {
                 _passes[pairId] = pass;
                 AccountAttachment(pairId, -retired);
                 merged = true;
                 continue;
             }
-            BootstrapRename(pairId, pair, candidate, pass.Through);
-            if (Held(pair.Row, candidate.WorkId) ||
-                Earliest(pair.Row, pairId, candidate, candidate.WorkId).WorkId != candidate.WorkId)
-                continue;
-            _passes[pairId] = pass;
-            return Selected(pairId, candidate, pass.Through);
+            BootstrapRename(pairId, pair, candidate, pass.Through, out var known);
+            if (Held(pair.Row, candidate.WorkId, out responsibility, staged is null ? null : known)) continue;
+            var first = Earliest(pair.Row, pairId, candidate, candidate.WorkId);
+            if (first.WorkId != candidate.WorkId)
+            {
+                if (staged?.Contains(first.WorkId) != true) continue;
+                // A staged predecessor must commit before this row can be assessed, never make it skip FIFO.
+                pass = pass with { After = after };
+                flush = true;
+                return null;
+            }
+            return candidate;
         }
         if (merged) _passes[pairId] = pass;
         return null;
+    }
+
+    /// <summary>Retires one bounded page of no-effect Dropbox echoes before ordinary selection; never retires peers.</summary>
+    // One page owns its walk, staged predecessors, budget and post-commit publication; splitting would divide that state.
+    internal (int Settled, bool More) SettleEchoes(string pairId, long expectedGeneration, PathScope scope,
+        Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(settles);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pageSize);
+        var open = _passes.GetValueOrDefault(pairId) is { Scope: not null } current && current.Generation == expectedGeneration
+            ? current : null;
+        if (!Read(null, StateSchema.EchoWorkPending, static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
+                (StateSchema.ParamPair, pairId), (StateSchema.ParamGeneration, expectedGeneration),
+                (StateSchema.ParamAfter, open?.After ?? BeforeFirstWork), (StateSchema.ParamThrough, open?.Through)).First()) return (0, false);
+        if (ReadPair(null, pairId) is not { } pair || pair.Generation != expectedGeneration) return (0, false);
+        var local = ReadSourceRow(null, pair.Row, Side.Local);
+        var dropbox = ReadSourceRow(null, pair.Row, Side.Dropbox);
+        var roots = Roots(pair);
+        if (TrustedEchoDomain(local, dropbox, roots) is null) return (0, false);
+        long? through = Watermark(null);
+        var localDomain = Domain(roots, Side.Local)!;
+        var pass = OpenPass(pair, pairId, expectedGeneration, scope, ref through);
+        var claimed = new PrefixSet();
+        if (pass.Claims is { } claims)
+            foreach (var claim in claims.Values) claimed.Add(claim.Key);
+        pass.EchoResponsibility ??= ReadEchoResponsibility(pair.Row);
+        var page = new List<(WorkSelection Selection, WorkRow Row)>();
+        var staged = new HashSet<long>();
+        var work = 0;
+        var more = false;
+        while (work < pageSize)
+        {
+            var after = pass.After;
+            if (NextCandidate(pair, pairId, ref pass, staged, out var flush, out var responsibility) is not { } row)
+            {
+                more = flush;
+                break;
+            }
+            // OpenPass reads through by ref and never clears its initialized value.
+            var (selection, examined) = EchoSelection(pair, row, pass, claimed, settles, pageSize,
+                local!, localDomain, through!.Value, responsibility);
+            work += 1 + examined;
+            if (selection is null)
+            {
+                pass = pass with { After = after };
+                break;
+            }
+            page.Add((selection, row));
+            staged.Add(row.WorkId);
+            more = work >= pageSize;
+        }
+        if (page.Count > 0)
+        {
+            pass.NetRetired += RetireEchoPage(pair, page);
+            pass.Deletions?.Clear();
+            pass.DirectDeletions?.Clear();
+        }
+        _passes[pairId] = pass;
+        return (page.Count, more);
+    }
+
+    // Candidate eligibility is separate from walking and retirement; only the walker moves After.
+    private (WorkSelection? Settle, int Examined) EchoSelection(PairRow pair, WorkRow row, Pass pass,
+        PrefixSet claimed, Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize,
+        SourceRow local, string localDomain, long through,
+        (RenameContinuation? Rename, long? Issue)? responsibility)
+    {
+        if (row.Side != Side.Dropbox || row.Obligation is not null || row.Notice is null ||
+            row.Parent is not null || row.DiscoveryRequired || pass.Suspended?.ContainsValue(row.WorkId) == true) return (null, 0);
+        var notice = StateEncoding.DecodeEnvelope<ChangeNotice>(row.Notice)!;
+        if (notice.OldPath is not null) return (null, 0);
+        var selection = ToSelection(pair.Id, row, through: row.WorkId);
+        var saved = SelectionBaseline(null, selection);
+        if (notice.Kind != ChangeKind.Deleted && !settles(notice, saved, false) ||
+            OwnsResponsibility(row.WorkId, responsibility is { } known ? known.Issue is not null : null) ||
+            (responsibility is { } read ? read.Rename : ReadRenameContinuation(null, pair.Row, row.WorkId)) is not null ||
+            Read(null, StateSchema.ReadRenameRemoval, static reader => reader.GetString(StateSchema.FirstColumn),
+                (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamWork, row.WorkId)).Any()) return (null, 0);
+        var entry = notice.Kind == ChangeKind.Changed;
+        var localKey = entry ? saved!.LocalKey : row.Key;
+        var dropboxKey = entry ? saved!.DropboxKey : row.Key;
+        var isFolder = !entry || saved!.IsFolder;
+        var (bound, examined) = notice.Kind == ChangeKind.Deleted ? BoundAtOrUnder(pair, row.Key, pageSize) : (false, 0);
+        if (bound is null || claimed.ResponsibilityOverlaps(localKey, isFolder) ||
+            claimed.ResponsibilityOverlaps(dropboxKey, isFolder) ||
+            row.Identity is not null && pass.Claims?.Values.Any(claim =>
+                claim.Side == Side.Dropbox && claim.Identity == row.Identity) == true ||
+            pass.EchoResponsibility!.ResponsibilityOverlaps(localKey, isFolder) ||
+            pass.EchoResponsibility.ResponsibilityOverlaps(dropboxKey, isFolder) ||
+            Read(null, StateSchema.EchoPending, static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
+                (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamLocalKey, localKey),
+                (StateSchema.ParamDropboxKey, dropboxKey), (StateSchema.ParamIsFolder, isFolder)).First()) return (null, examined);
+        if (entry && (Rows(null, StateSchema.PeerPathPage,
+                Evidence(pair.Row, pair.Generation, Side.Local, local.Epoch, localDomain,
+                    (StateSchema.ParamJoinKey, localKey), (StateSchema.ParamAfter, BeforeFirstWork),
+                    (StateSchema.ParamThrough, through), (StateSchema.ParamTake, StateSchema.OneRow))).Any() ||
+            isFolder && IssueTable.UnreadableAtOrUnder(_connection, pair.Id, dropboxKey))) return (null, examined);
+        return (entry || settles(notice, saved, bound.Value) ? Keyed(selection, row, saved) : null, examined);
+    }
+
+    // Limit examined Local-index rows, not matching inherited rows; a full nonmatching page proves nothing.
+    private (bool? Bound, int Examined) BoundAtOrUnder(PairRow pair, string key, int take)
+    {
+        if (Read(null, StateSchema.SyncedDropboxBound,
+                static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
+                (StateSchema.ParamPair, pair.Id), (StateSchema.ParamTargetKey, key)).First()) return (true, 0);
+        var examined = 0;
+        foreach (var inherited in Read(null, StateSchema.SyncedInheritedUnderPage,
+                     static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
+                     (StateSchema.ParamPair, pair.Id), (StateSchema.ParamTargetKey, key), (StateSchema.ParamTake, take)))
+        {
+            examined++;
+            if (inherited) return (true, examined);
+        }
+        return (examined < take ? false : null, examined);
+    }
+
+    // One page transaction; the constraint certificate covers retirement and commit, not later publication.
+    private int RetireEchoPage(PairRow pair, IReadOnlyList<(WorkSelection Selection, WorkRow Row)> page)
+    {
+        using var transaction = _connection.BeginTransaction();
+        var faulted = page[0].Selection;
+        var retired = 0;
+        try
+        {
+            RequireCurrent(transaction, faulted);
+            RequireAnchor(transaction, pair.Row, faulted);
+            foreach (var (selection, row) in page)
+            {
+                faulted = selection;
+                retired += Retire(transaction, pair.Row, selection, row);
+            }
+            transaction.Commit();
+        }
+        catch (SqliteException error) when (IntegrityRefusal(error))
+        {
+            throw RollbackMutation(transaction, faulted, error);
+        }
+        return retired;
     }
 
     // One custody transaction: validate the contiguous segment, transfer its debt, then delete those exact sources.
@@ -389,7 +550,7 @@ internal sealed partial class ChangeTable
             if (protectedRow is { Side: Side.Local } && protectedRow.Domain == first.Domain && protectedRow.Key == first.Key)
                 through = Math.Min(through, protectedId - StateSchema.OneRow);
         }
-        if (first.WorkId > through || Read(transaction, StateSchema.LocalEchoPending,
+        if (first.WorkId > through || Read(transaction, StateSchema.EchoPending,
             static reader => reader.GetBoolean(StateSchema.FirstColumn), (StateSchema.ParamPairRow, pair.Row),
             (StateSchema.ParamLocalKey, first.Key), (StateSchema.ParamDropboxKey, first.Key),
             (StateSchema.ParamIsFolder, false)).First()) return null;
@@ -445,14 +606,21 @@ internal sealed partial class ChangeTable
             null, workId, null, null);
     }
 
-    private void BootstrapRename(string pairId, PairRow pair, WorkRow work, long through)
+    private void BootstrapRename(string pairId, PairRow pair, WorkRow work, long through,
+        out (RenameContinuation? Rename, long? Issue)? responsibility)
     {
+        responsibility = null;
         if (work.Notice is null || work.Identity is null || ReadRenameContinuation(null, pair.Row, work.WorkId) is not null ||
             Read(null, StateSchema.ItemEpisodeByWork, static reader => reader.GetInt64(StateSchema.EpisodeByWorkIssueId),
                 (StateSchema.ParamWork, work.WorkId)).Any()) return;
         var issueId = Read(null, StateSchema.WorkIssue, static reader => Number(reader, StateSchema.WorkIssueId),
             (StateSchema.ParamWork, work.WorkId)).FirstOrDefault();
-        if (issueId is null || IssueTable.ById(_connection, pairId, issueId.Value) is not { } issue ||
+        if (issueId is null)
+        {
+            responsibility = (null, null);
+            return;
+        }
+        if (IssueTable.ById(_connection, pairId, issueId.Value) is not { } issue ||
             !IssuePolicy.RenameClashMatches(issue, work.Side, work.Key, work.Identity)) return;
         var notice = StateEncoding.DecodeEnvelope<ChangeNotice>(work.Notice)!;
         var selection = ToSelection(pairId, work, through);
@@ -655,7 +823,7 @@ internal sealed partial class ChangeTable
         {
             var owner = Earliest(row.PairRow, pairId, ParentOwner(row.PairRow, row), through);
             if (owner.WorkId <= through && seen.Add(owner.WorkId) &&
-                (coveredThrough is not null || !Held(owner.PairRow, owner.WorkId)))
+                (coveredThrough is not null || !Held(owner.PairRow, owner.WorkId, out _)))
                 yield return Selected(pairId, owner, through);
         }
     }
@@ -740,10 +908,12 @@ internal sealed partial class ChangeTable
     {
         var pair = RequireCurrent(null, selection);
         var pass = _passes.GetValueOrDefault(selection.PairId) is { Scope: not null } active ? active : null;
-        var responsibility = pass?.LocalEchoResponsibility ?? ReadLocalEchoResponsibility(pair.Row);
-        if (pass is not null) pass.LocalEchoResponsibility = responsibility;
+        var responsibility = pass?.EchoResponsibility ?? ReadEchoResponsibility(pair.Row);
+        if (pass is not null) pass.EchoResponsibility = responsibility;
         var roots = Roots(pair);
-        return (saved, through) => !responsibility(saved) && CanSettleLocalEcho(selection, saved, through, roots);
+        return (saved, through) => !responsibility.ResponsibilityOverlaps(saved.LocalKey, saved.IsFolder) &&
+            (saved.LocalKey == saved.DropboxKey || !responsibility.ResponsibilityOverlaps(saved.DropboxKey, saved.IsFolder)) &&
+            CanSettleLocalEcho(selection, saved, through, roots);
     }
 
     internal static void ReleaseClashContinuations(SqliteConnection connection, SqliteTransaction transaction,
@@ -754,7 +924,7 @@ internal sealed partial class ChangeTable
         command.ExecuteNonQuery();
     }
 
-    private Func<SyncedEntry, bool> ReadLocalEchoResponsibility(long pairRow)
+    private PrefixSet ReadEchoResponsibility(long pairRow)
     {
         var keys = new PrefixSet();
         void Add(string? path)
@@ -763,7 +933,7 @@ internal sealed partial class ChangeTable
             var key = PathNames.Key(path);
             keys.Add(key);
         }
-        foreach (var row in Read(null, StateSchema.LocalEchoResponsibilities, reader =>
+        foreach (var row in Read(null, StateSchema.EchoResponsibilities, reader =>
             (Path: reader.IsDBNull(0) ? null : reader.GetString(0),
              Subject: reader.IsDBNull(StateSchema.EchoSubject) ? null : reader.GetString(StateSchema.EchoSubject),
              Saved: reader.IsDBNull(StateSchema.EchoSaved) ? null : reader.GetString(StateSchema.EchoSaved)), (StateSchema.ParamPairRow, pairRow)))
@@ -780,9 +950,19 @@ internal sealed partial class ChangeTable
         }
         // Issues raised mid-pass cannot invalidate unchanged Local-only settlement; the next pass sees them.
         // Folder effects retain their acquired work; pending effects and source/work fences are checked fresh below.
-        return saved => keys.ResponsibilityOverlaps(saved.LocalKey, saved.IsFolder) ||
-            saved.LocalKey != saved.DropboxKey && keys.ResponsibilityOverlaps(saved.DropboxKey, saved.IsFolder);
+        return keys;
     }
+
+    private static string? TrustedEchoDomain(SourceRow? local, SourceRow? dropbox, RootBinding? roots) =>
+        !OwesRepair(local) && !OwesRepair(dropbox) && dropbox is { Provenance: not null } &&
+        !string.IsNullOrEmpty(dropbox.Cursor) ? Domain(roots, Side.Dropbox) : null;
+
+    // Issue deletion removes its members in the same transaction, so issue-id presence and member-row presence are equivalent.
+    private bool OwnsResponsibility(long workId, bool? hasIssue = null) =>
+        (hasIssue ?? Read(null, StateSchema.WorkIssue, static reader => reader.GetInt64(StateSchema.FirstColumn),
+            (StateSchema.ParamWork, workId)).Any()) ||
+        Read(null, StateSchema.WorkHasChildren, static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
+            (StateSchema.ParamParent, workId)).First();
 
     private bool CanSettleLocalEcho(WorkSelection selection, SyncedEntry saved, long throughWorkId, RootBinding? roots)
     {
@@ -796,18 +976,13 @@ internal sealed partial class ChangeTable
         var anchor = RequireAnchor(null, pair.Row, selection);
         if (selection.Side != Side.Local) return false;
         var source = ReadSourceRow(null, pair.Row, Side.Dropbox);
-        if (OwesRepair(selectedSource) || OwesRepair(source) || anchor.Parent is not null || anchor.Obligation is not null ||
-            source is not { Cursor: not null, Provenance: not null } ||
-            string.IsNullOrEmpty(source.Cursor) || Domain(roots, Side.Dropbox) is not { } domain ||
-            Read(null, StateSchema.WorkIssue, static reader => reader.GetInt64(StateSchema.FirstColumn),
-                (StateSchema.ParamWork, anchor.WorkId)).Any() ||
-            Read(null, StateSchema.WorkHasChildren, static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
-                (StateSchema.ParamParent, anchor.WorkId)).First()) return false;
+        if (anchor.Parent is not null || anchor.Obligation is not null ||
+            TrustedEchoDomain(selectedSource, source, roots) is not { } domain || OwnsResponsibility(anchor.WorkId)) return false;
         if (Rows(null, StateSchema.PeerPathPage,
-            Evidence(pair.Row, selection.PairGeneration, Side.Dropbox, source.Epoch, domain,
+            Evidence(pair.Row, selection.PairGeneration, Side.Dropbox, source!.Epoch, domain,
                 (StateSchema.ParamJoinKey, saved.DropboxKey), (StateSchema.ParamAfter, BeforeFirstWork),
                 (StateSchema.ParamThrough, throughWorkId), (StateSchema.ParamTake, StateSchema.OneRow))).Any()) return false;
-        return !Read(null, StateSchema.LocalEchoPending,
+        return !Read(null, StateSchema.EchoPending,
             static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
             (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamLocalKey, saved.LocalKey),
             (StateSchema.ParamDropboxKey, saved.DropboxKey), (StateSchema.ParamIsFolder, saved.IsFolder)).First();
@@ -1207,7 +1382,7 @@ internal sealed partial class ChangeTable
                 var issue = Read(transaction, StateSchema.SelectIssueById, IssueTable.ReadIssue,
                     (StateSchema.ParamPair, selection.PairId), (StateSchema.ParamId, expected.Token.IssueId)).Single();
                 if (IssuePolicy.UnknownMove(issue.Kind, issue.Subject) ||
-                    Read(transaction, StateSchema.LocalEchoPending, static reader => reader.GetBoolean(StateSchema.FirstColumn),
+                    Read(transaction, StateSchema.EchoPending, static reader => reader.GetBoolean(StateSchema.FirstColumn),
                         (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamLocalKey, selection.Key),
                         (StateSchema.ParamDropboxKey, selection.Key), (StateSchema.ParamIsFolder, false)).First()) return false;
                 SyncedEntry? earliestBefore = null;
@@ -1941,22 +2116,27 @@ internal sealed partial class ChangeTable
         (StateSchema.ParamWork, work), (StateSchema.ParamPairRow, pair)).Any();
 
     // An in-use lifecycle waits for its real opportunity; any other association follows the issue's own hold.
-    private bool Held(long pair, long work)
+    private bool Held(long pair, long work, out (RenameContinuation? Rename, long? Issue)? responsibility,
+        (RenameContinuation? Rename, long? Issue)? known = null)
     {
+        responsibility = null;
         // Checked first, with no exemption: X's other work waits for its duplicate-folder obligation in any generation.
         if (Read(null, StateSchema.WorkRepairHeld, static reader => reader.GetInt64(0) != 0,
                 (StateSchema.ParamPairRow, pair), (StateSchema.ParamWork, work)).FirstOrDefault())
             return true;
-        if (Read(null, StateSchema.ItemEpisodeByWork,
+        if (known is null && Read(null, StateSchema.ItemEpisodeByWork,
                 static reader => reader.GetInt64(StateSchema.EpisodeByWorkIssueId),
                 (StateSchema.ParamWork, work)).Any())
             return true;
-        if (ReadRenameContinuation(null, pair, work) is { Clash: { } captured } &&
+        var rename = known is { } read ? read.Rename : ReadRenameContinuation(null, pair, work);
+        if (rename is { Clash: { } captured } &&
             Read(null, StateSchema.RenameClashCurrent, IssueTable.ReadIssue,
                 (StateSchema.ParamPairRow, pair), (StateSchema.ParamWork, work)).FirstOrDefault() is { } current &&
             !current.Ignored && !current.Dismissed && current.Matches(captured)) return false;
-        return Read(null, StateSchema.WorkIssue, static reader => Number(reader, StateSchema.WorkIssueId),
-                (StateSchema.ParamWork, work)).FirstOrDefault() is { } issue &&
+        var issueId = known is { } facts ? facts.Issue : Read(null, StateSchema.WorkIssue,
+            static reader => Number(reader, StateSchema.WorkIssueId), (StateSchema.ParamWork, work)).FirstOrDefault();
+        responsibility = (rename, issueId);
+        return issueId is { } issue &&
             Read(null, StateSchema.ValidateIssue, static reader => IssuePolicy.Holds(
                     (IssueKind)reader.GetInt32(StateSchema.ValidIssueKind),
                     StateEncoding.ReadEnum<TextKey>(reader, StateSchema.ValidIssueCause),
@@ -1973,7 +2153,7 @@ internal sealed partial class ChangeTable
         while (Rows(null, ReadIdentity(row), Membership(pair, group, row,
             (StateSchema.ParamAfter, after), (StateSchema.ParamTake, StateSchema.OneRow))).FirstOrDefault() is { } first)
         {
-            if (first.WorkId == row.WorkId || !Held(pair, first.WorkId)) return first;
+            if (first.WorkId == row.WorkId || !Held(pair, first.WorkId, out _)) return first;
             after = first.WorkId;
         }
         return row;
@@ -2155,7 +2335,7 @@ internal sealed partial class ChangeTable
         internal Dictionary<long, WorkSelection>? Claims { get; set; }
         internal long NetRetired { get; set; }
         internal bool Released { get; set; }
-        internal Func<SyncedEntry, bool>? LocalEchoResponsibility { get; set; }
+        internal PrefixSet? EchoResponsibility { get; set; }
         internal HashSet<long>? Attempted { get; set; }
         internal Dictionary<long, long>? Suspended { get; set; }
         internal HashSet<long>? Completed { get; set; }

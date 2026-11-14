@@ -489,7 +489,8 @@ public static class ScanReaderChecks
             (StateSchema.ParamJoinKey, key), (StateSchema.ParamOwnKey, PathNames.Key(path)),
             (StateSchema.ParamPath, path), (StateSchema.ParamIsFolder, isFolder),
             (StateSchema.ParamSize, size), (StateSchema.ParamMtime, mtime), (StateSchema.ParamId, id),
-            (StateSchema.ParamRev, rev), (StateSchema.ParamHash, hash), (StateSchema.ParamSkip, skip));
+            (StateSchema.ParamRev, rev), (StateSchema.ParamHash, hash), (StateSchema.ParamSkip, skip),
+            (StateSchema.ParamShared, false));
 
     private static void Execute(SqliteConnection connection, string sql,
         params (string Name, object? Value)[] arguments)

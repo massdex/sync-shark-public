@@ -485,7 +485,15 @@ public static class ActionExecutorChecks
                 ? await SeedAsync(fixture.Context.For(written), "Target", kind == ActionKind.ReplaceKind ? !folder : folder, "old")
                 : null;
             var row = MakeRow(written == Side.Local ? old : source, written == Side.Dropbox ? old : source);
-            if (old != null) row = row with { Synced = SyncedEntries.From(row.Local!, row.Dropbox!) };
+            if (old != null)
+                row = row with
+                {
+                    // A reverse-kind replacement's bound counterpart folder was replaced by the incoming file, so its
+                    // old identity is no longer in scope; the identity recheck asks the absent side about it.
+                    Synced = kind == ActionKind.ReplaceKind && written == Side.Local && old.IsFolder
+                        ? SyncedEntries.From(row.Local!, row.Dropbox! with { Id = "replaced-target", IsFolder = true })
+                        : SyncedEntries.From(row.Local!, row.Dropbox!)
+                };
             else if (kind == ActionKind.ReplaceKind)
                 row = row with { Synced = written == Side.Local ? Saved("Target", "Source") : Saved("Source", "Target") };
             // A Dropbox folder counterpart has no saved content hash; the losing local file's own hash is the proof.
@@ -515,7 +523,14 @@ public static class ActionExecutorChecks
                 continue;
             }
             var commits = new CloseScopeStore(fixture.Store);
-            var outcome = await ExecutorFor(fixture.Context with { Store = commits }).ExecuteAsync(action, null, CancellationToken.None, closeIssues);
+            // Both production adapters answer identity: an absent counterpart is proven absent and a present one still
+            // refuses the replacement.
+            var live = fixture.Context with
+            {
+                Store = commits, Local = IdentitySide.Truthful(fixture.Context.Local, fixture.Local),
+                Dropbox = IdentitySide.Truthful(fixture.Context.Dropbox, fixture.Dropbox)
+            };
+            var outcome = await ExecutorFor(live).ExecuteAsync(action, null, CancellationToken.None, closeIssues);
             Check.Require(commits.Last is { CloseScope: { Binding: { } binding, Absent: false } } &&
                 ReferenceEquals(binding, commits.Last.Record.Single()),
                 $"{kind}: the copy's closure scope reuses its resulting binding.");
@@ -560,7 +575,14 @@ public static class ActionExecutorChecks
             var row = MakeRow(written == Side.Local ? expected : source, written == Side.Dropbox ? expected : source);
             if (expected is not null)
             {
-                row = row with { Synced = SyncedEntries.From(row.Local!, row.Dropbox!) };
+                // As in CopiesAsync: a reverse-kind replacement's bound Dropbox folder was replaced by the incoming
+                // file, so its old identity is no longer in scope.
+                row = row with
+                {
+                    Synced = mode == "replace" && written == Side.Local
+                        ? SyncedEntries.From(row.Local!, row.Dropbox! with { Id = "replaced-target", IsFolder = true })
+                        : SyncedEntries.From(row.Local!, row.Dropbox!)
+                };
                 fixture.Store.Commit(fixture.Pair.PairId, StateChange.Empty with { Record = [row.Synced] });
             }
             if (mode == "disappeared")
@@ -570,7 +592,8 @@ public static class ActionExecutorChecks
                 await destination.DeleteAsync(parent!, null, default);
             }
             var counter = new ReadCounter(destination);
-            var context = written == Side.Local ? fixture.Context with { Local = counter }
+            var context = written == Side.Local
+                ? fixture.Context with { Local = counter, Dropbox = IdentitySide.Truthful(fixture.Context.Dropbox, fixture.Dropbox) }
                 : fixture.Context with { Dropbox = counter };
             var kind = mode == "replace" ? ActionKind.ReplaceKind
                 : written == Side.Local ? ActionKind.Download : ActionKind.Upload;
@@ -2682,6 +2705,9 @@ public static class ActionExecutorChecks
             string? cursor, SourceObligation? obligation) => throw new NotSupportedException();
         public WorkSelection? SelectWork(string pairId, long expectedGeneration, PathScope scope) =>
             throw new NotSupportedException();
+        public (int Settled, bool More) SettleEchoes(string pairId, long expectedGeneration, PathScope scope,
+            Func<ChangeNotice, SyncedEntry?, bool, bool> settles, int pageSize) =>
+            (inner ?? throw new NotSupportedException()).SettleEchoes(pairId, expectedGeneration, scope, settles, pageSize);
         public bool CompleteOutOfScope(WorkSelection selection, PathScope scope) =>
             throw new NotSupportedException();
         public bool EndWorkPass(string pairId) => throw new NotSupportedException();
@@ -2750,11 +2776,12 @@ public static class ActionExecutorChecks
             FolderRemovalItem.ProvenanceKind provenance, string path, Entry? observed, Entry? selected) =>
             throw new NotSupportedException();
         public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, WorkSelection renameWork,
-            Action? admit = null) => (inner ?? throw new NotSupportedException()).BeginFolderRemoval(pairId, plan, authority, pageSize, ct, renameWork, admit);
+            Action? admit = null, string? preRestoreId = null) =>
+            (inner ?? throw new NotSupportedException()).BeginFolderRemoval(pairId, plan, authority, pageSize, ct, renameWork, admit, preRestoreId);
     public string? RenameRemoval(WorkSelection selection) => (inner ?? throw new NotSupportedException()).RenameRemoval(selection);
     public long? RenameRemovalWork(string pairId, string operationId) => (inner ?? throw new NotSupportedException()).RenameRemovalWork(pairId, operationId);
-    public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, Action? admit = null) =>
-        throw new NotSupportedException();
+    public string BeginFolderRemoval(string pairId, FolderPlan plan, FolderRemovalAuthority authority, int pageSize, CancellationToken ct, Action? admit = null,
+        string? preRestoreId = null) => throw new NotSupportedException();
         public FolderRemovalState FolderRemoval(string pairId, string operationId) =>
             throw new NotSupportedException();
         public IEnumerable<FolderRemovalState> ActiveFolderRemovals(string pairId, CancellationToken ct) =>

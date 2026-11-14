@@ -194,7 +194,7 @@ public static class ScanWriterChecks
                 (StateSchema.ParamPath, path), (StateSchema.ParamIsFolder, folder),
                 (StateSchema.ParamSize, size), (StateSchema.ParamMtime, mtime),
                 (StateSchema.ParamId, id), (StateSchema.ParamRev, rev),
-                (StateSchema.ParamHash, hash), (StateSchema.ParamSkip, skip));
+                (StateSchema.ParamHash, hash), (StateSchema.ParamSkip, skip), (StateSchema.ParamShared, false));
             return Number(connection, "SELECT total_changes();") - before;
         }
 
@@ -235,7 +235,7 @@ public static class ScanWriterChecks
                 (StateSchema.ParamPath, "delta.txt"), (StateSchema.ParamIsFolder, false),
                 (StateSchema.ParamSize, 1L), (StateSchema.ParamMtime, 100L),
                 (StateSchema.ParamId, "d"), (StateSchema.ParamRev, ""), (StateSchema.ParamHash, ""),
-                (StateSchema.ParamSkip, null));
+                (StateSchema.ParamSkip, null), (StateSchema.ParamShared, false));
             return Number(connection, "SELECT total_changes();") - before;
         }
 
@@ -971,19 +971,27 @@ public static class ScanWriterChecks
         var child = FileEntry("a/child", 1, "child", "", "");
         Listed[] events = [new("z", null), new(child.Path, child), new("a", null),
             new(child.Path, child), new("b", null), new("z", null), new("\U00010000", null), new("", null)];
-        WriteOrdered(connection, pair, Side.Dropbox, false, true, events, row);
-        using (var command = connection.CreateCommand())
+        Execute(connection, "CREATE TABLE scan_state.name_order(path_key TEXT);");
+        Execute(connection, "CREATE TRIGGER scan_state.trace_name AFTER INSERT ON deleted_name BEGIN INSERT INTO name_order VALUES(NEW.path_key); END;");
+        try
         {
-            command.CommandText = "SELECT path_key FROM scan_state.deleted_name WHERE pair_id=$pair AND path_key<>$warmup ORDER BY rowid;";
-            command.Parameters.AddWithValue("$pair", row);
-            command.Parameters.AddWithValue("$warmup", PathNames.Key("batch-boundary"));
+            WriteOrdered(connection, pair, Side.Dropbox, false, true, events, row);
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT path_key FROM scan_state.name_order WHERE path_key<>$warmup ORDER BY rowid;";
+            var warmup = PathNames.Key("batch-boundary");
+            command.Parameters.AddWithValue("$warmup", warmup);
             using var reader = command.ExecuteReader();
             var inserted = new List<string>();
             while (reader.Read()) inserted.Add(reader.GetString(0));
-            Check.Require(inserted.SequenceEqual(events.Where(item => item.Entry is null)
-                    .Select(item => PathNames.Key(item.Path)).Distinct(StringComparer.Ordinal).OrderBy(key => key, StringComparer.Ordinal)),
+            var expected = events.Where(item => item.Entry is null)
+                .Select(item => PathNames.Key(item.Path)).Distinct(StringComparer.Ordinal).OrderBy(key => key, StringComparer.Ordinal).ToArray();
+            // SQLite BINARY orders UTF-8 bytes; ordinal insertion order compares UTF-16 code units.
+            Check.Require(inserted.SequenceEqual(expected) &&
+                Markers(connection, pair).Where(key => key != warmup)
+                    .OrderBy(key => key, StringComparer.Ordinal).SequenceEqual(expected),
                 "deleted-name set writes are sorted within the batch without dropping Unicode or duplicate markers");
         }
+        finally { Execute(connection, "DROP TRIGGER scan_state.trace_name; DROP TABLE scan_state.name_order;"); }
         Check.Require(Rows(connection, pair).Select(item => item.Path).SequenceEqual([child.Path]),
             "sorting markers preserves parent tombstone and later child recreation event order");
         var before = Markers(connection, pair).ToArray();

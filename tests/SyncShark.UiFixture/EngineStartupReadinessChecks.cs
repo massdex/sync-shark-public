@@ -44,6 +44,7 @@ internal static class EngineStartupReadinessChecks
     internal static async Task<int> RunAsync()
     {
         await RefusalCleanupAsync();
+        RetainedNoticeReachesTheEdge();
         var previous = Environment.GetEnvironmentVariable(RendezvousVariable);
         try
         {
@@ -101,6 +102,30 @@ internal static class EngineStartupReadinessChecks
         }
         finally { Environment.SetEnvironmentVariable(RendezvousVariable, previous); }
         return 0;
+    }
+
+    // B-227 R1: the application edge reads the one retained notice, and only for an absent-host status.
+    private static void RetainedNoticeReachesTheEdge()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "SyncShark.NoticeProbe." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using (SyncSharkRuntimePaths.OverrideProductRootForTest(root))
+            {
+                AutoSyncProcess.RecordExistingOwnerNotice(AutoSyncProcess.PersistentStartupNoticePath,
+                    SyncCli.PersistentStartupRefusalNoticeKey((int)SyncCliExitCode.StartupLegacyFootprintRefused));
+                Require(EngineHostEntry.AbsentHostStatusNotice(["--cli", "engine", "host", "status"]) ==
+                    File.ReadAllText(AutoSyncProcess.PersistentStartupNoticePath),
+                    "The application edge reads the retained startup notice for an absent-host status");
+                Require(EngineHostEntry.AbsentHostStatusNotice(["--cli", "engine", "logs", "--pair", "p"]) is null,
+                    "Other engine commands never read the retained startup notice");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
     }
 
     private static async Task RefusalCleanupAsync()
