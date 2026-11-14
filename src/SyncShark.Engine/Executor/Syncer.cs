@@ -135,6 +135,7 @@ public sealed class Syncer
             void LeaveSerial()
             {
                 alone = false;
+                serial = false;
                 refusedAlone = Volatile.Read(ref refused);
                 _context.Events(RunEvent.Snapshot(TextKey.LanesParallel, Text.Get(TextKey.LanesParallel)));
             }
