@@ -7,7 +7,8 @@ internal sealed class HeldMemberSettlement(ExecutorContext context)
 {
     internal async Task SettleAsync(FolderRemovalState operation, FolderRemovalItem root, CancellationToken ct)
     {
-        if (context.Local is not IIdentitySide local || context.Dropbox is not IIdentitySide dropbox) return;
+        var local = context.Local as IIdentitySide;
+        var dropbox = context.Dropbox as IIdentitySide;
         var (low, high) = PathNames.DescendantBounds(PathNames.Key(root.Path));
         foreach (var kind in IssueClosure.AfterEffect)
         {
@@ -22,8 +23,8 @@ internal sealed class HeldMemberSettlement(ExecutorContext context)
                 var proven = new List<Issue>();
                 foreach (var (issue, saved) in page)
                     if (Bound(issue, saved) &&
-                        await AbsentAsync(() => local.ReadByIdDocumentedAsync(saved!.LocalId, ct)) &&
-                        await AbsentAsync(() => dropbox.ReadByIdAsync(saved!.DropboxId, ct))) proven.Add(issue);
+                        (local is null || await AbsentAsync(() => local.ReadByIdDocumentedAsync(saved!.LocalId, ct))) &&
+                        (dropbox is null || await AbsentAsync(() => dropbox.ReadByIdAsync(saved!.DropboxId, ct)))) proven.Add(issue);
                 if (proven.Count != 0) context.Store.CloseIdentityAbsent(context.Pair.PairId, proven);
             }
         }
