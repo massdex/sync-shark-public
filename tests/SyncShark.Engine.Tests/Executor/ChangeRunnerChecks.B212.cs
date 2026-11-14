@@ -29,7 +29,8 @@ public static partial class ChangeRunnerChecks
         {
             RepairDropboxVictimAsync, RepairHandDeletedVictimAsync, RepairLateDescendantAsync, RepairObsoleteHeldAsync,
             RepairChangedShapeAsync, RepairLinkedElsewhereAsync, RepairHeldThenRetryAsync, RepairOwnRetainedAsync,
-            RepairRefusedCompleteCostAsync, RepairOtherCustodyAsync, RepairAncestorWaitAsync
+            RepairRefusedCompleteCostAsync, RepairOtherCustodyAsync, RepairAncestorWaitAsync, VacateExactAsync,
+            VacateReuseAsync, VacateForeignAsync, VacateGoneAsync, VacateGonePriorAsync, ReplaceDeferredJobAsync
         })
         {
             try { await witness(); }
