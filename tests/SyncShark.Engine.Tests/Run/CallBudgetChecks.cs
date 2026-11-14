@@ -369,7 +369,7 @@ public static partial class CallBudgetChecks
             Check.Require((await rig.RunAsync(log, default)).Completed, "An occupied create does not stop its Repair.");
             var issue = rig.Store.Issues(rig.Pair.PairId).Single(item => item.Kind == IssueKind.NameClash);
             var occupant = rig.Wire.Snapshot().Single(item => item.Path == "a");
-            Check.Require(before is not null && JsonSerializer.Serialize(rig.Wire.ChangeExistingFile("a")) == before &&
+            Check.Require(before is not null && occupantId is not null && JsonSerializer.Serialize(rig.Wire.ChangeExistingFile("a")) == before &&
                 issue.Cause == TextKey.ClashNameTaken && issue.Subject.Items.Contains(new IssueItem(Side.Dropbox, "a", occupantId)) &&
                 (kind == "folder" ? occupant.Folder && occupant.Bytes.Length == 0 :
                     Encoding.UTF8.GetString(occupant.Bytes) == (kind == "identical" ? "content" : "occupant")) &&
