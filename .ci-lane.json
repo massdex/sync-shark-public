@@ -1,0 +1,13 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "repair-held",
+    "dropbox-echo",
+    "syncer",
+    "path-only-coalescing"
+  ],
+  "core": [],
+  "ui": []
+}
