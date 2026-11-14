@@ -407,8 +407,6 @@ internal sealed partial class ChangeTable
             claimed.ResponsibilityOverlaps(dropboxKey, isFolder) ||
             row.Identity is not null && pass.Claims?.Values.Any(claim =>
                 claim.Side == Side.Dropbox && claim.Identity == row.Identity) == true ||
-            pass.EchoResponsibility!.ResponsibilityOverlaps(localKey, isFolder) ||
-            pass.EchoResponsibility.ResponsibilityOverlaps(dropboxKey, isFolder) ||
             Read(null, StateSchema.EchoPending, static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
                 (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamLocalKey, localKey),
                 (StateSchema.ParamDropboxKey, dropboxKey), (StateSchema.ParamIsFolder, isFolder)).First()) return (null, examined);
