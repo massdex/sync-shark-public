@@ -467,6 +467,8 @@ internal sealed partial class ChangeTable
     {
         if (ReadPair(transaction, pairId) is not { } pair || ReadSourceRow(transaction, pair.Row, Side.Dropbox) is not
                 { } source || Domain(Roots(pair), Side.Dropbox) is not { } domain) return 0;
+        _ = Read(transaction, StateSchema.ReadIssueMembers, static reader => reader.GetInt64(0),
+            (StateSchema.ParamIssue, move.Id)).ToArray();
         // Finish the reader before deleting; each deletion cascades its issue association.
         var proven = Rows(transaction, StateSchema.IssueRegistrations, (StateSchema.ParamIssue, move.Id),
                 (StateSchema.ParamSide, (int)Side.Dropbox), (StateSchema.ParamPairRow, pair.Row),
@@ -477,7 +479,12 @@ internal sealed partial class ChangeTable
             .Select(row => row.WorkId).ToList();
         var retired = 0;
         foreach (var work in proven)
+        {
+            _ = Rows(transaction, StateSchema.Anchor, (StateSchema.ParamAnchor, work),
+                (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamGeneration, pair.Generation),
+                (StateSchema.ParamEpoch, source.Epoch)).FirstOrDefault();
             retired += Run(transaction, StateSchema.DeleteWork, (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamWork, work));
+        }
         return retired;
     }
 
