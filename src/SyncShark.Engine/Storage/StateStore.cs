@@ -786,7 +786,6 @@ public sealed partial class StateStore : IStateStore
         var retired = 0;
         using (var transaction = _connection.BeginTransaction())
         {
-            RequireGeneration(transaction, pairId, expectedGeneration);
             if (IssueTable.ById(_connection, pairId, expected.Id, transaction)?.Matches(expected) != true ||
                 !IssuePolicy.UnknownMove(expected.Kind, expected.Subject))
                 throw StaleIssue(expected.Id);
