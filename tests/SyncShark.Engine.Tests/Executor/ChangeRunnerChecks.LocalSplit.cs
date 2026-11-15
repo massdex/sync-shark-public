@@ -123,6 +123,8 @@ public static partial class ChangeRunnerChecks
         var batchPublications = 0;
         var followUps = 0;
         var retirements = new List<FolderRetirementDisposition>();
+        var closures = new List<(bool Closed, long Through, int Reads, bool Held)>();
+        long injectedWatermark = 0;
         fixture.Hooks.AfterCall = (method, args, result) =>
         {
             if (method == nameof(IStateStore.BeginFolderRemoval))
@@ -130,8 +132,9 @@ public static partial class ChangeRunnerChecks
             if (method == nameof(IStateStore.RetireFolderRemoval))
                 retirements.Add((FolderRetirementDisposition)args[3]!);
             if (shape == "fault-new-evidence" && method == nameof(IStateStore.CloseNoEffectFailure))
-                Console.WriteLine($"CLOSURE boundary result={result}, through={args[4]}, watermark={fixture.Inner.ReadWorkWatermark()}, " +
-                    $"issue={fixture.Inner.IssueById(PairId, ((Issue)args[3]!).Id)?.Cause}, reads={documented}, moves={remoteCalls.Moves}");
+                closures.Add(((bool)result!, (long)args[4]!, documented,
+                    fixture.Inner.IssueById(PairId, ((Issue)args[3]!).Id)?.Cause == TextKey.ReadLocalFailed &&
+                    remoteCalls.Moves == 0 && effects.Count == 0));
         };
         var faultId = childFault ? members.Single(value => value.LocalPath == oldPath + "/Loose").LocalId : root.LocalId;
         Task<(IdentityLocation Location, bool InScope)?> Identity(string id, bool strict)
@@ -289,16 +292,24 @@ public static partial class ChangeRunnerChecks
                         fixture.Hooks.BeforeCallWith = null;
                         Notice(new ChangeNotice(Side.Local, ChangeKind.Changed, oldPath + "/Loose", null,
                             members.Single(value => value.LocalPath == oldPath + "/Loose").LocalId, null, false, false));
-                        Check.Require(fixture.Inner.ReadWorkWatermark() > (long)args[4]!,
+                        injectedWatermark = fixture.Inner.ReadWorkWatermark();
+                        Check.Require(injectedWatermark > (long)args[4]!,
                             "The injected descendant evidence is newer than this closure's read proof");
                         injected = true;
                     };
                 }
                 await Runner().SyncWorkAsync(default);
                 Check.Require(shape != "fault-new-evidence" || injected, "The closure boundary received newer evidence");
-                Check.Require(retirements.Contains(FolderRetirementDisposition.NoEffect) && effects.Count == 0 &&
-                    remoteCalls.Moves == 0 && fixture.Inner.IssueById(PairId, issue.Id)?.Cause == faultCause,
-                    "NoEffect keeps the exact issue after later evidence or an unrelated failure cause: " + shape);
+                if (shape == "fault-new-evidence")
+                    Check.Require(retirements.Contains(FolderRetirementDisposition.NoEffect) && effects.Count == 0 &&
+                        closures.Count > 0 && !closures[0].Closed && closures[0].Held &&
+                        closures.Where(value => value.Closed).All(value => value.Through >= injectedWatermark &&
+                            value.Reads > closures[0].Reads),
+                        "Newer evidence holds the injected attempt; later closure requires fresh covering reads");
+                else
+                    Check.Require(retirements.Contains(FolderRetirementDisposition.NoEffect) && effects.Count == 0 &&
+                        remoteCalls.Moves == 0 && fixture.Inner.IssueById(PairId, issue.Id)?.Cause == faultCause,
+                        "NoEffect keeps the exact issue after later evidence or an unrelated failure cause: " + shape);
                 return Counts();
             }
             if (shape == "fault")
