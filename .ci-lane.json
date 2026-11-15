@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "dropbox",
+    "issues",
+    "mapped-holds",
+    "folder-move",
+    "duplicate-repair"
+  ],
+  "core": [],
+  "ui": []
+}
