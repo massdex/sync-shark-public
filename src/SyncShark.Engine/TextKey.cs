@@ -36,7 +36,6 @@ public enum TextKey
     RecycleUnavailable,
     RecycleFailed,
     DropboxRefused,
-    FailDropboxOutcomeUnknown,
     ReadLocalFailed,
     LocalNameInvalid,
     ReadDropboxFailed,

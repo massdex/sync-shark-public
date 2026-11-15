@@ -2597,36 +2597,6 @@ public sealed class InMemoryStateStore : IStateStore
         lock (_gate) return IssueRows(pairId).FirstOrDefault(issue => issue.Id == id);
     }
 
-    public void CloseUnknownMove(string pairId, long expectedGeneration, Issue expected,
-        Func<ChangeNotice, SyncedEntry?, bool, bool>? echoes)
-    {
-        lock (_gate)
-        {
-            RequireGeneration(pairId, expectedGeneration);
-            if (IssueById(pairId, expected.Id)?.Matches(expected) != true ||
-                !IssuePolicy.UnknownMove(expected.Kind, expected.Subject))
-                throw new EngineRequestException(TextKey.ResolveStale,
-                    (TextArg.Id, expected.Id.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-            var source = _sources.GetValueOrDefault(SourceKey(pairId, Side.Dropbox));
-            var domain = Domain(pairId, Side.Dropbox);
-            var proven = echoes is null || source is null || domain is null ? [] : _work.Where(row =>
-                row.PairId == pairId && row.IssueId == expected.Id && row.Side == Side.Dropbox && !row.IssueOrigin &&
-                row.PairGeneration == expectedGeneration && row.SourceEpoch == source.Epoch && row.Domain == domain &&
-                row.OldPathKey is null && !row.DiscoveryRequired && row.Parent is not null &&
-                row.RenameContinuation is null && !_work.Any(child => child.Parent == row.WorkId) &&
-                !_folders.Any(folder => folder.Key.PairId == pairId && folder.Value.RenameWork == row.WorkId) &&
-                ChangeTable.ProvesMoveEcho(row.Notice!, row.PathKey, row.Before, expected.Subject.Move!, echoes)).ToList();
-            if (!CloseExact(pairId, expected)) throw new InvalidDataException();
-            foreach (var row in proven) _work.Remove(row);
-            if (_passes.TryGetValue(pairId, out var pass)) pass.NetRetired += proven.Count;
-        }
-    }
-
-    public Issue? UnknownMoveCovering(string pairId, string key)
-    {
-        lock (_gate) return ProjectIssues(pairId).UnknownMoveCovering(key);
-    }
-
     public IssueKind? HeldKind(string pairId, Row row, IReadOnlySet<long>? exceptIssues)
     {
         lock (_gate) return ProjectIssues(pairId).HeldKind(row, exceptIssues);

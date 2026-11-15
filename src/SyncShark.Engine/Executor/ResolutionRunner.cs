@@ -110,12 +110,7 @@ internal sealed class ResolutionRunner(
             return SyncOutcome.InSync;
         }
         // Settlement closes and may restore, so it acts on the stored row, not the caller's snapshot.
-        if (IssuePolicy.UnknownMove(current.Kind, current.Subject))
-        {
-            var settled = await new UnknownMoveSettlement(context, items).SettleAsync(current, false, ct);
-            Resolved = settled.Resolved;
-            return settled.Outcome;
-        }
+        if (IssuePolicy.UnknownMove(current.Kind, current.Subject)) return await SettleMoveAsync(current, ct);
         // Release only: syncing the subject paths would reach X outside its hold; the cleanup runs at the next wake.
         if (IssuePolicy.RetryWakesRepair(current.Cause))
         {
@@ -133,6 +128,32 @@ internal sealed class ResolutionRunner(
                 await SyncFollowUpAsync(item.Side, item.Path, issue, false, ct, retryIssues));
         Resolved = context.Store.IssueById(context.Pair.PairId, issue.Id) is null;
         return retried;
+    }
+
+    private async Task<SyncOutcome> SettleMoveAsync(Issue issue, CancellationToken ct)
+    {
+        var held = new SyncOutcome(ActionKind.None, NoneReason.Held, null, IssueKind.Failure, false, issue.Cause);
+        if (await items.Renames.ObserveUnknownMoveAsync(issue, ct) is not { } read) return held;
+        var (decision, observed) = read;
+        var move = issue.Subject.Move!;
+        var bound = context.Store.SyncedById(context.Pair.PairId, Side.Dropbox, move.ExpectedId);
+        if (!UnknownMoveCheck.Settles(decision, bound is not null)) return held;
+        (SyncOutcome Outcome, bool Kept) settled;
+        try
+        {
+            settled = await items.Renames.SettleUnknownMoveAsync(issue, observed!.Value.Location.Entry,
+                bound, decision == UnknownMoveCheck.Outcome.RemainingHop, () => Close(issue), ct);
+        }
+        // Settlement has already decided the restore; an item error is this Retry's outcome, as in an ordinary Retry.
+        catch (Exception error) when (ItemFailures.IsItemError(error))
+        {
+            context.Events(RunEvent.Failed(error, path: issue.Path));
+            // The settlement's close already marked this Retry resolved; the held outcome is not.
+            Resolved = false;
+            return held;
+        }
+        Resolved = !settled.Kept;
+        return settled.Outcome;
     }
 
     // The keep-folder choice has no sync action: its one atomic transaction validates the exact issue and

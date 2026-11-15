@@ -714,7 +714,6 @@ public static class QueryPlanChecks
             (StateSchema.ItemEpisodeBySubject, "issue_member_retry_subject"),
             (StateSchema.ItemEpisodesAtPath, "issue_member_retry_subject"),
             (StateSchema.Registration, "issue_member_retry_subject"),
-            (StateSchema.IssueRegistrations, "issue_member_issue"),
         })
             // EarliestRetry is itself the pair keyset, so its pair search line carries the owning index.
             CheckDurableStatement(connection, sql, index, keepPair: sql == StateSchema.EarliestRetry);

@@ -125,10 +125,9 @@ public sealed class Syncer
     {
         var pairId = _context.Pair.PairId;
         RowContexts? rows = null;
-        var moves = new UnknownMoveSettlement(_context, _items);
         SelectionPass CreatePass() => new(_context, _items, _ancestors, _ports.Live, _executor,
             (rows ??= _items.Rows).ForConcurrentSelection(), progress, _ports.RunBatchAsync, _temporary.Record,
-            work => _temporary.Skips(work, out _), moves.Request);
+            work => _temporary.Skips(work, out _));
         var serial = false;
         var serialOnly = false;
         var settling = true;
@@ -229,15 +228,14 @@ public sealed class Syncer
                 if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             }
             finally { retired = _context.Store.EndWorkPass(pairId); }
-            var settledMove = await moves.SettleRequestedAsync(ct).ConfigureAwait(false);
             // Retirement or a newly released endpoint justifies another pass; re-registering failure does not.
             if (alone) LeaveSerial();
             // Alone refusals are not competition; any refused remainder lane of a serial-started pass is.
             var competed = (serial || lanes > 1) && Volatile.Read(ref refused) > refusedAlone;
             // Progress only on arrivals, with no older refusal or completed continuation, yields to the opportunity boundary.
-            yielded = !settledMove && retired && !competed && !Volatile.Read(ref completed) && Volatile.Read(ref progressed) &&
+            yielded = retired && !competed && !Volatile.Read(ref completed) && Volatile.Read(ref progressed) &&
                 Volatile.Read(ref progress0) == 0 && Volatile.Read(ref refused0) == 0;
-            repeat = settledMove || !yielded && (competed || retired || Volatile.Read(ref completed));
+            repeat = !yielded && (competed || retired || Volatile.Read(ref completed));
             serialOnly = !retired && (serialOnly || serial && competed);
             serial = competed && Volatile.Read(ref progress0) == 0;
         } while (repeat);

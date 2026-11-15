@@ -780,31 +780,6 @@ public sealed partial class StateStore : IStateStore
         lock (_lock) return IssueTable.ById(_connection, pairId, id);
     }
 
-    public void CloseUnknownMove(string pairId, long expectedGeneration, Issue expected,
-        Func<ChangeNotice, SyncedEntry?, bool, bool>? echoes) => Write(() =>
-    {
-        var retired = 0;
-        using (var transaction = _connection.BeginTransaction())
-        {
-            RequireGeneration(transaction, pairId, expectedGeneration);
-            if (IssueTable.ById(_connection, pairId, expected.Id, transaction)?.Matches(expected) != true ||
-                !IssuePolicy.UnknownMove(expected.Kind, expected.Subject))
-                throw StaleIssue(expected.Id);
-            // Keep associations available for proof, and roll retirement back if the exact close refuses.
-            if (echoes is not null) retired = _changes.RetireMoveEchoes(transaction, pairId, expected, echoes);
-            if (!IssueTable.Close(_connection, transaction, pairId, expected.Path, [expected.Kind],
-                    only: issue => issue.Id == expected.Id)) throw new InvalidDataException();
-            transaction.Commit();
-        }
-        _changes.AccountAttachment(pairId, -retired);
-        UpdateClosures(pairId, StateChange.Empty with { Close = [(expected.Path, [expected.Kind])] });
-    });
-
-    public Issue? UnknownMoveCovering(string pairId, string key)
-    {
-        lock (_lock) return _issueFacts.Read(pairId).UnknownMoveCovering(key);
-    }
-
     private void RequireExpectedIssue(string pairId, Issue? expected)
     {
         if (expected is not null && IssueTable.ById(_connection, pairId, expected.Id)?.Matches(expected) != true)

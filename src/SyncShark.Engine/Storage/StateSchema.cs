@@ -877,12 +877,6 @@ public static class StateSchema
     public const string SaveBeforePath = "UPDATE change_work AS w SET before_json=$nextBefore WHERE " + PathSelection + ";";
     public const string PendingByIdentity = "SELECT " + WorkColumns + " FROM change_work w WHERE w.work_origin='Acquired' AND w.side=$side AND w.domain=$domain AND w.identity=$identity AND (w.pair_id,w.work_id)>($afterPair,$after) ORDER BY w.pair_id,w.work_id LIMIT $take;";
     public const string Registration = "SELECT " + WorkColumns + " FROM issue_member m INDEXED BY issue_member_retry_subject JOIN change_work w ON w.work_id=m.work_id WHERE m.pair_id=$pair AND m.side=$side AND m.path_key=$path AND m.identity IS $identity AND m.work_id IS NOT NULL AND m.issue_id=$issue AND w.work_origin='Acquired';";
-    /// <summary>One issue's current acquired registrations, excluding owed discovery, old paths and parents.</summary>
-    public const string IssueRegistrations = "SELECT " + WorkColumns + " FROM issue_member m INDEXED BY issue_member_issue " +
-        "JOIN change_work w ON w.work_id=m.work_id WHERE m.issue_id=$issue AND m.side=$side AND m.pair_id=$pair AND " +
-        "w.work_origin='Acquired' AND w.pair_generation=$generation AND w.source_epoch=$epoch AND w.domain=$domain AND " +
-        "w.old_path_key IS NULL AND w.discovery_required=0 AND w.parent_anchor IS NOT NULL AND " +
-        "NOT EXISTS(SELECT 1 FROM change_work c WHERE c.parent_anchor=w.work_id) ORDER BY m.path_key,w.work_id;";
     public const string EpisodeWork = "SELECT " + WorkColumns + " FROM issue i JOIN change_work w ON w.work_id=i.item_retry_work_id WHERE i.pair_id=$pair AND i.issue_id=$issue AND i.item_retry_episode IS NOT NULL;";
     public const string RegistrationByParent = "SELECT " + WorkColumns + " FROM change_work w WHERE w.parent_anchor=$parent AND w.obligation_key=$obligation;";
     public const string MoveRegistration = "UPDATE change_work SET pair_generation=$generation,source_epoch=$epoch,domain=$domain,parent_anchor=$parent,obligation_key=$obligation WHERE pair_id=$pair AND work_id=$work;";

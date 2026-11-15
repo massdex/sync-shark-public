@@ -107,7 +107,7 @@ internal readonly struct SelectionExecution(SelectionPass _pass, ExecutorContext
     }
 
     // The one park for both held routes: the branch attaches to its holder and its siblings carry on.
-    internal (bool Ready, bool DiscardPeer, bool MayRetain) Park(WorkSelection selection, ChangeNotice notice,
+    private (bool Ready, bool DiscardPeer, bool MayRetain) Park(WorkSelection selection, ChangeNotice notice,
         ChangeNotice? original, string key, Row row, SyncedEntry? before, Issue? holder)
     {
         _pass.RememberHeld(original, key, row, before, holder);

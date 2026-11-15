@@ -253,15 +253,14 @@ public static class ActionExecutorChecks
             if (firstRun) row = row with { Context = row.Context with
                 { FirstRunDeletion = IssueSubject.FirstRunDeletionKind.Item } };
             var move = new IssueSubject.UnknownMove(dropbox.Id, dropbox.Path, local.Path, "Intermediate", folder);
-            var error = new ItemFailedException(dropbox.Path, TextKey.FailDropboxOutcomeUnknown, null)
+            var error = new ItemFailedException(dropbox.Path, TextKey.MoveFailed, null)
                 { Disposition = FailureDisposition.UnknownEffect, Move = move };
             fixture.Dropbox.FailNext(dropbox.Path, error);
             var callbacks = new List<Issue>();
             var outcome = await fixture.Executor.ExecuteAsync(new SyncAction(ActionKind.MoveDropbox, row,
                 Target: local.Path), null, default, committedIssue: callbacks.Add);
             var issue = fixture.Store.Issues(fixture.Pair.PairId).Single();
-            Check.Require(issue.Kind == IssueKind.Failure && issue.Cause == TextKey.FailDropboxOutcomeUnknown &&
-                issue.Subject.Move == move &&
+            Check.Require(issue.Kind == IssueKind.Failure && issue.Subject.Move == move &&
                 issue.Subject.FirstRunDeletion == (firstRun ? IssueSubject.FirstRunDeletionKind.Item :
                     IssueSubject.FirstRunDeletionKind.None) && callbacks.Single() == issue &&
                 outcome.Raised == IssueKind.Failure && !outcome.Succeeded(),
@@ -276,7 +275,7 @@ public static class ActionExecutorChecks
     {
         // Every cause passed to ItemFailedException, including the LocalWriter.Map causes.
         foreach (var cause in new[] { TextKey.LocalNameInvalid, TextKey.ReadLocalFailed, TextKey.ReadDropboxFailed,
-            TextKey.DropboxRefused, TextKey.FailDropboxOutcomeUnknown, TextKey.RecycleUnavailable, TextKey.RecycleFailed, TextKey.PublishFailed,
+            TextKey.DropboxRefused, TextKey.RecycleUnavailable, TextKey.RecycleFailed, TextKey.PublishFailed,
             TextKey.ParentMissing, TextKey.DownloadIncomplete, TextKey.FailEarlierReplace, TextKey.MoveFailed })
         foreach (var inner in new Exception?[] { null, new IOException("Original provider detail") })
         {
@@ -2834,11 +2833,6 @@ public static class ActionExecutorChecks
         public IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null) =>
             throw new NotSupportedException();
         public Issue? IssueById(string pairId, long id) => throw new NotSupportedException();
-        public void CloseUnknownMove(string pairId, long expectedGeneration, Issue expected,
-            Func<ChangeNotice, SyncedEntry?, bool, bool>? echoes) =>
-            (inner ?? throw new NotSupportedException()).CloseUnknownMove(pairId, expectedGeneration, expected, echoes);
-        public Issue? UnknownMoveCovering(string pairId, string key) =>
-            (inner ?? throw new NotSupportedException()).UnknownMoveCovering(pairId, key);
         public IssueKind? HeldKind(string pairId, Row row, IReadOnlySet<long>? exceptIssues) =>
             throw new NotSupportedException();
         public bool HeldCovers(string pairId, string key, IReadOnlySet<long>? exceptIssues) =>
