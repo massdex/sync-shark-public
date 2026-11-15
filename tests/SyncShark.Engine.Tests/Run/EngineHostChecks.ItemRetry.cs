@@ -1118,7 +1118,7 @@ public static partial class EngineHostChecks
             Volatile.Write(ref refreshes, rig.Refreshes);
             if (mode == "other-pair-pause")
             {
-                var auto = (AutoSync)typeof(EngineHost).GetField("_auto", Private)!.GetValue(rig.Host)!;
+                var auto = (Massdex.SyncShark.Engine.Run.AutoSync)typeof(EngineHost).GetField("_auto", Private)!.GetValue(rig.Host)!;
                 auto.PublishPause("pair-b", true);
             }
             else if (mode == "late-cancel")
