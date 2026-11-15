@@ -107,6 +107,15 @@ public static partial class ChangeRunnerChecks
         var effects = new List<FolderRemovalEffect>();
         var batches = 0;
         var batchPublications = 0;
+        var followUps = 0;
+        var retirements = new List<FolderRetirementDisposition>();
+        fixture.Hooks.AfterCall = (method, args, result) =>
+        {
+            if (method == nameof(IStateStore.BeginFolderRemoval))
+                followUps += fixture.Inner.PendingFolderFollowUps(PairId, (string)result!, -1, int.MaxValue).Count();
+            if (method == nameof(IStateStore.RetireFolderRemoval))
+                retirements.Add((FolderRetirementDisposition)args[3]!);
+        };
         var faultId = shape == "fault" ? members.Single(value => value.LocalPath == oldPath + "/Loose").LocalId : root.LocalId;
         Task<(IdentityLocation Location, bool InScope)?> Identity(string id, bool strict)
         {
@@ -139,13 +148,14 @@ public static partial class ChangeRunnerChecks
                 return selected = SeedRemote(fixture, notice.Observed ?? FolderEntry(notice.Path, notice.Id!), notice);
             return selected = Seed(fixture, notice, ++page);
         }
-        Syncer Runner()
+        Syncer Runner(bool live = true)
         {
             var boundary = new Boundary(_ => new Lease());
             boundary.Capture = (work, _, _) => Task.FromResult(Coverage(work));
             var context = fixture.Context(selected!) with
             {
                 Store = store,
+                Live = live,
                 CaptureFolderCursorAsync = _ => Task.FromResult(Cursor),
                 ReadFolderChangesAsync = (_, ct) => NoFolderChangesAsync(ct)
             };
@@ -196,16 +206,21 @@ public static partial class ChangeRunnerChecks
         {
             Removed();
             var before = documented;
+            var plainBefore = plain;
             await Runner().SyncWorkAsync(default);
+            Console.WriteLine($"LOCAL-SPLIT removal {shape}/{children}/{background}: documented={documented - before}, " +
+                $"plain={plain - plainBefore}, submissions={submissions}, effects={effects.Count}, moves={remoteCalls.Moves}, followups={followUps}");
             var expected = shape switch
             {
                 "historic" => 2,
                 "remote-delete" => 0,
                 "root-fault" => 1,
-                "deleted" or "deleted-child" or "excluded-child" or "send-fault" => 4 * children + 3,
+                // The held send is rechecked by the drain's continuation, still without a submission.
+                "send-fault" => 4 * children + 4,
+                "deleted" or "deleted-child" or "excluded-child" => 4 * children + 3,
                 _ => 4 * children + 2
             };
-            Check.Require(documented - before == expected && plain == 0,
+            Check.Require(documented - before == expected && plain == plainBefore,
                 $"Removal uses only documented identities: {shape}, observed={documented - before}, expected={expected}, plain={plain}");
             if (shape is "fault" or "root-fault")
             {
@@ -234,7 +249,10 @@ public static partial class ChangeRunnerChecks
                     "The failed parent fences child renames; no move or removal escapes");
                 fault = false;
                 var issue = fixture.Inner.Issues(PairId).Single(value => value.Path == oldPath);
-                await Runner().ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
+                var retry = await Runner(live: false).ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
+                Console.WriteLine($"LOCAL-SPLIT Retry {children}/{background}: resolved={retry.Resolved}, outcome={retry.Outcome}, " +
+                    $"issues={string.Join(',', fixture.Inner.Issues(PairId).Select(value => value.Cause))}, retirements={string.Join(',', retirements)}");
+                Check.Require(retry.Resolved, "Retry clears the failed populated removal: " + retry.Outcome);
                 await Runner().SyncWorkAsync(default);
             }
         }
@@ -251,7 +269,9 @@ public static partial class ChangeRunnerChecks
             effects.Count == expectedEffects && submissions == expectedEffects && remoteCalls.Deletes == 0,
             $"Split effects {shape}: moves={remoteCalls.Moves}/{expectedMoves}, publishes={remoteCalls.Publishes}, " +
             $"effects={effects.Count}/{expectedEffects}, submissions={submissions}, deletes={remoteCalls.Deletes}");
-        Check.Require(localCalls.Work == (shape == "remote-delete" ? 1 : 0), "No unintended Local work: " + shape);
+        // Fresh needs one Local stream open for its upload; the mirror delete needs one Local removal.
+        Check.Require(localCalls.Work == (shape is "remote-delete" or "fresh" ? 1 : 0),
+            $"No unintended Local work: {shape}, work={localCalls.Work}, opens={localCalls.Opens}, deletes={localCalls.Deletes}");
         Check.Require(remoteCalls.Ensures == (pureDelete || shape == "reference" ? 0 : 1), "Only the new root is created: " + shape);
         if (shape is "batch" or "fresh")
             Check.Require(batches == 1 && batchPublications == (shape == "fresh" ? 1 : 0),
@@ -259,6 +279,11 @@ public static partial class ChangeRunnerChecks
         if (shape == "remote-delete") Check.Require(remoteIdentity == 2, "Mirror delete probes only its plan and send roots");
         Check.Require(fixture.Inner.Issues(PairId).Count == 0 && !fixture.Inner.ActiveFolderRemovals(PairId, default).Any(),
             "The completed opportunity leaves no failure or active removal: " + shape);
+        if (shape is "stall" or "batch" or "fresh" or "fault")
+            Check.Require(followUps == 0 && retirements.Contains(FolderRetirementDisposition.NoEffect) &&
+                fixture.Dropbox.FindById(root.DropboxId) is not null &&
+                fixture.Inner.SyncedByKey(PairId, Side.Local, root.LocalKey) == root,
+                "The populated survivor plan retires NoEffect, without follow-ups, and keeps the old root binding");
         foreach (var member in members)
         {
             var current = fixture.Local.FindById(member.LocalId);
@@ -277,7 +302,12 @@ public static partial class ChangeRunnerChecks
                 localCalls.Publishes, remoteCalls.Publishes, localCalls.Ensures, remoteCalls.Ensures, localCalls.Deletes,
                 remoteCalls.Deletes, localCalls.Moves, remoteCalls.Moves, plain, documented, remoteIdentity, submissions,
                 effects.Count, batches, localCalls.Yielded, remoteCalls.Yielded, store.Commands, store.CommitCalls,
-                store.ReadConnections, store.RowsRead, store.ScanAccepted };
+                store.ReadConnections, store.RowsRead, store.ScanAccepted, followUps,
+                localCalls.SubtreeListings, remoteCalls.SubtreeListings, localCalls.SiblingListings, remoteCalls.SiblingListings,
+                localCalls.Disposals, remoteCalls.Disposals, localCalls.BytesRead, remoteCalls.BytesRead,
+                localCalls.HashBytes, remoteCalls.HashBytes, store.RecordCommitCalls, store.RecordCommittedMembers,
+                store.RecordCommitFailures, store.ScanAppliedOnCompletion, store.ScanCompleted, store.ScanAborted,
+                store.ScanFailedCompletions, store.DerivedPlanDataStatements, fixture.Hooks.Total };
             Console.WriteLine($"LOCAL-SPLIT {shape} children={children} background={background}: " + string.Join(",", values));
             return values;
         }
