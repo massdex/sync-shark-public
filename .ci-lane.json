@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "folder-move",
+    "unknown-move-live",
+    "syncer",
+    "dropbox",
+    "repair"
+  ],
+  "core": [],
+  "ui": []
+}
