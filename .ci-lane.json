@@ -1,0 +1,21 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "local-split",
+    "no-effect-closure",
+    "folder-move",
+    "folder-deletes",
+    "syncer",
+    "store",
+    "repair",
+    "unknown-move-live",
+    "unknown-move-repair",
+    "dependencies",
+    "literals",
+    "strings"
+  ],
+  "core": [],
+  "ui": []
+}
