@@ -1,0 +1,15 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "repair",
+    "unknown-move-repair",
+    "renames",
+    "store",
+    "syncer",
+    "unknown-move-live"
+  ],
+  "core": [],
+  "ui": []
+}
