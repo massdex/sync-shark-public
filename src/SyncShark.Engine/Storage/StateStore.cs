@@ -1948,7 +1948,7 @@ public sealed partial class StateStore : IStateStore
                     selected = current is { Ignored: false, Dismissed: false } && current.Matches(clash!) ? current.Id : null;
                     inspected = true;
                 }
-                return facts.Overlaps(key, descendants, selected);
+                return facts.Overlapping(key, descendants, selected);
             });
         });
 

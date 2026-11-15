@@ -95,13 +95,16 @@ internal sealed class IssueFacts(string pairId, long pairRow)
         return null;
     }
 
-    /// <summary>Whether a hold covers the key or, for a whole subtree, sits under it. The descendant walk visits held
-    /// keys only, so it grows with notices, never with the pair.</summary>
-    public bool Overlaps(string key, bool includesDescendants) => Overlaps(key, includesDescendants, null);
-
-    internal bool Overlaps(string key, bool includesDescendants, long? selectedIssue) =>
-        Covering(key, null, selectedIssue) is not null || includesDescendants &&
-        _held.Keys.Any(held => PathNames.IsUnderKey(held, key) && At(_held, held, null, selectedIssue) is not null);
+    /// <summary>The hold covering the key or, for a whole subtree, the first found under it. The descendant walk visits
+    /// held keys only, so it grows with notices, never with the pair.</summary>
+    internal Issue? Overlapping(string key, bool includesDescendants, long? selectedIssue)
+    {
+        if (Covering(key, null, selectedIssue) is { } covering) return covering;
+        if (includesDescendants)
+            foreach (var held in _held.Keys)
+                if (PathNames.IsUnderKey(held, key) && At(_held, held, null, selectedIssue) is { } issue) return issue;
+        return null;
+    }
 
     private static Issue? At(Dictionary<string, SortedDictionary<long, Issue>> map, string key,
         IReadOnlySet<long>? exceptIssues, long? selectedIssueId = null)

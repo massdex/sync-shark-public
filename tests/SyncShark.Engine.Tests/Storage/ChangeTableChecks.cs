@@ -959,9 +959,11 @@ public static partial class ChangeTableChecks
             store.CountWork(PairId, provenance.PairGeneration, later).Local == 2,
             "Another lane's peer claim refuses without changing either row");
         store.EndSelection(peer);
-        Check.Require(store.TransferSupersededWork(first, later) && !store.ReadWork(first).Any() &&
-            store.ReadWork(newest).Single().Notice!.LocalContentDirty,
+        Check.Require(store.TransferSupersededWork(first, later) &&
+            store.ReadWork(newest).Single().Notice!.LocalContentDirty &&
+            store.CountWork(PairId, provenance.PairGeneration, later).Local == 1,
             "Only the transferring selection's own claim and attempt remain: debt transfers");
+        Throws<LiveAdmissionStaleException>(() => store.ReadWork(first).ToArray());
         store.EndWorkPass(PairId);
     }
 

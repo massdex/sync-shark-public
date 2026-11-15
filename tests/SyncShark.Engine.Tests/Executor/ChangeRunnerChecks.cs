@@ -4786,7 +4786,16 @@ public static partial class ChangeRunnerChecks
 
     public static void RunLiveReplaceSafety() => LiveFolderReplaceOverUnreadableChildAsync().GetAwaiter().GetResult();
 
-    public static void RunRaisedHoldSafety() => RaisedHoldCoversSelectionChildrenAsync().GetAwaiter().GetResult();
+    public static void RunRaisedHoldSafety() => RaisedHoldSafetyAsync().GetAwaiter().GetResult();
+
+    private static async Task RaisedHoldSafetyAsync()
+    {
+        await RaisedHoldCoversSelectionChildrenAsync();
+        foreach (var mode in new[] { "holder-closed", "repair", "item-acquired" })
+            await HeldScopeParksAsync(mode);
+        await RecreatedUnderHeldFolderKeepsHolderAsync();
+        await ExactHeldFileParksAsync();
+    }
 
     public static void RunHeldRenameSafety() => RenameUnderHeldFolderHoldsAsync().GetAwaiter().GetResult();
 
@@ -10949,6 +10958,158 @@ public static partial class ChangeRunnerChecks
         Check.Require(fixture.Admission.Completed == 0 &&
             await fixture.Dropbox.ReadOneAsync(child.Path, default) is null,
             "No action runs for a child of the folder that raised the hold.");
+    }
+
+    private static (WorkSelection Selection, Issue Holder) HeldScope(Fixture fixture)
+    {
+        TrustEchoSources(fixture);
+        var folder = FolderEntry(Folder, FolderId);
+        var child = LocalEntry(Folder + "/inner.txt", LocalId);
+        fixture.Inner.Commit(PairId, StateChange.Empty with
+        {
+            Record = [SyncedEntries.From(folder, FolderEntry(Folder, "remote-folder")),
+                SyncedEntries.From(child, RemoteEntry(child.Path, DropboxId))],
+            Raise = [(IssueKind.NameClash, TextKey.ClashNameTaken, child.Path,
+                new IssueSubject([new IssueItem(Side.Local, child.Path, child.Id),
+                    new IssueItem(Side.Dropbox, child.Path, DropboxId)], null))]
+        });
+        var selection = Seed(fixture, Deleting(Folder, FolderId));
+        return (selection, fixture.Inner.Issues(PairId).Single());
+    }
+
+    private static async Task HeldScopeParksAsync(string mode)
+    {
+        using var fixture = new Fixture(realStore: true);
+        var (selection, holder) = HeldScope(fixture);
+        var counters = new StoreCounters(fixture.Inner);
+        fixture.Hooks.Inner = counters;
+        var events = new List<RunEvent>();
+        var boundary = new Boundary(request =>
+        {
+            fixture.Store.ValidateLiveCoverage(request.Selection, request.Coverage, request.Footprint);
+            return new Lease();
+        });
+        var attached = false;
+        fixture.Hooks.AfterCall = (method, args, result) =>
+        {
+            if (method == nameof(IStateStore.AttachIssueWork) && args[1] is Issue issue && issue.Id == holder.Id)
+                attached |= result is true;
+        };
+        var syncer = LiveSyncer(fixture, selection, boundary, events);
+        await syncer.SyncWorkAsync(default);
+        Check.Require(attached && PendingAt(fixture, Side.Local, Folder).All(work => work.AnchorWorkId != selection.AnchorWorkId) &&
+            PendingAt(fixture, Side.Local, Folder).Count == 1 &&
+            events.All(item => item.Error is not LiveAdmissionStaleException),
+            "A held descendant parks the folder under its exact notice and retires the anchor without a stale event.");
+        var calls = boundary.Calls;
+        var commands = counters.Commands;
+        await syncer.SyncWorkAsync(default);
+        Console.WriteLine($"Held scope {mode}: first commands={commands}, parked commands={counters.Commands - commands}");
+        Check.Require(boundary.Calls == calls && events.All(item => item.Error is not LiveAdmissionStaleException),
+            "Without a holder event, a parked folder makes no new admission and reports no refusal.");
+        if (mode == "item-acquired")
+            Seed(fixture, Deleting(Folder, FolderId), page: 2);
+        else if (mode == "holder-closed")
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Close = [(holder.Path, new[] { holder.Kind })] });
+        else
+        {
+            var token = fixture.Inner.BeginScan(PairId, Generation, false);
+            await fixture.Inner.OpenScan(PairId, Side.Local, 1).CompleteAsync();
+            await fixture.Inner.OpenScan(PairId, Side.Dropbox, 1).CompleteAsync();
+            var repair = LiveSyncer(fixture, selection, boundary, events, configure: context => context with { Live = false });
+            await repair.SyncScannedAsync(token, new ListedSkips([], [], [], []), null, default);
+            await fixture.Inner.EndScanAsync(PairId, token, 1);
+        }
+        await syncer.SyncWorkAsync(default);
+        Check.Require(events.All(item => item.Error is not LiveAdmissionStaleException),
+            "A holder event resumes durable work without a stale refusal.");
+        if (mode == "item-acquired")
+            Check.Require(boundary.Calls == calls + 1 && fixture.Inner.Issues(PairId).Any(issue => issue.Id == holder.Id) &&
+                PendingAt(fixture, Side.Local, Folder).Count > 0,
+                "A new folder acquisition plans once and parks again while its holder remains open.");
+        else
+            Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Folder)) is null &&
+                fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(holder.Path)) is null,
+                "Holder closure or Repair resumes ForgetOnly for the saved folder and child.");
+    }
+
+    private static async Task RecreatedUnderHeldFolderKeepsHolderAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var (selection, holder) = HeldScope(fixture);
+        WorkSelection? recreated = null;
+        fixture.Hooks.BeforeCall = method =>
+        {
+            if (method.Name != nameof(IStateStore.ValidateLiveCoverage) || recreated is not null) return;
+            var child = LocalEntry(holder.Path, OccupantId);
+            fixture.Local.Seed(child, [5]);
+            recreated = Selected(fixture, child.Path, child, page: 2);
+        };
+        var boundary = new Boundary(request =>
+        {
+            fixture.Store.ValidateLiveCoverage(request.Selection, request.Coverage, request.Footprint);
+            return new Lease();
+        });
+        var syncer = LiveSyncer(fixture, selection, boundary, []);
+        for (var call = 0; call < 2; call++)
+        {
+            await syncer.SyncWorkAsync(default);
+            Check.Require(recreated is not null && fixture.Inner.Issues(PairId).Any(issue => issue.Id == holder.Id) &&
+                fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Folder)) is not null &&
+                PendingAt(fixture, Side.Local, holder.Path).Any(work => work.Identity == OccupantId),
+                "Recreation keeps the holder and folder binding; the recreated item's responsibility is not consumed by the folder park.");
+        }
+    }
+
+    private static async Task ExactHeldFileParksAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        TrustEchoSources(fixture);
+        var local = LocalEntry(Item, LocalId);
+        var remote = RemoteEntry(Item, DropboxId);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(local, remote)] });
+        fixture.Local.Seed(local with { Size = 2 }, [2, 2]);
+        fixture.Dropbox.Seed(remote, [1]);
+        var selection = Selected(fixture, Item, local);
+        Issue? holder = null;
+        fixture.Hooks.BeforeCall = method =>
+        {
+            if (method.Name != nameof(IStateStore.CaptureLiveCoverage) || holder is not null) return;
+            fixture.Inner.Commit(PairId, StateChange.Empty with
+            {
+                Raise = [(IssueKind.NameClash, TextKey.ClashNameTaken, Item,
+                    new IssueSubject([new IssueItem(Side.Local, Item, LocalId),
+                        new IssueItem(Side.Dropbox, Item, DropboxId)], null))]
+            });
+            holder = fixture.Inner.Issues(PairId).Single();
+        };
+        var attached = false;
+        fixture.Hooks.AfterCall = (method, args, result) =>
+        {
+            if (method == nameof(IStateStore.AttachIssueWork) && args[1] is Issue issue && issue.Id == holder?.Id)
+                attached |= result is true;
+        };
+        var boundary = new Boundary(request =>
+        {
+            fixture.Store.ValidateLiveCoverage(request.Selection, request.Coverage, request.Footprint);
+            return new Lease();
+        });
+        var events = new List<RunEvent>();
+        var syncer = LiveSyncer(fixture, selection, boundary, events);
+        boundary.Capture = (chosen, _, _) =>
+        {
+            var coverage = Coverage(chosen);
+            return Task.FromResult(fixture.Store.CaptureLiveCoverage(chosen, coverage.Local, coverage.Dropbox));
+        };
+        await syncer.SyncWorkAsync(default);
+        Check.Require(holder is not null && attached &&
+            PendingAt(fixture, Side.Local, Item).All(work => work.AnchorWorkId != selection.AnchorWorkId) &&
+            PendingAt(fixture, Side.Local, Item).Count == 1 && events.All(item => item.Error is not LiveAdmissionStaleException),
+            "A hold raised after file preparation parks the exact file under its notice without a stale event.");
+        var calls = boundary.Calls;
+        await syncer.SyncWorkAsync(default);
+        Check.Require(boundary.Calls == calls && events.All(item => item.Error is not LiveAdmissionStaleException),
+            "A parked exact file does not seek admission again without a holder event.");
     }
 
     // D3: a rename under a held folder is held through the prefix rule, not only on an exact held key.

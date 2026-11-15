@@ -1640,7 +1640,7 @@ internal sealed partial class ChangeTable
     /// watermark and no relevant unselected identity, old-path, descendant, residual or issue evidence falls in the
     /// footprint. Unrelated progress passes.</summary>
     internal void ValidateLiveCoverage(WorkSelection selection, LiveCoverage coverage,
-        IReadOnlyList<LiveEffectScope> footprint, Func<string, bool, bool> heldOverlaps)
+        IReadOnlyList<LiveEffectScope> footprint, Func<string, bool, Issue?> holder)
     {
         var pair = RequireCoverage(selection, coverage.Local, coverage.Dropbox);
         if (selection.SourceEpoch != EpochOn(coverage, selection.Side))
@@ -1655,7 +1655,7 @@ internal sealed partial class ChangeTable
         bool? plainDeletion = null;
         for (var index = 0; index < scopes.Length; index++)
             ValidateScopeEvidence(pair, selection, anchor, coverage, definition.Roots, scopes[index],
-                footprint[index].ExactEvidence, footprint[index].FolderPlan, baseline, heldOverlaps, ref plainDeletion);
+                footprint[index].ExactEvidence, footprint[index].FolderPlan, baseline, holder, ref plainDeletion);
         // B-101: a path selection's saved identity acquired elsewhere is a reported move, not a deletion (D19).
         if (LaterIdentityEvidence(pair.Row, selection, anchor) ||
             selection.Identity is null && baseline?.IdOn(selection.Side) is { Length: > 0 } saved && UnownedIdentity(pair.Row,
@@ -1691,19 +1691,19 @@ internal sealed partial class ChangeTable
     // One ordered decision over one footprint scope: hold, exact and descendant evidence share one anchor and coverage.
     private void ValidateScopeEvidence(PairRow pair, WorkSelection selection, WorkRow anchor, LiveCoverage coverage,
         RootBinding? roots, (Side Side, string Key, bool IncludesDescendants) scope, bool exactEvidence, bool folderPlan,
-        SyncedEntry? baseline, Func<string, bool, bool> heldOverlaps, ref bool? plainDeletion)
+        SyncedEntry? baseline, Func<string, bool, Issue?> holder, ref bool? plainDeletion)
     {
         var epoch = EpochOn(coverage, scope.Side);
         var domain = Domain(roots, scope.Side) ??
             throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
         var key = scope.Key;
-        var held = heldOverlaps(key, scope.IncludesDescendants);
+        var holding = holder(key, scope.IncludesDescendants);
         ItemRetryCandidate? newerEpisode = null;
-        if (held || InUseBlocks(pair.Row, selection, scope.Side, key, out newerEpisode))
+        if (holding is not null || InUseBlocks(pair.Row, selection, scope.Side, key, out newerEpisode))
             throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.RelevantEvidenceChanged,
                 Massdex.SyncShark.Engine.Text.Get(TextKey.StaleFootprintHeld, (TextArg.Path, key), (TextArg.Side, scope.Side.ToString())))
-                { WaitKey = held || scope.Side != Side.Local ? null : key,
-                    NewerEpisode = newerEpisode is null ? null : (selection, newerEpisode) };
+                { WaitKey = holding is not null || scope.Side != Side.Local ? null : key,
+                    NewerEpisode = newerEpisode is null ? null : (selection, newerEpisode), Holder = holding };
         var (low, high) = PathNames.DescendantBounds(key);
         var range = Evidence(pair.Row, selection.PairGeneration, scope.Side, epoch, domain,
             (StateSchema.ParamJoinKey, key), (StateSchema.ParamLow, low), (StateSchema.ParamHigh, high));

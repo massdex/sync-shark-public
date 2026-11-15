@@ -20,6 +20,9 @@ internal sealed class LiveAdmissionStaleException(LiveAdmissionStaleReason reaso
     /// <summary>The exact later row found by a later-evidence refusal; custody decides whether it carries this work.</summary>
     internal (WorkSelection Selection, long LaterWorkId)? Superseded { get; init; }
 
+    /// <summary>The open notice whose hold overlaps the refused footprint; set only by the held-scope rule.</summary>
+    internal Issue? Holder { get; init; }
+
     /// <summary>A contained content observation needing fresh admission within the same item attempt.</summary>
     internal Row? HandoffRow { get; init; }
 

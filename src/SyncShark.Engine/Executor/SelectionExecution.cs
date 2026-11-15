@@ -42,11 +42,8 @@ internal readonly struct SelectionExecution(SelectionPass _pass, ExecutorContext
         {
             // Settled before any coverage capture or lease: a held branch waits on its notice, its siblings carry on.
             if (prepared is { Kind: ActionKind.None, None: NoneReason.Held })
-            {
-                var holder = context.Store.HoldingIssue(selection.PairId, prepared.Row);
-                _pass.RememberHeld(original, key, prepared.Row, before, holder);
-                return (_pass.AttachHeld(selection, original ?? notice, prepared.Row, before, holder), false, false);
-            }
+                return Park(selection, notice, original, key, prepared.Row, before,
+                    context.Store.HoldingIssue(selection.PairId, prepared.Row));
             if (prepared is { Kind: ActionKind.None, None: NoneReason.Skipped or NoneReason.OutOfScope })
             {
                 return (true, key == selection.Key, false);
@@ -83,6 +80,13 @@ internal readonly struct SelectionExecution(SelectionPass _pass, ExecutorContext
             }
             return (Succeeded(outcome, selection), false, true);
         }
+        // A footprint held by a notice parks under it, as a held plan does; a holder that changed since refuses as today.
+        catch (LiveAdmissionStaleException error) when (error.Holder is { } holder)
+        {
+            var parked = Park(selection, notice, original, key, admission?.Row ?? row, before, holder);
+            if (parked.Ready) return parked;
+            throw;
+        }
         // B-195b: this refusal already paid its probes; a vanished file's wait ends here, before the next capture.
         catch (LiveAdmissionStaleException error) when (error.WaitKey is { } waitKey && (admission?.Row ?? row).Local is null)
         {
@@ -100,5 +104,13 @@ internal readonly struct SelectionExecution(SelectionPass _pass, ExecutorContext
     {
         if (outcome.None == NoneReason.Unfinished) _pass.RecordTemporary?.Invoke(selection, outcome.RetryWait);
         return outcome.Succeeded();
+    }
+
+    // The one park for both held routes: the branch attaches to its holder and its siblings carry on.
+    private (bool Ready, bool DiscardPeer, bool MayRetain) Park(WorkSelection selection, ChangeNotice notice,
+        ChangeNotice? original, string key, Row row, SyncedEntry? before, Issue? holder)
+    {
+        _pass.RememberHeld(original, key, row, before, holder);
+        return (_pass.AttachHeld(selection, original ?? notice, row, before, holder), false, false);
     }
 }
