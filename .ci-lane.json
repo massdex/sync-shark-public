@@ -1,0 +1,14 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "zero-wait-retries",
+    "failure-episodes",
+    "dropbox",
+    "limiter",
+    "repair"
+  ],
+  "core": [],
+  "ui": []
+}
