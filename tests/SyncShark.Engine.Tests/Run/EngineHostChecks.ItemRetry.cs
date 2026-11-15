@@ -1369,7 +1369,6 @@ public static partial class EngineHostChecks
         await rig.TurnAsync().ConfigureAwait(false);
         var row = rig.Store.ReadItemRetry(rig.PairId)!.Value;
         await rig.SettledIdleAsync("yield setup").ConfigureAwait(false);
-        Console.WriteLine($"Yield {mode}: setup settled, due={rig.Clock.NextDueIn}, firstWait={rig.FirstWait}");
         var dispatches = rig.Dispatches;
         int logs;
         lock (rig.Logs) logs = rig.Logs.Count;
@@ -1387,7 +1386,6 @@ public static partial class EngineHostChecks
             (RunLog?)registration.GetType().GetField("Log", Private)!.GetValue(registration);
         rig.BeforeSelect = () =>
         {
-            Console.WriteLine($"Yield {mode}: select {selects + 1}, completed dispatches={rig.Dispatches - dispatches}");
             if (rig.Dispatches == dispatches)
             {
                 if (++selects == 1)
@@ -1408,7 +1406,6 @@ public static partial class EngineHostChecks
                 source.WorkCommitted = _ => Interlocked.Increment(ref withheld);
                 try { rig.Hold(rig.DeliverLocalAsync("other.txt"), "post-floor arrival commits without its acquisition wake"); }
                 finally { source.WorkCommitted = committed; }
-                Console.WriteLine($"Yield {mode}: arrival committed, withheld={withheld}");
                 first!.Failed(new IOException("synthetic carried failure"));
             }
             else if (second is null)
@@ -1422,7 +1419,6 @@ public static partial class EngineHostChecks
         };
         rig.AfterDispatch = () =>
         {
-            Console.WriteLine($"Yield {mode}: completed dispatches={rig.Dispatches - dispatches}, selects={selects}");
             if (rig.Dispatches != dispatches + 1) return;
             Volatile.Write(ref refreshes, rig.Refreshes);
             if (mode == "other-pair-pause")
@@ -1922,8 +1918,6 @@ public static partial class EngineHostChecks
             var generation = Store.ReadPairExecution(PairId)!.Value.Generation;
             Store.RequireRepairAfterLoss(PairId, generation);
             if (!notice) return;
-            var local = Store.ReadSource(PairId, Side.Local)!.Value;
-            var dropbox = Store.ReadSource(PairId, Side.Dropbox)!.Value;
             Store.RecordPrerequisiteFailure(PairId, generation, _ => new FailureRetryOwner.State(1, Clock.GetUtcNow() + Far),
                 RetryNotice());
         }

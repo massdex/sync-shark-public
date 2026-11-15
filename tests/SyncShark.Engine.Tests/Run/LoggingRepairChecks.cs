@@ -1475,9 +1475,6 @@ internal static class LoggingRepairChecks
         await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(pairId) is null && wire.HeldLongpolls > polls &&
             (!finite || wire.Snapshot().Any(item => item.Path == "child.txt" && Encoding.UTF8.GetString(item.Bytes) == "pending")));
         await SettleAsync();
-        Console.WriteLine($"Live recovery finite={finite}: C={Calls("/2/files/list_folder/continue") - continuations}, " +
-            $"L={wire.HeldLongpolls - polls}, U={Uploads() - uploads}, " +
-            $"noticeOpen={rig.Store.Issues(pairId).Any(issue => issue.Id == notice.Id)}, status={rig.Host.Status().Status}");
         Check.Require(Calls("/2/files/list_folder/continue") == continuations + 2 &&
             Uploads() == uploads + (finite ? 1 : 0) &&
             Calls("/2/files/upload_session/finish_batch_v2") == finishes + (finite ? 1 : 0) &&
@@ -1722,8 +1719,8 @@ internal static class LoggingRepairChecks
         var expected = failedResume
             ? new Dictionary<string, int>
             {
-                [nameof(IStateStore.ReadPairExecution)] = 6, [nameof(IStateStore.ReadSource)] = 4,
-                [nameof(IStateStore.ReadPrerequisiteRetry)] = 2, [nameof(IStateStore.HasOpenIssue)] = 1,
+                [nameof(IStateStore.ReadPairExecution)] = 6, [nameof(IStateStore.ReadSource)] = 2,
+                [nameof(IStateStore.ReadPrerequisiteRetry)] = 1, [nameof(IStateStore.HasOpenIssue)] = 1,
                 [nameof(IStateStore.ReadItemRetry)] = 1, [nameof(IStateStore.Obligated)] = 1,
                 [nameof(IStateStore.RequireRepairAfterLoss)] = 1, [nameof(IStateStore.RecordPrerequisiteFailure)] = 1,
                 [nameof(IStateStore.ReadJournal)] = 1

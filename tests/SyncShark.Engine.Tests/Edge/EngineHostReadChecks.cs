@@ -276,8 +276,9 @@ public static class EngineHostReadChecks
             "the CLI lists the out-of-space notice with Retry");
         var resolved = await ReadAsync(runtime, ["--cli", "engine", "resolve", "--pair", PairId, "--issue",
             notice.GetProperty("id").GetInt64().ToString(CultureInfo.InvariantCulture), "--reviewed",
-            notice.GetProperty("reviewed").GetString()!, "--choice", "retry", "--yes", "--json"]).ConfigureAwait(false);
-        Check.Require(!resolved.GetProperty("resolved").GetBoolean() && rig.Store.ReadPrerequisiteRetry(PairId) is not null,
+            notice.GetProperty("reviewed").GetString()!, "--choice", "retry", "--yes", "--json"],
+            SyncCliExitCode.TransientUnavailable).ConfigureAwait(false);
+        Check.Require(!resolved.GetProperty("done").GetBoolean() && rig.Store.ReadPrerequisiteRetry(PairId) is not null,
             "Retry hands work back without prematurely resolving the notice");
         armed = true;
         await rig.Host.StartAsync(default).ConfigureAwait(false);
@@ -297,7 +298,8 @@ public static class EngineHostReadChecks
     private static IEnumerable<string?> Choices(JsonElement item) =>
         item.GetProperty("options").EnumerateArray().Select(option => option.GetProperty("choice").GetString());
 
-    private static async Task<JsonElement> ReadAsync(EngineCliRuntime runtime, string[] args)
+    private static async Task<JsonElement> ReadAsync(EngineCliRuntime runtime, string[] args,
+        SyncCliExitCode expectedExit = SyncCliExitCode.Success)
     {
         using var stdout = new StringWriter(CultureInfo.InvariantCulture);
         using var stderr = new StringWriter(CultureInfo.InvariantCulture);
@@ -305,7 +307,7 @@ public static class EngineHostReadChecks
             .ConfigureAwait(false);
         using var document = JsonDocument.Parse(stdout.ToString());
         var envelope = document.RootElement;
-        Check.Require(exit == (int)SyncCliExitCode.Success && envelope.GetProperty("ok").GetBoolean() &&
+        Check.Require(exit == (int)expectedExit && envelope.GetProperty("ok").GetBoolean() &&
             envelope.GetProperty("data").ValueKind == JsonValueKind.Object,
             "a host read returns its data envelope: " + string.Join(' ', args) + "; stderr=" + stderr + "; stdout=" + stdout);
         return envelope.GetProperty("data").Clone();

@@ -208,9 +208,9 @@ public static class DependencyChecks
         var methods = typeof(Syncer).GetMethods(BindingFlags.DeclaredOnly | BindingFlags.Instance |
             BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic).Where(method => !method.IsPrivate).ToArray();
         string[] expected = ["SyncScannedAsync", "SyncWorkAsync", "FailItem", "ReconcileReceiptsAsync",
-            "SettleOutstandingAsync", "RecoverAsync", "ResolveAsync", "PreviewExclusionAsync"];
+            "SettleOutstandingAsync", "RecoverAsync", "ResolveAsync", "PreviewExclusionAsync", "Cancelled"];
         Check.Require(methods.Select(method => method.Name).Order().SequenceEqual(expected.Order()),
-            "A1: Syncer exposes exactly its eight workflow entries.");
+            "A1: Syncer exposes exactly its eight workflow entries and shared requested-cancellation classifier.");
         Check.Require(methods.Single(method => method.Name == "FailItem").ReturnType == typeof(void),
             "C1: native item failure reporting is synchronous and exposes no task to block on.");
         Check.Require(methods.All(method => !Forbidden(method.ReturnType) &&

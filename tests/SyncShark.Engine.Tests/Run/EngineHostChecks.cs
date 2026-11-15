@@ -497,8 +497,6 @@ public static partial class EngineHostChecks
         const string PairId = "page-debt";
         var store = new InMemoryStateStore();
         store.SavePair(Pair(PairId));
-        var local = store.ReadSource(PairId, Side.Local) ?? throw new InvalidOperationException();
-        var remote = store.ReadSource(PairId, Side.Dropbox) ?? throw new InvalidOperationException();
         store.RecordPrerequisiteFailure(PairId, 0, _ => new FailureRetryOwner.State(1, DateTimeOffset.UtcNow.AddMinutes(1)),
             RetryNotice());
         Check.Require(RetryNotices(store, PairId) == 1, "the independently protected failed-Repair notice is recorded");
