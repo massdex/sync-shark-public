@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "user-moves",
+    "unknown-move-live"
+  ],
+  "core": [],
+  "ui": []
+}
