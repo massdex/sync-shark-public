@@ -230,7 +230,7 @@ internal sealed class SelectionPass
             // A clash that already registers this work current is left alone: Storage owns that answer (B-123).
             if (holder.Kind == IssueKind.NameClash && _context.Store.ClashRefusalState(selection, holder.Path,
                     holder.Subject, member).State == ClashRefusal.Covered) return true;
-            return _context.Store.AttachIssueWork(selection, holder, [member]);
+            return _context.Store.AttachIssueWork(selection, holder, [member, member]);
         }
         catch (LiveAdmissionStaleException error) when (error.Reason == LiveAdmissionStaleReason.RelevantEvidenceChanged)
         {
