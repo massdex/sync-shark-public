@@ -10,7 +10,7 @@ public static partial class ChangeRunnerChecks
     private static async Task MoveNoticeBaseProbeAsync()
     {
         foreach (var real in new[] { false, true })
-        foreach (var scenario in new[] { "same-key", "clash" })
+        foreach (var scenario in new[] { "same-key", "clash", "source" })
         {
             using var fixture = new Fixture(realStore: real);
             var bindings = new List<SyncedEntry>();
@@ -21,7 +21,8 @@ public static partial class ChangeRunnerChecks
                 var remote = index == 0 ? FolderEntry("Source", DropboxId) : RemoteEntry("Source" + suffix, DropboxId + index);
                 bindings.Add(SyncedEntries.From(local, remote));
                 fixture.Local.Seed(scenario == "clash" ? local : local with { Path = "Destination" + suffix }, index == 0 ? null : [1]);
-                fixture.Dropbox.Seed(remote with { Path = "Destination" + suffix }, index == 0 ? null : [1]);
+                if (scenario != "source" || index != 1)
+                    fixture.Dropbox.Seed(scenario == "source" ? remote : remote with { Path = "Destination" + suffix }, index == 0 ? null : [1]);
             }
             if (scenario == "clash") fixture.Local.Seed(FolderEntry("Destination", OccupantId), null);
             fixture.Inner.Commit(PairId, StateChange.Empty with { Record = bindings });
@@ -35,6 +36,13 @@ public static partial class ChangeRunnerChecks
             fixture.Inner.Commit(PairId, StateChange.Empty with
                 { Raise = [(IssueKind.Failure, TextKey.DropboxRefused, "Source", subject)] });
             var issue = fixture.Inner.Issues(PairId).Single();
+            if (scenario == "source")
+            {
+                var deleted = new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, "Source/Child1", null, null, null, false, false);
+                var debt = SeedRemote(fixture, RemoteEntry(deleted.Path, DropboxId + 1), deleted);
+                Check.Require(fixture.Inner.AttachIssueWork(debt, issue, [(deleted, false, bindings[1])]) &&
+                    fixture.Inner.CompleteWork(debt, null), "The source deletion waits as a retained registration.");
+            }
             var byId = 0;
             fixture.DropboxView = new IdentitySide(fixture.Dropbox, (id, ct) =>
             {
@@ -71,6 +79,14 @@ public static partial class ChangeRunnerChecks
                 if (fixture.Inner.IssueById(PairId, replacement!.Id) is not null)
                     await new Syncer(context, ports).ResolveAsync(replacement, ResolutionChoice.Retry, null, null, default);
                 Console.WriteLine("BASE MOVE PROBE after-B byId=" + byId + " issues=" +
+                    string.Join(";", fixture.Inner.Issues(PairId).Select(item => item.Kind + " " + item.Path)));
+            }
+            else if (scenario == "source")
+            {
+                await UntilDrainedAsync(new Syncer(context, ports), default);
+                Console.WriteLine("BASE MOVE PROBE source-delete local=" + fixture.Local.FindById(LocalId + 1)?.Path +
+                    " binding=" + fixture.Inner.SyncedById(PairId, Side.Dropbox, DropboxId + 1)?.DropboxPath +
+                    " pending=" + fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Dropbox + " issues=" +
                     string.Join(";", fixture.Inner.Issues(PairId).Select(item => item.Kind + " " + item.Path)));
             }
             else
