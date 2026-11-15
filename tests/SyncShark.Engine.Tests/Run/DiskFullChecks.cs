@@ -285,7 +285,7 @@ public static class DiskFullChecks
         Execute(connection, StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema +
             StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames +
             StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn +
-            StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema);
+            StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema + StateSchema.FolderMoveSchema);
         Execute(connection, StateSchema.AttachScan, (StateSchema.ParamPath, StateSchema.EmptyScan));
         Execute(connection, StateSchema.ScanPragmas);
         Execute(connection, StateSchema.CreateScan);

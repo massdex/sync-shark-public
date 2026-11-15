@@ -7,9 +7,12 @@ internal sealed class Recovery(ExecutorContext context, IRecoveryExecutionBounda
 {
     private string PairId => context.Pair.PairId;
 
-    internal Task ReconcileReceiptsAsync(CancellationToken ct, bool progressOnly = false,
-        Func<string, CancellationToken, Task>? finish = null) =>
-        folders.ReconcileFolderRemovalsAsync(ct, progressOnly, finish);
+    internal async Task ReconcileReceiptsAsync(CancellationToken ct, bool progressOnly = false,
+        Func<string, CancellationToken, Task>? finish = null)
+    {
+        await folders.ReconcileFolderRemovalsAsync(ct, progressOnly, finish).ConfigureAwait(false);
+        context.Store.HoldFolderMoves(PairId);
+    }
 
     internal async Task<OutstandingWork> SettleOutstandingAsync(CancellationToken ct)
     {

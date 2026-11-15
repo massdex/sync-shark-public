@@ -463,4 +463,7 @@ public enum TextKey
     LanesSerial,
     LanesParallel,
     FailDropboxTooManyFiles,
+    FailMoveInParts,
+    FailMoveSharedFolder,
+    StageFolderMoveParts,
 }

@@ -37,6 +37,9 @@ public sealed record StateChange(
     /// <summary>Holds X's obligation on Side behind the one Failure this change raises, a CAS on the issue it recorded.</summary>
     public (Side Side, string Identity, long? ExpectedIssue)? HoldRepair { get; init; }
 
+    /// <summary>The split root whose Filled receipts atomically replace source binding identities before settlement.</summary>
+    public string? SplitRelabel { get; init; }
+
     /// <summary>Process-local provenance for a listed Record or Adopt, revalidated after its queue wait.</summary>
     internal Guid? ListedScanId { get; init; }
 

@@ -208,7 +208,7 @@ public static class IssuePolicy
     public static bool Holds(IssueKind kind, TextKey cause) => kind switch
     {
         IssueKind.Failure => cause is TextKey.FailDropboxNameRejected or TextKey.FailDropboxNoPermission or
-            TextKey.FailDropboxTooManyFiles,
+            TextKey.FailDropboxTooManyFiles or TextKey.FailMoveSharedFolder,
         IssueKind.Tie or IssueKind.NameClash =>
             cause is not (TextKey.ClashMappedNames or TextKey.ClashMappedDiffers),
         _ => false
@@ -248,7 +248,7 @@ public static class IssuePolicy
 
     /// <summary>Stored Failures whose public label is informational; retry and closure still use stored kinds.</summary>
     public static IReadOnlyList<TextKey> FailureInfoCauses { get; } =
-        Array.AsReadOnly(new[] { TextKey.FailLocalInUse });
+        Array.AsReadOnly(new[] { TextKey.FailLocalInUse, TextKey.FailMoveInParts });
 
     public const IssueKind FailureInfoSource = IssueKind.Failure;
     public const IssueKind FailureInfoTarget = IssueKind.Info;

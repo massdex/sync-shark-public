@@ -2577,6 +2577,10 @@ public static class ActionExecutorChecks
     {
         public CommitStore(Action<StateChange, Action<Issue>?, Action<Issue, bool>?> commit) : this(null, commit) { }
 
+        public void HoldFolderMoves(string pairId) => inner?.HoldFolderMoves(pairId);
+        public IEnumerable<FolderMove> FolderMoveRoots(string pairId, CancellationToken ct) =>
+            inner?.FolderMoveRoots(pairId, ct) ?? [];
+
         public int Commits { get; private set; }
         public int AsyncCommits { get; private set; }
         public int RecordCommits { get; private set; }

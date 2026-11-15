@@ -14,6 +14,7 @@ public static class StateCommitter
         ICollection<(Issue Issue, bool IsNew)>? settled = null, Func<Issue, bool>? endEpisode = null)
     {
         ValidateChange(change, scans);
+        if (change.SplitRelabel is { } root) RelabelFolderMove(connection, transaction, pairId, root);
         // Before any stage writes: a settle's own forget would otherwise hide the binding it checks.
         if (change.SettleRepair is { } settle) DuplicateRepairs.RequirePreForget(connection, transaction, pairId, settle);
         foreach (var rename in change.Renames)
@@ -41,6 +42,26 @@ public static class StateCommitter
         // The hold commit raises exactly its one Failure; the hold binds to whatever Failure that raise left there.
         if (change.HoldRepair is { } hold)
             DuplicateRepairs.Hold(connection, transaction, pairId, hold, change.Raise.Single().Path);
+    }
+
+    private static void RelabelFolderMove(SqliteConnection connection, SqliteTransaction transaction, string pairId,
+        string root)
+    {
+        var pair = IssueTable.PairFor(connection, transaction, pairId);
+        List<FolderMove> rows = [];
+        using (var command = StorageCommand.Create(connection, transaction, StateSchema.FolderMoveRelabelRead,
+            (StateSchema.ParamPairRow, pair), (StateSchema.ParamMoveRoot, root)))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) rows.Add(StateEncoding.ReadFolderMove(reader));
+        if (!rows.Any(row => row.SourceId == root && row.ParentId is null) ||
+            rows.Any(row => row.Phase != FolderMovePhase.Filled || row.DestinationId is null))
+            throw new ChangedUnderneathException(rows.FirstOrDefault()?.SourcePath ?? string.Empty);
+        foreach (var row in rows)
+            Execute(connection, transaction, StateSchema.FolderMoveRelabelBindings,
+                (StateSchema.ParamPairRow, pair), (StateSchema.ParamId, row.SourceId),
+                (StateSchema.ParamMoveDestinationId, row.DestinationId));
+        Execute(connection, transaction, StateSchema.FolderMoveRelabelRows,
+            (StateSchema.ParamPairRow, pair), (StateSchema.ParamMoveRoot, root));
     }
 
     private static void ValidateChange(StateChange change, IReadOnlyList<ScanPartition> scans)

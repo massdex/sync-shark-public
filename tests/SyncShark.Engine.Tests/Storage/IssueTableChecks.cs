@@ -1443,7 +1443,7 @@ public static class IssueTableChecks
         Execute(connection, null, StateSchema.Pragmas);
         Execute(connection, null, StateSchema.Create);
         Execute(connection, null, StateSchema.SchemaAdditions);
-        Execute(connection, null, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema);
+        Execute(connection, null, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema + StateSchema.FolderMoveSchema);
         Execute(connection, null, StateSchema.AttachScan, (StateSchema.ParamPath, StateSchema.EmptyScan));
         Execute(connection, null, StateSchema.CreateSkipTouched);
         return connection;

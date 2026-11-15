@@ -1,4 +1,7 @@
 {
+  "FailMoveInParts": "Dropbox moves at most a limited number of items in one step, so Sync Shark is moving this folder in parts. It continues automatically, also after an interruption. Retry continues it now.",
+  "FailMoveSharedFolder": "This folder is, or contains, a shared folder or a folder whose name Sync Shark cannot transfer, so Sync Shark cannot check inside it. Rename that folder or move the shared folder separately, then choose Retry.",
+  "StageFolderMoveParts": "Moving a large folder in parts ({Count} moved); one work slot is in use",
   "FailDuplicateFolderBinding": "This folder is linked to two folders on the other side: {First} and {Second}. Sync Shark removes one of them only when it is empty, has no synced items recorded inside it, isn't a shared folder and isn't linked to anything else. Neither qualifies now: {First}: {FirstReason}; {Second}: {SecondReason}. Nothing was changed or deleted, and moves of this folder wait until this is resolved. Change that, then choose Retry. Ignore only hides this notice; the moves keep waiting.",
   "ReasonLinkedElsewhere": "it is also linked to another folder",
   "ReasonHistory": "items inside it are still synced",

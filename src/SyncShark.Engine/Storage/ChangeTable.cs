@@ -565,7 +565,12 @@ internal sealed partial class ChangeTable
         var pair = RequirePair(transaction, pairId);
         AddEndpoint(transaction, pair, side, ReadSourceRow(transaction, pair.Row, side)?.Epoch ??
             throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged), path, id);
-        if (_passes.TryGetValue(pairId, out var pass) && pass.Generation == pair.Generation) pass.Released = true;
+        RequestRepeat(pairId, pair.Generation);
+    }
+
+    internal void RequestRepeat(string pairId, long generation)
+    {
+        if (_passes.TryGetValue(pairId, out var pass) && pass.Generation == generation) pass.Released = true;
     }
 
     /// <summary>Fences one temporary turn in the caller's transaction (the pair at its generation, the turn's side at
@@ -2032,6 +2037,23 @@ internal sealed partial class ChangeTable
     // A peer's discovery walk and unconsumed dirty evidence still need its own selection.
     private static bool NeedsOwnSelection(WorkRow work, ChangeNotice? notice = null, bool residual = false) =>
         work.DiscoveryRequired || notice?.Observed is { IsFolder: true } || residual && notice?.LocalContentDirty == true;
+
+    internal bool HasPendingUnder(string pairId, string path)
+    {
+        var pair = RequirePair(null, pairId);
+        var roots = Roots(pair);
+        var key = PathNames.Key(path);
+        foreach (var side in new[] { Side.Local, Side.Dropbox })
+        {
+            using var work = StorageCommand.Create(_connection, null, StateSchema.FolderMovePendingWork,
+                (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamGeneration, pair.Generation),
+                (StateSchema.ParamSide, (int)side), (StateSchema.ParamDomain, Domain(roots, side)), (StateSchema.ParamTargetKey, key));
+            if ((long)work.ExecuteScalar()! != 0) return true;
+        }
+        using var issue = StorageCommand.Create(_connection, null, StateSchema.FolderMovePendingIssue,
+            (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamTargetKey, key));
+        return (long)issue.ExecuteScalar()! != 0;
+    }
 
     private static RootBinding? Roots(PairRow pair) => StateEncoding.DecodePair(pair.Definition).Roots;
 

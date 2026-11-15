@@ -9,7 +9,8 @@ public static class StateSchema
     public const string Pragmas = "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;";
 
     /// <summary>The schema version this build writes and accepts.</summary>
-    public const int Version = 15;
+    public const int Version = 16;
+    public const int FolderMoveUpgradeVersion = 15;
     public const int DuplicateBindingUpgradeVersion = 14;
     public const int RenameContinuationUpgradeVersion = 13;
     public const int IssuePathKeyUpgradeVersion = 12;
@@ -50,6 +51,58 @@ public static class StateSchema
 
     /// <summary>Canonical issue lookup, installed after every issue-table rebuild.</summary>
     public const string IssuePathKeyIndex = "CREATE INDEX issue_path_key ON issue(pair_id, " + KeyOf + "path), kind);";
+
+    /// <summary>One custody row per split folder; launch is the ordered array of identity/name pairs.</summary>
+    public const string FolderMoveSchema = """
+        CREATE TABLE folder_move(
+          pair_id INTEGER NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+          source_id TEXT NOT NULL, root_id TEXT NOT NULL, parent_id TEXT,
+          source_path TEXT NOT NULL, destination_path TEXT NOT NULL, destination_id TEXT,
+          phase TEXT NOT NULL CHECK(phase IN ('Armed','Filling','Filled','Relabelled')),
+          launch TEXT, job_id TEXT, generation INTEGER NOT NULL,
+          CHECK(job_id IS NULL OR launch IS NOT NULL),
+          CHECK(phase='Armed' OR destination_id IS NOT NULL),
+          PRIMARY KEY(pair_id, source_id)) STRICT;
+        CREATE INDEX folder_move_root ON folder_move(pair_id, root_id);
+        """;
+    internal const string FolderMoveColumns = "source_id, root_id, parent_id, source_path, destination_path, destination_id, phase, launch, job_id, generation";
+    private const string FolderMoveSelect = "SELECT " + FolderMoveColumns + " FROM folder_move";
+    internal const string FolderMovesRead = FolderMoveSelect + " INDEXED BY folder_move_root WHERE pair_id=" + PairRow + " AND root_id=$root ORDER BY source_id;";
+    internal const string FolderMoveRootRead = FolderMoveSelect + " WHERE pair_id=" + PairRow + " AND source_id>$after AND parent_id IS NULL ORDER BY source_id LIMIT 1;";
+    internal const string FolderMoveUnheldRoots = FolderMoveSelect + " WHERE pair_id=$pair AND parent_id IS NULL AND phase!='Relabelled' ORDER BY source_id;";
+    internal const string FolderMoveInsert = "INSERT INTO folder_move(pair_id," + FolderMoveColumns + ") VALUES($pair,$id,$root,$parent,$sourcePath,$destinationPath,$destinationId,$phase,$launch,$job,$generation) ON CONFLICT(pair_id,source_id) DO NOTHING;";
+    internal const string FolderMoveUpdate = "UPDATE folder_move SET destination_id=$destinationId,phase=$phase,launch=$launch,job_id=$job,generation=$generation WHERE pair_id=$pair AND source_id=$id AND generation=$expected;";
+    internal const string FolderMoveDelete = "DELETE FROM folder_move WHERE pair_id=$pair AND source_id=$id AND generation=$expected;";
+    internal const string FolderMoveHolds = "SELECT EXISTS(SELECT 1 FROM folder_move WHERE pair_id=$pair AND source_id=$id AND parent_id IS NULL AND phase IN ('Filling','Filled'));";
+    internal const string FolderMoveOwns = "SELECT EXISTS(SELECT 1 FROM folder_move WHERE pair_id=$pair AND source_id=$id AND parent_id IS NULL);";
+    internal const string FolderMoveRelabelBindings = "UPDATE synced_entry INDEXED BY synced_dropbox_id SET dropbox_id=$destinationId WHERE pair_id=$pair AND dropbox_id=$id;";
+    internal const string FolderMoveRelabelRows = "UPDATE folder_move SET phase='Relabelled',generation=generation+1 WHERE pair_id=$pair AND root_id=$root;";
+    internal const string FolderMoveRelabelRead = FolderMoveSelect + " INDEXED BY folder_move_root WHERE pair_id=$pair AND root_id=$root;";
+    internal const string ParamMoveRoot = "$root";
+    internal const string ParamMoveParent = "$parent";
+    internal const string ParamMoveSourcePath = "$sourcePath";
+    internal const string ParamMoveDestinationPath = "$destinationPath";
+    internal const string ParamMoveDestinationId = "$destinationId";
+    internal const string ParamMoveLaunch = "$launch";
+    private static readonly string[] FolderMoveColumnNames = FolderMoveColumns.Split(", ");
+    internal static readonly int MoveSourceId = Array.IndexOf(FolderMoveColumnNames, "source_id");
+    internal static readonly int MoveRootId = Array.IndexOf(FolderMoveColumnNames, "root_id");
+    internal static readonly int MoveParentId = Array.IndexOf(FolderMoveColumnNames, "parent_id");
+    internal static readonly int MoveSourcePath = Array.IndexOf(FolderMoveColumnNames, "source_path");
+    internal static readonly int MoveDestinationPath = Array.IndexOf(FolderMoveColumnNames, "destination_path");
+    internal static readonly int MoveDestinationId = Array.IndexOf(FolderMoveColumnNames, "destination_id");
+    internal static readonly int MovePhase = Array.IndexOf(FolderMoveColumnNames, "phase");
+    internal static readonly int MoveLaunch = Array.IndexOf(FolderMoveColumnNames, "launch");
+    internal static readonly int MoveJobId = Array.IndexOf(FolderMoveColumnNames, "job_id");
+    internal static readonly int MoveGeneration = Array.IndexOf(FolderMoveColumnNames, "generation");
+
+    private const string MovePendingFence = " WHERE pair_id=$pair AND pair_generation=$generation AND side=$side AND domain=$domain AND ";
+    internal static readonly string FolderMovePendingWork = "SELECT EXISTS(" +
+        string.Join(" UNION ALL ", new[] { (Index: "work_path", Column: "path_key"), (Index: "work_old_path", Column: "old_path_key") }
+            .SelectMany(path => new[] { path.Column + "=$k", path.Column + ">=$k||'/' AND " + path.Column + "<$k||'0'" }
+                .Select(range => "SELECT 1 FROM change_work INDEXED BY " + path.Index + MovePendingFence + range))) + ");";
+    internal const string FolderMovePendingIssue = "SELECT EXISTS(SELECT 1 FROM issue INDEXED BY issue_path_key WHERE pair_id=$pair AND " +
+        KeyOf + "path)>=$k||'/' AND " + KeyOf + "path)<$k||'0' AND (dismissed=0 OR item_retry_episode IS NOT NULL));";
 
     public const string AttachScan = "ATTACH DATABASE $path AS scan_state;";
     public const string DetachScan = "DETACH DATABASE scan_state;";
@@ -720,7 +773,7 @@ public static class StateSchema
     internal const int DuplicateIdValue = 1;
     public const string DuplicateLocalIds = "SELECT pair_id,local_id FROM synced_entry INDEXED BY synced_local_id WHERE (pair_id,local_id)>($afterPair,$after) GROUP BY pair_id,local_id HAVING count(*)>1 ORDER BY pair_id,local_id LIMIT 1;";
     public const string DuplicateDropboxIds = "SELECT pair_id,dropbox_id FROM synced_entry INDEXED BY synced_dropbox_id WHERE (pair_id,dropbox_id)>($afterPair,$after) GROUP BY pair_id,dropbox_id HAVING count(*)>1 ORDER BY pair_id,dropbox_id LIMIT 1;";
-    public const string PublishVersion = "PRAGMA user_version=15;";
+    public const string PublishVersion = "PRAGMA user_version=16;";
     public const string LocalAccessRetryCauseFunction = "localaccessretrycause";
 
     // Upgrade validation: the actual structure is compared before and after the additions.

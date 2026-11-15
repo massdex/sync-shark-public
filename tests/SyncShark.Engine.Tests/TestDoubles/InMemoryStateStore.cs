@@ -9,6 +9,9 @@ namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 /// 3.3/3.4. Every member takes one gate, as the real store serialises its writes.</remarks>
 public sealed class InMemoryStateStore : IStateStore
 {
+    public void HoldFolderMoves(string pairId) { }
+    public IEnumerable<FolderMove> FolderMoveRoots(string pairId, CancellationToken ct) => [];
+
     private readonly object _gate = new();
     private readonly Dictionary<string, PairConfig> _pairs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _generations = new(StringComparer.Ordinal);

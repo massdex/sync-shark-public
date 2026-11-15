@@ -79,6 +79,7 @@ public static class IssueTable
         if (existing is not null &&
             (existing.Cause, cause) is not (TextKey.RequiredRepairRetry, TextKey.RequiredRepairRetry) &&
             existing.Cause != TextKey.FailDropboxDeleteJobInvalid &&
+            !RecausesFolderMove(connection, transaction, pair, existing, subject) &&
             (incoming != TextKey.FailRecycledLate && HoldsResponsibility(connection, transaction, pair, existing) ||
              IssuePolicy.UnknownMove(existing.Kind, existing.Subject)))
         {
@@ -717,15 +718,33 @@ public static class IssueTable
     private static bool HasFirstRunWork(Issue issue) => issue.Kind == IssueKind.Failure &&
         issue.Subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None;
 
+    private static bool RecausesFolderMove(SqliteConnection connection, SqliteTransaction transaction, long pair,
+        Issue existing, IssueSubject incoming) =>
+        IssuePolicy.UnknownMove(existing.Kind, existing.Subject) && existing.Subject.Move is { } previous &&
+        incoming.Move is { } next && previous.Source == next.Source && previous.Destination == next.Destination &&
+        FolderMoveResponsibility(connection, transaction, pair, previous.ExpectedId, StateSchema.FolderMoveOwns);
+
+    private static bool FolderMoveResponsibility(SqliteConnection connection, SqliteTransaction? transaction,
+        long pair, string identity, string sql)
+    {
+        using var command = StorageCommand.Create(connection, transaction, sql,
+            (StateSchema.ParamPairRow, pair), (StateSchema.ParamId, identity));
+        return (long)command.ExecuteScalar()! != 0;
+    }
+
     private static bool MayHoldResponsibility(Issue issue) => issue.Kind == IssueKind.Failure &&
         (issue.Cause is TextKey.RequiredRepairRetry or TextKey.FailDropboxDeleteJobInvalid or TextKey.FailRecycledLate
-            or TextKey.FailDuplicateFolderBinding || IssuePolicy.IsLocalAccessRetryCause(issue.Cause));
+            or TextKey.FailDuplicateFolderBinding || IssuePolicy.IsLocalAccessRetryCause(issue.Cause) ||
+         IssuePolicy.UnknownMove(issue.Kind, issue.Subject));
 
     // Live retry debt or an in-use lifecycle. First-run work is not here: it may change cause, only not close.
     internal static bool HoldsResponsibility(SqliteConnection connection, SqliteTransaction? transaction, long pair,
         Issue issue)
     {
         if (!MayHoldResponsibility(issue)) return false;
+        if (IssuePolicy.UnknownMove(issue.Kind, issue.Subject))
+            return FolderMoveResponsibility(connection, transaction, pair, issue.Subject.Move!.ExpectedId,
+                StateSchema.FolderMoveHolds);
         // A late-recycled warning has no automatic resolution; only the user ends it.
         if (issue.Cause == TextKey.FailRecycledLate) return !issue.Dismissed;
         if (issue.Cause == TextKey.FailDropboxDeleteJobInvalid)

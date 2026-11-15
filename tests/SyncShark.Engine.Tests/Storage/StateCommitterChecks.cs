@@ -19,7 +19,7 @@ public static class StateCommitterChecks
             StateStore.OpenConnection(connection);
             Exec(connection, StateSchema.Create);
             Exec(connection, StateSchema.SchemaAdditions);
-            Exec(connection, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema);
+            Exec(connection, StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema + StateSchema.FolderMoveSchema);
             Exec(connection, StateSchema.AttachScan, (StateSchema.ParamPath, StateSchema.EmptyScan));
             Exec(connection, StateSchema.ScanPragmas);
             Exec(connection, StateSchema.CreateScan);

@@ -69,13 +69,15 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/StateStore.cs
 
+Split-folder delta: schema admission and migration remain in the existing schema lifetime. The new partial shares the connection lock, write queue and publication owner; it does not discharge the existing class extraction. Retain every open row under its existing structural clearing condition.
+
 B-222 disposition: StateStore class-size and file-size - reason recorded; the growth extends existing retry, closing and persistence jobs (EndAbsentEpisode, CloseIdentityAbsent, CommitClosure, the HeldFolderMembers reader and the ResponsibilityRetained split), not a new workflow; split destination REFACTOR-PLAN-2, no row deleted. StateStore.SettleFolderRemovalItems - accepted as one atomic transition; do not split validation from commit. StateStore.SettleItemAttempt - pre-existing at lane base, not B-222; CompleteItemAttempt reads as improved only because SettleItemAttempt carries its old key.
 
 Category-change split clearing condition (class-size and file-size rows, and the FinishRepair row that cites this condition): open: the release feature freeze allows only live-defect fixes. Owner: the structural refactor lane. Clearing condition: that lane's extraction of the unit. Trigger: the first release after that lane lands. Destination: this register section and the extracted owners under src/SyncShark.Engine/Storage/. Closure requires the completed extraction preserving transaction, locking and publication semantics, plus a fresh cross-family verdict; the obligation stays open until that closure.
 
 Current inventory: class :8-4185 (4178), file 4185. SettleEchoes :1759-1761 is ordered queue forwarding, not a new job. Long-member ranges below are current; embedded release histories in the class/file rows are historical, not current coordinates. Existing split verdicts remain.
 
-<!-- spec-source: 082bda7260f5~2efdc3f14d53~4b39e0be2ffa~6098774a7d2c~3ee4c0f313ef~8de6 -->
+<!-- spec-source: ba5e7b9bf023~4bf3b57e5ff9~eb3d929ecaa9~2ff37c5bc403~f2bb373e6825~dd20 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -139,6 +141,8 @@ B-222 disposition: FolderDeleteRunner class-size and file-size - reason recorded
 
 ## src/SyncShark.Engine/Storage/ChangeTable.cs
 
+Split-folder delta: RequestRepeat extracts the existing generation-matched pass signal, and HasPendingUnder uses the existing current-domain owner. Both are work-selection custody. Existing source-acquisition versus selection extraction remains open under its recorded clearing condition.
+
 B-222 disposition: ChangeTable class-size and file-size, and CoalescePathWork - pre-existing at lane base; not in the lane's src diff. CompleteWork's 52 to 50 improvement predates B-222 at the lane base.
 
 Category-change split clearing condition (class-size and file-size rows): open: the release feature freeze allows only live-defect fixes. Owner: the structural refactor lane. Clearing condition: that lane's extraction of the unit. Trigger: the first release after that lane lands. Destination: this register section and the extracted owners under src/SyncShark.Engine/Storage/. Closure requires the completed extraction preserving transaction, locking and publication semantics, plus a fresh cross-family verdict; the obligation stays open until that closure.
@@ -149,7 +153,7 @@ ValidateLiveCoverage :1557-1581 retains main's freshness obligation. ValidateSel
 
 SettleEchoes :326-382 (57): the earlier REASON-RECORDED verdict needs current-delta confirmation; reason :325 keeps one page's walk, staged predecessors, budget and post-commit publication together. EchoSelection :385-421 is 37 lines; RetireEchoPage :441-462 is one atomic page. CoalescePathWork :466-528 and TransferBound :530-558 retain main's coalescing responsibility; only ordinary NextCandidate :285-322 reaches it. IntegrityRefusal :1211-1212 and RollbackMutation :1214-1220 remain single owners. These units add no new class job.
 
-<!-- spec-source: 01930d9398df~0a8ac549adab~4df5689199cb~99876109d75b~36ac039a0b79~4fd3 -->
+<!-- spec-source: ec81c407d040~b05766997d73~86c6407b2aef~6f93d3e4902e~f5c3f54fc2b6~cb6e -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -331,9 +335,11 @@ Current temporary-wait change: Failure :528-556 carries one additional result ar
 
 ## src/SyncShark.Engine/Storage/IssueTable.cs
 
+Split-folder delta: retention and matching-move re-cause extend the existing ordered issue lifecycle. The schema probe is parameterized for those two meanings. Existing lifecycle/listing/skip/retry extraction remains open for the structural lane; no independent verdict is claimed.
+
 B-222 disposition: IssueTable class-size and file-size - reason recorded; the optional endEpisode on Close and CloseExact (:110-129, :158-173) and the DeleteIssue seam (:785) extend the existing close lifecycle, not a new job; split destination REFACTOR-PLAN-2, no row deleted.
 
-<!-- spec-source: a732111b4da1~4c104c625045~8376724294b6~09847c128e0d~552f426da544~e6dc -->
+<!-- spec-source: 18c5700415f3~c93e0ba8c417~ba11a9066bba~b491c393a73d~1435c71baafd~b569 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -428,7 +434,9 @@ B-222 disposition: IssueTable class-size and file-size - reason recorded; the op
 
 ## src/SyncShark.Engine/Storage/StateEncoding.cs
 
-<!-- spec-source: f102264f0fa9~a8ed4f0b1106~fc3b4b54339c~6249aa40861c~8d0c916aa27a~e0a0 -->
+Split-folder delta: ordered launch JSON and the folder-row projection stay in the persisted-encoding owner and reuse its optional-text and enum readers. The existing compressed-history versus JSON versus row-projection extraction remains open; its owner is the storage structural lane, triggered by that extraction assignment and cleared by preserved codec contracts plus independent review.
+
+<!-- spec-source: f87ccfdc1108~153b61e87f88~c241b8223cc2~448fcb8b0dfb~f877f2e2f030~babc -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -517,11 +525,13 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 ## src/SyncShark.Engine/Storage/StateCommitter.cs
 
+Split-folder delta: the receipt-based identity relabel is an ordered interpreter stage inside the existing transaction. Its validation precedes all identity writes. Current-content review of the recorded single-interpreter reason is still required.
+
 B-222 disposition: StateCommitter class-size and file-size - accepted: forwarding only; the close callback forwarding in Commit changed bytes without growth and keeps the existing closed reason.
 
 Closed rows: the class (362) and file (368) REASON-RECORDED verdicts stand in the ledger (one ordered StateChange interpreter inside the caller transaction, reason :6 and :11), so they carry no register row.
 
-<!-- spec-source: 3bf43cd57ba0~9c688cf548fb~8fc70c8c565e~0082c118f68b~e3574131f765~87e7 -->
+<!-- spec-source: f7d98b78581c~c8e25e4e9681~196c0c28eb36~cd999013fcb4~84fc49e1b4dc~69d5 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -652,7 +662,9 @@ Closed rows: the class (362) and file (368) REASON-RECORDED verdicts stand in th
 
 ## src/SyncShark.Engine/Executor/Recovery.cs
 
-<!-- spec-source: 30ee9f234e59~ad8374785e52~b3fdf1ef1eab~1f482a28fa97~0f3b6edc16a0~ed8d -->
+Split-folder delta: the common receipts prelude restores state-only custody after folder receipts. The listed admitted-choice method is unchanged and retains its existing lifetime reason.
+
+<!-- spec-source: 6392c8336c9a~2e56cd2416f6~1efa5e9a6535~217773ac4f89~970a6812365d~f5af -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -681,13 +693,15 @@ The ordinary unknown-move observation/settlement composition now lives in ItemRe
 
 ## src/SyncShark.Engine/IssuePolicy.cs
 
+Split-folder delta: the new shared-folder hold cause and informational public projection reuse Holds and FailureInfoCauses. First-run extraction remains open under its existing clearing condition.
+
 The oversized-move refusal extends the existing cause-based Holds decision only. First-run policy extraction remains the existing structural lane's obligation; this change neither duplicates that policy nor clears its rows.
 
 B-222 disposition: IssuePolicy class-size and file-size - reason recorded; the same Obsolete change adds no new job; split destination REFACTOR-PLAN-2, no row deleted. IssuePolicy.Obsolete - accepted as one ordered retirement decision; the live-episode branch and AbsentOnBothSides (:299-307) are D-1113-10 Trigger B, so the decision keeps one owner.
 
 Category-change scope: PublicKind and its immutable cause list own public labels beside the stored issue policies; the existing Obsolete decision is unchanged. Its recorded single-transition reason remains applicable; independent review must verify the new category owner separately.
 
-<!-- spec-source: a35ac821a539~6c958fc1162f~adb851b7f175~c91bbcd5819f~f113b4e9fe10~4147 -->
+<!-- spec-source: ed3120d21479~e1c226047fb7~77dd4c5660df~790171e750cc~260c4e51ac2e~a7f6 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -758,7 +772,9 @@ No open §1.3 size obligation. Since 07ff9d097 (3b9d021a9, 36efd4772, cb637f88a)
 
 ## src/SyncShark.Engine/Storage/IssueFacts.cs
 
-<!-- spec-source: 7e28886bd111~dd8ad566cc75~e91d742fe709~b0458bb3b573~d2a7b78cebbd~0e2c -->
+Split-folder delta: HeldIdentity exposes the existing dismissed-inclusive identity index; no second projection is added. Replace is unchanged and retains its single locked-transition reason.
+
+<!-- spec-source: 37f2c4323385~cd7d0731c4df~a96752da23d3~a7e9c20cc99a~9156e9df53af~e893 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -866,13 +882,15 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 ## src/SyncShark.Engine/Storage/StateSchema.cs
 
+Split-folder delta: the table, indexed custody probes and structure-derived row ordinals remain declarations in the SQL catalogue. The pending-work query is composed once from its two existing index/column shapes, with no execution policy. Current-content confirmation of the catalogue reason remains required.
+
 B-222 disposition: StateSchema class-size and file-size catalogue rows - accepted; declarative SQL only (held-member statement :940, the episode-query access directives :1027 and :1041, and the saved-binding ordinal :1281); no execution or transaction policy added.
 
 Current catalogue: class :6-1532 (1527), file 1532; B-214 adds only declarations (echo responsibilities, binding probes, exact-path peer variant and EchoWorkPending :788-792). B-232 uses the existing direct pair-row delete and makes the disposable deleted-name relation WITHOUT ROWID; no new job. REASON-RECORDED remains subject to current-delta confirmation; reason :3.
 
 Category-change scope: Public page, count and keyset statements reuse one bound SQL expression. The catalogue still contains declarations only, without execution or transaction policy, so arbitrary catalogue splitting does not separate a runtime job. Absence-retirement scope changes the index access directives of PairItemEpisodes and ReadIssueRetryViews and adds HeldFolderMembers with its saved-binding column ordinal; these are declarations, not execution or transaction policy. The existing catalogue reason remains subject to content-bound review.
 
-<!-- spec-source: bc1c64aa7407~9ed5391c7db9~eafcb4dd4294~ae02600ef648~286e532b6cf9~e33b -->
+<!-- spec-source: 28df67fe4030~5f7d6107676e~001244ab4859~9ed6a614de6c~165e3325cdde~6964 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -882,9 +900,11 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 ## src/SyncShark.Engine/TextKey.cs
 
+Split-folder delta: three vocabulary identifiers are appended without changing existing enum values. The single-catalogue reason remains; no structural row is cleared.
+
 One oversized-move cause is appended to the existing vocabulary, preserving all earlier enum values. The one-catalog reason remains applicable; the recorded row is retained rather than claiming a type split.
 
-<!-- spec-source: 85e0012dd032~03df875ba942~7380e6b7c849~2111d083a695~4ec4f4f22174~cb3f -->
+<!-- spec-source: 8d4a1921853e~819037e6df94~46ac98564468~9576bb902ff2~c42d41452349~6106 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

@@ -3,7 +3,8 @@
     "engine-tests"
   ],
   "engine": [
-    "dropbox",
+    "store",
+    "work-lifecycle",
     "literals",
     "dependencies",
     "strings"

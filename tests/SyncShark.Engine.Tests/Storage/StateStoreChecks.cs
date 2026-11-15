@@ -10,7 +10,7 @@ using Microsoft.Data.Sqlite;
 namespace Massdex.SyncShark.Engine.Tests.Storage;
 
 /// <summary>Requirement-derived persistence oracles through the real Store, including reopen and refusal preimages.</summary>
-public static class StateStoreChecks
+public static partial class StateStoreChecks
 {
     // These are synthetic identities and boundary fixtures, not operating limits.
     private const string PairId = "pair-a";
@@ -57,6 +57,7 @@ public static class StateStoreChecks
         {
             foreach (var test in new Func<string, Task>[]
             {
+                FolderMoveCustodyCases, FolderMoveUpgradeCases, FolderMovePendingCases,
                 DuplicateBindingSchemaCases, PreRestoreUpgradeCases, RenameDestinationCases, DisposedRecordCases, IssueRollbackCase, IssueUpgradeCases, PersistedImportNoticeCase, BusyReaderCases, BasicCases, MappingCases, ScanCases, DeletedHistoryCases, DeletedHistoryBatchCases, DeletedHistoryUpgradeCases, LocalPublishedUpgradeCases, CanonicalClosureCases, ClosureCostCases, ScanRecordCases, SkipCases, ProtectingMemberCases, MemberlessUpgradeCases, UnreadableCases, RecordCases, GroupedRecordCases, GroupedAdoptionCases, ListedQueuePartitionCountCases, MarkerCases,
                 PendingCases, PageCases, JournalCases, PageWaitCases, ItemRetryCases, CompletionCases, ClaimedRepairCases, DropboxBookmarkCases, DropboxResetRetryCases, ConfigurationCases,
                 ItemCases, FolderCases, CounterpartPagesCases, CounterpartSiblingAnchorCases, UpgradeCases, PhaseIndexUpgradeCases, CodecCases, LegacyPendingCases, KeepRulesCases,
@@ -334,7 +335,7 @@ public static class StateStoreChecks
                 "M10/M12: the public open path admits v14 and installs both v15 additions.");
         using (var reopened = StateStore.Open(path)) { }
         using (var readOnly = StateStore.OpenReadOnly(path)) { }
-        using (var connection = Inspect(path)) Execute(connection, "PRAGMA user_version=16;");
+        using (var connection = Inspect(path)) Execute(connection, "PRAGMA user_version=" + (StateSchema.Version + 1) + ";");
         foreach (var readOnly in new[] { false, true })
         {
             try

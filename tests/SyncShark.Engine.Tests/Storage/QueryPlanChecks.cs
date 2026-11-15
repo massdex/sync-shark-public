@@ -24,7 +24,7 @@ public static class QueryPlanChecks
     private static readonly string[] DurableTables =
     [
         "change_work", "synced_entry", "folder_removal_item", "folder_removal_submission", "folder_removal",
-        "issue_member", "issue", "source_state", "journal_position", "pair", "account",
+        "issue_member", "issue", "source_state", "journal_position", "pair", "account", "folder_move",
     ];
 
     private static void ResponsibilityEquivalence()
@@ -454,7 +454,7 @@ public static class QueryPlanChecks
         StateStore.OpenConnection(connection);
         using (var create = connection.CreateCommand())
         {
-            create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema + StateSchema.PublishVersion +
+            create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema + StateSchema.FolderMoveSchema + StateSchema.PublishVersion +
                 "ATTACH DATABASE ':memory:' AS scan_state;" + StateSchema.EmptyScanPragmas + StateSchema.CreateScan + StateSchema.CreateSkipTouched + StateSchema.CreateScanIssues;
             create.ExecuteNonQuery();
             // Production semantics: an issue DELETE also plans its child SET NULL program, checked below.
@@ -672,6 +672,10 @@ public static class QueryPlanChecks
     {
         foreach (var sql in new[]
         {
+            StateSchema.FolderMovesRead, StateSchema.FolderMoveRootRead, StateSchema.FolderMoveUnheldRoots,
+            StateSchema.FolderMoveUpdate, StateSchema.FolderMoveDelete, StateSchema.FolderMoveHolds,
+            StateSchema.FolderMoveOwns, StateSchema.FolderMoveRelabelBindings, StateSchema.FolderMoveRelabelRows,
+            StateSchema.FolderMoveRelabelRead, StateSchema.FolderMovePendingWork, StateSchema.FolderMovePendingIssue,
             StateSchema.ReadPathSelection, StateSchema.DirtyIdentity,
             StateSchema.SyncedLocalPublished,
             StateSchema.EvidenceIdentity, StateSchema.EvidencePathExact, StateSchema.EvidencePathBelow,
@@ -816,7 +820,7 @@ public static class QueryPlanChecks
             using (var setup = StateStore.Connect(durable, SqliteOpenMode.ReadWriteCreate))
             using (var create = setup.CreateCommand())
             {
-                create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema + StateSchema.PublishVersion;
+                create.CommandText = StateSchema.Create + StateSchema.SchemaAdditions + StateSchema.DeletedHistorySchema + StateSchema.RebuildIssues + StateSchema.DeletedHistoryBlocks + StateSchema.DropDeletedHistoryNames + StateSchema.SpentDeletedHistory + StateSchema.LocalPublishedColumns + StateSchema.DiscoveryRequiredColumn + StateSchema.IssuePathKeyIndex + StateSchema.RenameContinuationColumns + StateSchema.DuplicateBindingSchema + StateSchema.FolderMoveSchema + StateSchema.PublishVersion;
                 create.ExecuteNonQuery();
             }
 

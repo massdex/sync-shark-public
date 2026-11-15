@@ -84,6 +84,8 @@ internal sealed class IssueFacts(string pairId, long pairRow)
         _heldIdentities.Count != 0 && row.Dropbox?.Id is { } id
             ? At(_heldIdentities, id, exceptIssues, selectedIssueId) : null;
 
+    public Issue? HeldIdentity(string id) => At(_heldIdentities, id, null);
+
     public Issue? Covering(string key, IReadOnlySet<long>? exceptIssues) => Covering(key, exceptIssues, null);
 
     private Issue? Covering(string key, IReadOnlySet<long>? exceptIssues, long? selectedIssueId)

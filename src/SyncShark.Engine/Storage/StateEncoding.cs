@@ -19,6 +19,25 @@ internal static class StateEncoding
     internal const int MaximumDeletedKeyBytes = SyncEndpointContext.MaximumPathLength * StateSchema.DeletedKeyUtf8BytesPerUnit;
     private static readonly UTF8Encoding HistoryUtf8 = new(false, true);
 
+    internal static string? EncodeMoveLaunch(IReadOnlyList<(string Id, string Name)>? launch) =>
+        launch is null ? null : JsonSerializer.Serialize(launch.Select(member => new[] { member.Id, member.Name }));
+
+    private static IReadOnlyList<(string Id, string Name)>? DecodeMoveLaunch(SqliteDataReader reader)
+    {
+        if (reader.IsDBNull(StateSchema.MoveLaunch)) return null;
+        var members = JsonSerializer.Deserialize<string[][]>(reader.GetString(StateSchema.MoveLaunch)) ??
+            throw new InvalidDataException();
+        return Array.AsReadOnly(members.Select(member => member is [string id, string name]
+            ? (id, name) : throw new InvalidDataException()).ToArray());
+    }
+
+    internal static FolderMove ReadFolderMove(SqliteDataReader reader) => new(
+        reader.GetString(StateSchema.MoveSourceId), reader.GetString(StateSchema.MoveRootId),
+        ReadOptionalText(reader, StateSchema.MoveParentId), reader.GetString(StateSchema.MoveSourcePath),
+        reader.GetString(StateSchema.MoveDestinationPath), ReadOptionalText(reader, StateSchema.MoveDestinationId),
+        ReadEnum<FolderMovePhase>(reader, StateSchema.MovePhase), DecodeMoveLaunch(reader),
+        ReadOptionalText(reader, StateSchema.MoveJobId), reader.GetInt64(StateSchema.MoveGeneration));
+
     internal static byte[] EncodeDeletedNames(IReadOnlyList<string> keys)
     {
         if (keys.Count is <= 0 or > StateSchema.DeletedHistoryBatchSize) throw new InvalidDataException();

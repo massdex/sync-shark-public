@@ -3922,7 +3922,8 @@ public sealed partial class StateStore : IStateStore
         var actual = (long)version.ExecuteScalar()!;
         using var schema = StorageCommand.Create(connection, null, StateSchema.HasSchema);
         var empty = (long)schema.ExecuteScalar()! == 0;
-        if (actual != StateSchema.Version && actual != StateSchema.DuplicateBindingUpgradeVersion &&
+        if (actual != StateSchema.Version && actual != StateSchema.FolderMoveUpgradeVersion &&
+            actual != StateSchema.DuplicateBindingUpgradeVersion &&
             actual != StateSchema.RenameContinuationUpgradeVersion &&
             actual != StateSchema.IssuePathKeyUpgradeVersion &&
             actual != StateSchema.DiscoveryRequiredUpgradeVersion &&
@@ -4007,6 +4008,7 @@ public sealed partial class StateStore : IStateStore
         if (actual >= StateSchema.RenameContinuationUpgradeVersion) Execute(reference, null, StateSchema.IssuePathKeyIndex);
         if (actual >= StateSchema.DuplicateBindingUpgradeVersion) Execute(reference, null, StateSchema.RenameContinuationColumns);
         if (actual > StateSchema.DuplicateBindingUpgradeVersion) Execute(reference, null, StateSchema.DuplicateBindingSchema);
+        if (actual > StateSchema.FolderMoveUpgradeVersion) Execute(reference, null, StateSchema.FolderMoveSchema);
     }
 
     private static void MigrateInitialSchema(SqliteConnection connection, SqliteTransaction transaction,
@@ -4076,8 +4078,14 @@ public sealed partial class StateStore : IStateStore
         if (empty || actual <= StateSchema.DuplicateBindingUpgradeVersion)
         {
             ApplySchemaChange(connection, transaction, reference, StateSchema.DuplicateBindingSchema);
-            if (!empty) MigrateDuplicateBindings(connection, transaction, DateTimeOffset.UtcNow);
         }
+        if (empty || actual <= StateSchema.FolderMoveUpgradeVersion)
+        {
+            ApplySchemaChange(connection, transaction, reference, StateSchema.FolderMoveSchema);
+        }
+        // Backfill raises use current issue retention, whose custody tables must already exist.
+        if (!empty && actual <= StateSchema.DuplicateBindingUpgradeVersion)
+            MigrateDuplicateBindings(connection, transaction, DateTimeOffset.UtcNow);
     }
 
     private static void ApplySchemaChange(SqliteConnection connection, SqliteTransaction transaction,

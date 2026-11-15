@@ -8,10 +8,9 @@ namespace Massdex.SyncShark.Engine.Tests.Executor;
 // duplicate-folder obligation, then one public SyncWorkAsync call executes it.
 public static partial class ChangeRunnerChecks
 {
-    // The inverse of the unreleased v15 step (StateSchema.DuplicateBindingSchema), the one copy every check uses to turn
-    // a current store back into a genuine older file. It changes whenever that step does.
+    // The inverse from the current schema to v14, shared by every older-file fixture.
     internal const string DuplicateBindingInverse =
-        "DROP INDEX folder_removal_unresolved;DROP INDEX folder_removal_repair;DROP TABLE binding_repair;ALTER TABLE folder_removal DROP COLUMN pre_restore_id;ALTER TABLE folder_removal DROP COLUMN authority;";
+        "DROP TABLE folder_move;DROP INDEX folder_removal_unresolved;DROP INDEX folder_removal_repair;DROP TABLE binding_repair;ALTER TABLE folder_removal DROP COLUMN pre_restore_id;ALTER TABLE folder_removal DROP COLUMN authority;";
 
     // The names: X is the Local folder at Renamed; A = X@Old <-> R@Old (content), D = X@Renamed <-> E@Renamed
     // (empty). Old sorts before Renamed, so the attempt checks A first (the store's key order).

@@ -10,6 +10,14 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
     internal IStateStore FixtureInner => Inner;
     protected IStateStore Inner { get; } = inner;
 
+    public virtual void SetFolderMove(string pairId, long expectedGeneration, FolderMove? expected, FolderMove? next) =>
+        Inner.SetFolderMove(pairId, expectedGeneration, expected, next);
+    public virtual IReadOnlyList<FolderMove> FolderMoves(string pairId, string rootId) => Inner.FolderMoves(pairId, rootId);
+    public virtual IEnumerable<FolderMove> FolderMoveRoots(string pairId, CancellationToken ct) => Inner.FolderMoveRoots(pairId, ct);
+    public virtual Issue? MoveResponsibility(string pairId, string dropboxId) => Inner.MoveResponsibility(pairId, dropboxId);
+    public virtual void HoldFolderMoves(string pairId) => Inner.HoldFolderMoves(pairId);
+    public virtual bool HasPendingUnder(string pairId, string path) => Inner.HasPendingUnder(pairId, path);
+
     public virtual IReadOnlyList<PairConfig> Pairs() => Inner.Pairs();
     public virtual PairConfig? Pair(string pairId) => Inner.Pair(pairId);
     public virtual void SavePair(PairConfig pair) => Inner.SavePair(pair);

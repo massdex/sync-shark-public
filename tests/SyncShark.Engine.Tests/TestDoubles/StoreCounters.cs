@@ -31,6 +31,55 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
     private readonly ConcurrentDictionary<string, PhaseCounts> _planPhases = new();
     private readonly ConcurrentDictionary<string, long> _memberCalls = new();
     public IReadOnlyDictionary<string, long> MemberCalls => _memberCalls;
+    private readonly ConcurrentDictionary<string, long> _memberRows = new();
+    public IReadOnlyDictionary<string, long> MemberRows => _memberRows;
+
+    public void SetFolderMove(string pairId, long expectedGeneration, FolderMove? expected, FolderMove? next)
+    {
+        Command();
+        inner.SetFolderMove(pairId, expectedGeneration, expected, next);
+    }
+
+    public IReadOnlyList<FolderMove> FolderMoves(string pairId, string rootId)
+    {
+        Command();
+        var rows = inner.FolderMoves(pairId, rootId);
+        Rows(rows.Count);
+        return rows;
+    }
+
+    public IEnumerable<FolderMove> FolderMoveRoots(string pairId, CancellationToken ct)
+    {
+        Command();
+        foreach (var row in inner.FolderMoveRoots(pairId, ct))
+        {
+            Rows(1);
+            yield return row;
+        }
+    }
+
+    public Issue? MoveResponsibility(string pairId, string dropboxId)
+    {
+        Command();
+        var issue = inner.MoveResponsibility(pairId, dropboxId);
+        Rows(issue is null ? 0 : 1);
+        return issue;
+    }
+
+    public void HoldFolderMoves(string pairId)
+    {
+        Command();
+        inner.HoldFolderMoves(pairId);
+    }
+
+    public bool HasPendingUnder(string pairId, string path)
+    {
+        Command();
+        return inner.HasPendingUnder(pairId, path);
+    }
+
+    private void Rows(long count, [CallerMemberName] string member = "") =>
+        _memberRows.AddOrUpdate(member, count, (_, previous) => previous + count);
 
     public long RecordCommitCalls => Interlocked.Read(ref _recordCalls);
     public long RecordCommittedMembers => Interlocked.Read(ref _recordCommitted);
@@ -91,6 +140,7 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         Volatile.Write(ref _planIncomplete, 0);
         _planPhases.Clear();
         _memberCalls.Clear();
+        _memberRows.Clear();
     }
 
     public IReadOnlyList<PairConfig> Pairs()
