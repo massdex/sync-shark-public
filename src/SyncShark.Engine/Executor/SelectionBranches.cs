@@ -100,7 +100,6 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
             var primaryKey = PathNames.KeyFor(notice.Side, notice.Path);
             if (_pass.RefuseBeforeProvider(notice, work.Before) is { } move)
             {
-                yield return (work, null, work.Notice, null, false, false, move);
                 continue;
             }
             var saved = work.Before;
