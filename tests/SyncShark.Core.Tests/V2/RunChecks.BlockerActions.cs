@@ -1,0 +1,222 @@
+namespace Massdex.SyncShark.V2;
+
+internal static partial class RunChecks
+{
+    private static void NoticeFoldParityChecks()
+    {
+        using var memory = new InMemoryStateStore();
+        using var sqlite = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "notice-fold-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        foreach (var store in new IStateStore[] { memory, sqlite })
+        {
+            var fx = Build(suppliedStore: store);
+            foreach (var retryFirst in new[] { false, true })
+            {
+                var path = retryFirst ? "retry-first.txt" : "planner-first.txt";
+                var observation = new Notice(fx.Pair.PairId, 30, NoticeKind.Info, path, "comparison unconfirmed", "content-unconfirmed");
+                var retry = new Notice(fx.Pair.PairId, 40, NoticeKind.Info, path, "exact executor failure; Retry or Ignore", "sync-retry");
+                store.AddNotices(retryFirst ? [retry, observation] : [observation, retry]);
+                var canonical = store.UnresolvedNotices(fx.Pair.PairId).Single(n => n.Path == path);
+                Require(canonical.ReasonKey == "sync-retry" && canonical.Detail == retry.Detail,
+                    "both stores retain one canonical retry explanation in either publication order");
+                store.CloseNotice(canonical.NoticeId!, NoticeChoices.Ignore);
+                store.AddNotices([observation]);
+                Require(store.OpenNotices(fx.Pair.PairId).All(n => n.Path != path) &&
+                    store.UnresolvedNotices(fx.Pair.PairId).Single(n => n.Path == path).NoticeId == canonical.NoticeId,
+                    "planner republish cannot duplicate or resurface an ignored canonical retry");
+            }
+        }
+    }
+
+    private static void NoticeFoldSpecificityChecks()
+    {
+        using var memory = new InMemoryStateStore();
+        using var sqlite = SqliteStateStore.Open(Path.Combine(Path.GetTempPath(), "notice-specificity-" + Guid.NewGuid().ToString("N")), Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        foreach (var store in new IStateStore[] { memory, sqlite })
+        {
+            var fx = Build(suppliedStore: store);
+            // Content-unconfirmed is also the planner observation's existing vocabulary.
+            // Exercise both roles without introducing a second reason or display-text classifier.
+            foreach (var first in Enumerable.Range(0, 4))
+            foreach (var second in Enumerable.Range(0, 4))
+            foreach (var ignoreFirst in new[] { false, true })
+            {
+                var path = $"specificity-{first}-{second}-{ignoreFirst}.txt";
+                Notice Candidate(int category) => category switch
+                {
+                    0 => FailureRetryOwner.RetryNotice(fx.Pair.PairId, path,
+                        "Content proof is unavailable, paused, changed, or deferred to indexing; the item remains unsynced."),
+                    2 => FailureRetryOwner.RetryNotice(fx.Pair.PairId, path, "Hash: provider rejected this exact version"),
+                    _ => new Notice(fx.Pair.PairId, 30, NoticeKind.Info, path,
+                        "comparison unconfirmed", "content-unconfirmed")
+                };
+                int Rank(int category) => category == 0 ? 0 : category == 2 ? 2 : 1;
+                var initial = Candidate(first);
+                var incoming = Candidate(second);
+                store.AddNotices([initial]);
+                var saved = store.UnresolvedNotices(fx.Pair.PairId).Single(n => n.Path == path);
+                if (ignoreFirst) store.CloseNotice(saved.NoticeId!, NoticeChoices.Ignore);
+                store.AddNotices([incoming]);
+                var winner = store.UnresolvedNotices(fx.Pair.PairId).Single(n => n.Path == path);
+                var expected = Rank(first) >= Rank(second) ? initial : incoming;
+                Require(winner.ReasonKey == expected.ReasonKey && winner.Detail == expected.Detail &&
+                    winner.CauseKey == expected.CauseKey,
+                    $"specificity truth table retains one most-specific cause: {first}/{second}/{ignoreFirst}");
+                var remainsSuppressed = ignoreFirst && Rank(first) >= Rank(second);
+                Require(store.OpenNotices(fx.Pair.PairId).Count(n => n.Path == path) == (remainsSuppressed ? 0 : 1),
+                    "losing observations never resurface an ignored winner; a new stronger cause does resurface");
+                store.CloseNotice(winner.NoticeId!, NoticeChoices.Ignore);
+                store.AddNotices([initial, incoming]);
+                Require(store.OpenNotices(fx.Pair.PairId).All(n => n.Path != path) &&
+                    store.UnresolvedNotices(fx.Pair.PairId).Count(n => n.Path == path) == 1,
+                    "republication preserves ignored winning authority without duplicate notices");
+            }
+        }
+    }
+
+    internal static async Task BlockerActionChecksAsync()
+    {
+        NoticeFoldParityChecks();
+        NoticeFoldSpecificityChecks();
+        foreach (var name in new[] { "CON", "COM1.txt", "bad:name?.txt", "trailing. ", "<>|", "..." })
+            Require(PilotPath.IsWindowsTransferPath(BlockerNames.Suggest(name)), "safe suggestion for " + name);
+        foreach (var name in new[] { "../escape", "Other/Child", "CON.txt", "same.txt", "", "bad?name" })
+        {
+            try { BlockerNames.Destination("same.txt", name); throw new InvalidOperationException("Unsafe name accepted: " + name); }
+            catch (SyncRunRefusedException) { }
+        }
+        var folder = Path.Combine(Path.GetTempPath(), "blocker-actions-" + Guid.NewGuid().ToString("N"));
+        using var store = SqliteStateStore.Open(folder, Settings, TimeProvider.System, LocalItems.CaptureOptionalHash);
+        var fx = Build(suppliedStore: store, displayRoot: true);
+        var run = fx.Run();
+        var pairId = fx.Pair.PairId;
+        var original = fx.A.Seed("blocked.txt", "original");
+        await run.PreviewFirstSyncAsync(pairId, new RecordingProgress(), default);
+        Notice Refusal(ItemState item) => new(pairId, 31, NoticeKind.Info, item.Path, "Provider refused name", "provider-name-refused",
+            Repair: new NoticeRepair(Side.A, item));
+        store.AddNotices([Refusal(original)]);
+        var notice = store.OpenNotices(pairId).Single(n => n.ReasonKey == "provider-name-refused");
+        Require(NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.Rename) &&
+            NoticeOptions.Options(notice).Any(o => o.Choice == NoticeChoices.Ignore), "refused name offers real Rename / Keep excluded options");
+        Require(store.NoticeById(pairId, notice.NoticeId!)?.Notice.Repair?.Item == original, "repair provenance round trips through SQLite");
+        foreach (var name in new[] { "desktop.ini", ".dropbox", "~$document.docx" })
+        {
+            try
+            {
+                await run.ApplyRetryNoticeChoiceAsync(pairId, notice.NoticeId!, NoticeChoices.Rename, default, input: new(name));
+                throw new InvalidOperationException("Provider-reserved rename was accepted");
+            }
+            catch (SyncRunRefusedException) { }
+        }
+        Require(fx.WriterA.Moves == 0, "Dropbox-reserved custom names are rejected before any move");
+        fx.B.Seed("occupied.txt", "other");
+        try
+        {
+            await run.ApplyRetryNoticeChoiceAsync(pairId, notice.NoticeId!, NoticeChoices.Rename, default, input: new("occupied.txt"));
+            throw new InvalidOperationException("Opposite namespace collision was accepted");
+        }
+        catch (SyncRunRefusedException) { }
+        Require(fx.WriterA.Moves == 0, "opposite namespace collision never moves source");
+        fx.A.Seed("local-occupied.txt", "local");
+        try
+        {
+            await run.ApplyRetryNoticeChoiceAsync(pairId, notice.NoticeId!, NoticeChoices.Rename, default, input: new("local-occupied.txt"));
+            throw new InvalidOperationException("Source namespace collision was accepted");
+        }
+        catch (SyncRunRefusedException) { }
+        var response = await run.ApplyRetryNoticeChoiceAsync(pairId, notice.NoticeId!, NoticeChoices.Rename, default, input: new("safe.txt"));
+        Require(response.Contains("safe.txt", StringComparison.Ordinal) && fx.WriterA.Moves == 1, "explicit custom name runs conditional rename");
+        Require(await fx.A.ObserveAsync("blocked.txt", default) is null &&
+            (await fx.A.ObserveAsync("safe.txt", default))?.ObjectId == original.ObjectId, "rename preserves exact entity");
+        Require(store.NoticeById(pairId, notice.NoticeId!) is { Closed: false }, "rename alone does not close notice");
+        store.AddNotices([Refusal(original)]);
+        Require(store.NoticeById(pairId, notice.NoticeId!)?.Notice.Repair?.Destination == "safe.txt", "catalog refresh cannot erase pending destination");
+        await run.ApplyRetryNoticeChoiceAsync(pairId, notice.NoticeId!, NoticeChoices.Rename, default);
+        Require(fx.WriterA.Moves == 1, "repeated rename verifies existing effect without a second move");
+        Require(store.SyncRetryAt(pairId, "safe.txt") is not null, "rename schedules targeted re-observation");
+        var savedRenameDebt = store.SyncRetryAt(pairId, "safe.txt");
+        var refusalHost = new V2SyncHost(store, run, new ObservedExecutor(fx.Executor), null!, Settings, TimeProvider.System,
+            Path.Combine(folder, "state.db"));
+        var refusedUi = await refusalHost.ResolveConflictSelectionCommandAsync(
+            [new(new(notice.NoticeId!, pairId, notice.Path, 0), SyncAuthorityConflictResolutionKind.PreserveBoth,
+                NoticeChoices.Rename, NoticeInput: new("different.txt"))]);
+        Require(refusedUi.Items.Single().Result is { Blocked: 1, Recovered: 0 },
+            "UI mismatched repeat returns typed refusal rather than an escaped exception");
+        var refusalCli = new V2CliRuntime(null, store, run, new EndpointRootProbe(fx.Provider), folder);
+        var refusedCli = await refusalCli.ResolveNoticeAsync(pairId, notice.Path, NoticeChoices.Rename,
+            notice.NoticeId, 0, null, default, input: new("different.txt"));
+        Require(refusedCli.Blocked == 1 && refusedCli.NotAttempted == 1 && fx.WriterA.Moves == 1 &&
+            store.SyncRetryAt(pairId, "safe.txt") == savedRenameDebt &&
+            await fx.A.ObserveAsync("different.txt", default) is null &&
+            (await fx.A.ObserveAsync("safe.txt", default))?.ObjectId == original.ObjectId,
+            "CLI mismatched repeat returns typed refusal and preserves bytes, debt and the captured destination");
+        var refusalNotice = store.OpenNotices(pairId).Single(n => n.NoticeId == notice.NoticeId);
+        Require(refusalNotice.Repair?.Destination == "safe.txt" &&
+            refusalNotice.Detail.Contains("earlier rename", StringComparison.Ordinal) &&
+            NoticeOptions.Options(refusalNotice).Any(o => o.Choice == NoticeChoices.RetryNow) &&
+            NoticeOptions.Options(refusalNotice).Any(o => o.Choice == NoticeChoices.Ignore) &&
+            store.OpenNotices(pairId).Count(n => n.ReasonKey == "provider-name-refused") == 1,
+            "refused choices update one actionable notice with why, Retry and Ignore");
+        await FirstSyncAsync(run, fx);
+        Require(store.NoticeById(pairId, notice.NoticeId!) is { Closed: true }, "notice closes only after renamed identity has synced");
+        var reserved = fx.B.Seed("CON", "", ItemKind.Folder);
+        for (var i = 0; i < 3; i++) fx.B.Seed("CON/child" + i, "child");
+        store.AddNotices([new(pairId, 30, NoticeKind.Info, reserved.Path, "Windows reserved name", "windows-name-invalid",
+            Repair: new NoticeRepair(Side.B, reserved))]);
+        var invalid = store.OpenNotices(pairId).Single(n => n.Path == reserved.Path);
+        await run.ApplyRetryNoticeChoiceAsync(pairId, invalid.NoticeId!, NoticeChoices.Rename, default);
+        Require((await fx.B.ObserveAsync("Renamed-CON", default))?.ObjectId == reserved.ObjectId,
+            "Windows reserved cloud folder is renamed on its source side with safe suggestion");
+        Require(await fx.B.ObserveAsync("Renamed-CON/child2", default) is not null, "folder Rename carries its children");
+
+        var changed = fx.A.Seed("changed.txt", "before");
+        store.AddNotices([Refusal(changed)]);
+        var stale = store.OpenNotices(pairId).Single(n => n.Path == "changed.txt");
+        var updated = fx.A.Seed("changed.txt", "after");
+        var refresh = await run.ApplyRetryNoticeChoiceAsync(pairId, stale.NoticeId!, NoticeChoices.Rename, default);
+        Require(refresh.Contains("Choose Rename again", StringComparison.Ordinal) && fx.WriterA.Moves == 1,
+            "first action refreshes changed revision without moving it");
+        Require(store.NoticeById(pairId, stale.NoticeId!)?.Notice.Repair?.Item.VersionId == updated.VersionId,
+            "fresh evidence replaces stale revision");
+        await run.ApplyRetryNoticeChoiceAsync(pairId, stale.NoticeId!, NoticeChoices.Rename, default);
+        Require(fx.WriterA.Moves == 2, "second action renames the refreshed revision");
+        var observed = updated with { Path = "another-refused.txt", VersionId = "later" };
+        store.AddNotices([Refusal(observed)]);
+        // Provider object ids are scoped to their side; the opposite folder can have the same id.
+        var entityNotices = store.OpenNotices(pairId)
+            .Where(n => n.Repair is { Side: Side.A } repair && repair.Item.ObjectId == updated.ObjectId).ToArray();
+        Require(entityNotices.Length == 1 && entityNotices[0].NoticeId == stale.NoticeId,
+            "moving to another refused name reuses the entity notice");
+        Require(store.NoticeById(pairId, invalid.NoticeId!) is { Closed: false, Notice.Repair.Side: Side.B },
+            "reusing a source notice preserves the opposite entity's pending rename notice");
+        foreach (var refused in new[] { "desktop.ini", ".dropbox", "~$document.docx" })
+            Require(BlockerNames.DropboxRefuses(refused), "provider rejects custom reserved name: " + refused);
+
+        fx.A.Seed("Remaining", "", ItemKind.Folder);
+        for (var i = 0; i < 121; i++) fx.A.Seed($"Remaining/{i:D3}.txt", "child");
+        store.WriteSnapshot(await fx.A.FullAsync(store.BeginGeneration(fx.Pair.A.RootId, "test"),
+            _ => true, SilentProgress, default));
+        store.SaveSyncRetry(pairId, new("Remaining/000.txt", "sync", 1, "File is in use", DateTimeOffset.MaxValue));
+        store.AddNotices([new(pairId, 40, NoticeKind.Info, "Remaining", "Folder not emptied", "sync-retry", FolderInspection: true)]);
+        var remaining = store.OpenNotices(pairId).Single(n => n.Path == "Remaining");
+        var page = await run.ApplyRetryNoticeChoiceAsync(pairId, remaining.NoticeId!, NoticeChoices.ShowRemaining, default);
+        Require(page.Contains("File is in use", StringComparison.Ordinal) && page.Contains("next offset 50", StringComparison.Ordinal), "first bounded page includes each child's reason");
+        Require(!page.Contains("Remaining/050.txt", StringComparison.Ordinal), "first page stops before child 51");
+        var second = await run.ApplyRetryNoticeChoiceAsync(pairId, remaining.NoticeId!, NoticeChoices.ShowRemaining, default, input: new(Offset: 50));
+        Require(second.Contains("Remaining/050.txt", StringComparison.Ordinal) && !second.Contains("Remaining/000.txt", StringComparison.Ordinal), "second page advances without duplicates");
+        Require(store.LiveChildrenPage(fx.Pair.A.RootId, "Remaining", 100, 50).Count == 21, "SQL page limits decoded children");
+        Require(store.NoticeById(pairId, remaining.NoticeId!) is { Closed: false } && fx.WriterA.Deletes == 0, "inspection neither deletes nor acknowledges success");
+        var host = new V2SyncHost(store, run, new ObservedExecutor(fx.Executor), null!, Settings, TimeProvider.System, Path.Combine(folder, "state.db"));
+        var gui = await host.ResolveConflictSelectionCommandAsync([new(new(remaining.NoticeId!, pairId, remaining.Path, 0),
+            SyncAuthorityConflictResolutionKind.PreserveBoth, NoticeChoices.ShowRemaining, NoticeInput: new(Offset: 100))]);
+        Require(gui.Items.Single().Result!.Decisions.Single().Reason.Contains("Remaining/120.txt", StringComparison.Ordinal), "GUI returns shared page result rather than generic acknowledgement");
+        var cli = new V2CliRuntime(null, store, run, new EndpointRootProbe(fx.Provider), folder);
+        await cli.ResolveNoticeAsync(pairId, remaining.Path, NoticeChoices.ShowRemaining, remaining.NoticeId, 0, null, default, new(Offset: 100));
+        var paper = new Notice(pairId, 30, NoticeKind.Info, "Document.paper", "Export needed", "export-required");
+        store.AddNotices([paper]);
+        var savedPaper = store.OpenNotices(pairId).Single(n => n.ReasonKey == "export-required");
+        var url = await run.ApplyRetryNoticeChoiceAsync(pairId, savedPaper.NoticeId!, NoticeChoices.OpenDropbox, default);
+        Require(url == "https://www.dropbox.com/home/b/Document.paper", "Paper navigation returns a URL only");
+        Require(store.NoticeById(pairId, savedPaper.NoticeId!) is { Closed: false }, "opening URL is not a successful export");
+        Console.WriteLine("PASS bounded blocker actions: names, collision guards, stale identity, idempotent rename, pending notice, folder pages, GUI/CLI and Paper URL");
+    }
+}
