@@ -407,7 +407,8 @@ public static class DropboxWriterChecks
             DropboxProtocol.Delete, DropboxProtocol.Move })
         {
             await ErrorCaseAsync(route, "other/", false, typeof(ItemFailedException));
-            await ErrorCaseAsync(route, "", false, typeof(ItemFailedException), new HttpRequestException());
+            await ErrorCaseAsync(route, "", false, typeof(ItemFailedException), new HttpRequestException(),
+                route == DropboxProtocol.Move ? TextKey.FailDropboxOutcomeUnknown : TextKey.DropboxRefused);
             await ErrorCaseAsync(route, "", false, typeof(OperationCanceledException), new OperationCanceledException());
         }
     }
@@ -990,7 +991,7 @@ public static class DropboxWriterChecks
         {
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.Move, _ => { }, new { }));
             await MalformedAsync("Other", typeof(KeyNotFoundException),
-                () => fixture.Writer.MoveAsync(Source(), "Other", default));
+                () => fixture.Writer.MoveAsync(Source(), "Other", default), expectedCause: TextKey.FailDropboxOutcomeUnknown);
             Check.Require(fixture.Handler.Requests == 1, "A malformed move reply is not replayed.");
             fixture.Done();
         }
@@ -999,7 +1000,7 @@ public static class DropboxWriterChecks
         {
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.Move, _ => { }, Metadata()));
             await MalformedAsync("Other", typeof(KeyNotFoundException),
-                () => fixture.Writer.MoveAsync(Source(), "Other", default));
+                () => fixture.Writer.MoveAsync(Source(), "Other", default), expectedCause: TextKey.FailDropboxOutcomeUnknown);
             Check.Require(fixture.Handler.Requests == 1,
                 "Valid-looking move metadata without the required envelope is rejected.");
             fixture.Done();
@@ -1080,7 +1081,7 @@ public static class DropboxWriterChecks
         {
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.Move, _ => { }, new { metadata = WrongKindNumber }));
             await MalformedAsync("Other", typeof(InvalidOperationException),
-                () => fixture.Writer.MoveAsync(Source(), "Other", default));
+                () => fixture.Writer.MoveAsync(Source(), "Other", default), expectedCause: TextKey.FailDropboxOutcomeUnknown);
             Check.Require(fixture.Handler.Requests == 1, "A wrong-kind move metadata value is not replayed.");
             fixture.Done();
         }
@@ -1114,7 +1115,8 @@ public static class DropboxWriterChecks
         }
     }
 
-    private static async Task MalformedAsync(string path, Type inner, Func<Task> action, string? raw = null)
+    private static async Task MalformedAsync(string path, Type inner, Func<Task> action, string? raw = null,
+        TextKey expectedCause = TextKey.DropboxRefused)
     {
         try
         {
@@ -1122,7 +1124,7 @@ public static class DropboxWriterChecks
         }
         catch (ItemFailedException failure)
         {
-            Check.Require(failure.Path == path && failure.Cause == TextKey.DropboxRefused,
+            Check.Require(failure.Path == path && failure.Cause == expectedCause,
                 "A malformed successful reply becomes the item failure for that path.");
             var cause = failure.InnerException;
             if (cause?.GetType() == typeof(JsonException) && cause.InnerException is { } extraction)
@@ -1179,7 +1181,8 @@ public static class DropboxWriterChecks
             Exception? thrown = null;
             try { await fixture.Writer.MoveAsync(Source(), destination, default); }
             catch (Exception error) { thrown = error; }
-            Check.Require(thrown is ItemFailedException { Disposition: FailureDisposition.UnknownEffect } failed &&
+            Check.Require(thrown is ItemFailedException { Disposition: FailureDisposition.UnknownEffect,
+                Cause: TextKey.FailDropboxOutcomeUnknown } failed &&
                 failed.Move == new IssueSubject.UnknownMove("id:source", "Child", destination, intermediate, false),
                 "an unknown move keeps its expected identity, source, destination and intermediate: " + destination);
             Check.Require(fixture.Handler.Requests == (intermediate is null ? 1 : PairCount),
@@ -1195,7 +1198,8 @@ public static class DropboxWriterChecks
             Exception? thrown = null;
             try { await fixture.Writer.MoveAsync(Source(), "Other", default); }
             catch (Exception error) { thrown = error; }
-            Check.Require(thrown is ItemFailedException { Disposition: FailureDisposition.UnknownEffect } failed &&
+            Check.Require(thrown is ItemFailedException { Disposition: FailureDisposition.UnknownEffect,
+                Cause: TextKey.FailDropboxOutcomeUnknown } failed &&
                 ReferenceEquals(failed.InnerException, timeout) &&
                 failed.Move == new IssueSubject.UnknownMove("id:source", "Child", "Other", null, false) &&
                 fixture.Handler.Requests == 1, "a timed-out move is unknown, keeps its intent and is not resent: " +
@@ -1210,7 +1214,8 @@ public static class DropboxWriterChecks
             Exception? thrown = null;
             try { await fixture.Writer.MoveAsync(Source(), "Other", default); }
             catch (Exception error) { thrown = error; }
-            Check.Require(thrown is ItemFailedException { Disposition: FailureDisposition.UnknownEffect, Path: "Other" } failed &&
+            Check.Require(thrown is ItemFailedException { Disposition: FailureDisposition.UnknownEffect, Path: "Other",
+                Cause: TextKey.FailDropboxOutcomeUnknown } failed &&
                 ReferenceEquals(failed.InnerException, broken) &&
                 failed.Move == new IssueSubject.UnknownMove("id:source", "Child", "Other", null, false) &&
                 fixture.Handler.Requests == 1, "a move whose reply body read failed is unknown and keeps its intent");
@@ -1226,7 +1231,8 @@ public static class DropboxWriterChecks
             Exception? thrown = null;
             try { await fixture.Writer.MoveAsync(Source(), "child", default); }
             catch (Exception error) { thrown = error; }
-            Check.Require(thrown is ItemFailedException { Disposition: FailureDisposition.UnknownEffect } failed &&
+            Check.Require(thrown is ItemFailedException { Disposition: FailureDisposition.UnknownEffect,
+                Cause: TextKey.FailDropboxOutcomeUnknown } failed &&
                 failed.Path == intermediate &&
                 failed.Move == new IssueSubject.UnknownMove("id:source", "Child", "child", intermediate, false) &&
                 fixture.Handler.Requests == 1, "an unknown first hop keeps the whole case-only intent, unsent second hop");

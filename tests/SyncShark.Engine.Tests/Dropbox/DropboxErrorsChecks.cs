@@ -306,10 +306,14 @@ public static class DropboxErrorsChecks
             "a permanent member, or a reply without a wait, passes unchanged");
         var move = new IssueSubject.UnknownMove("id:source", "Child", "Other", null, false);
         var unknown = DropboxErrors.Uncertain(path, new JsonException());
-        Check.Require(unknown.Disposition == FailureDisposition.UnknownEffect &&
-            DropboxErrors.WithMove(unknown, move) is ItemFailedException { Move: { } kept } && kept == move &&
+        Check.Require(unknown.Disposition == FailureDisposition.UnknownEffect && unknown.Cause == TextKey.DropboxRefused &&
+            DropboxErrors.WithMove(unknown, move) is ItemFailedException
+            { Move: { } kept, Cause: TextKey.FailDropboxOutcomeUnknown, Disposition: FailureDisposition.UnknownEffect } mapped &&
+            kept == move && mapped.Path == unknown.Path && mapped.LocalId == unknown.LocalId &&
+            mapped.ProviderWait == unknown.ProviderWait && mapped.ProviderWaitStarted == unknown.ProviderWaitStarted &&
+            ReferenceEquals(mapped.InnerException, unknown.InnerException) &&
             ReferenceEquals(DropboxErrors.WithMove(refusal, move), refusal),
-            "only an unknown-effect failure keeps its intended move");
+            "only an unknown-effect move gets the outcome-unknown cause; all other failure facts survive");
     }
 
     // The closed result: absence is explicit, and a default or refusal-less value can never grant it.

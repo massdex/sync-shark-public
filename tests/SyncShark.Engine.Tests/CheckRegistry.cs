@@ -102,6 +102,7 @@ public static class CheckRegistry
         ["renames"] = [Planner.RenamesChecks.Run],
         ["folder-deletes"] = [Planner.FolderDeletesChecks.Run, Executor.RecoveryChecks.Run, Executor.FolderDeleteRunnerChecks.SharedMountRemoval],
         ["resolutions"] = [Planner.ResolutionsChecks.Run, Executor.UnknownMoveCheckChecks.Run],
+        ["unknown-move-live"] = [Executor.ChangeRunnerChecks.UnknownMoveAutomatic, Executor.ChangeRunnerChecks.UnknownMoveClose],
         ["exclusions"] = [Planner.ExclusionsChecks.Run, Executor.ExclusionRunnerChecks.Run],
         ["released-history"] = [Executor.ChangeRunnerChecks.ReleasedHistory],
         ["excluded-admission"] = [Executor.ChangeRunnerChecks.RunExcludedAdmission],

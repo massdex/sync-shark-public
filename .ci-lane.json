@@ -3,8 +3,10 @@
     "engine-tests"
   ],
   "engine": [
-    "syncer",
-    "unknown-move-repair"
+    "unknown-move-live",
+    "unknown-move-repair",
+    "dropbox",
+    "syncer"
   ],
   "core": [],
   "ui": []

@@ -449,18 +449,16 @@ public static class RepairChecks
                     store = new InMemoryStateStore();
                 }
                 var faults = faulting = new FaultingStore(store);
-                return new HookStore(faults)
+                faults.Closed = issue =>
                 {
-                    // Fault only after the settlement's own close, so the act (not the by-ID read) fails.
-                    OnCommit = change =>
-                    {
-                        if (!armed || !change.Close.Any(item => item.Path == "Source")) return;
-                        armed = false;
-                        faults.Fault = path => path != "Source" ? null : stale
-                            ? (Exception)new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged)
-                            : new ItemFailedException(path, TextKey.FailLocalInUse, null);
-                    }
+                    // Fault only after the exact close, so the act (not the by-ID read) fails.
+                    if (!armed || issue.Path != "Source") return;
+                    armed = false;
+                    faults.Fault = path => path != "Source" ? null : stale
+                        ? (Exception)new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged)
+                        : new ItemFailedException(path, TextKey.FailLocalInUse, null);
                 };
+                return faults;
             });
             await SeedLinkedAsync(rig, "Source");
             using (var baseline = rig.Log(folder, "baseline"))
@@ -500,7 +498,15 @@ public static class RepairChecks
     private sealed class FaultingStore(IStateStore inner) : ForwardingStateStore(inner)
     {
         public Func<string, Exception?>? Fault { get; set; }
+        public Action<Issue>? Closed { get; set; }
         public int Fired { get; private set; }
+
+        public override void CloseUnknownMove(string pairId, long expectedGeneration, Issue expected,
+            Func<ChangeNotice, SyncedEntry?, bool, bool>? echoes)
+        {
+            base.CloseUnknownMove(pairId, expectedGeneration, expected, echoes);
+            Closed?.Invoke(expected);
+        }
 
         public override ItemRetryCandidate? ReadItemRetryForSubject(string pairId, long expectedGeneration,
             string path, IssueSubject subject, bool registeredWithin = false)
