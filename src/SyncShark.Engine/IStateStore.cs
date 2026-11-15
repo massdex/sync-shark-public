@@ -181,6 +181,8 @@ public partial interface IStateStore : IDisposable
     bool CompleteWork(WorkSelection selection, SelectionPeer? peer);
     /// <summary>Atomically transfers selected pre-episode same-item content debt to its exact newer wait; never retries it.</summary>
     bool TransferOlderEpisodeWork(WorkSelection selection, ItemRetryCandidate expected);
+    /// <summary>Atomically folds refused same-item content debt into the exact later row.</summary>
+    bool TransferSupersededWork(WorkSelection selection, long laterWorkId) => false;
     /// <summary>Registers unfinished branches against the exact committed issue without retiring their parent.</summary>
     bool AttachIssueWork(WorkSelection parent, Issue exactIssue,
         IEnumerable<(ChangeNotice Notice, bool IsFolder, SyncedEntry? Before)> unfinished);

@@ -484,7 +484,7 @@ internal sealed partial class ChangeTable
             var selection = ToSelection(pairId, candidate, pass.Through);
             pair = RequireCurrent(transaction, selection);
             var first = RequireAnchor(transaction, pair.Row, selection);
-            if (TransferBound(transaction, pair, first, pass, through) is not { } bound) return 0;
+            if (TransferBound(transaction, pair, first, pass, through, null) is not { } bound) return 0;
             through = bound;
             (ChangeNotice? Notice, string? Before, long Acquisition) debt = (null, null, BeforeFirstWork);
             var newest = first;
@@ -522,7 +522,9 @@ internal sealed partial class ChangeTable
         catch (ItemStoreMutationException) { return 0; }
     }
 
-    private long? TransferBound(SqliteTransaction transaction, PairRow pair, WorkRow first, Pass pass, long through)
+    // Only another owner's claim or attempt bounds a transfer; attempts are looked up at this key, never scanned.
+    private long? TransferBound(SqliteTransaction transaction, PairRow pair, WorkRow first, Pass pass, long through,
+        long? transferring)
     {
         foreach (var episode in Read(transaction, StateSchema.ItemEpisodesAtPath,
             static reader => reader.GetInt64(StateSchema.EpisodePathWork),
@@ -531,14 +533,29 @@ internal sealed partial class ChangeTable
             if (episode >= first.WorkId) through = Math.Min(through, episode - StateSchema.OneRow);
         if (pass.Claims is { } claims)
             foreach (var claim in claims.Values)
-                if (FindAnchor(transaction, pair.Row, claim) is { } anchor &&
+                if (claim.AnchorWorkId != transferring && FindAnchor(transaction, pair.Row, claim) is { } anchor &&
                     (Owned(claim, anchor, first) || claim.Side == Side.Local && claim.Key == first.Key ||
                      claim.Side == Side.Dropbox && claim.Peer?.Key == first.Key)) return null;
-        // EndSelection adds every suspended dependent to Attempted; only prerequisites need a separate walk.
-        foreach (var protectedId in (pass.Attempted ?? Enumerable.Empty<long>())
-            .Concat(pass.Suspended?.Values ?? Enumerable.Empty<long>()))
+        if (pass.Attempted is { } attempted)
         {
-            if (protectedId < first.WorkId || protectedId > through) continue;
+            var after = first.WorkId - StateSchema.OneRow;
+            while (Rows(transaction, StateSchema.PeerPathPage, Evidence(pair.Row, pair.Generation, Side.Local,
+                       first.SourceEpoch, first.Domain, (StateSchema.ParamJoinKey, first.Key), (StateSchema.ParamAfter, after),
+                       (StateSchema.ParamThrough, through), (StateSchema.ParamTake, StateSchema.OneRow))).FirstOrDefault()
+                   is { } row)
+            {
+                if (row.WorkId != transferring && attempted.Contains(row.WorkId))
+                {
+                    through = row.WorkId - StateSchema.OneRow;
+                    break;
+                }
+                after = row.WorkId;
+            }
+        }
+        // EndSelection adds every suspended dependent to Attempted; only prerequisites need a separate walk.
+        foreach (var protectedId in pass.Suspended?.Values ?? Enumerable.Empty<long>())
+        {
+            if (protectedId < first.WorkId || protectedId > through || protectedId == transferring) continue;
             var protectedRow = Rows(transaction, StateSchema.Anchor, (StateSchema.ParamAnchor, protectedId),
                 (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamGeneration, pair.Generation),
                 (StateSchema.ParamEpoch, first.SourceEpoch)).FirstOrDefault();
@@ -1409,6 +1426,60 @@ internal sealed partial class ChangeTable
         return true;
     }
 
+    /// <summary>Folds refused same-item content debt into its exact successor at that row's FIFO place.</summary>
+    // One custody transaction: validation, fold and exact retirement commit together; accounting follows the commit.
+    internal bool TransferSupersededWork(WorkSelection selection, long laterWorkId)
+    {
+        if (selection.Side != Side.Local || !_passes.TryGetValue(selection.PairId, out var pass)) return false;
+        int retired;
+        try
+        {
+            using var transaction = _connection.BeginTransaction();
+            var pair = RequireCurrent(transaction, selection);
+            if (FindAnchor(transaction, pair.Row, selection) is not { Parent: null } anchor ||
+                Rows(transaction, StateSchema.Anchor, (StateSchema.ParamAnchor, laterWorkId),
+                    (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamGeneration, pair.Generation),
+                    (StateSchema.ParamEpoch, selection.SourceEpoch)).FirstOrDefault() is not { } later ||
+                later.Side != selection.Side || later.Domain != selection.Domain || later.Key != selection.Key ||
+                later.Identity != selection.Identity ||
+                Read(transaction, StateSchema.WorkHasChildren, static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
+                    (StateSchema.ParamParent, anchor.WorkId)).First() ||
+                TransferBound(transaction, pair, anchor, pass, laterWorkId, selection.AnchorWorkId) != laterWorkId) return false;
+            var pathOnly = selection.Identity is null;
+            (ChangeNotice? Notice, string? Before, long Acquisition) debt = (null, null, BeforeFirstWork);
+            var after = BeforeFirstWork;
+            while ((pathOnly ? after < anchor.WorkId ? anchor : null
+                       : Rows(transaction, ReadIdentity(anchor), Membership(pair.Row, selection, anchor,
+                           (StateSchema.ParamAfter, after), (StateSchema.ParamTake, StateSchema.OneRow))).FirstOrDefault())
+                   is { } row)
+            {
+                after = row.WorkId;
+                if (row.Key != selection.Key || TransferableWork(transaction, pair.Row, row, null, pathOnly) is not { } content ||
+                    !Fold(ref debt, row, content.Notice)) return false;
+            }
+            if (TransferableWork(transaction, pair.Row, later, null, pathOnly) is not { } newest ||
+                !Fold(ref debt, later, newest.Notice)) return false;
+            try
+            {
+                Require(Run(transaction, StateSchema.MergeTransferredWork, (StateSchema.ParamPairRow, pair.Row),
+                    (StateSchema.ParamWork, later.WorkId), (StateSchema.ParamAcquisition, debt.Acquisition),
+                    (StateSchema.ParamBefore, debt.Before), (StateSchema.ParamNotice, StateEncoding.Envelope(debt.Notice!))));
+                retired = Retire(transaction, pair.Row, selection, anchor);
+                transaction.Commit();
+            }
+            catch (SqliteException error) when (IntegrityRefusal(error))
+            {
+                throw RollbackMutation(transaction, selection, error);
+            }
+        }
+        // A stale fence or certified rollback leaves the ordinary retry unchanged.
+        catch (LiveAdmissionStaleException) { return false; }
+        catch (ItemStoreMutationException) { return false; }
+        AccountAttachment(selection.PairId, -retired);
+        EndSelection(selection);
+        return true;
+    }
+
     private (ChangeNotice Notice, SyncedEntry? Before)? TransferableWork(
         SqliteTransaction? transaction, long pair, WorkRow row, long? parent, bool pathOnly = false)
     {
@@ -1668,7 +1739,7 @@ internal sealed partial class ChangeTable
                 row.Acquisition > observedThrough) is { } later)
                 throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.RelevantEvidenceChanged,
                     Massdex.SyncShark.Engine.Text.Get(TextKey.StaleEvidenceAfter, (TextArg.Path, later.Key),
-                        (TextArg.Count, later.Acquisition.ToString() ?? string.Empty)));
+                        (TextArg.Count, later.Acquisition.ToString() ?? string.Empty))) { Superseded = (selection, later.WorkId) };
     }
 
     /// <summary>B-176: ValidateLiveCoverage's later-evidence rule for the footprint's own-side scopes, in footprint

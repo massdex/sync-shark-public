@@ -532,6 +532,12 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         return inner.TransferOlderEpisodeWork(selection, expected);
     }
 
+    public bool TransferSupersededWork(WorkSelection selection, long laterWorkId)
+    {
+        Command();
+        return inner.TransferSupersededWork(selection, laterWorkId);
+    }
+
     public bool AttachIssueWork(WorkSelection parent, Issue exactIssue,
         IEnumerable<(ChangeNotice Notice, bool IsFolder, SyncedEntry? Before)> unfinished)
     {

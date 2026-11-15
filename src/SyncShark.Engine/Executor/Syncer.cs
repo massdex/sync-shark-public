@@ -415,6 +415,11 @@ public sealed class Syncer
                 retired(transfer.Selection.AnchorWorkId);
                 return;
             }
+            if (error.Superseded is { } newer && _context.Store.TransferSupersededWork(newer.Selection, newer.LaterWorkId))
+            {
+                retired(newer.Selection.AnchorWorkId);
+                return;
+            }
             // A refused opportunity keeps its work pending and reports why without creating a notice.
             refused();
             _context.Events(RunEvent.Failed(error, path: path) with { Side = side, WorkId = workId });

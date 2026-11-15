@@ -44,6 +44,8 @@ public static partial class ChangeTableChecks
         WithStore(store => PersistedRenameBootstrap(store, false));
         WithStore(store => PersistedRenameBootstrap(store, true));
         WithStore(LivePeerClaimSurvives);
+        WithStore(PeerClaimGatesTransfer);
+        TransferBoundIgnoresUnrelatedAttempts();
         WithStore(PageRollback);
         WithStore(store => ReturningRelease(store));
         using (var memory = new InMemoryStateStore()) ReturningRelease(memory);
@@ -932,6 +934,72 @@ public static partial class ChangeTableChecks
         Check.Require(store.ReadWork(unrelated).Any() && store.CompleteWork(unrelated, null),
             "M: unrelated live membership remains independently completable");
         store.EndWorkPass(PairId);
+    }
+
+    private static void PeerClaimGatesTransfer(StateStore store)
+    {
+        var provenance = InstallWithoutObligations(store);
+        var volume = AcquireLocal(store, provenance, Notice(Side.Local, File, Identity, dirty: true));
+        Acquire(store, provenance, NextCursor, [Notice(Side.Dropbox, File, OtherIdentity)]);
+        var scope = new PathScope(store.Pair(PairId)!, store.Pairs());
+        var first = store.SelectWork(PairId, provenance.PairGeneration, scope)!;
+        Check.Require(first.Side == Side.Local && store.BeginSelection(first) is not null, "Local transfer setup");
+        var source = store.ReadSource(PairId, Side.Local)!.Value;
+        var later = store.AcquireJournalPage(volume, new JournalPosition(0, 0), new JournalPosition(0, 1),
+            [(PairId, provenance.PairGeneration, source.Epoch, source.Revision, false)],
+            [(PairId, Notice(Side.Local, File, Identity))])!.Value;
+        var peer = store.SelectWork(PairId, provenance.PairGeneration, scope)!;
+        Check.Require(peer.Side == Side.Dropbox && store.BeginSelection(peer) is not null, "Peer claim setup");
+        store.ClaimSelectionPeer(peer, new SelectionPeer(first.Key, later));
+        var newest = first with { AnchorWorkId = later, ThroughWorkId = later };
+        var oldRows = store.ReadWork(first).ToArray();
+        var newRows = store.ReadWork(newest).ToArray();
+        Check.Require(!store.TransferSupersededWork(first, later) &&
+            store.ReadWork(first).SequenceEqual(oldRows) && store.ReadWork(newest).SequenceEqual(newRows) &&
+            store.CountWork(PairId, provenance.PairGeneration, later).Local == 2,
+            "Another lane's peer claim refuses without changing either row");
+        store.EndSelection(peer);
+        Check.Require(store.TransferSupersededWork(first, later) && !store.ReadWork(first).Any() &&
+            store.ReadWork(newest).Single().Notice!.LocalContentDirty,
+            "Only the transferring selection's own claim and attempt remain: debt transfers");
+        store.EndWorkPass(PairId);
+    }
+
+    private static void TransferBoundIgnoresUnrelatedAttempts()
+    {
+        int? previous = null;
+        // One extra attempted key added one Anchor query in the old walk; fourfold sizes expose that dependence.
+        foreach (var count in new[] { 8, 32 }) WithStore(store =>
+        {
+            var provenance = InstallWithoutObligations(store);
+            var notices = new[] { Notice(Side.Local, File, Identity, dirty: true) }.Concat(
+                Enumerable.Range(0, count).Select(index => Notice(Side.Local, $"Other{index}", $"other-{index}"))).ToArray();
+            var volume = AcquireLocal(store, provenance, notices);
+            var scope = new PathScope(store.Pair(PairId)!, store.Pairs());
+            var first = store.SelectWork(PairId, provenance.PairGeneration, scope)!;
+            Check.Require(store.BeginSelection(first) is not null, "Transfer count setup");
+            for (var index = 0; index < count; index++)
+            {
+                var other = store.SelectWork(PairId, provenance.PairGeneration, scope)!;
+                Check.Require(store.BeginSelection(other) is not null, "Unrelated attempt setup");
+                store.EndSelection(other);
+            }
+            var source = store.ReadSource(PairId, Side.Local)!.Value;
+            var later = store.AcquireJournalPage(volume, new JournalPosition(0, 0), new JournalPosition(0, 1),
+                [(PairId, provenance.PairGeneration, source.Epoch, source.Revision, false)],
+                [(PairId, Notice(Side.Local, File, Identity))])!.Value;
+            var trace = new List<string>();
+            var transferred = false;
+            Statements(store, () => transferred = store.TransferSupersededWork(first, later), captured: trace);
+            var statements = trace.Count(sql => !sql.TrimStart().StartsWith("--", StringComparison.Ordinal) &&
+                !sql.TrimStart().StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase) &&
+                !sql.TrimStart().StartsWith("COMMIT", StringComparison.OrdinalIgnoreCase));
+            Console.WriteLine($"Superseded transfer unrelated={count} statements={statements}");
+            Check.Require(transferred && statements == 17 && (previous is null || previous == statements),
+                "Transfer work depends only on the involved key, not unrelated attempts");
+            previous = statements;
+            store.EndWorkPass(PairId);
+        });
     }
 
     private static IEnumerable<T> FailsAfter<T>(T first, Exception failure)

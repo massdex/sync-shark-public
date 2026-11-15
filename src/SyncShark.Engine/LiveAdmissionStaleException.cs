@@ -17,6 +17,9 @@ internal sealed class LiveAdmissionStaleException(LiveAdmissionStaleReason reaso
     /// <summary>Exact authority captured only after a same-item newer-episode refusal; never grants admission.</summary>
     internal (WorkSelection Selection, ItemRetryCandidate Episode)? NewerEpisode { get; init; }
 
+    /// <summary>The exact later row found by a later-evidence refusal; custody decides whether it carries this work.</summary>
+    internal (WorkSelection Selection, long LaterWorkId)? Superseded { get; init; }
+
     /// <summary>A contained content observation needing fresh admission within the same item attempt.</summary>
     internal Row? HandoffRow { get; init; }
 

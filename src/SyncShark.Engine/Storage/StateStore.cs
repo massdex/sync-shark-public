@@ -1894,6 +1894,10 @@ public sealed partial class StateStore : IStateStore
         Ordered(() => _changes.TransferOlderEpisodeWork(selection, expected));
 
     /// <inheritdoc />
+    public bool TransferSupersededWork(WorkSelection selection, long laterWorkId) =>
+        Ordered(() => _changes.TransferSupersededWork(selection, laterWorkId));
+
+    /// <inheritdoc />
     public bool AttachIssueWork(WorkSelection parent, Issue exactIssue,
         IEnumerable<(ChangeNotice Notice, bool IsFolder, SyncedEntry? Before)> unfinished) =>
         Ordered(() => _changes.AttachIssueWork(parent, exactIssue, unfinished));

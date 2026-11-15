@@ -433,6 +433,8 @@ public static partial class ChangeRunnerChecks
         await OldPathMemberAsync();
         await OutOfScopeIdentityAsync();
         await LaterRowAsync();
+        await SupersededTransfersAsync(replacement: false);
+        await SupersededTransfersAsync(replacement: true);
         await ProbeCancelledAsync();
         await InPlaceRewriteAsync();
         await IdentityReadFailureAsync();
@@ -880,6 +882,52 @@ public static partial class ChangeRunnerChecks
             queued == (0, 0),
             $"B-179 (p) a row beyond the gone selection's Through keeps its own work and syncs: {reads.Take()}, " +
             $"queued {queued}");
+    }
+
+    private static async Task SupersededTransfersAsync(bool replacement)
+    {
+        using var fixture = new Fixture(realStore: true);
+        TrustEchoSources(fixture);
+        var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Churn, null, LocalId,
+            LocalEntry(Churn, LocalId), true, false));
+        var added = false;
+        bool? transferred = null;
+        var dirty = false;
+        fixture.Hooks.BeforeCall = method =>
+        {
+            if (added || method.Name != nameof(IStateStore.BeginSelection)) return;
+            added = true;
+            var later = LocalEntry(Churn, replacement ? OccupantId : LocalId);
+            fixture.Local.Seed(later, [4]);
+            Selected(fixture, Churn, later, 2);
+        };
+        fixture.Hooks.AfterCall = (method, args, result) =>
+        {
+            if (method != nameof(IStateStore.TransferSupersededWork)) return;
+            transferred = (bool)result!;
+            var selected = (WorkSelection)args![0]!;
+            if (transferred == true) dirty = fixture.Inner.ReadLocalDirty(PairId, Generation, selected.SourceEpoch,
+                selected.Domain, selected.Identity, selected.Key, selected.Key).Dirty;
+        };
+        var events = new List<RunEvent>();
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
+        var refused = events.Count(item => item.Error is LiveAdmissionStaleException);
+        var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
+        if (!replacement)
+        {
+            Check.Require(added && transferred == true && dirty && refused == 0 && queued == (0, 0) &&
+                await DropboxByte(fixture, Churn) == 4,
+                $"Superseded same-item debt transfers without refusal: transfer={transferred}, dirty={dirty}, refusals={refused}, queued={queued}");
+            return;
+        }
+        Check.Require(added && transferred == false && refused == 1 && queued.Local == 2,
+            $"A replacement keeps the original item's retry: transfer={transferred}, refusals={refused}, queued={queued}");
+        fixture.Hooks.BeforeCall = null;
+        fixture.Hooks.AfterCall = null;
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        Check.Require(fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0, 0) &&
+            await DropboxByte(fixture, Churn) == 4,
+            "The replacement's next opportunity drains both rows and uploads its bytes");
     }
 
     // Cancellation during the by-id read is not an answer: the probe rethrows it, it leaves SyncWorkAsync and the row

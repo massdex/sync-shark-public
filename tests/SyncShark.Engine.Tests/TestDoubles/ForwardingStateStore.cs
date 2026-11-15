@@ -155,6 +155,8 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
     public virtual bool CompleteWork(WorkSelection selection, SelectionPeer? peer) => Inner.CompleteWork(selection, peer);
     public virtual bool TransferOlderEpisodeWork(WorkSelection selection, ItemRetryCandidate expected) =>
         Inner.TransferOlderEpisodeWork(selection, expected);
+    public virtual bool TransferSupersededWork(WorkSelection selection, long laterWorkId) =>
+        Inner.TransferSupersededWork(selection, laterWorkId);
     public virtual bool AttachIssueWork(WorkSelection parent, Issue exactIssue,
         IEnumerable<(ChangeNotice Notice, bool IsFolder, SyncedEntry? Before)> unfinished) =>
         Inner.AttachIssueWork(parent, exactIssue, unfinished);
