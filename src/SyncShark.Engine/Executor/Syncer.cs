@@ -73,9 +73,9 @@ public sealed class Syncer
     // This session's one live copy, so every effect live work reaches meets the live refusal.
     private Syncer Live => _context.Live ? this : _live ??= new Syncer(_context with { Live = true }, _ports);
 
-    /// <summary>Runs pending work on this session's one live copy. Drained is false when the opportunity yielded after a
-    /// pass that served only work acquired during it; Revisit asks for one more opportunity after a yield, or when a
-    /// waiting duplicate-folder repair's follow-up completed an operation after the lanes.</summary>
+    /// <summary>Runs pending work on this session's one live copy. Drained is false after requested cancellation or a
+    /// yield from a pass that served only work acquired during the opportunity. Revisit asks for another opportunity
+    /// after a yield, or when a waiting duplicate-folder repair's follow-up completed an operation after the lanes.</summary>
     internal Task<(bool Revisit, bool Drained)> SyncWorkAsync(CancellationToken ct) => Live.RunWorkAsync(ct);
 
     private async Task<(bool Revisit, bool Drained)> RunWorkAsync(CancellationToken ct)

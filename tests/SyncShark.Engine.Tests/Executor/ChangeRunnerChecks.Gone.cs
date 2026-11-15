@@ -913,7 +913,8 @@ public static partial class ChangeRunnerChecks
         };
         var events = new List<RunEvent>();
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.Gone.cs:913");
-        Console.WriteLine($"Superseded replacement={replacement}: first commands={counters.Commands}");
+        Check.Require(counters.Commands == (replacement ? 20 : 47),
+            "The same-item transfer uses 47 store calls; the protected replacement refusal uses 20.");
         var refused = events.Count(item => item.Error is LiveAdmissionStaleException);
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         if (!replacement)

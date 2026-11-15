@@ -6,10 +6,7 @@
     "engine-host",
     "repair",
     "syncer",
-    "gone-identities",
-    "safety",
-    "temporary-retry-time",
-    "serial-lane-lifetime"
+    "gone-identities"
   ],
   "core": [],
   "ui": []

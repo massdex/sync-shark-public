@@ -7634,7 +7634,7 @@ public static partial class ChangeRunnerChecks
         // Pass and effect counts stay unchanged; arrivals can now span orderly opportunities.
         var calls = await UntilDrainedAsync(new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
             RefusingExecutionBoundary.Instance, 1)), guard.Token, "Executor/ChangeRunnerChecks.cs:7626").WaitAsync(guard.Token);
-        Console.WriteLine($"Sustained arrivals: commands={counters.Commands}");
+        Check.Require(counters.Commands == 108, "Three sustained-arrival opportunities use 108 store calls.");
         Check.Require(calls == 3, "Only post-floor arrival progress yields; the final opportunity drains.");
         Check.Require(rounds == arrivals + 2,
             "Sustained arrivals remain reachable across yields; one empty pass ends the drain.");

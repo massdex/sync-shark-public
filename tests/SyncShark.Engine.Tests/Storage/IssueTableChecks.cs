@@ -96,8 +96,6 @@ public static class IssueTableChecks
         Check.Require(!reopened.Dismissed, "a replaced dismissed row reopens and announces");
 
         var execution = store.ReadPairExecution(ContractPair)!.Value;
-        var local = store.ReadSource(ContractPair, Side.Local)!.Value;
-        var remote = store.ReadSource(ContractPair, Side.Dropbox)!.Value;
         store.RecordPrerequisiteFailure(ContractPair, execution.Generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(0, Now),
             StateChange.Empty with { Raise = [(IssueKind.Failure, TextKey.RequiredRepairRetry, "", new IssueSubject([], null))] });
         var held = store.Issues(ContractPair).Single(issue => issue.Path.Length == 0);

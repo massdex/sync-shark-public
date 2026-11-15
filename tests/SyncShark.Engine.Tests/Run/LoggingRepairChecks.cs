@@ -1415,6 +1415,7 @@ internal static class LoggingRepairChecks
             });
         var pairId = rig.Pair.PairId;
         int Calls(string path) { lock (wire.Calls) return wire.Calls.Count(call => call == path); }
+        int Uploads() => Calls("/2/files/upload") + Calls("/2/files/upload_session/start");
         bool Idle() => EngineHostChecks.AutoSyncIdle(rig.Host, pairId) && MonitorIdle(monitor, pairId);
         async Task SettleAsync()
         {
@@ -1432,7 +1433,8 @@ internal static class LoggingRepairChecks
         await SettleAsync();
         while (logs.TryDequeue(out _)) { }
         var continuations = Calls("/2/files/list_folder/continue");
-        var uploads = Calls("/2/files/upload");
+        var uploads = Uploads();
+        var finishes = Calls("/2/files/upload_session/finish_batch_v2");
         var polls = wire.HeldLongpolls;
         var refreshMark = Volatile.Read(ref refreshes);
         var refuse = 1;
@@ -1449,7 +1451,7 @@ internal static class LoggingRepairChecks
         var notice = rig.Store.Issues(pairId).Single(issue => issue.Path.Length == 0);
         Check.Require(notice.Cause == TextKey.RequiredRepairRetryNoSpace &&
             rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off) &&
-            Calls("/2/files/list_folder/continue") == continuations + 1 && Calls("/2/files/upload") == uploads &&
+            Calls("/2/files/list_folder/continue") == continuations + 1 && Uploads() == uploads &&
             wire.HeldLongpolls == polls + (finite ? 1 : 0) &&
             logs.SelectMany(Lines).Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Failed)) == 1 &&
             (finite || logs.Count == 1) && !logs.SelectMany(File.ReadAllLines).Any(line => line.Contains("synthetic", StringComparison.Ordinal)),
@@ -1462,7 +1464,7 @@ internal static class LoggingRepairChecks
             await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(pairId) is { Attempts: 2 });
             await SettleAsync();
             Check.Require(Calls("/2/files/list_folder/continue") == continuations + 2 && wire.HeldLongpolls == polls &&
-                Calls("/2/files/upload") == uploads && rig.Store.Issues(pairId).Single(issue => issue.Path.Length == 0).Id == notice.Id,
+                Uploads() == uploads && rig.Store.Issues(pairId).Single(issue => issue.Path.Length == 0).Id == notice.Id,
                 "a still-refused deadline drains once without restarting the ended feed or replacing its notice");
             row = rig.Store.ReadPrerequisiteRetry(pairId)!.Value;
         }
@@ -1475,10 +1477,11 @@ internal static class LoggingRepairChecks
             (!finite || wire.Snapshot().Any(item => item.Path == "child.txt" && Encoding.UTF8.GetString(item.Bytes) == "pending")));
         await SettleAsync();
         Console.WriteLine($"Live recovery finite={finite}: C={Calls("/2/files/list_folder/continue") - continuations}, " +
-            $"L={wire.HeldLongpolls - polls}, U={Calls("/2/files/upload") - uploads}, " +
+            $"L={wire.HeldLongpolls - polls}, U={Uploads() - uploads}, " +
             $"noticeOpen={rig.Store.Issues(pairId).Any(issue => issue.Id == notice.Id)}, status={rig.Host.Status().Status}");
         Check.Require(Calls("/2/files/list_folder/continue") == continuations + 2 &&
-            Calls("/2/files/upload") == uploads + (finite ? 1 : 0) &&
+            Uploads() == uploads + (finite ? 1 : 0) &&
+            Calls("/2/files/upload_session/finish_batch_v2") == finishes + (finite ? 1 : 0) &&
             (finite ? wire.HeldLongpolls - polls is >= 1 and <= 2 : wire.HeldLongpolls == polls + 1) &&
             rig.Store.Issues(pairId).All(issue => issue.Id != notice.Id) &&
             rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),

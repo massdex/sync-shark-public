@@ -659,17 +659,9 @@ public static partial class EngineHostChecks
         {
             rig.BeforeSelect = rig.BeforeBegin = null;
             const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
-            CancellationToken token;
-            lock (typeof(EngineHost).GetField("_gate", Private)!.GetValue(rig.Host)!)
-            {
-                var registrations = (System.Collections.IDictionary)typeof(EngineHost)
-                    .GetField("_registrations", Private)!.GetValue(rig.Host)!;
-                var dispatch = registrations.Values.Cast<object>().Single(value =>
-                    (EngineHost.RegistrationKind)value.GetType().GetProperty("Kind", Private)!.GetValue(value)! ==
-                    EngineHost.RegistrationKind.Dispatch);
-                token = ((CancellationTokenSource)dispatch.GetType().GetProperty("Cancellation", Private)!
-                    .GetValue(dispatch)!).Token;
-            }
+            var dispatch = rig.ActiveDispatch();
+            var token = ((CancellationTokenSource)dispatch.GetType().GetProperty("Cancellation", Private)!
+                .GetValue(dispatch)!).Token;
             entered.TrySetResult(token);
             rig.Hold(release.Task, "the cancellation hook is released");
             if (mode == "unexpected") throw new OperationCanceledException();
@@ -1310,7 +1302,6 @@ public static partial class EngineHostChecks
             "B-161 a wait cleared during a dispatch no longer holds its file in that dispatch");
     }
 
-    // D3: a user Retry of another issue on a waiting pair runs at once; the item wait is untouched.
     private static async Task YieldKeepsAdmittedRetryAsync(string root, string mode)
     {
         await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "yield-" + mode), turn: false).ConfigureAwait(false);
@@ -1341,7 +1332,7 @@ public static partial class EngineHostChecks
             {
                 if (++selects == 1)
                 {
-                    var registration = rig.CheckedDispatch();
+                    var registration = rig.ActiveDispatch();
                     admitted = registration is not null && rig.Store.ReadItemRetry(rig.PairId) == row;
                     first = Log(registration);
                 }
@@ -1364,7 +1355,7 @@ public static partial class EngineHostChecks
             {
                 keptRow = rig.Store.ReadItemRetry(rig.PairId) == row;
                 noRefresh = rig.Refreshes == Volatile.Read(ref refreshes);
-                second = Log(rig.CheckedDispatch());
+                second = Log(rig.ActiveDispatch());
                 if (second is not null)
                     reset = ((HashSet<Exception>)typeof(RunLog).GetField("_reportedFailures", Private)!.GetValue(second)!).Count == 0;
             }
@@ -1381,7 +1372,7 @@ public static partial class EngineHostChecks
             }
             else if (mode == "late-cancel")
             {
-                var registration = rig.CheckedDispatch()!;
+                var registration = rig.ActiveDispatch();
                 ((CancellationTokenSource)registration.GetType().GetProperty("Cancellation", Private)!.GetValue(registration)!).Cancel();
             }
         };
@@ -1417,6 +1408,7 @@ public static partial class EngineHostChecks
         }
     }
 
+    // D3: a user Retry of another issue on a waiting pair runs at once; the item wait is untouched.
     private static async Task ResolveRunsBesideItemWaitAsync(string root)
     {
         await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "item-resolve")).ConfigureAwait(false);
@@ -1639,6 +1631,16 @@ public static partial class EngineHostChecks
                 return ((System.Collections.IDictionary)typeof(EngineHost).GetField("_prerequisites", Private)!
                     .GetValue(Host)!).Contains(PairId);
         }
+        internal object ActiveDispatch()
+        {
+            const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+            lock (typeof(EngineHost).GetField("_gate", Private)!.GetValue(Host)!)
+                return ((System.Collections.IDictionary)typeof(EngineHost).GetField("_registrations", Private)!
+                    .GetValue(Host)!).Values.Cast<object>().Single(value =>
+                    (EngineHost.RegistrationKind)value.GetType().GetProperty("Kind", Private)!.GetValue(value)! ==
+                    EngineHost.RegistrationKind.Dispatch);
+        }
+
         // The dispatch the pair's item wait last confirmed against its stored row, or null (IR-1).
         internal object? CheckedDispatch()
         {
