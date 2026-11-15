@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "live-wake",
+    "live-admission"
+  ],
+  "core": [],
+  "ui": []
+}
