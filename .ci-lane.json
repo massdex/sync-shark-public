@@ -3,7 +3,12 @@
     "engine-tests"
   ],
   "engine": [
-    "literals"
+    "unknown-move-live",
+    "unknown-move-repair",
+    "completion-containment",
+    "completion-containment-cost",
+    "resolutions",
+    "dropbox"
   ],
   "core": [],
   "ui": []

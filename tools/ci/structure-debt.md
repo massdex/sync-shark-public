@@ -75,7 +75,7 @@ Category-change split clearing condition (class-size and file-size rows, and the
 
 Current inventory: class :8-4293 (4286), file 4293. CloseUnknownMove :783-801 owns the generation-fenced exact close and proven-echo retirement in one transaction; UnknownMoveCovering :803-806 forwards the move-specific hold query. These extend issue persistence, not a new workflow. Other embedded ranges below predate this change; existing split verdicts remain.
 
-<!-- spec-source: 082bda7260f5~2efdc3f14d53~4b39e0be2ffa~6098774a7d2c~3ee4c0f313ef~8de6 -->
+<!-- spec-source: b724246fa9f2~0b7716ead923~687fa03043ee~dc6ce0f11de4~4abbba04ad45~a611 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -149,7 +149,7 @@ ValidateLiveCoverage :1557-1581 retains main's freshness obligation. ValidateSel
 
 SettleEchoes :326-382 (57): the earlier REASON-RECORDED verdict needs current-delta confirmation; reason :325 keeps one page's walk, staged predecessors, budget and post-commit publication together. EchoSelection :385-421 is 37 lines; RetireEchoPage :441-462 is one atomic page. CoalescePathWork :466-528 and TransferBound :530-558 retain main's coalescing responsibility; only ordinary NextCandidate :285-322 reaches it. IntegrityRefusal :1211-1212 and RollbackMutation :1214-1220 remain single owners. These units add no new class job.
 
-<!-- spec-source: 01930d9398df~0a8ac549adab~4df5689199cb~99876109d75b~36ac039a0b79~4fd3 -->
+<!-- spec-source: cdea2dfc5d31~7c441d422b47~adae8d03f84e~f948d6a8a4fc~d5eb3634b3e8~a371 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -658,7 +658,7 @@ Closed rows: the class (362) and file (368) REASON-RECORDED verdicts stand in th
 
 ## src/SyncShark.Engine/Executor/ResolutionRunner.cs
 
-<!-- spec-source: c4345ac7a729~20f5c26f31bb~3e7cc74fd4ad~377896e4bebd~db8d32ac03ec~003c -->
+<!-- spec-source: 65636d3cc60c~510bea740a0e~0c9af9053f53~0a6feab26bcb~e18cf61c4aec~a484 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -752,7 +752,9 @@ No open §1.3 size obligation. Since 07ff9d097 (3b9d021a9, 36efd4772, cb637f88a)
 
 ## src/SyncShark.Engine/Storage/IssueFacts.cs
 
-<!-- spec-source: 7e28886bd111~dd8ad566cc75~e91d742fe709~b0458bb3b573~d2a7b78cebbd~0e2c -->
+Current file: 161 lines. UnknownMoveCovering :98-105 and MoveAt :107-113 query the existing held-issue projection by path/ancestors without letting an older non-move holder conceal a move. Replace remains the projection-update owner; no stored fact or second index was added.
+
+<!-- spec-source: e3759b98defc~39078ede052d~d7375b754c9e~9c014f3dd3c4~a42769ed7f89~67a9 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -800,7 +802,9 @@ No open §1.3 size obligation. Since 07ff9d097 (3b9d021a9, 36efd4772, cb637f88a)
 
 ## src/SyncShark.Engine/Dropbox/DropboxErrors.cs
 
-<!-- spec-source: 096feee8db1a~734a26ef4c39~45d68e0ede69~1845a7fb7a4d~076e91f10953~3b67 -->
+Current class: :9-401 (393), file 401. WithMove :260-262 changes the cause only for unknown-effect moves; Copy :264-269 preserves the remaining failure fields and defaults to the original cause for provider-wait decoration. These remain the existing classification/decoration jobs; the split below is still open.
+
+<!-- spec-source: 85a042585a33~c63e0f6b9447~282174dd783d~b5a8897044ad~e32c038e8bb6~5cee -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -828,9 +832,9 @@ B-222 disposition: IStateStore file-size - reason recorded; HeldFolderMembers an
 
 Category-change split clearing condition: open: the release feature freeze allows only live-defect fixes. Owner: the structural refactor lane. Clearing condition: that lane's extraction of the unit. Trigger: the first release after that lane lands. The earlier replacement trigger, the first growth of this unit after B-214 (3712ae9c6), is met: the duplicate-folder obligation reads (UnresolvedFolderRemovals, DuplicateRepairPage, CheckDuplicateRepair) and the removal authority on BeginFolderRemoval grow it. The interface split remains open until extraction and a fresh cross-family verdict.
 
-Current file: 436 lines. SettleEchoes :147-148 joins SelectWork :145 and EndWorkPass :150 in the existing work group; the historical interface ranges below describe their cited releases, not the current file.
+Current file: 461 lines. CloseUnknownMove :363-364 and UnknownMoveCovering :365 extend the existing issue persistence/lookup group; no separate workflow is added. SettleEchoes remains in the existing work group; the historical interface ranges below describe their cited releases, not the current file.
 
-<!-- spec-source: c0df83272ac0~2deca8d4637f~d8687efce896~7646000b190f~170aace7fec6~a4fb -->
+<!-- spec-source: 450f34d7e331~ae6c6adfc266~d01d11d8391e~f24fb381813b~5ed265315f8a~9a1f -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -860,11 +864,11 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 B-222 disposition: StateSchema class-size and file-size catalogue rows - accepted; declarative SQL only (held-member statement :940, the episode-query access directives :1027 and :1041, and the saved-binding ordinal :1281); no execution or transaction policy added.
 
-Current catalogue: class :6-1532 (1527), file 1532; B-214 adds only declarations (echo responsibilities, binding probes, exact-path peer variant and EchoWorkPending :788-792). B-232 uses the existing direct pair-row delete and makes the disposable deleted-name relation WITHOUT ROWID; no new job. REASON-RECORDED remains subject to current-delta confirmation; reason :3.
+Current catalogue: class :6-1631 (1626), file 1631. IssueRegistrations :881-885 adds one declaration for exact-issue current-fence echo candidates; execution and transaction ownership stay outside this catalogue. B-232 uses the existing direct pair-row delete and makes the disposable deleted-name relation WITHOUT ROWID; no new job. REASON-RECORDED remains subject to current-delta confirmation; reason :3.
 
 Category-change scope: Public page, count and keyset statements reuse one bound SQL expression. The catalogue still contains declarations only, without execution or transaction policy, so arbitrary catalogue splitting does not separate a runtime job. Absence-retirement scope changes the index access directives of PairItemEpisodes and ReadIssueRetryViews and adds HeldFolderMembers with its saved-binding column ordinal; these are declarations, not execution or transaction policy. The existing catalogue reason remains subject to content-bound review.
 
-<!-- spec-source: bc1c64aa7407~9ed5391c7db9~eafcb4dd4294~ae02600ef648~286e532b6cf9~e33b -->
+<!-- spec-source: 8baeab5bbc60~50ecbdf858b0~abc14fcf6ef8~63a14ed52c1b~d4764789bd4a~8aa7 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -874,7 +878,9 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 ## src/SyncShark.Engine/TextKey.cs
 
-<!-- spec-source: d2d1e2556386~c3ff8ef5e0f2~ee1322d79b11~967209b31f1b~ea08f59d9771~a1c4 -->
+Current file: 466 lines. FailDropboxOutcomeUnknown :39 adds one persisted-by-name strings key to the same catalogue. It introduces no message formatting or execution policy; the one-catalogue reason below still applies, subject to independent content-bound review.
+
+<!-- spec-source: e233d561966a~3f06512eb377~0ff62d495a3e~d6578ed92793~b761b3bf2c0f~d136 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -942,7 +948,7 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 ## src/SyncShark.Engine/Executor/Syncer.cs
 
-<!-- spec-source: 364213d7154e~0ceae2804f79~9ed7583d1a6b~f55f1e09a19b~180067ef91b0~bf8e -->
+<!-- spec-source: 08101730c308~dcb193e6675f~2255fa1bbced~341d22e926e5~09b1a409f0fc~0d73 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -980,7 +986,7 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 ## src/SyncShark.Engine/Executor/SelectionBranches.cs
 
-<!-- spec-source: 9da5cd9bca66~4ec31942f0d7~ca2a4b287b94~438dc1cafd21~41679e73e54d~ca71 -->
+<!-- spec-source: 06e9b58e3831~c5dfb3c5aca1~afbf3a159fed~0c97359fa389~3e6ea46cf04b~f5de -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -988,13 +994,13 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 ## src/SyncShark.Engine/Executor/SelectionPass.cs
 
-<!-- spec-source: 2d92ef47f31b~913a71c84064~7c390c253210~cfbcf94b3544~f3f7dece73fd~a4b6 -->
+<!-- spec-source: ab518765ea11~52684e9cf035~dbddc21aefeb~fce8e5aef3d0~fb496b65d691~961d -->
 
-The prior size disposition is retained, not renewed; current delta review is pending. The 0.3.82 extraction moved branch enumeration to SelectionBranches and selected renames to SelectionRenames, leaving this type the pass lifetime alone (active row/branch, refused row, prerequisite, per-selection lifecycle). The current class spans :6-253 (248 lines) and the file 253 lines. RunSelectionAsync :114-200 preserves branch custody and completion while adding the pre-read park at :152-161; RefuseBeforeProvider :243-250 asks the move-specific hold owner before the existing ancestor fence. Both type and file remain under §1.3's 300-line review trigger, which prompts review rather than setting a limit; the changed long member still needs current semantic review. The cleared rows are deleted (AGENTS.md:105-107); the section remains only because the ledger's historical SPLIT-PENDING anchors (673/678) link here, and those anchors are provenance in tools/ci/spec-verdicts.json, not current authority.
+The prior size disposition is retained, not renewed; current delta review is pending. The 0.3.82 extraction moved branch enumeration to SelectionBranches and selected renames to SelectionRenames, leaving this type the pass lifetime alone (active row/branch, refused row, prerequisite, per-selection lifecycle). The current class spans :6-253 (248 lines) and the file 253 lines. RunSelectionAsync :114-200 preserves branch custody and completion while adding the pre-read park at :152-161; its :158 call retains the current branch notice and preserves null for walked branches, without changing generic Park. RefuseBeforeProvider :243-250 asks the move-specific hold owner before the existing ancestor fence. Both type and file remain under §1.3's 300-line review trigger, which prompts review rather than setting a limit; the changed long member still needs current semantic review. The cleared rows are deleted (AGENTS.md:105-107); the section remains only because the ledger's historical SPLIT-PENDING anchors (673/678) link here, and those anchors are provenance in tools/ci/spec-verdicts.json, not current authority.
 
 ## src/SyncShark.Engine/Executor/ItemRenames.cs
 
-<!-- spec-source: 9042e1e1cc49~9323039b421a~dfa6685fe633~67c13b24fcd9~f3a849c4cf2f~28d8 -->
+<!-- spec-source: acde9c69d783~195e3ce7fc95~bcabb6c9cd34~15276dd1529d~ee197f1f1068~a2fa -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
