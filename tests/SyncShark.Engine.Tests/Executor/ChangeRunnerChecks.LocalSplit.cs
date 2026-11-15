@@ -302,7 +302,7 @@ public static partial class ChangeRunnerChecks
                 Check.Require(shape != "fault-new-evidence" || injected, "The closure boundary received newer evidence");
                 if (shape == "fault-new-evidence")
                     Check.Require(retirements.Contains(FolderRetirementDisposition.NoEffect) && effects.Count == 0 &&
-                        closures.Count > 0 && !closures[0].Closed && closures[0].Held &&
+                        closures.Count > 0 && !closures[0].Closed && closures[0].Held && closures.Any(value => value.Closed) &&
                         closures.Where(value => value.Closed).All(value => value.Through >= injectedWatermark &&
                             value.Reads > closures[0].Reads),
                         "Newer evidence holds the injected attempt; later closure requires fresh covering reads");
