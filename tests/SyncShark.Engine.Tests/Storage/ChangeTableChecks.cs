@@ -1273,8 +1273,6 @@ public static partial class ChangeTableChecks
     private static void FailedRepairKeepsIntake(StateStore store, SourceProvenance provenance, PathScope scope)
     {
         var generation = provenance.PairGeneration;
-        var local = store.ReadSource(PairId, Side.Local)!.Value;
-        var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
         var episode = new Massdex.SyncShark.V2.FailureRetryOwner.State(1, DateTimeOffset.UnixEpoch.AddSeconds(1));
         store.RecordPrerequisiteFailure(PairId, generation, _ => episode,
             StateChange.Empty with
@@ -1286,7 +1284,7 @@ public static partial class ChangeTableChecks
         var otherGeneration = store.ReadPairExecution(OtherPair)!.Value.Generation;
         var before = store.ReadWorkWatermark();
         Acquire(store, provenance, LastCursor, [Notice(Side.Dropbox, OtherFile, OtherIdentity)]);
-        local = store.ReadSource(PairId, Side.Local)!.Value;
+        var local = store.ReadSource(PairId, Side.Local)!.Value;
         var volume = Pair(PairId).Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var journal = store.AcquireJournalPage(volume, null, new JournalPosition(0, 1),
             [(PairId, generation, local.Epoch, local.Revision, false),

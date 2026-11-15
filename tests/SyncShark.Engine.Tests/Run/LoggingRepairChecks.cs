@@ -1866,8 +1866,6 @@ internal static class LoggingRepairChecks
         host = rig.Host;
         var pairId = rig.Pair.PairId;
         var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
-        var local = rig.Store.ReadSource(pairId, Side.Local)!.Value;
-        var remote = rig.Store.ReadSource(pairId, Side.Dropbox)!.Value;
         rig.Store.RecordPrerequisiteFailure(pairId, generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(1)),
             StateChange.Empty);
         using (var completed = rig.Log(folder, "completed"))
@@ -1943,8 +1941,6 @@ internal static class LoggingRepairChecks
         {
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
             var generation = rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation;
-            var local = rig.Store.ReadSource(rig.Pair.PairId, Side.Local)!.Value;
-            var remote = rig.Store.ReadSource(rig.Pair.PairId, Side.Dropbox)!.Value;
             rig.Store.RecordPrerequisiteFailure(rig.Pair.PairId, generation, _ => new FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(1)),
                 StateChange.Empty);
             using var subscription = new CancellationTokenSource();
@@ -2009,8 +2005,6 @@ internal static class LoggingRepairChecks
             }).ToArray();
             rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with { Record = entries });
             var generation = rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation;
-            var local = rig.Store.ReadSource(rig.Pair.PairId, Side.Local)!.Value;
-            var remote = rig.Store.ReadSource(rig.Pair.PairId, Side.Dropbox)!.Value;
             rig.Store.RecordPrerequisiteFailure(rig.Pair.PairId, generation, _ => new FailureRetryOwner.State(1, DateTimeOffset.UtcNow.AddHours(1)),
                 StateChange.Empty);
             using var subscription = new CancellationTokenSource();

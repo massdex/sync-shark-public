@@ -775,7 +775,9 @@ public static class LiveRunChecks
                 ended.Task.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
             }
             scenario.Require(completed.IsCompleted && opportunities == (related ? 2 : 1),
-                "W1: unrelated volume progress completes immediately; a real change settles on its following wake");
+                "W1: unrelated volume progress completes immediately; a real change settles on its following wake" +
+                "; related=" + related + "; completed=" + completed.IsCompleted + "; opportunities=" + opportunities +
+                "; reads=" + reads + "; passes=" + scenario.EndedWorkPasses);
         }
         finally { auto.StopAsync().GetAwaiter().GetResult(); }
     }

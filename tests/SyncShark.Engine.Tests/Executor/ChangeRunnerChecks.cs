@@ -2575,19 +2575,14 @@ public static partial class ChangeRunnerChecks
                 if (method.Name == nameof(IStateStore.CompleteOutOfScope)) cancel.Cancel();
             };
             var scope = ExcludedScope(fixture);
-            var cancelled = false;
-            try
-            {
-                await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [],
-                    configure: context => context with { Scope = scope }).CensusWorkAsync(cancel.Token, "Executor/ChangeRunnerChecks.cs:2582");
-            }
-            catch (OperationCanceledException) { cancelled = true; }
+            var result = await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [],
+                configure: context => context with { Scope = scope }).CensusWorkAsync(cancel.Token, "Executor/ChangeRunnerChecks.cs:2582");
             fixture.Hooks.BeforeCall = null;
             var completions = fixture.Hooks.Count(nameof(IStateStore.CompleteOutOfScope));
-            Check.Require(cancelled && completions == 1 &&
+            Check.Require(cancel.IsCancellationRequested && result == (false, false) && completions == 1 &&
                 PendingAt(fixture, Side.Dropbox, "Skip/Folder/File").Any() && !PendingAt(fixture, Side.Dropbox, "Skip/Folder").Any(),
-                "H6: cancellation between two eligible completions keeps the remaining selection; real=" + real +
-                "; cancelled=" + cancelled + "; completions=" + completions);
+                "H6: cancellation between two eligible completions ends cleanly and keeps the remaining selection; real=" + real +
+                "; cancelled=" + cancel.IsCancellationRequested + "; result=" + result + "; completions=" + completions);
         }
     }
 
@@ -3178,8 +3173,6 @@ public static partial class ChangeRunnerChecks
         RepairDone(fixture);
         ClearObligations(fixture);
         OweLocal(fixture, SourceObligation.NormalRepair);
-        var local = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
-        var remoteSource = fixture.Inner.ReadSource(PairId, Side.Dropbox)!.Value;
         var episode = new Massdex.SyncShark.V2.FailureRetryOwner.State(1, Stamp.AddMinutes(5));
         fixture.Inner.RecordPrerequisiteFailure(PairId, Generation, _ => episode,
             StateChange.Empty with
@@ -3197,7 +3190,7 @@ public static partial class ChangeRunnerChecks
             PendingAt(fixture, Side.Dropbox, remote.Path).Count == 0,
             "RQ-179 a failed Repair does not stop a same-pair sibling" + label);
         // Local intake commits on the shared journal source.
-        local = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
+        var local = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
         var position = fixture.Inner.ReadJournal(VolumeKey);
         var later = new JournalPosition(position!.JournalId, position.NextUsn + 1);
         var arrived = new ChangeNotice(Side.Local, ChangeKind.Changed, "Arrived", null, "arrived-local", null, false, false);
@@ -3270,8 +3263,6 @@ public static partial class ChangeRunnerChecks
             ClearObligations(fixture);
             RepairDone(fixture, debt != SourceObligation.Bootstrap);
             if (debt is { } owed) OweLocal(fixture, owed);
-            var local = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
-            var remote = fixture.Inner.ReadSource(PairId, Side.Dropbox)!.Value;
             switch (state)
             {
                 case "listing":
@@ -3334,8 +3325,6 @@ public static partial class ChangeRunnerChecks
             RepairDone(fixture);
             ClearObligations(fixture);
             OweLocal(fixture, SourceObligation.NormalRepair);
-            var local = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
-            var remote = fixture.Inner.ReadSource(PairId, Side.Dropbox)!.Value;
             fixture.Inner.RecordPrerequisiteFailure(PairId, Generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(1, Stamp.AddMinutes(5)),
                 RequiredRepairNotice);
             var fresh = RemoteEntry("Fresh", "fresh-remote");

@@ -605,7 +605,6 @@ public static partial class EngineHostChecks
                 "the later-boundary fixture has an acquired native journal base");
         }
         var local = store.ReadSource(id, Side.Local)!.Value;
-        var remote = store.ReadSource(id, Side.Dropbox)!.Value;
         if (hasRetry)
             store.RecordPrerequisiteFailure(id, generation, _ => FailureRetryOwner.AdoptedFailed(0, DateTimeOffset.UnixEpoch, null,
                     Settings.Backoff, static () => 0.5),
@@ -871,8 +870,6 @@ public static partial class EngineHostChecks
             instance.StateAuthority, Settings, Http, clock, _ => null, _ => store,
             EngineHost.Mode.Direct, startupMonitor: monitor);
         var generation = store.ReadPairExecution(pair.PairId)!.Value.Generation;
-        var local = store.ReadSource(pair.PairId, Side.Local)!.Value;
-        var remote = store.ReadSource(pair.PairId, Side.Dropbox)!.Value;
         var selected = new FailureRetryOwner.State(1, clock.GetUtcNow().AddSeconds(-1));
         store.RecordPrerequisiteFailure(pair.PairId, generation, _ => selected,
             StateChange.Empty);
@@ -952,8 +949,6 @@ public static partial class EngineHostChecks
         foreach (var id in new[] { "disabled", "paused", "decision", "eligible" })
         {
             var generation = store.ReadPairExecution(id)!.Value.Generation;
-            var local = store.ReadSource(id, Side.Local)!.Value;
-            var remote = store.ReadSource(id, Side.Dropbox)!.Value;
             store.RecordPrerequisiteFailure(id, generation, _ => new FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(++ordinal)),
                 StateChange.Empty);
         }
@@ -1542,8 +1537,6 @@ public static partial class EngineHostChecks
         IStateStore store = (IStateStore?)opened ?? memory!;
         store.SavePair(Pair(PairId));
         var generation = store.ReadPairExecution(PairId)!.Value.Generation;
-        var local = store.ReadSource(PairId, Side.Local)!.Value;
-        var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
         // The failed attempt's deadline already honours a provider wait: the floor that nothing may shorten.
         var floored = new FailureRetryOwner.State(1, DateTimeOffset.UtcNow.AddMinutes(10));
         store.RecordPrerequisiteFailure(PairId, generation, _ => floored,
