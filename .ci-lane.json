@@ -4,9 +4,7 @@
   ],
   "engine": [
     "unknown-move-live",
-    "unknown-move-repair",
-    "dropbox",
-    "work-lifecycle"
+    "unknown-move-repair"
   ],
   "core": [],
   "ui": []
