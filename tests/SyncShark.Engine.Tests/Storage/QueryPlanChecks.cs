@@ -965,7 +965,8 @@ public static class QueryPlanChecks
                 field.Name.StartsWith("Param", StringComparison.Ordinal) ||
                 field.Name.StartsWith("PlanParam", StringComparison.Ordinal)))
                 command.Parameters.AddWithValue((string)parameter.GetRawConstantValue()!, "A");
-            foreach (Match parameter in Regex.Matches(statement, @"\$\w+"))
+            // Peer arguments carry the only $names without a Param constant; bind their family alone.
+            foreach (Match parameter in Regex.Matches(statement, @"\$peer_\w+"))
                 if (!command.Parameters.Contains(parameter.Value)) command.Parameters.AddWithValue(parameter.Value, "A");
             using var reader = command.ExecuteReader();
             var before = plan.Count;
