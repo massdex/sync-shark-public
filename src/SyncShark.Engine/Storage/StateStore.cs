@@ -793,7 +793,7 @@ public sealed partial class StateStore : IStateStore
             // Keep associations available for proof, and roll retirement back if the exact close refuses.
             if (echoes is not null) retired = _changes.RetireMoveEchoes(transaction, pairId, expected, echoes);
             if (!IssueTable.Close(_connection, transaction, pairId, expected.Path, [expected.Kind],
-                    only: issue => issue.Id == expected.Id)) throw new InvalidDataException();
+                    only: null)) throw new InvalidDataException();
             transaction.Commit();
         }
         _changes.AccountAttachment(pairId, -retired);
