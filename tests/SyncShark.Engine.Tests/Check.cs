@@ -30,7 +30,7 @@ public static class Check
 
     // TEST-ONLY execution census; removed with its callers before hand-back.
     internal static async Task<(bool Revisit, bool Drained)> CensusWorkAsync(
-        this Executor.Syncer syncer, CancellationToken ct, string site)
+        this Massdex.SyncShark.Engine.Executor.Syncer syncer, CancellationToken ct, string site)
     {
         try
         {

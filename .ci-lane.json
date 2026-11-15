@@ -1,6 +1,10 @@
 {
   "build": [
-    "engine-tests"
+    "engine-tests",
+    "core-tests",
+    "core-tests",
+    "app",
+    "ui-fixture"
   ],
   "engine": [
     "engine-host",
@@ -10,8 +14,13 @@
     "gone-identities",
     "syncer",
     "store",
-    "logging-repair"
+    "repair"
   ],
-  "core": [],
-  "ui": []
+  "core": [
+    "--v2-autosync-checks",
+    "--cli-checks"
+  ],
+  "ui": [
+    "engine-startup-readiness-checks"
+  ]
 }
