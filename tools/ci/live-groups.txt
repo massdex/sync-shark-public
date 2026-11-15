@@ -1,0 +1,6 @@
+# Engine check groups that need the authorized live route. Hosted CI must not
+# schedule them, and they must not go in .ci-lane.json. One owner for the list:
+# .github/workflows/sync-shark-ci.yml, tools/ci/check-lane-selection.ps1 and
+# tools/Test-PreReview.ps1 read this file.
+scenarios
+scenarios-live
