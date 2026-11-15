@@ -1232,8 +1232,7 @@ internal static class LoggingRepairChecks
             var expected = new Dictionary<string, int>
             {
                 [nameof(IStateStore.RecordPrerequisiteFailure)] = memberCount,
-                [nameof(IStateStore.ReadSource)] = 3 * memberCount,
-                [nameof(IStateStore.ReadPrerequisiteRetry)] = memberCount,
+                [nameof(IStateStore.ReadSource)] = memberCount,
                 [nameof(IStateStore.ReadPairExecution)] = memberCount,
                 [nameof(IStateStore.ReadJournal)] = 1,
                 [nameof(IStateStore.ReadPrerequisiteRetries)] = 1

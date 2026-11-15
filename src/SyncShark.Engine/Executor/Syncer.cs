@@ -227,7 +227,7 @@ public sealed class Syncer
                 failure = await tasks.JoinAsync(failure, failure is not null and not LiveAdmissionStaleException,
                     joined =>
                     {
-                        if (joined is not OperationCanceledException || !ct.IsCancellationRequested)
+                        if (!ct.IsCancellationRequested || !Cancelled(joined))
                             _context.Events(RunEvent.Failed(joined));
                     });
                 // The join may substitute a lane token; a requested opportunity stop still ends normally at its owner.
@@ -248,6 +248,11 @@ public sealed class Syncer
         } while (repeat);
         return (waiting, yielded);
     }
+
+    // Classify the exception separately from whether the opportunity's own token requested the stop.
+    internal static bool Cancelled(Exception error) => error is OperationCanceledException ||
+        error is AggregateException aggregate &&
+        aggregate.Flatten().InnerExceptions.All(inner => inner is OperationCanceledException);
 
     private (int Settled, bool More)? SettleEchoPage(string pairId)
     {

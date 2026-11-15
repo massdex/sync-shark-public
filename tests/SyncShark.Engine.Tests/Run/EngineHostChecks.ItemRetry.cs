@@ -283,6 +283,7 @@ public static partial class EngineHostChecks
         await StepAsync(nameof(NewerLiveFailureStaysUnhandedAsync), () => NewerLiveFailureStaysUnhandedAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(ContendedFailureAccountingAsync), () => ContendedFailureAccountingAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(HandedStaleRearmsAsync), () => HandedStaleRearmsAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(JoinedCancellationAggregatesAsync), () => JoinedCancellationAggregatesAsync(root)).ConfigureAwait(false);
         foreach (var mode in new[] { "unexpected", "pause", "mixed", "configuration", "lane", "stop" })
             await StepAsync(nameof(OpportunityCancellationClassificationAsync) + mode,
                 () => OpportunityCancellationClassificationAsync(root, mode)).ConfigureAwait(false);
@@ -637,6 +638,65 @@ public static partial class EngineHostChecks
             "a later wake still dispatches after an unlogged failure").ConfigureAwait(false);
     }
 
+    private static async Task JoinedCancellationAggregatesAsync(string root)
+    {
+        await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "joined-cancellation"), turn: false).ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
+        await rig.SettledIdleAsync("before joined cancellation").ConfigureAwait(false);
+        var logMark = rig.Logs.Count;
+        var laneEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var producerEntered = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var armed = 0;
+        var selected = 0;
+        var laneFailed = false;
+        var producerFailed = false;
+        rig.Rig.Transport.Respond = async (request, _) =>
+        {
+            if (request.RequestUri!.AbsolutePath != "/2/files/list_folder/continue" || Interlocked.Exchange(ref armed, 1) != 0)
+                return null;
+            laneEntered.TrySetResult();
+            await release.Task.ConfigureAwait(false);
+            laneFailed = true;
+            throw new AggregateException(new OperationCanceledException(), new OperationCanceledException());
+        };
+        rig.BeforeSelect = () =>
+        {
+            if (++selected != 2) return;
+            rig.BeforeSelect = null;
+            rig.Hold(laneEntered.Task, "the selected lane reaches its asynchronous coverage read");
+            const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+            var dispatch = rig.ActiveDispatch();
+            producerEntered.TrySetResult(((CancellationTokenSource)dispatch.GetType()
+                .GetProperty("Cancellation", Private)!.GetValue(dispatch)!).Token);
+            rig.Hold(release.Task, "the cancelled producer and lane are released together");
+            producerFailed = true;
+            throw new AggregateException(new OperationCanceledException(), new OperationCanceledException());
+        };
+        string content;
+        Task ending;
+        try
+        {
+            content = await rig.DeliverLocalAsync("cancelled.txt").ConfigureAwait(false);
+            var opportunity = await producerEntered.Task.WaitAsync(HookBound).ConfigureAwait(false);
+            ending = rig.Host.PauseAsync(rig.PairId, default);
+            await UntilAsync(() => opportunity.IsCancellationRequested, "both failures follow opportunity cancellation").ConfigureAwait(false);
+        }
+        finally { release.TrySetResult(); }
+        await ending.WaitAsync(HookBound).ConfigureAwait(false);
+        await UntilAsync(rig.AutoSyncIdle, "the cancelled producer and lane join cleanly").ConfigureAwait(false);
+        string[] logs;
+        lock (rig.Logs) logs = rig.Logs.Skip(logMark).ToArray();
+        Check.Require(laneFailed && producerFailed && rig.Store.ReadPrerequisiteRetry(rig.PairId) is null &&
+            rig.Store.Issues(rig.PairId).Count == 0 && !logs.SelectMany(System.IO.File.ReadAllLines)
+                .Any(line => line.Contains("Failed\t", StringComparison.Ordinal)),
+            "Separate requested all-cancellation aggregates produce no Failed line, retry or notice.");
+        rig.Rig.Transport.Respond = null;
+        await rig.Host.ResumeAsync(rig.PairId, default).ConfigureAwait(false);
+        await UntilAsync(() => Uploaded(rig, "cancelled.txt", content) && rig.AutoSyncIdle(),
+            "the cleanly joined cancellation preserves work for resume").ConfigureAwait(false);
+    }
+
     private static async Task OpportunityCancellationClassificationAsync(string root, string mode)
     {
         var folder = Path.Combine(root, "opportunity-cancel-" + mode);
@@ -745,7 +805,7 @@ public static partial class EngineHostChecks
             rig.AutoSyncIdle(), "the stale opportunity accounts and becomes idle without an external wake").ConfigureAwait(false);
         var rearmed = rig.Store.ReadPrerequisiteRetry(rig.PairId)!.Value;
         Check.Require(rearmed.RetryAfter > rig.Clock.GetUtcNow() &&
-            rig.Store.Issues(rig.PairId).Single(issue => issue.Path.Length == 0) == notice &&
+            rig.Store.Issues(rig.PairId).Single(issue => issue.Path.Length == 0).Matches(notice) &&
             rig.Rig.Wire.Calls.Count(path => path == "/2/files/list_folder/continue") == continuations + 1 &&
             rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
             "stale re-arm advances only the row and preserves its notice after one drain");

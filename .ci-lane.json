@@ -4,9 +4,7 @@
   ],
   "engine": [
     "engine-host",
-    "repair",
-    "syncer",
-    "gone-identities"
+    "repair"
   ],
   "core": [],
   "ui": []

@@ -307,7 +307,7 @@ public static class EngineHostReadChecks
         var envelope = document.RootElement;
         Check.Require(exit == (int)SyncCliExitCode.Success && envelope.GetProperty("ok").GetBoolean() &&
             envelope.GetProperty("data").ValueKind == JsonValueKind.Object,
-            "a host read returns its data envelope: " + string.Join(' ', args) + "; stderr=" + stderr);
+            "a host read returns its data envelope: " + string.Join(' ', args) + "; stderr=" + stderr + "; stdout=" + stdout);
         return envelope.GetProperty("data").Clone();
     }
 

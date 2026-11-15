@@ -116,7 +116,7 @@ internal sealed class AutoSync
         }
         var yielded = false;
         try { yielded = await OpportunityAsync(pairId, wake, Open, ct).ConfigureAwait(false); }
-        catch (Exception error) when (Cancelled(error) && (ct.IsCancellationRequested || IsPaused(pairId))) { }
+        catch (Exception error) when (Executor.Syncer.Cancelled(error) && (ct.IsCancellationRequested || IsPaused(pairId))) { }
         catch (LiveAdmissionStaleException) { }
         catch (EngineRequestException) { }
         catch (Exception error) { _host.LiveWorkFailed(pairId, error, log); }
@@ -182,7 +182,7 @@ internal sealed class AutoSync
                 _host.ScheduleFolderPoll(pairId, _store.HasFolderJobProgress(pairId, token),
                     () => Kick(pairId, receiptsOnly: true));
             }
-            catch (Exception error) when (Cancelled(error) && token.IsCancellationRequested)
+            catch (Exception error) when (Executor.Syncer.Cancelled(error) && token.IsCancellationRequested)
             {
                 yielded = false;
             }
@@ -194,11 +194,6 @@ internal sealed class AutoSync
             return yielded && !token.IsCancellationRequested;
         }, ct, startupLog: log).ConfigureAwait(false);
     }
-
-    // Classify the exception separately from whether the opportunity's own token requested the stop.
-    private static bool Cancelled(Exception error) => error is OperationCanceledException ||
-        error is AggregateException aggregate &&
-        aggregate.Flatten().InnerExceptions.All(inner => inner is OperationCanceledException);
 
     internal bool IsGloballyPaused => _pause.Global;
 
