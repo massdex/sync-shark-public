@@ -10,7 +10,10 @@ internal sealed class UnknownMoveSettlement(ExecutorContext context, ItemSync it
     private readonly ConcurrentDictionary<IssueSubject.UnknownMove, Issue> _requested = new();
     private readonly HashSet<IssueSubject.UnknownMove> _tried = [];
 
-    internal void Request(Issue holder) => _requested.TryAdd(holder.Subject.Move!, holder);
+    internal void Request(Issue holder)
+    {
+        if (!holder.Ignored) _requested.TryAdd(holder.Subject.Move!, holder);
+    }
 
     internal async Task<bool> SettleRequestedAsync(CancellationToken ct)
     {
