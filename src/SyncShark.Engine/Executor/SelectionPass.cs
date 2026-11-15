@@ -155,7 +155,7 @@ internal sealed class SelectionPass
             {
                 var heldRow = Row.ForOneSide(notice.Side, key, notice.Observed, work.Before, [], null, RowContext.Neutral);
                 ready &= new SelectionExecution(this, _context, _items, _executor, _boundary)
-                    .Park(selection, notice, original is null ? null : notice, key, heldRow, work.Before, move).Ready;
+                    .Park(selection, notice, original, key, heldRow, work.Before, move).Ready;
                 _requestSettlement?.Invoke(move);
                 continue;
             }
