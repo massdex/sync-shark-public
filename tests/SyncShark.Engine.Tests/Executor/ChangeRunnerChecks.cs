@@ -8166,23 +8166,23 @@ public static partial class ChangeRunnerChecks
         }
         fixture.Hooks.BeforeCallWith = null;
         fixture.Hooks.AfterCall = null;
-        if (oldPath)
+        if (oldPath) Check.Require(reads.Count(path => path == outside!.DropboxPath) == 1,
+            "Old-path enumeration observes Outside exactly once before parking its unfinished branch.");
+        if (entrance == "old-path-restart")
         {
-            var parkedSelection = PendingAt(fixture, Side.Dropbox, remote.Path).Single();
-            var retained = fixture.Inner.ReadWork(parkedSelection).Single();
+            var parkedSelections = PendingAt(fixture, Side.Dropbox, remote.Path);
+            Check.Require(parkedSelections.Count == 1 && PendingAt(fixture, Side.Dropbox, outside!.DropboxPath).Count == 0,
+                "Old-path custody retains only the unfinished branch rather than the completed Outside primary.");
+            var retained = fixture.Inner.ReadWork(parkedSelections.Single()).Single();
             Check.Require(retained.Notice is { Side: Side.Dropbox, OldPath: null, Id: null, Observed: null } &&
-                retained.Notice.Path == remote.Path && reads.Count(path => path == outside!.DropboxPath) == 1 &&
+                retained.Notice.Path == remote.Path,
+                "The retained old-path receipt preserves its exact branch notice.");
+            fixture.RestartStore();
+            var reopened = PendingAt(fixture, Side.Dropbox, remote.Path).Single();
+            Check.Require(fixture.Inner.ReadWork(reopened).Single() == retained && StoredWorkCount(fixture) == 1 &&
+                fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true &&
                 PendingAt(fixture, Side.Dropbox, outside!.DropboxPath).Count == 0,
-                "Old-path custody retains only the unfinished branch after observing Outside once.");
-            if (entrance == "old-path-restart")
-            {
-                fixture.RestartStore();
-                var reopened = PendingAt(fixture, Side.Dropbox, remote.Path).Single();
-                Check.Require(fixture.Inner.ReadWork(reopened).Single() == retained && StoredWorkCount(fixture) == 1 &&
-                    fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true &&
-                    PendingAt(fixture, Side.Dropbox, outside!.DropboxPath).Count == 0,
-                    "Restart between Park and wake preserves exactly the old-path receipt without replaying Outside.");
-            }
+                "Restart between Park and wake preserves exactly the old-path receipt without replaying Outside.");
         }
         if (entrance == "walked")
         {
