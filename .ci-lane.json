@@ -1,0 +1,16 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "scan-pass",
+    "repair",
+    "syncer",
+    "repair-held",
+    "unknown-move-repair",
+    "scan-owner",
+    "parents"
+  ],
+  "core": [],
+  "ui": []
+}
