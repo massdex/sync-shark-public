@@ -315,9 +315,9 @@ public static class DropboxApiChecks
             ("""{"error_summary":"","error":{".tag":"path","path":{".tag":"not_found"}}}""", "path/not_found"),
             // A tagless error still logs its reason union's own safe tag.
             ("""{"error_summary":"","error":{"reason":{".tag":"too_many_requests"}}}""", "too_many_requests"),
-            // An unsafe reason tag is filtered, so the safe summary is logged instead.
+            // An unsafe reason tag is authoritative like an outer tag, so it is filtered to the unavailable reason.
             ("""{"error_summary":"fallback/fixture","error":{"reason":{".tag":"Bad Reason: secret"}}}""",
-                "fallback/fixture"),
+                Text.Get(TextKey.ProviderReasonUnavailable)),
             // A reason that is not a union object yields no tag and falls back to the summary.
             ("""{"error_summary":"fallback/fixture","error":{"reason":"unexpected"}}""", "fallback/fixture"),
             // Unsafe or empty summary text never reaches the log.
