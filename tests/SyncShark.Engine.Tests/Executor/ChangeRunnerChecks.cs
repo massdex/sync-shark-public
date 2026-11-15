@@ -8069,14 +8069,14 @@ public static partial class ChangeRunnerChecks
         if (entrance == "older-holder") movedRemote = movedRemote with { ContentHash = DropboxContentHash.Compute(new byte[] { 2 }) };
         fixture.Local.Seed(movedLocal, [1]);
         fixture.Dropbox.Seed(movedRemote, entrance == "older-holder" ? [2] : [1]);
+        var parentLocal = FolderEntry("Destination", "parent-local");
+        var parentRemote = FolderEntry("Destination", "parent-remote");
+        fixture.Local.Seed(parentLocal, null);
+        fixture.Dropbox.Seed(parentRemote, null);
         fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
         WorkSelection selection;
         if (entrance == "walked")
         {
-            var parentLocal = FolderEntry("Destination", "parent-local");
-            var parentRemote = FolderEntry("Destination", "parent-remote");
-            fixture.Local.Seed(parentLocal, null);
-            fixture.Dropbox.Seed(parentRemote, null);
             fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(parentLocal, parentRemote)] });
             fixture.Hooks.RepairDone = false;
             selection = Selected(fixture, parentLocal.Path, parentLocal);
@@ -8121,14 +8121,8 @@ public static partial class ChangeRunnerChecks
         var issue = fixture.Inner.Issues(PairId).Single(item => item.Kind == IssueKind.Failure);
         var byId = 0;
         var settle = false;
-        var draining = false;
         var reads = new List<string>();
-        fixture.DropboxView = new IdentitySide(new HookedSide(fixture.Dropbox, beforeRead: path =>
-        {
-            reads.Add(path);
-            if (draining && entrance is ("old-path" or "local") && path == remote.Path)
-                Console.WriteLine("Move entrance read " + entrance + " " + path + Environment.NewLine + Environment.StackTrace);
-        }), (_, _) =>
+        fixture.DropboxView = new IdentitySide(new HookedSide(fixture.Dropbox, beforeRead: reads.Add), (_, _) =>
         {
             byId++;
             var elsewhere = settle ? moveObserved : moveObserved with { Path = "Elsewhere" };
@@ -8173,20 +8167,23 @@ public static partial class ChangeRunnerChecks
         reads.Clear();
         var resolution = await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events)
             .ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
-        Console.WriteLine("Move entrance settlement " + entrance + " " + resolution + " binding=" +
-            fixture.Inner.SyncedById(PairId, Side.Dropbox, remote.Id) + " issues=" +
-            string.Join(";", fixture.Inner.Issues(PairId)) + " events=" + string.Join(";", events));
+        Check.Require(events.All(item => item.Kind != RunEventKind.Failed),
+            "Consistent endpoint observations produce no failed event during settlement.");
         if (entrance == "older-root")
         {
-            Check.Require(byId == 2 && fixture.Inner.Issues(PairId).Single(item => item.Subject.Move == move).Id != issue.Id &&
+            Check.Require(!resolution.Resolved && resolution.Outcome.None == NoneReason.Held && byId == 2 &&
+                fixture.Inner.Issues(PairId).Single(item => item.Subject.Move == move).Id != issue.Id &&
                 fixture.Inner.IssueById(PairId, older!.Id)?.Matches(older) == true &&
                 fixture.Inner.SyncedById(PairId, Side.Dropbox, remote.Id) == saved &&
                 fixture.Local.FindById(local.Id)?.Path == movedLocal.Path && fixture.Dropbox.FindById(remote.Id)?.Path == movedRemote.Path,
                 "An older clash on the moved file blocks its root rename and restores the unknown move without losing either item.");
             return;
         }
-        Check.Require(byId == 2 && fixture.Inner.Issues(PairId).All(item => item.Subject.Move != move),
-            "The next request settles the move before residual entrances resume; entrance=" + entrance +
+        var rebased = fixture.Inner.SyncedById(PairId, Side.Dropbox, remote.Id);
+        Check.Require(resolution.Resolved && resolution.Outcome == SyncOutcome.InSync && byId == 2 &&
+            rebased?.LocalPath == movedLocal.Path && rebased.DropboxPath == movedRemote.Path &&
+            fixture.Inner.Issues(PairId).All(item => item.Kind != IssueKind.Failure),
+            "The next request rebases the saved binding without a failure before residual entrances resume; entrance=" + entrance +
             " issues=" + string.Join(";", fixture.Inner.Issues(PairId).Select(item => item.Kind + " " + item.Path)));
         Check.Require(reads.Count == 2 && reads.Count(path => path == move.Source) == 1 &&
             reads.Count(path => path == move.Destination) == 1,
@@ -8202,12 +8199,12 @@ public static partial class ChangeRunnerChecks
                 postParks++;
             }
         };
-        draining = true;
         await UntilDrainedAsync(LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events), default);
         var residualPath = entrance == "old-path" ? remote.Path : movedRemote.Path;
         var residualReads = entrance == "primary" ? 0 : 1;
         Check.Require(reads.Count == residualReads && reads.All(path => path == residualPath) &&
-            StoredWorkCount(fixture) == (older is null ? 0 : 1) && postParks == (older is null ? 0 : 1) && byId == 2,
+            StoredWorkCount(fixture) == (older is null ? 0 : 1) && postParks == (older is null ? 0 : 1) && byId == 2 &&
+            events.All(item => item.Kind != RunEventKind.Failed),
             "Each non-echo entrance gets one post-close observation and never repeats; entrance=" + entrance +
             " reads=" + string.Join(",", reads));
         if (older is not null) Check.Require(fixture.Inner.IssueById(PairId, older.Id)?.Matches(older) == true,
