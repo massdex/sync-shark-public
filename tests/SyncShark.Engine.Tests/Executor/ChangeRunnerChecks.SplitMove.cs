@@ -22,11 +22,19 @@ public static partial class ChangeRunnerChecks
             try { await SplitMoveCostAsync(shape, size, aggregate); }
             catch (Exception error) { failures.Add(new Exception($"{shape}/{size}/aggregate={aggregate}", error)); }
         }
+        foreach (var mode in new[] { "accepted", "refused", "unknown-source", "unknown-destination", "unknown-absent",
+            "own-conflict", "foreign-conflict" })
+        {
+            try { await SplitMoveReceiptsAsync(mode); }
+            catch (Exception error) { failures.Add(new Exception(mode, error)); }
+        }
         foreach (var mode in new[] { "skipped", "advanced", "walk-skipped", "walk-advanced", "occupied" })
         {
             try { await SplitSettlementProgressAsync(mode); }
             catch (Exception error) { failures.Add(new Exception(mode, error)); }
         }
+        try { await SplitMoveOpportunityAsync(); }
+        catch (Exception error) { failures.Add(new Exception("whole opportunity", error)); }
         try { await SplitCleanupReachabilityAsync(); }
         catch (Exception error) { failures.Add(new Exception("cleanup reachability", error)); }
         if (failures.Count != 0) throw new AggregateException(failures);

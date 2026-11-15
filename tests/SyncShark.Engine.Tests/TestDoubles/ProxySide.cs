@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 /// <summary>Delegates a real FakeSide, adding skip-flagged entries and/or one listing failure.</summary>
-internal sealed class ProxySide(ISide inner) : ISide
+internal sealed class ProxySide(ISide inner) : ISide, IFolderMoveSide
 {
     internal ISide Inner => inner;
 
@@ -119,6 +119,17 @@ internal sealed class ProxySide(ISide inner) : ISide
     public Func<string, Exception?>? MoveFault { get; init; }
     public Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct) =>
         MoveFault?.Invoke(newPath) is { } fault ? Task.FromException<Entry>(fault) : inner.MoveAsync(expected, newPath, ct);
+
+    public Func<IReadOnlyList<(string From, string To)>, RequestAttempt, CancellationToken, Task<FolderSubmitResult>>? SubmitMove { get; init; }
+    public Func<string, int, RequestAttempt, CancellationToken, Task<FolderJobResult>>? ReadMove { get; init; }
+    public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct) =>
+        ((IFolderMoveSide)inner).CreateFolderExclusiveAsync(path, ct);
+    public Task<FolderSubmitResult> SubmitMoveBatchAsync(IReadOnlyList<(string From, string To)> members,
+        RequestAttempt attempt, CancellationToken ct) => SubmitMove?.Invoke(members, attempt, ct) ??
+            ((IFolderMoveSide)inner).SubmitMoveBatchAsync(members, attempt, ct);
+    public Task<FolderJobResult> ReadMoveBatchAsync(string jobId, int expectedCount, RequestAttempt attempt,
+        CancellationToken ct) => ReadMove?.Invoke(jobId, expectedCount, attempt, ct) ??
+            ((IFolderMoveSide)inner).ReadMoveBatchAsync(jobId, expectedCount, attempt, ct);
 
     public Task<FolderSubmitResult> SubmitFolderRemovalAsync(FolderSubmission submission,
         IReadOnlyList<FolderRemovalEffect> effects, RequestAttempt attempt, CancellationToken ct)

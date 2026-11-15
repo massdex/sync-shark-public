@@ -4,9 +4,8 @@
   ],
   "engine": [
     "folder-move",
-    "literals",
-    "unknown-move-repair",
-    "dependencies"
+    "duplicate-repair",
+    "literals"
   ],
   "core": [],
   "ui": []

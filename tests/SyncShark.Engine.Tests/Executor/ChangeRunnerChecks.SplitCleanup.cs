@@ -246,7 +246,9 @@ public static partial class ChangeRunnerChecks
         var context = fixture.Context(selection) with
         {
             Local = IdentitySide.Truthful(fixture.Local, fixture.Local),
-            Dropbox = IdentitySide.Truthful(fixture.Dropbox, fixture.Dropbox)
+            Dropbox = IdentitySide.Truthful(fixture.Dropbox, fixture.Dropbox),
+            CaptureFolderCursorAsync = _ => Task.FromResult(Cursor),
+            ReadFolderChangesAsync = (_, ct) => NoFolderChangesAsync(ct)
         };
         return (context, Row.ForOneSide(Side.Dropbox, saved.LocalKey, root, saved, [], null, RowContext.Neutral));
     }
