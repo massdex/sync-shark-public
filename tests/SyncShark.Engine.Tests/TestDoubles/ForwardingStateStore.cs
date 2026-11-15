@@ -70,8 +70,7 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
         Inner.OpenIssuesUnder(pairId, scopeKey, kinds);
     public virtual (FailureRetryOwner.State? Previous, FailureRetryOwner.State Next) RecordPrerequisiteFailure(string pairId, long expectedGeneration,
             Func<FailureRetryOwner.State?, FailureRetryOwner.State> advance, StateChange failureNotice) =>
-        Inner.RecordPrerequisiteFailure(pairId, expectedGeneration, localEpoch, dropboxEpoch, localRevision,
-            dropboxRevision, expected, next, failureNotice);
+        Inner.RecordPrerequisiteFailure(pairId, expectedGeneration, advance, failureNotice);
     public virtual void CompleteRecomposition(string pairId, long expectedGeneration, long localEpoch, long dropboxEpoch,
         long localRevision, long dropboxRevision, FailureRetryOwner.State expected) =>
         Inner.CompleteRecomposition(pairId, expectedGeneration, localEpoch, dropboxEpoch, localRevision, dropboxRevision, expected);
