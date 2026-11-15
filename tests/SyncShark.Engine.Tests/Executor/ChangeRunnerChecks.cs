@@ -8171,8 +8171,11 @@ public static partial class ChangeRunnerChecks
         fixture.Hooks.AfterCall = null;
         settle = true;
         reads.Clear();
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events)
+        var resolution = await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events)
             .ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
+        Console.WriteLine("Move entrance settlement " + entrance + " " + resolution + " binding=" +
+            fixture.Inner.SyncedById(PairId, Side.Dropbox, remote.Id) + " issues=" +
+            string.Join(";", fixture.Inner.Issues(PairId)) + " events=" + string.Join(";", events));
         if (entrance == "older-root")
         {
             Check.Require(byId == 2 && fixture.Inner.Issues(PairId).Single(item => item.Subject.Move == move).Id != issue.Id &&
