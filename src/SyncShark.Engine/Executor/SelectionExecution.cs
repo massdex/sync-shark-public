@@ -111,6 +111,6 @@ internal readonly struct SelectionExecution(SelectionPass _pass, ExecutorContext
         ChangeNotice? original, string key, Row row, SyncedEntry? before, Issue? holder)
     {
         _pass.RememberHeld(original, key, row, before, holder);
-        return (_pass.AttachHeld(selection, original ?? notice, row, before, holder), false, false);
+        return (true, false, false);
     }
 }
