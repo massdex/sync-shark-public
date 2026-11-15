@@ -1,0 +1,21 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "folder-move",
+    "syncer",
+    "store",
+    "unknown-move-repair",
+    "duplicate-repair",
+    "renames",
+    "repair",
+    "dropbox",
+    "query-plans",
+    "dependencies",
+    "literals",
+    "strings"
+  ],
+  "core": [],
+  "ui": []
+}
