@@ -7632,6 +7632,65 @@ public static partial class ChangeRunnerChecks
                 "N7/N8: every finite arrival remains reachable and commits");
     }
 
+    internal static async Task OlderRefusalPreventsYieldAsync()
+    {
+        using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var fixture = new Fixture(realStore: true);
+        var held = LocalEntry("Held", "local-held");
+        fixture.Inner.Commit(PairId, StateChange.Empty with
+        {
+            Raise = [(IssueKind.NameClash, TextKey.ClashNameTaken, held.Path,
+                new IssueSubject([new IssueItem(Side.Local, held.Path, held.Id),
+                    new IssueItem(Side.Dropbox, held.Path, "remote-held")], null))]
+        });
+        var holder = fixture.Inner.Issues(PairId).Single();
+        var heldRow = Row.ForOneSide(Side.Local, PathNames.Key(held.Path), held, null, [], null, RowContext.Neutral);
+        Check.Require(fixture.Inner.HoldingIssue(PairId, heldRow)?.Id == holder.Id, "The unrelated holder is established.");
+        WorkSelection? opportunity = null;
+        foreach (var path in new[] { "First", "Second" })
+        {
+            var entry = RemoteEntry(path, "remote-" + path);
+            fixture.Dropbox.Seed(entry, [1]);
+            var work = SeedRemote(fixture, entry);
+            opportunity ??= work;
+        }
+        ClearObligations(fixture);
+        var rounds = 0;
+        var attempts = new System.Collections.Concurrent.ConcurrentDictionary<string, int>();
+        var store = Massdex.SyncShark.Engine.Tests.Local.JournalSourceChecks.HookedStore.Wrap(fixture.Inner);
+        ((Massdex.SyncShark.Engine.Tests.Local.JournalSourceChecks.HookedStore)store).Before = method =>
+        {
+            if (method.Name != nameof(IStateStore.EndWorkPass) || Interlocked.Increment(ref rounds) != 1) return;
+            var arrival = RemoteEntry("Arrival", "remote-arrival");
+            fixture.Dropbox.Seed(arrival, [1]);
+            SeedRemote(fixture, arrival);
+        };
+        var boundary = new Boundary(_ => new Lease())
+        {
+            Capture = (selection, _, _) =>
+            {
+                var attempt = attempts.AddOrUpdate(selection.Key, 1, (_, count) => count + 1);
+                if (selection.Key != PathNames.DropboxKey("Arrival") && attempt <= 2)
+                    throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.RelevantEvidenceChanged);
+                return Task.FromResult(Coverage(selection));
+            }
+        };
+        var context = fixture.Context(opportunity!, new FakeAdmission { Level = 2 }) with { Store = store };
+        // Two initial refusals force serial fallback; only the post-floor arrival retires in that pass.
+        var result = await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
+            RefusingExecutionBoundary.Instance, 1)).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        Check.Require(result == (false, true) && rounds == 4 &&
+            attempts[PathNames.DropboxKey("First")] == 3 && attempts[PathNames.DropboxKey("Second")] == 3 &&
+            attempts[PathNames.DropboxKey("Arrival")] == 1,
+            "An older refusal prevents a post-floor-only progress pass from yielding.");
+        foreach (var path in new[] { "First", "Second", "Arrival" })
+            Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(path)) is not null &&
+                PendingAt(fixture, Side.Dropbox, path).Count == 0, "The same opportunity drains every retained row.");
+        Check.Require(fixture.Inner.Issues(PairId).Single().Matches(holder) &&
+            fixture.Inner.HoldingIssue(PairId, heldRow)?.Id == holder.Id,
+            "Older refusals create no notice and leave the unrelated holder unchanged.");
+    }
+
     internal static async Task ConcurrentRefusalRedispatchAsync()
     {
         foreach (var makesProgress in new[] { false, true })

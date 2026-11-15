@@ -24,7 +24,8 @@ public static class SyncerChecks
         foreach (var check in new Func<Task>[] { ChangeRunnerChecks.ConcurrentUploadCapacityAsync,
             ChangeRunnerChecks.ConcurrentCoverageCapacityAsync, ChangeRunnerChecks.ConcurrentSelectionIsolationAsync,
             ChangeRunnerChecks.ConcurrentLaneFailureAsync, ChangeRunnerChecks.ConcurrentRefusalRedispatchAsync,
-            ChangeRunnerChecks.SustainedArrivalRoundsAsync, ChangeRunnerChecks.ConcurrentMissingParentAsync,
+            ChangeRunnerChecks.SustainedArrivalRoundsAsync, ChangeRunnerChecks.OlderRefusalPreventsYieldAsync,
+            ChangeRunnerChecks.ConcurrentMissingParentAsync,
             ChangeRunnerChecks.AttemptedAncestorSkipsAsync, ChangeRunnerChecks.AttemptedSkipReplaysAsync,
             ChangeRunnerChecks.DuplicateSelectionKeepsClaimAsync, ChangeRunnerChecks.AttemptedAncestorProgressAsync,
             ChangeRunnerChecks.SelectionRefusalReasonsAsync })

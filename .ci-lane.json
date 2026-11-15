@@ -3,8 +3,7 @@
     "engine-tests"
   ],
   "engine": [
-    "live-wake",
-    "live-admission"
+    "syncer"
   ],
   "core": [],
   "ui": []
