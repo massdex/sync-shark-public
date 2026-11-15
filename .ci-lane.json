@@ -13,7 +13,9 @@
     "renames",
     "folder-move",
     "dependencies",
-    "strings"
+    "strings",
+    "relocated-unreadable-owner",
+    "owner-handoff-autosync"
   ],
   "core": [],
   "ui": []

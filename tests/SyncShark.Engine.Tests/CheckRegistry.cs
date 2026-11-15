@@ -118,6 +118,7 @@ public static class CheckRegistry
         ["new-file-case-rename"] = [Executor.ChangeRunnerChecks.RunNewFileCaseRename],
         ["inventory-case-rename"] = [Run.EngineHostChecks.RunInventoryCaseRename],
         ["journal-case-rename"] = [Run.EngineHostChecks.RunJournalCaseRename],
+        ["owner-handoff-autosync"] = [Run.EngineHostChecks.RunOwnerHandoffAutoSync],
         ["ancestor-retry"] = [Executor.OwnFolderChecks.AncestorRefusalRetry],
         ["syncer"] = [Executor.SyncerChecks.Run, Executor.OwnFolderChecks.Run, Executor.ActionExecutorChecks.Run, Executor.LockKeysChecks.Run, Executor.ObserverChecks.Run, Executor.TransfersChecks.Run, Executor.ParentsChecks.Run, Executor.SyncedEntriesChecks.Run, Executor.RenameRunnerChecks.Run, Executor.KeepBothRunnerChecks.Run, Executor.FolderPlanBuilderChecks.Run, Executor.FolderDeleteRunnerChecks.Run, Executor.ResolutionRunnerChecks.Run, Executor.ChangeRunnerChecks.Run, Executor.ChangeRunnerChecks.RunB101RenameIdentity],
         ["mapped-holds"] = [Contracts.IssuePolicyChecks.Run, Executor.ChangeRunnerChecks.RunMappedHolds],

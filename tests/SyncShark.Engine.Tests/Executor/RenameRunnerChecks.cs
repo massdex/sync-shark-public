@@ -2521,14 +2521,15 @@ public static class RenameRunnerChecks
 
     public static void RebasedHold()
     {
-        HeldFootprintCost();
+        HeldFootprintShape();
         RebasedHoldAsync().GetAwaiter().GetResult();
+        MappedRelocatedHoldAsync().GetAwaiter().GetResult();
     }
 
-    // Counted work of a held group's footprint, per candidate (a group has one or two): an ordinary hold, whose decided
-    // footprint equals the handed one, keys the 4 handed paths and copies nothing; a rebased or relocated hold keys the
-    // 4 handed and 4 decided paths. The count follows the group, never the pair's size.
-    private static void HeldFootprintCost()
+    // Shape of a held group's footprint, per candidate (a group has one or two): an ordinary hold, whose decided
+    // footprint equals the handed one, passes the 4 handed paths through without a copy; a rebased or relocated hold
+    // passes the 4 handed and 4 decided paths. Each path passed is one hold-key computation and insertion.
+    private static void HeldFootprintShape()
     {
         foreach (var candidates in new[] { 1, 2 })
         {
@@ -2545,11 +2546,55 @@ public static class RenameRunnerChecks
             var relocated = RenameRunner.HeldFootprint(handed,
                 handed.Select(path => path.Path.StartsWith("New", StringComparison.Ordinal)
                     ? (path.Side, "Home/" + path.Path, path.Destination) : path).ToArray());
-            Check.Require(ReferenceEquals(ordinary, handed) && rebased.Count == 8 * candidates &&
-                relocated.Count == 8 * candidates && handed.All(rebased.Contains) && handed.All(relocated.Contains),
-                "An ordinary hold keys only its handed paths, without a copy; a rebased or relocated hold keys the " +
+            Check.Require(ReferenceEquals(ordinary, handed) && rebased.Count() == 8 * candidates &&
+                relocated.Count() == 8 * candidates && handed.All(rebased.Contains) && handed.All(relocated.Contains),
+                "An ordinary hold passes only its handed paths, without a copy; a rebased or relocated hold passes the " +
                 "handed and decided paths, 8 per candidate; candidates=" + candidates);
         }
+    }
+
+    // A folder under a mapped parent (Local a_b, Dropbox a:b) is listed at a stale path and relocated by a fresh identity
+    // read to a_b/Home, whose Dropbox destination is the mapped a:b/Home. Unreadable there, it holds with no issue, so
+    // only the home it was decided at keeps a later file moved into a_b/Home from refusing into a Failure or writing
+    // under a:b/Home. Once readable, a new execution moves the folder to its mapped home and the file follows into it.
+    private static async Task MappedRelocatedHoldAsync()
+    {
+        using var f = new Fixture(folder: true, mappedParent: true);
+        var context = f.Context with { Local = IdentitySide.Truthful(f.Local, f.Local) };
+        var home = await f.Local.MoveAsync(f.LocalOld, "a_b/Home", default);
+        var stale = new RenameCandidate(Side.Local, home with { Path = "a_b/Snapshot" }, f.Saved);
+        f.Local.Seed(home with { Skip = nameof(TextKey.SkipUnreadable) }, null);
+        var fileLocal = new Entry("a_b/Spare", false, Fixture.Content.Length, Fixture.Time, "local-spare", "", "", null);
+        var fileRemote = new Entry("a:b/Spare", false, Fixture.Content.Length, Fixture.Time, "dropbox-spare", "revision",
+            DropboxContentHash.Compute(Fixture.Content), null);
+        f.Local.Seed(fileLocal, Fixture.Content);
+        f.Dropbox.Seed(fileRemote, Fixture.Content);
+        var file = SyncedEntries.From(fileLocal, fileRemote);
+        f.Store.Commit(f.Pair.PairId, StateChange.Empty with { Record = [file] });
+        var into = new RenameCandidate(Side.Local, await f.Local.MoveAsync(fileLocal, "a_b/Home/Spare", default), file);
+        var held = Jobs(context);
+        var owner = await held.Renames.RenameAsync([stale], stale.Moved, default, completedScan: true);
+        var dependent = await held.Renames.RenameAsync([into], into.Moved, default);
+        Check.Require(owner.Kind == RenameKind.Hold && dependent.Kind == RenameKind.Hold &&
+            f.Store.Issues(f.Pair.PairId).Count == 0 &&
+            f.Store.SyncedById(f.Pair.PairId, Side.Local, f.LocalOld.Id) == f.Saved &&
+            f.Store.SyncedById(f.Pair.PairId, Side.Local, file.LocalId) == file &&
+            (await f.Dropbox.ReadOneAsync("a:b/Spare", default))?.Id == fileRemote.Id &&
+            await f.Dropbox.ReadOneAsync("a:b/Home", default) is null &&
+            (await f.Dropbox.ReadOneAsync("a:b/Old", default))?.Id == f.DropboxOld.Id,
+            "A relocated folder held at its unreadable mapped home keeps a file moved into it waiting with no Failure " +
+            "and no write under the mapped Dropbox home.");
+        f.Local.Seed(home, null);
+        var resumed = Jobs(context);
+        Check.Require((await resumed.Renames.RenameAsync([stale], stale.Moved, default, completedScan: true)).Kind ==
+            RenameKind.Follow && f.Store.SyncedById(f.Pair.PairId, Side.Local, f.LocalOld.Id) is
+            { LocalPath: "a_b/Home", DropboxPath: "a:b/Home" } &&
+            (await resumed.Renames.RenameAsync([into], into.Moved, default)).Kind == RenameKind.Follow &&
+            (await f.Dropbox.ReadOneAsync("a:b/Home/Spare", default))?.Id == fileRemote.Id,
+            "Once readable, a new execution moves the folder to its mapped home and the file follows into it.");
+
+        static ItemSync Jobs(ExecutorContext execution) => SyncJobs.Create(execution, new SyncPorts(new RecoveryBoundary(),
+            RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0)).Items;
     }
 
     // An earlier rename rebased the group's binding outside the footprint it was handed, so it is decided at the rebased

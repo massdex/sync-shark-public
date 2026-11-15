@@ -46,10 +46,10 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
 
     /// <summary>The handed footprint stays held; a relocated or rebased group also holds the home it was decided at.
     /// An unchanged decided footprint adds nothing, so an ordinary hold keys each path once.</summary>
-    internal static IReadOnlyList<(Side Side, string Path, bool Destination)> HeldFootprint(
+    internal static IEnumerable<(Side Side, string Path, bool Destination)> HeldFootprint(
         IReadOnlyList<(Side Side, string Path, bool Destination)> handed,
         IReadOnlyList<(Side Side, string Path, bool Destination)> decided) =>
-        decided.SequenceEqual(handed) ? handed : handed.Concat(decided).ToArray();
+        decided.SequenceEqual(handed) ? handed : handed.Concat(decided);
 
     // The next pass reads captured retry locals after hold release; an async extraction cannot take them by ref.
     private async Task<(RenameDecision Decision, IReadOnlyList<(Side Side, string Path, bool Destination)> Footprint)> RunUnrecordedAsync(
