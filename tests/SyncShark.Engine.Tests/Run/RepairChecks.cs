@@ -399,7 +399,35 @@ public static class RepairChecks
                     { Move = move })]
             });
             using (var first = rig.Log(folder, "exit-1"))
-                Check.Require((await rig.RunAsync(first, default)).Completed, "the exit Repair completes");
+            {
+                if (exit == "configured" && !edited)
+                    await rig.Host.DispatchSessionAsync(rig.Pair.PairId, () => first, async (session, token) =>
+                    {
+                        var issue = rig.Store.Issues(rig.Pair.PairId).Single(item => item.Subject.Move == move);
+                        var source = rig.Store.ReadSource(rig.Pair.PairId, Side.Dropbox)!.Value;
+                        var notice = new ChangeNotice(Side.Dropbox, ChangeKind.Changed, "Source", null,
+                            saved.DropboxId, null, false, false);
+                        var work = rig.Store.AcquireDropboxPage(rig.Pair.PairId, session.Context.ExpectedGeneration,
+                            source.Epoch, source.Revision, source.Provenance!, source.Cursor, [notice], source.Cursor!);
+                        var selection = new WorkSelection(rig.Pair.PairId, session.Context.ExpectedGeneration,
+                            source.Epoch, Side.Dropbox, source.Provenance!.NamespaceId, saved.DropboxId,
+                            saved.DropboxKey, work, work);
+                        Check.Require(rig.Store.AttachIssueWork(selection, issue, [(notice, false, saved)]) &&
+                            rig.Store.CompleteWork(selection, null), "The requested move retains acquired work before Repair.");
+                        var items = (ItemSync)typeof(Syncer).GetField("_items", BindingFlags.Instance | BindingFlags.NonPublic)!
+                            .GetValue(session.Syncer)!;
+                        var requested = new UnknownMoveSettlement(session.Context, items);
+                        requested.Request(issue);
+                        Check.Require((await Repair.RunAsync(session, token)).Completed &&
+                            rig.Store.IssueById(rig.Pair.PairId, issue.Id) is null,
+                            "Actual Repair closes the requested move through its excluded-identity closing scan.");
+                        var reads = rig.Wire.MetadataPaths.Count;
+                        Check.Require(!await requested.SettleRequestedAsync(token) && rig.Wire.MetadataPaths.Count == reads,
+                            "Repair between request and attempt prevents every automatic by-id read and close.");
+                        return true;
+                    }, default);
+                else Check.Require((await rig.RunAsync(first, default)).Completed, "the exit Repair completes");
+            }
             Check.Require(rig.Store.Issues(rig.Pair.PairId).All(issue => issue.Subject.Move is null),
                 "One Repair closes the Failure once its identity sits under a configured, applied or pending exit.");
             if (exit == "pending")

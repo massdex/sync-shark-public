@@ -7988,12 +7988,20 @@ public static partial class ChangeRunnerChecks
                     events.All(item => item.Kind != RunEventKind.Failed),
                     "Settling B drains residual work without restoring A or raising a new failure.");
                 foreach (var saved in bindings)
-                    Check.Require(fixture.Local.FindById(saved.LocalId) is not null && fixture.Dropbox.FindById(saved.DropboxId) is not null,
-                        "Both sides keep every original identity while the held rebase transfers to B.");
-                if (scenario == "same-key-edit") Check.Require(
-                    await fixture.Local.ContentHashAsync(fixture.Local.FindById(LocalId + 1)!, default) ==
+                {
+                    var current = fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId)!;
+                    Check.Require(fixture.Local.FindById(current.LocalId)?.Path == current.LocalPath &&
+                        fixture.Dropbox.FindById(saved.DropboxId)?.Path == current.DropboxPath &&
+                        (scenario == "same-key-edit" && saved.DropboxId == DropboxId + 1 || current.LocalId == saved.LocalId),
+                        "Both sides retain every item; only the downloaded edit may replace its Local identity.");
+                }
+                if (scenario == "same-key-edit")
+                {
+                    var current = fixture.Inner.SyncedById(PairId, Side.Dropbox, DropboxId + 1)!;
+                    Check.Require(await fixture.Local.ContentHashAsync(fixture.Local.FindById(current.LocalId)!, default) ==
                         DropboxContentHash.Compute(new byte[] { 2 }),
-                    "The residual genuine edit applies after B rebases the saved descendants.");
+                        "The residual genuine edit applies after B rebases the saved descendants.");
+                }
                 return;
             }
             if (scenario == "clash")
@@ -8098,11 +8106,12 @@ public static partial class ChangeRunnerChecks
         fixture.Inner.Commit(PairId, StateChange.Empty with { Raise = [(IssueKind.Failure, TextKey.DropboxRefused, remote.Path, subject)] });
         var issue = fixture.Inner.Issues(PairId).Single(item => item.Kind == IssueKind.Failure);
         var byId = 0;
+        var settle = false;
         var reads = new List<string>();
         fixture.DropboxView = new IdentitySide(new HookedSide(fixture.Dropbox, beforeRead: reads.Add), (_, _) =>
         {
             byId++;
-            var elsewhere = movedRemote with { Path = "Elsewhere" };
+            var elsewhere = settle ? movedRemote : movedRemote with { Path = "Elsewhere" };
             return Task.FromResult<(IdentityLocation Location, bool InScope)?>((new IdentityLocation("1", elsewhere.Path, elsewhere), true));
         });
         var traces = new List<List<string>>();
@@ -8138,6 +8147,28 @@ public static partial class ChangeRunnerChecks
                 statement != TransactionCommit && statement != TransactionRollback);
             Check.Require(actual.SequenceEqual(expected), "Every entrance uses the same exact ten-statement attachment.");
         }
+        fixture.Hooks.BeforeCallWith = null;
+        fixture.Hooks.AfterCall = null;
+        settle = true;
+        reads.Clear();
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events)
+            .ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
+        Check.Require(byId == 2 && fixture.Inner.Issues(PairId).All(item => item.Subject.Move != move),
+            "The next request settles the move before residual entrances resume; entrance=" + entrance +
+            " issues=" + string.Join(";", fixture.Inner.Issues(PairId).Select(item => item.Kind + " " + item.Path)));
+        Check.Require(reads.Count == 2 && reads.Count(path => path == remote.Path) == 1 &&
+            reads.Count(path => path == movedRemote.Path) == 1,
+            "Settlement pays only its two endpoint observations; entrance=" + entrance + " reads=" + string.Join(",", reads));
+        reads.Clear();
+        await UntilDrainedAsync(LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events), default);
+        var residualPath = entrance == "old-path" ? remote.Path : movedRemote.Path;
+        var residualReads = entrance is "primary" or "older-holder" ? 0 : 1;
+        Check.Require(reads.Count == residualReads && reads.All(path => path == residualPath) &&
+            StoredWorkCount(fixture) == 0 && byId == 2,
+            "Each non-echo entrance gets one post-close observation and never repeats; entrance=" + entrance +
+            " reads=" + string.Join(",", reads));
+        if (older is not null) Check.Require(fixture.Inner.IssueById(PairId, older.Id)?.Matches(older) == true,
+            "The exact move close leaves the older independent holder intact.");
     }
 
     private static long StoredWorkCount(Fixture fixture)
@@ -8161,7 +8192,7 @@ public static partial class ChangeRunnerChecks
         var failures = new List<Exception>();
         foreach (var real in new[] { false, true })
         foreach (var scenario in new[] { "deleted-echo", "changed-echo", "edit", "new", "old-path", "local",
-            "destination-delete", "before-null", "discovery", "kind", "wrong-path", "no-proof", "generation", "epoch", "replacement", "same-key" })
+            "destination-delete", "before-null", "discovery", "kind", "wrong-path", "no-proof", "generation", "epoch", "domain", "snapshot", "parent", "rename", "replacement", "same-key" })
         {
             try { CheckClose(real, scenario); }
             catch (Exception error) { failures.Add(new InvalidOperationException(
@@ -8172,7 +8203,7 @@ public static partial class ChangeRunnerChecks
         static void CheckClose(bool real, string scenario)
         {
             using var fixture = new Fixture(realStore: real);
-            var local = LocalEntry("Source/Child", LocalId) with { IsFolder = scenario == "discovery" };
+            var local = LocalEntry("Source/Child", LocalId) with { IsFolder = scenario is "discovery" or "parent" };
             var remote = RemoteEntry(local.Path, DropboxId) with { IsFolder = local.IsFolder };
             var before = SyncedEntries.From(local, remote);
             var moved = remote with { Path = "Destination/Child" };
@@ -8204,10 +8235,21 @@ public static partial class ChangeRunnerChecks
                 "The fixture parks one registration and retires only its parent.");
             Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count == 1,
                 "The parked registration remains durable before exact closure.");
+            var parked = PendingAt(fixture, notice.Side, notice.Path).Single();
             if (scenario == "discovery")
-            {
-                var parked = PendingAt(fixture, notice.Side, notice.Path).Single();
                 fixture.Inner.RequireDiscovery(parked, fixture.Inner.ReadWork(parked).Single().WorkId);
+            if (scenario == "parent")
+            {
+                var child = RemoteEntry("Destination/Child/Leaf", "leaf-remote");
+                Check.Require(fixture.Inner.AttachIssueWork(parked, issue,
+                    [(new ChangeNotice(Side.Dropbox, ChangeKind.Changed, child.Path, null, child.Id, child, false, false), false, null)]),
+                    "The retained folder registration owns unfinished child work.");
+            }
+            if (scenario == "rename")
+            {
+                var destination = SyncedEntries.From(LocalEntry(moved.Path, "other-local"), RemoteEntry(moved.Path, "other-remote"));
+                fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [destination] });
+                fixture.Inner.RegisterRenameContinuation(parked, before, destination, null);
             }
             Issue? replacement = null;
             var retained = StoredWorkCount(fixture);
@@ -8219,6 +8261,15 @@ public static partial class ChangeRunnerChecks
                 fixture.Inner.AdvanceSource(PairId, Side.Dropbox, Generation, source.Epoch, source.Revision,
                     source.Provenance, source.Cursor, next.SourceEpoch, source.Revision + 1, next,
                     source.Cursor, source.Obligation);
+            }
+            if (scenario == "domain")
+            {
+                var roots = fixture.Pair.Roots!;
+                fixture.Inner.SavePair(fixture.Pair with
+                    { Roots = roots with { Dropbox = roots.Dropbox with { RootNamespaceId = "other-namespace" } } });
+                Check.Require(fixture.Inner.ReadPairExecution(PairId)!.Value.Generation == Generation &&
+                    fixture.Inner.ReadSource(PairId, Side.Dropbox)!.Value.Epoch == parked.SourceEpoch,
+                    "The domain witness changes only the root namespace, not generation or source epoch.");
             }
             if (scenario is "replacement" or "same-key")
             {
@@ -8235,19 +8286,25 @@ public static partial class ChangeRunnerChecks
                 return SelectionObservation.SettlesDropboxEcho(item, saved, bound);
             }
             Exception? refused = null;
-            try { fixture.Store.CloseUnknownMove(PairId, Generation, issue, scenario == "no-proof" ? null : Echo); }
+            // Stale caller snapshot fence (API contract), not a naturally reachable in-place issue race.
+            var expectedIssue = scenario == "snapshot" ? issue with { Cause = TextKey.FailChanged } : issue;
+            try { fixture.Store.CloseUnknownMove(PairId, Generation, expectedIssue, scenario == "no-proof" ? null : Echo); }
             catch (Exception error) when (error is EngineRequestException or LiveAdmissionStaleException) { refused = error; }
-            var stale = scenario is "generation" or "replacement";
+            var stale = scenario is "generation" or "replacement" or "snapshot";
             Check.Require(stale ? refused is not null && proofs == 0 : refused is null,
                 "Generation and exact-id fences precede every echo proof or write.");
-            Check.Require(scenario == "generation" ? fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true :
+            Check.Require(scenario is "generation" or "snapshot" ? fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true :
                 fixture.Inner.IssueById(PairId, issue.Id) is null,
                 "Only a current exact responsibility is closed.");
             if (replacement is not null) Check.Require(
                 fixture.Inner.IssueById(PairId, replacement.Id)?.Matches(replacement) == true,
                 "A same-key or same-endpoint replacement survives the exact close.");
-            if (scenario is "generation" or "epoch") Check.Require(StoredWorkCount(fixture) == retained && proofs == 0,
-                "A generation refusal or stale source epoch preserves raw durable work without admitting an echo proof.");
+            if (scenario is "generation" or "epoch" or "domain" or "snapshot" or "parent")
+                Check.Require(StoredWorkCount(fixture) == retained && proofs == 0,
+                    "Fenced or parent-owned work stays durable without admitting an echo proof.");
+            else if (scenario == "rename") Check.Require(StoredWorkCount(fixture) == retained &&
+                fixture.Inner.ReadRenameContinuation(parked) is not null,
+                "An exact move close cannot retire a registration's independent rename responsibility.");
             else Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count ==
                 (scenario is "deleted-echo" or "changed-echo" or "same-key" ? 0 : 1),
                 "Only proven source deletes and unchanged destination entries retire; unrelated work stays durable.");
