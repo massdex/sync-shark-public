@@ -39,7 +39,8 @@ public static partial class ChangeRunnerChecks
             if (scenario == "source")
             {
                 var deleted = new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, "Source/Child1", null, null, null, false, false);
-                var debt = SeedRemote(fixture, RemoteEntry(deleted.Path, DropboxId + 1), deleted);
+                AcquireRemotePage(fixture, deleted);
+                var debt = PendingAt(fixture, Side.Dropbox, deleted.Path).Single();
                 Check.Require(fixture.Inner.AttachIssueWork(debt, issue, [(deleted, false, bindings[1])]) &&
                     fixture.Inner.CompleteWork(debt, null), "The source deletion waits as a retained registration.");
             }
