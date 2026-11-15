@@ -8448,9 +8448,19 @@ public static partial class ChangeRunnerChecks
         foreach (var endpoint in new[] { fixture.Local, fixture.Dropbox })
         {
             var survivor = await endpoint.ReadOneAsync("Other/File", default);
-            Check.Require(survivor is not null && await endpoint.ContentHashAsync(survivor, default) == remote.ContentHash &&
-                await endpoint.ReadOneAsync("Folder", default) is null,
-                $"move-out {side}: original bytes survive at new path on {endpoint.Side}, deleted folder stays gone");
+            Check.Require(survivor is not null && await endpoint.ContentHashAsync(survivor, default) == remote.ContentHash,
+                $"move-out {side}: original bytes survive at new path on {endpoint.Side}");
+            var remaining = await endpoint.ReadOneAsync("Folder", default);
+            if (side == Side.Local && endpoint.Side == Side.Dropbox)
+            {
+                Check.Require(remaining?.Id == remoteFolder.Id &&
+                    fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key("Folder")) ==
+                        SyncedEntries.From(localFolder, remoteFolder),
+                    "The Local split keeps the old remote root and its binding until Repair");
+                await foreach (var child in endpoint.ReadAllAsync("Folder", new ListOptions(true, false), default))
+                    Check.Require(child.Entry is null, "The retained old remote root is empty");
+            }
+            else Check.Require(remaining is null, $"move-out {side}: deleted folder stays gone on {endpoint.Side}");
         }
     }
 

@@ -232,9 +232,11 @@ public static partial class ChangeRunnerChecks
             }
             if (shape == "send-fault")
             {
-                Check.Require(submissions == 0 && effects.Count == 0 &&
-                    fixture.Inner.ActiveFolderRemovals(PairId, default).Any(),
-                    "Uncertain send-root identity retains the ready operation without sending");
+                Check.Require(submissions == 0 && effects.Count == 0 && remoteCalls.Deletes == 0 &&
+                    retirements.Contains(FolderRetirementDisposition.NoEffect) &&
+                    members.Append(root).All(value => fixture.Dropbox.FindById(value.DropboxId)?.Path == value.DropboxPath &&
+                        fixture.Inner.SyncedByKey(PairId, Side.Local, value.LocalKey) == value),
+                    "Uncertain send-root identity retires unsent NoEffect without deleting or forgetting");
                 return Counts();
             }
         }
@@ -249,11 +251,19 @@ public static partial class ChangeRunnerChecks
                     "The failed parent fences child renames; no move or removal escapes");
                 fault = false;
                 var issue = fixture.Inner.Issues(PairId).Single(value => value.Path == oldPath);
+                var beforeRetry = documented;
+                Check.Require(await Identity(faultId, true) is { InScope: true }, "The injected Local-read fault is cleared");
                 var retry = await Runner(live: false).ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
                 Console.WriteLine($"LOCAL-SPLIT Retry {children}/{background}: resolved={retry.Resolved}, outcome={retry.Outcome}, " +
+                    $"documented={documented - beforeRetry - 1}, batches={batches}, " +
                     $"issues={string.Join(',', fixture.Inner.Issues(PairId).Select(value => value.Cause))}, retirements={string.Join(',', retirements)}");
-                Check.Require(retry.Resolved, "Retry clears the failed populated removal: " + retry.Outcome);
+                Check.Require(!retry.Resolved && effects.Count == 0 && submissions == 0 &&
+                    fixture.Inner.Issues(PairId).Any(value => value.Id == issue.Id && value.Cause == TextKey.ReadLocalFailed),
+                    "Retry leaves the existing folder Failure open without deleting");
                 await Runner().SyncWorkAsync(default);
+                Console.WriteLine($"LOCAL-SPLIT recovery {children}/{background}: moves={remoteCalls.Moves}, " +
+                    $"issues={string.Join(',', fixture.Inner.Issues(PairId).Select(value => value.Id + ":" + value.Cause))}, " +
+                    $"retirements={string.Join(',', retirements)}");
             }
         }
         if (shape == "root-fault") return Counts();
@@ -269,6 +279,12 @@ public static partial class ChangeRunnerChecks
             effects.Count == expectedEffects && submissions == expectedEffects && remoteCalls.Deletes == 0,
             $"Split effects {shape}: moves={remoteCalls.Moves}/{expectedMoves}, publishes={remoteCalls.Publishes}, " +
             $"effects={effects.Count}/{expectedEffects}, submissions={submissions}, deletes={remoteCalls.Deletes}");
+        if (expectedEffects != 0)
+        {
+            var target = shape == "deleted-child" ? oldPath + "/Child-0"
+                : shape == "excluded-child" ? oldPath + "/Loose" : oldPath;
+            Check.Require(effects.Single().Expected?.Path == target, "Only the intended absent branch is removed: " + shape);
+        }
         // Fresh needs one Local stream open for its upload; the mirror delete needs one Local removal.
         Check.Require(localCalls.Work == (shape is "remote-delete" or "fresh" ? 1 : 0),
             $"No unintended Local work: {shape}, work={localCalls.Work}, opens={localCalls.Opens}, deletes={localCalls.Deletes}");
@@ -280,10 +296,14 @@ public static partial class ChangeRunnerChecks
         Check.Require(fixture.Inner.Issues(PairId).Count == 0 && !fixture.Inner.ActiveFolderRemovals(PairId, default).Any(),
             "The completed opportunity leaves no failure or active removal: " + shape);
         if (shape is "stall" or "batch" or "fresh" or "fault")
+        {
             Check.Require(followUps == 0 && retirements.Contains(FolderRetirementDisposition.NoEffect) &&
                 fixture.Dropbox.FindById(root.DropboxId) is not null &&
                 fixture.Inner.SyncedByKey(PairId, Side.Local, root.LocalKey) == root,
                 "The populated survivor plan retires NoEffect, without follow-ups, and keeps the old root binding");
+            await foreach (var child in fixture.Dropbox.ReadAllAsync(oldPath, new ListOptions(true, false), default))
+                Check.Require(child.Entry is null, "The retained old remote root is empty");
+        }
         foreach (var member in members)
         {
             var current = fixture.Local.FindById(member.LocalId);
@@ -309,6 +329,38 @@ public static partial class ChangeRunnerChecks
                 store.RecordCommitFailures, store.ScanAppliedOnCompletion, store.ScanCompleted, store.ScanAborted,
                 store.ScanFailedCompletions, store.DerivedPlanDataStatements, fixture.Hooks.Total };
             Console.WriteLine($"LOCAL-SPLIT {shape} children={children} background={background}: " + string.Join(",", values));
+            // Successful-case CI observations at both sizes; these also pin the rename reference across sizes.
+            // Commands measures this wrapper, not SQL instructions; Hooks includes the evidence owner's store calls.
+            var pinned = (shape, children) switch
+            {
+                ("reference", 2) => "0,0,5,6,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,80,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,83",
+                ("reference", 8) => "0,0,5,6,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,80,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,83",
+                ("stall", 2) => "1,2,21,25,0,0,0,0,0,0,0,0,0,1,0,0,0,3,0,10,0,0,0,1,9,9,433,11,1,10,11,0,1,2,0,0,0,0,0,0,0,0,0,0,0,11,2,0,0,41,448",
+                ("stall", 8) => "1,2,51,61,0,0,0,0,0,0,0,0,0,1,0,0,0,9,0,34,0,0,0,1,33,33,1081,29,1,34,35,0,1,2,0,0,0,0,0,0,0,0,0,0,0,35,2,0,0,137,1102",
+                ("batch", 2) => "1,2,21,25,0,0,0,0,0,0,0,0,0,1,0,0,0,3,0,10,0,0,0,1,9,9,444,11,1,10,11,0,1,2,0,0,0,0,0,0,0,0,0,0,0,11,2,0,0,41,461",
+                ("batch", 8) => "1,2,51,61,0,0,0,0,0,0,0,0,0,1,0,0,0,9,0,34,0,0,0,1,33,33,1092,29,1,34,35,0,1,2,0,0,0,0,0,0,0,0,0,0,0,35,2,0,0,137,1115",
+                ("historic", 2) => "1,3,22,26,0,0,0,0,0,0,0,0,0,1,0,0,0,3,0,2,0,1,1,1,9,0,417,11,1,10,11,0,1,3,0,0,0,0,0,0,0,0,0,0,0,11,2,0,0,3,432",
+                ("historic", 8) => "1,3,52,62,0,0,0,0,0,0,0,0,0,1,0,0,0,9,0,2,0,1,1,1,33,0,945,29,1,34,35,0,1,3,0,0,0,0,0,0,0,0,0,0,0,35,2,0,0,3,966",
+                ("deleted-child", 2) => "1,3,17,21,0,0,0,0,0,0,0,0,0,1,0,0,0,2,0,11,0,1,1,1,5,12,397,8,1,6,7,0,1,3,0,0,0,0,0,0,0,0,0,0,0,7,2,0,0,54,411",
+                ("deleted-child", 8) => "1,3,47,57,0,0,0,0,0,0,0,0,0,1,0,0,0,8,0,35,0,1,1,1,29,36,1093,26,1,30,31,0,1,3,0,0,0,0,0,0,0,0,0,0,0,31,2,0,0,150,1113",
+                ("deleted", 2) => "0,2,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11,0,1,1,0,0,18,159,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,39,163",
+                ("deleted", 8) => "0,2,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,35,0,1,1,0,0,66,327,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,135,331",
+                ("remote-delete", 2) => "2,0,4,4,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,2,0,0,0,18,0,160,1,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,39,172",
+                ("remote-delete", 8) => "2,0,4,4,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,2,0,0,0,66,0,328,1,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,135,358",
+                ("excluded-child", 2) => "1,2,17,21,0,0,0,0,0,0,0,0,0,1,0,0,0,2,0,11,0,1,1,1,8,9,391,8,1,9,10,0,1,2,0,0,0,0,0,0,0,0,0,0,0,10,2,0,0,46,403",
+                ("excluded-child", 8) => "1,2,47,57,0,0,0,0,0,0,0,0,0,1,0,0,0,8,0,35,0,1,1,1,32,33,1063,26,1,33,34,0,1,2,0,0,0,0,0,0,0,0,0,0,0,34,2,0,0,142,1081",
+                ("fresh", 2) => "1,2,22,26,0,0,1,0,0,1,0,1,0,1,0,0,0,3,0,10,0,0,0,1,10,9,462,12,1,11,12,0,1,2,0,0,1,0,1,0,0,0,0,0,0,12,2,0,0,41,479",
+                ("fresh", 8) => "1,2,52,62,0,0,1,0,0,1,0,1,0,1,0,0,0,9,0,34,0,0,0,1,34,33,1110,30,1,35,36,0,1,2,0,0,1,0,1,0,0,0,0,0,0,36,2,0,0,137,1133",
+                ("root-fault", 2) => "0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,37,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,40",
+                ("root-fault", 8) => "0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,37,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,40",
+                ("chosen", 2) => "0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,9,3,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,29,3",
+                ("chosen", 8) => "0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,33,3,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,101,3",
+                ("excluded", 2) => "0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,9,3,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,29,3",
+                ("excluded", 8) => "0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,33,3,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,101,3",
+                _ => null
+            };
+            if (pinned is not null)
+                Check.Require(string.Join(",", values) == pinned, "Absolute Local split work budget: " + shape);
             return values;
         }
     }
