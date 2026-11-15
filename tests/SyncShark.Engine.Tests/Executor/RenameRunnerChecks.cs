@@ -2519,6 +2519,79 @@ public static class RenameRunnerChecks
         }
     }
 
+    public static void RebasedHold() => RebasedHoldAsync().GetAwaiter().GetResult();
+
+    // An earlier rename rebased the group's binding outside the footprint it was handed, so it is decided at the rebased
+    // home. Ending in Hold (a refused move) or Notice (a folder carrying another pair), later renames into the handed or
+    // the rebased home wait in that execution, an unrelated rename still moves, and a new execution resumes both once
+    // the blocking issue is retried.
+    private static async Task RebasedHoldAsync()
+    {
+        foreach (var notice in new[] { false, true })
+        {
+            using var f = new Fixture(folder: notice);
+            var local = await f.MoveAsync(Side.Local, "IndependentMove");
+            var dropbox = await f.MoveAsync(Side.Dropbox, "ParentMove");
+            // Only the rebased Local home "Rebased" lies outside the handed footprint.
+            RebaseSaved(f, "Rebased", "ParentMove");
+            var handed = f.SeedChild("Handed");
+            var rebased = f.SeedChild("Spare");
+            var unrelated = f.SeedChild("Unrelated");
+            var intoHanded = new RenameCandidate(Side.Dropbox,
+                await f.Dropbox.MoveAsync((await f.Dropbox.ReadOneAsync("Handed", default))!, "Old", default), handed);
+            // A Dropbox-side move, so no Local item sits at the group's rebased Local path while it observes.
+            var intoRebased = new RenameCandidate(Side.Dropbox,
+                await f.Dropbox.MoveAsync((await f.Dropbox.ReadOneAsync("Spare", default))!, "Rebased", default), rebased);
+            var elsewhere = new RenameCandidate(Side.Local,
+                await f.Local.MoveAsync((await f.Local.ReadOneAsync("Unrelated", default))!, "Elsewhere", default), unrelated);
+            var nested = f.Pair with
+            {
+                PairId = "Nested", LocalRoot = Path.Combine(f.Pair.LocalRoot, "IndependentMove", "Inner"),
+                DropboxRoot = "/OtherRoot"
+            };
+            var context = notice ? f.Context with { Scope = new PathScope(f.Pair, [f.Pair, nested]) } : f.Context;
+            if (!notice)
+                f.Dropbox.FailNext("IndependentMove", new ItemFailedException("IndependentMove", TextKey.DropboxRefused, null));
+            var label = notice ? "Notice" : "Hold";
+            var held = Jobs(context);
+            var result = await held.Renames.RenameAsync([local, dropbox], local.Moved, default);
+            Check.Require(result.Kind == (notice ? RenameKind.Notice : RenameKind.Hold) &&
+                f.Store.SyncedById(f.Pair.PairId, Side.Local, f.LocalOld.Id) is
+                { LocalPath: "Rebased", DropboxPath: "ParentMove" } &&
+                (await f.Dropbox.ReadOneAsync("ParentMove", default))?.Id == f.DropboxOld.Id &&
+                await f.Dropbox.ReadOneAsync("IndependentMove", default) is null,
+                label + ": the rebased group is decided at its rebased home and has no effect.");
+            var issues = f.Store.Issues(f.Pair.PairId).Count;
+            Check.Require((await held.Renames.RenameAsync([intoHanded], null, default)).Kind == RenameKind.Hold &&
+                (await f.Local.ReadOneAsync("Handed", default))?.Id == handed.LocalId &&
+                await f.Local.ReadOneAsync("Old", default) is null &&
+                f.Store.SyncedById(f.Pair.PairId, Side.Dropbox, handed.DropboxId) == handed,
+                label + ": a later rename into the handed home waits with no effect.");
+            Check.Require((await held.Renames.RenameAsync([intoRebased], null, default)).Kind == RenameKind.Hold &&
+                (await f.Local.ReadOneAsync("Spare", default))?.Id == rebased.LocalId &&
+                await f.Local.ReadOneAsync("Rebased", default) is null &&
+                f.Store.SyncedById(f.Pair.PairId, Side.Local, rebased.LocalId) == rebased,
+                label + ": a later rename into the rebased home waits with no effect.");
+            Check.Require((await held.Renames.RenameAsync([elsewhere], elsewhere.Moved, default)).Kind == RenameKind.Follow &&
+                (await f.Dropbox.ReadOneAsync("Elsewhere", default))?.Id == unrelated.DropboxId &&
+                f.Store.Issues(f.Pair.PairId).Count == issues,
+                label + ": an unrelated rename still moves, and the waiting renames raised no issue.");
+            var retry = f.Store.Issues(f.Pair.PairId).Select(issue => issue.Id).ToHashSet();
+            var resumed = Jobs(f.Context);
+            resumed.ScanContexts(false, retry, null, null);
+            Check.Require((await resumed.Renames.RenameAsync([local, dropbox], local.Moved, default)).Kind == RenameKind.Follow &&
+                f.Store.SyncedById(f.Pair.PairId, Side.Local, f.LocalOld.Id) is
+                { LocalPath: "IndependentMove", DropboxPath: "IndependentMove" } &&
+                (await f.Dropbox.ReadOneAsync("IndependentMove", default))?.Id == f.DropboxOld.Id &&
+                (await resumed.Renames.RenameAsync([intoRebased], null, default)).Kind == RenameKind.Follow &&
+                (await f.Local.ReadOneAsync("Rebased", default))?.Id == rebased.LocalId,
+                label + ": a new execution resumes the group and the rename into its rebased home once retried.");
+        }
+
+        static ItemSync Jobs(ExecutorContext execution) => SyncJobs.Create(execution, new SyncPorts(new RecoveryBoundary(),
+            RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0)).Items;
+    }
+
     private static async Task AdmittedStaleAsync()
     {
         using var f = new Fixture();
