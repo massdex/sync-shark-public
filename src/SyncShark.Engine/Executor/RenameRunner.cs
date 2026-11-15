@@ -41,7 +41,11 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
         if (decision.Kind == RenameKind.Notice ||
             decision.Kind == RenameKind.Hold &&
             decision.Destination?.Identity is not (DestinationIdentity.Moving or DestinationIdentity.MovingAncestor))
-            rows.HoldRenamePaths(Paths(group).Concat(decided).Select(path => (path.Side, path.Path)));
+        {
+            var handed = Paths(group).ToArray();
+            rows.HoldRenamePaths((decided.SequenceEqual(handed) ? handed : handed.Concat(decided))
+                .Select(path => (path.Side, path.Path)));
+        }
         return decision;
     }
 
