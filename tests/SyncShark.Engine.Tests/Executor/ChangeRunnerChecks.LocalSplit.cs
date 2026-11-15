@@ -129,6 +129,9 @@ public static partial class ChangeRunnerChecks
                 followUps += fixture.Inner.PendingFolderFollowUps(PairId, (string)result!, -1, int.MaxValue).Count();
             if (method == nameof(IStateStore.RetireFolderRemoval))
                 retirements.Add((FolderRetirementDisposition)args[3]!);
+            if (shape == "fault-new-evidence" && method == nameof(IStateStore.CloseNoEffectFailure))
+                Console.WriteLine($"CLOSURE boundary result={result}, through={args[4]}, watermark={fixture.Inner.ReadWorkWatermark()}, " +
+                    $"issue={fixture.Inner.IssueById(PairId, ((Issue)args[3]!).Id)?.Cause}, reads={documented}, moves={remoteCalls.Moves}");
         };
         var faultId = childFault ? members.Single(value => value.LocalPath == oldPath + "/Loose").LocalId : root.LocalId;
         Task<(IdentityLocation Location, bool InScope)?> Identity(string id, bool strict)
