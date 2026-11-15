@@ -787,9 +787,11 @@ public sealed partial class StateStore : IStateStore
         using (var transaction = _connection.BeginTransaction())
         {
             RequireGeneration(transaction, pairId, expectedGeneration);
-            if (IssueTable.ById(_connection, pairId, expected.Id, transaction)?.Matches(expected) != true ||
+            var current = IssueTable.AtPath(_connection, transaction, pairId, expected.Path, expected.Kind);
+            if (current?.Subject.Move != expected.Subject.Move ||
                 !IssuePolicy.UnknownMove(expected.Kind, expected.Subject))
                 throw StaleIssue(expected.Id);
+            expected = current!;
             // Keep associations available for proof, and roll retirement back if the exact close refuses.
             if (echoes is not null) retired = _changes.RetireMoveEchoes(transaction, pairId, expected, echoes);
             if (!IssueTable.Close(_connection, transaction, pairId, expected.Path, [expected.Kind],
