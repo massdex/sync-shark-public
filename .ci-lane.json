@@ -1,0 +1,10 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "zero-wait-retries"
+  ],
+  "core": [],
+  "ui": []
+}
