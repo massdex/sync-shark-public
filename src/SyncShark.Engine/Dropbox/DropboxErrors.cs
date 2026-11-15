@@ -258,7 +258,7 @@ public static partial class DropboxErrors
 
     /// <summary>An unknown-effect move keeps its intended operation for its stored Failure; other errors pass.</summary>
     internal static Exception WithMove(Exception error, IssueSubject.UnknownMove move) =>
-        error is ItemFailedException { Disposition: FailureDisposition.UnknownEffect } failed
+        error is ItemFailedException failed
             ? Copy(failed, failed.ProviderWait, failed.ProviderWaitStarted, move, TextKey.FailDropboxOutcomeUnknown) : error;
 
     private static ItemFailedException Copy(ItemFailedException failed, TimeSpan? wait, long? started,
