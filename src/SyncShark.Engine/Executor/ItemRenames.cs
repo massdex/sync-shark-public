@@ -21,6 +21,17 @@ internal readonly struct ItemRenames(ExecutorContext _context, Parents _parents,
         return await Renamer().RunAsync(group, localById, null, ct);
     }
 
+    /// <summary>Observes and settles a held move; null means its identity is not yet proven settleable.</summary>
+    internal async Task<(SyncOutcome Outcome, bool Kept)?> SettleMoveAsync(Issue issue, Action close, CancellationToken ct)
+    {
+        if (await ObserveUnknownMoveAsync(issue, ct) is not { } read) return null;
+        var (decision, observed) = read;
+        var bound = _context.Store.SyncedById(_context.Pair.PairId, Side.Dropbox, issue.Subject.Move!.ExpectedId);
+        if (!UnknownMoveCheck.Settles(decision, bound is not null)) return null;
+        return await SettleUnknownMoveAsync(issue, observed!.Value.Location.Entry,
+            bound, decision == UnknownMoveCheck.Outcome.RemainingHop, close, ct);
+    }
+
     // Closing releases the footprint only for this act; unfinished work restores its visible owner.
     internal async Task<(SyncOutcome Outcome, bool Kept)> SettleUnknownMoveAsync(Issue issue, Entry observed,
         SyncedEntry? bound, bool remainingHop, Action close, CancellationToken ct)

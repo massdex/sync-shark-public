@@ -133,16 +133,11 @@ internal sealed class ResolutionRunner(
     private async Task<SyncOutcome> SettleMoveAsync(Issue issue, CancellationToken ct)
     {
         var held = new SyncOutcome(ActionKind.None, NoneReason.Held, null, IssueKind.Failure, false, issue.Cause);
-        if (await items.Renames.ObserveUnknownMoveAsync(issue, ct) is not { } read) return held;
-        var (decision, observed) = read;
-        var move = issue.Subject.Move!;
-        var bound = context.Store.SyncedById(context.Pair.PairId, Side.Dropbox, move.ExpectedId);
-        if (!UnknownMoveCheck.Settles(decision, bound is not null)) return held;
-        (SyncOutcome Outcome, bool Kept) settled;
         try
         {
-            settled = await items.Renames.SettleUnknownMoveAsync(issue, observed!.Value.Location.Entry,
-                bound, decision == UnknownMoveCheck.Outcome.RemainingHop, () => Close(issue), ct);
+            if (await items.Renames.SettleMoveAsync(issue, () => Close(issue), ct) is not { } settled) return held;
+            Resolved = !settled.Kept;
+            return settled.Outcome;
         }
         // Settlement has already decided the restore; an item error is this Retry's outcome, as in an ordinary Retry.
         catch (Exception error) when (ItemFailures.IsItemError(error))
@@ -152,8 +147,6 @@ internal sealed class ResolutionRunner(
             Resolved = false;
             return held;
         }
-        Resolved = !settled.Kept;
-        return settled.Outcome;
     }
 
     // The keep-folder choice has no sync action: its one atomic transaction validates the exact issue and

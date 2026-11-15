@@ -658,7 +658,9 @@ Closed rows: the class (362) and file (368) REASON-RECORDED verdicts stand in th
 
 ## src/SyncShark.Engine/Executor/ResolutionRunner.cs
 
-<!-- spec-source: c4345ac7a729~20f5c26f31bb~3e7cc74fd4ad~377896e4bebd~db8d32ac03ec~003c -->
+The ordinary unknown-move observation/settlement composition now lives in ItemRenames.SettleMoveAsync; Retry retains its outcome, close and error bookkeeping. This extraction does not clear the choice-versus-Retry split or ResolveAsync obligations below. Their existing structural-lane owner and clearing conditions remain.
+
+<!-- spec-source: 0184a545fdf1~bc77afb73cbe~1b2a7c7d0e24~1e0644101dfd~b19e78a5d5fa~d322 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -1000,7 +1002,9 @@ No open §1.3 size obligation. The 0.3.82 extraction moved branch enumeration to
 
 ## src/SyncShark.Engine/Executor/ItemRenames.cs
 
-<!-- spec-source: 9042e1e1cc49~9323039b421a~dfa6685fe633~67c13b24fcd9~f3a849c4cf2f~28d8 -->
+SettleMoveAsync now owns the ordinary by-ID observation/settlement composition extracted from ResolutionRunner. It delegates to the existing observation, decision and act owners; Repair still uses observation alone. SettleUnknownMoveAsync is unchanged, so its read/act/restore extraction remains open under the owner and clearing conditions below. This is not a new reviewer verdict.
+
+<!-- spec-source: c41fc1030be8~d222db16f65e~275f5f97bab0~2fad85f63975~acfd0e5c11a4~8449 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

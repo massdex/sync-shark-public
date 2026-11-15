@@ -3,7 +3,11 @@
     "engine-tests"
   ],
   "engine": [
-    "all"
+    "dropbox",
+    "issues",
+    "mapped-holds",
+    "syncer",
+    "unknown-move-repair"
   ],
   "core": [],
   "ui": []
