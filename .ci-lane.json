@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "store",
+    "repair",
+    "host-reads"
+  ],
+  "core": [],
+  "ui": []
+}
