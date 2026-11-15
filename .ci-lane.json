@@ -3,7 +3,8 @@
     "engine-tests"
   ],
   "engine": [
-    "resolutions"
+    "syncer",
+    "unknown-move-repair"
   ],
   "core": [],
   "ui": []
