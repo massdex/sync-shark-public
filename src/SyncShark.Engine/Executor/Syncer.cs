@@ -229,7 +229,7 @@ public sealed class Syncer
                 if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             }
             finally { retired = _context.Store.EndWorkPass(pairId); }
-            var settledMove = await moves.SettleRequestedAsync(ct).ConfigureAwait(false);
+            var settledMove = false;
             // Retirement or a newly released endpoint justifies another pass; re-registering failure does not.
             if (alone) LeaveSerial();
             // Alone refusals are not competition; any refused remainder lane of a serial-started pass is.
