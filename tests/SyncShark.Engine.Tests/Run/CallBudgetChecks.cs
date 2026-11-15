@@ -218,7 +218,7 @@ public static partial class CallBudgetChecks
                                     () => session.Host.TryHoldGeneration(session.Registration), token);
                             }
                         });
-                        await syncer.CensusWorkAsync(ct, "Run/CallBudgetChecks.cs:221");
+                        await syncer.SyncWorkAsync(ct);
                         var moves = rig.Wire.Calls.Count(route => route.EndsWith("/move_v2", StringComparison.Ordinal));
                         Console.WriteLine($"B214 move origin={origin} children={children} remoteMoves={moves} localMoves={local.Moves} " +
                             $"new={Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "New"))} old={Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "Old"))} " +
@@ -237,7 +237,7 @@ public static partial class CallBudgetChecks
                         rig.Wire.SeedChangePage(remote.Cursor!, echo, false, "echo-terminal");
                         await rig.Host.CatchUpDropboxAsync(session.Registration, pairId, generation, ct);
                         var metadata = rig.Wire.Calls.Count(route => route.EndsWith("/get_metadata", StringComparison.Ordinal));
-                        await syncer.CensusWorkAsync(ct, "Run/CallBudgetChecks.cs:240");
+                        await syncer.SyncWorkAsync(ct);
                         Check.Require(rig.Wire.Calls.Count(route => route.EndsWith("/get_metadata", StringComparison.Ordinal)) == metadata &&
                             rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark()) == (0L, 0L),
                             "B214-T1/T2: one echo opportunity drains all feed rows with zero additional HTTP metadata");
@@ -318,7 +318,7 @@ public static partial class CallBudgetChecks
                     Check.Require(rig.Wire.MetadataPaths.Count == 0, "Echo acquisition makes no metadata requests.");
                     var ports = new SyncPorts(new RecoveryExecutionBoundary(() => session),
                         new LiveExecutionBoundary(_ => session), PairSafety.SelectedBoundaryFor(session), LocalSide.HashSlots);
-                    await new Syncer(session.Context, ports).CensusWorkAsync(ct, "Run/CallBudgetChecks.cs:321");
+                    await new Syncer(session.Context, ports).SyncWorkAsync(ct);
                     var expected = edited ? 2 : 0;
                     var downloads = rig.Wire.Calls.Select((route, index) => (route, index))
                         .Where(call => call.route.EndsWith("/download", StringComparison.Ordinal)).ToArray();
@@ -2223,7 +2223,7 @@ public static partial class CallBudgetChecks
             ScanPassChecks.RunOperationAsync(scanRig, log, Settings, async jobs =>
             {
                 SQLitePCL.raw.sqlite3_trace(connection.Handle, trace, null);
-                try { await jobs.Syncer.CensusWorkAsync(default, "Run/CallBudgetChecks.cs:2226"); }
+                try { await jobs.Syncer.SyncWorkAsync(default); }
                 finally { SQLitePCL.raw.sqlite3_trace(connection.Handle, (SQLitePCL.delegate_trace)null!, null); }
             }, live: new ChangeRunnerChecks.Boundary(_ => new ChangeRunnerChecks.Lease())
             {

@@ -190,7 +190,7 @@ public static class ScanPassChecks
             try
             {
                 await RunOperationAsync(rig with { Store = counted }, log, Settings,
-                    jobs => jobs.Syncer.CensusWorkAsync(default, "Executor/ScanPassChecks.cs:193"));
+                    jobs => jobs.Syncer.SyncWorkAsync(default));
             }
             catch (Exception caught) { error = caught; }
         }
@@ -202,7 +202,7 @@ public static class ScanPassChecks
             "; restored=" + refusedRestored);
         Owe(null);
         using (var log = Log(rig, folder, "cleared"))
-            await RunOperationAsync(rig, log, Settings, jobs => jobs.Syncer.CensusWorkAsync(default, "Executor/ScanPassChecks.cs:205"));
+            await RunOperationAsync(rig, log, Settings, jobs => jobs.Syncer.SyncWorkAsync(default));
         var clearedPending = Pending();
         var clearedRestored = await Restored();
         Check.Require(clearedPending == 0 && clearedRestored == 2,
@@ -924,13 +924,13 @@ public static class ScanPassChecks
             Local = IdentitySide.Truthful(local, (FakeSide)plain.Local, () => identityReads++), Dropbox = remote
         };
         using (var log = Log(rig, folder, "still-held"))
-            await RunOperationAsync(counted, log, Settings, jobs => jobs.Syncer.CensusWorkAsync(default, "Executor/ScanPassChecks.cs:929"));
+            await RunOperationAsync(counted, log, Settings, jobs => jobs.Syncer.SyncWorkAsync(default));
         Check.Require(local.Reads + local.Listings + local.Opens + local.Hashes +
             remote.Reads + remote.Listings + remote.Opens + remote.Hashes + identityReads == 0,
             "an ordinary wake with only a held survivor has no provider observation");
         rig.Store.Commit(rig.Pair.PairId, StateChange.Empty with { Close = [(kept, IssueClosure.AfterEffect)] });
         using (var log = Log(rig, folder, "released-wake"))
-            await RunOperationAsync(counted, log, Settings, jobs => jobs.Syncer.CensusWorkAsync(default, "Executor/ScanPassChecks.cs:935"));
+            await RunOperationAsync(counted, log, Settings, jobs => jobs.Syncer.SyncWorkAsync(default));
         Check.Require(!rig.Store.PendingFolderFollowUps(rig.Pair.PairId, operation, -1, 1).Any() &&
             !rig.Store.FolderRemoval(rig.Pair.PairId, operation).Active &&
             await rig.Local.ReadOneAsync(kept, default) is { } restored &&
@@ -977,7 +977,7 @@ public static class ScanPassChecks
         var issues = rig.Store.Issues(pairId).Count;
         var events = new List<RunEvent>();
         using (var log = Log(rig, folder, "debt-wake"))
-            await RunOperationAsync(rig, log, Settings, jobs => jobs.Syncer.CensusWorkAsync(default, "Executor/ScanPassChecks.cs:982"), events.Add);
+            await RunOperationAsync(rig, log, Settings, jobs => jobs.Syncer.SyncWorkAsync(default), events.Add);
         var held = events.Where(value => value.Kind == RunEventKind.Failed).ToArray();
         Check.Require(held.Length == 1 && held[0].Cause == TextKey.LocalWriteHeld &&
             held[0].Path == survivors[0].Expected!.Path && held[0].WorkId is null,

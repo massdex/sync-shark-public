@@ -26,7 +26,7 @@ public static partial class ChangeRunnerChecks
         for (var page = 2; page <= 11; page++) newest = Seed(fixture, notice, page);
         var reads = 0;
         fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: _ => reads++);
-        await LiveSyncer(fixture, newest, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B210.cs:29");
+        await LiveSyncer(fixture, newest, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
         Check.Require(reads == 1 && fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0, 0),
             "B210-LiveReads: eleven persisted path-only rows cause one metadata attempt and drain; reads=" + reads);
     }

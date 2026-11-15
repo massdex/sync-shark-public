@@ -87,7 +87,7 @@ public static partial class ChangeRunnerChecks
                 modes.Add(item.What);
                 trace.Enqueue(item.What);
             }
-        }).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B243.cs:90").WaitAsync(guard.Token);
+        }).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         var order = trace.ToList();
         Check.Require(fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)) == 4 &&
             modes.SequenceEqual([nameof(TextKey.LanesSerial), nameof(TextKey.LanesParallel)]) &&
@@ -124,7 +124,7 @@ public static partial class ChangeRunnerChecks
             }
         };
         // Pass counts stay unchanged across orderly opportunities.
-        await UntilDrainedAsync(LaneSyncer(fixture, selected, boundary, _ => { }), default, "Executor/ChangeRunnerChecks.B243.cs:126");
+        await UntilDrainedAsync(LaneSyncer(fixture, selected, boundary, _ => { }), default);
         Check.Require(arrivalPass == 1 && fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)) == 3,
             "a newly arrived top-level row waits for the next finite pass; real=" + real);
     }
@@ -175,7 +175,7 @@ public static partial class ChangeRunnerChecks
             }
         };
         // Pass and effect counts stay unchanged across orderly opportunities.
-        await UntilDrainedAsync(LaneSyncer(fixture, selected, boundary, _ => { }, batch: true), guard.Token, "Executor/ChangeRunnerChecks.B243.cs:176").WaitAsync(guard.Token);
+        await UntilDrainedAsync(LaneSyncer(fixture, selected, boundary, _ => { }, batch: true), guard.Token).WaitAsync(guard.Token);
         Check.Require(ancestors.Count == 3 && ancestors.Select((anchor, i) => begun.Contains((anchor, i + 1)) &&
             completed.Contains((anchor, i + 1))).All(value => value) &&
             begun.Where(item => item.Anchor == selected.AnchorWorkId).All(item => item.Pass == 3) &&
@@ -243,7 +243,7 @@ public static partial class ChangeRunnerChecks
             if (request.Selection.Identity == ar.Id) dependentLease = lease;
             return lease;
         });
-        await LiveSyncer(fixture, dependent, boundary, events).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B243.cs:244").WaitAsync(guard.Token);
+        await LiveSyncer(fixture, dependent, boundary, events).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         Check.Require(occupant is not null && begun.Contains((dependent.AnchorWorkId, 1)) &&
             closed.Contains((dependent.AnchorWorkId, 1)) && begun.First(item => item.Anchor == occupant.AnchorWorkId).Pass == 2 &&
             completed.Contains((occupant.AnchorWorkId, 2)) && completed.Contains((dependent.AnchorWorkId, 2)) &&
@@ -331,7 +331,7 @@ public static partial class ChangeRunnerChecks
             alone = item.What == nameof(TextKey.LanesSerial);
             modes.Add(item.What);
             trace.Enqueue(item.What);
-        }).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B243.cs:332").WaitAsync(guard.Token);
+        }).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         var label = "; real=" + real + "; mode=" + mode;
         Check.Require(ends.SequenceEqual(mode == "persists" ? new[] { false, false, false } : [false, false, true, false]) &&
             modes.SequenceEqual([nameof(TextKey.LanesSerial), nameof(TextKey.LanesParallel),

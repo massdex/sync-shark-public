@@ -27,21 +27,4 @@ public static class Check
     public static void Skip() => Skipped = true;
 
     public static void ResetSkip() => Skipped = false;
-
-    // TEST-ONLY execution census; removed with its callers before hand-back.
-    internal static async Task<(bool Revisit, bool Drained)> CensusWorkAsync(
-        this Massdex.SyncShark.Engine.Executor.Syncer syncer, CancellationToken ct, string site)
-    {
-        try
-        {
-            var result = await syncer.SyncWorkAsync(ct).ConfigureAwait(false);
-            Console.WriteLine($"OPPORTUNITY-CENSUS|{site}|yielded={!result.Drained && result.Revisit}|cancelled={ct.IsCancellationRequested}");
-            return result;
-        }
-        catch (Exception error)
-        {
-            Console.WriteLine($"OPPORTUNITY-CENSUS|{site}|threw={error.GetType().Name}");
-            throw;
-        }
-    }
 }

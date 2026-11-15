@@ -109,7 +109,7 @@ public static class DropboxFeedChecks
                     bindings.All(saved => rig.Store.SyncedByKey(pairId, Side.Local, saved.LocalKey) == saved),
                     "B214-T5a: failed second continue preserves bindings, cursor and only the first page's rows");
                 await rig.Host.CatchUpDropboxAsync(session.Registration, pairId, generation, ct);
-                await session.Syncer.CensusWorkAsync(ct, "Dropbox/DropboxFeedChecks.cs:112");
+                await session.Syncer.SyncWorkAsync(ct);
                 return true;
             }, default);
             var bounded = opportunity.WaitAsync(TimeSpan.FromSeconds(30));

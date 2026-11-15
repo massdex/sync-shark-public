@@ -72,7 +72,7 @@ public static partial class ChangeRunnerChecks
         InstallCompletionFkFault(fixture.DatabasePath!, failing.AnchorWorkId);
         Check.Require(TriggerVisible(fixture), "B204-01 setup: the store connection sees the fault trigger");
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:75");
+        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         var certificate = Certificates(events);
         Check.Require(certificate.Count == 1,
             "B204-01a: the run reports exactly one certified refusal; observed=" + certificate.Count +
@@ -158,7 +158,7 @@ public static partial class ChangeRunnerChecks
         var events = new List<RunEvent>();
         try
         {
-            await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:161");
+            await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         }
         finally { fixture.Hooks.BeforeCallWith = null; }
         Check.Require(attempts.Count(id => id == failing.AnchorWorkId) == 1 &&
@@ -169,7 +169,7 @@ public static partial class ChangeRunnerChecks
         Check.Require(PendingAt(fixture, Side.Local, FailingCompletion).Count == 1,
             "B204-03: the suppressed item stays pending for a real next opportunity");
         RemoveCompletionFkFault(fixture.DatabasePath!);
-        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:172");
+        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         Check.Require(PendingAt(fixture, Side.Local, FailingCompletion).Count == 0 &&
             fixture.Inner.Issues(PairId).Count == 0,
             "B204-03: the next ordinary opportunity completes the pending work and closes its Failure");
@@ -206,7 +206,7 @@ public static partial class ChangeRunnerChecks
         };
         try
         {
-            LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:209")
+            LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default)
                 .GetAwaiter().GetResult();
         }
         finally { fixture.Hooks.BeforeCallWith = null; }
@@ -286,7 +286,7 @@ public static partial class ChangeRunnerChecks
                         lock (events) events.Add(item);
                         if (item.Error is ItemStoreMutationException) Volatile.Write(ref certified, true);
                     }
-                }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:289");
+                }).SyncWorkAsync(default);
             }
             finally { fixture.Hooks.BeforeCallWith = null; }
             Check.Require(Certificates(events).Any(error => error.Selection.AnchorWorkId == ancestor.AnchorWorkId),
@@ -310,7 +310,7 @@ public static partial class ChangeRunnerChecks
                     "B204-11: the dependent stays pending and retained, never a prerequisite clash; bound=" + bound +
                     "; publishes=" + publishes + "; pending=" + PendingAt(fixture, Side.Local, Plain).Count);
                 RemoveCompletionFkFault(fixture.DatabasePath!);
-                await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:313");
+                await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
                 Check.Require(WorkRows(fixture, selection.AnchorWorkId) == 0 &&
                     WorkRows(fixture, ancestor.AnchorWorkId) == 0 &&
                     await fixture.Dropbox.ReadOneAsync(Plain, default) is not null,
@@ -371,7 +371,7 @@ public static partial class ChangeRunnerChecks
                 lock (events) events.Add(item);
                 if (item.Error is ItemStoreMutationException) faulted.TrySetResult();
             }
-        }).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B204.cs:374");
+        }).SyncWorkAsync(guard.Token);
         try
         {
             await faulted.Task.WaitAsync(guard.Token);
@@ -413,7 +413,7 @@ public static partial class ChangeRunnerChecks
             await LiveSyncer(fixture, first, new Boundary(_ => new Lease()), events, configure: context => context with
             {
                 Admission = admission
-            }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:416");
+            }).SyncWorkAsync(default);
         }
         finally { fixture.Hooks.BeforeCallWith = null; }
         Check.Require(Certificates(events).Count == 2,
@@ -436,12 +436,12 @@ public static partial class ChangeRunnerChecks
         var failing = SeedSingleCompletion(fixture, FailingCompletion, LocalId);
         InstallCompletionFkFault(fixture.DatabasePath!, failing.AnchorWorkId);
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:439");
+        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         // The test-only tables would fail the store's exact schema validation on reopen; reinstall them after it.
         RemoveCompletionFkFault(fixture.DatabasePath!);
         fixture.RestartStore();
         InstallCompletionFkFault(fixture.DatabasePath!, failing.AnchorWorkId);
-        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:444");
+        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         Check.Require(PendingAt(fixture, Side.Local, FailingCompletion).Count == 1,
             "B204-05: a restart keeps the uncertified work pending");
         Check.Require(fixture.Inner.Issues(PairId, [IssueKind.Failure]).Count == 1,
@@ -449,7 +449,7 @@ public static partial class ChangeRunnerChecks
         Check.Require(Certificates(events).Count == 2,
             "B204-05: the reopened store contains the refusal again");
         RemoveCompletionFkFault(fixture.DatabasePath!);
-        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:452");
+        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         Check.Require(PendingAt(fixture, Side.Local, FailingCompletion).Count == 0 &&
             fixture.Inner.Issues(PairId).Count == 0,
             "B204-05: without the fault the same pending work completes and the notice closes");
@@ -476,7 +476,7 @@ public static partial class ChangeRunnerChecks
             await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events, configure: context => context with
             {
                 Scope = new PathScope(fixture.Pair with { Exclusions = [new Exclusion(Side.Local, OutOfScopeCompletion, false)] }, [fixture.Pair])
-            }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:479");
+            }).SyncWorkAsync(default);
         }
         finally { fixture.Hooks.BeforeCallWith = null; }
         Check.Require(events.Any(item => item.Error is ItemStoreMutationException { PrimaryCode: ConstraintPrimary }),
@@ -510,7 +510,7 @@ public static partial class ChangeRunnerChecks
         };
         var events = new List<RunEvent>();
         Exception? escaped = null;
-        try { await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:513"); }
+        try { await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default); }
         catch (Exception error) { escaped = error; }
         finally { fixture.Hooks.BeforeCallWith = null; }
         Check.Require(escaped is not null && Flattened(escaped).Contains(injected),
@@ -534,7 +534,7 @@ public static partial class ChangeRunnerChecks
         var raw = new SqliteException("synthetic-read-failure", ConstraintPrimary);
         fixture.Hooks.OnReadWork = _ => throw raw;
         Exception? escaped = null;
-        try { await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:537"); }
+        try { await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), []).SyncWorkAsync(default); }
         catch (Exception error) { escaped = error; }
         finally { fixture.Hooks.OnReadWork = null; }
         Check.Require(escaped is not null && Flattened(escaped).Contains(raw) &&
@@ -574,13 +574,13 @@ public static partial class ChangeRunnerChecks
         var aggregated = SeedSingleCompletion(aggregateFixture, FailingCompletion, LocalId);
         InstallCompletionFkFault(aggregateFixture.DatabasePath!, aggregated.AnchorWorkId);
         var firstRun = new List<RunEvent>();
-        await LiveSyncer(aggregateFixture, aggregated, new Boundary(_ => new Lease()), firstRun).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:577");
+        await LiveSyncer(aggregateFixture, aggregated, new Boundary(_ => new Lease()), firstRun).SyncWorkAsync(default);
         var certificate = Certificates(firstRun).Single();
         var before = aggregateFixture.Inner.Issues(PairId, [IssueKind.Failure]).Single();
         var secondary = new InvalidOperationException("synthetic-cleanup-failure");
         aggregateFixture.Hooks.OnReadWork = _ => throw new AggregateException(certificate, secondary);
         Exception? aggregateEscaped = null;
-        try { await LiveSyncer(aggregateFixture, aggregated, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:583"); }
+        try { await LiveSyncer(aggregateFixture, aggregated, new Boundary(_ => new Lease()), []).SyncWorkAsync(default); }
         catch (Exception error) { aggregateEscaped = error; }
         finally { aggregateFixture.Hooks.OnReadWork = null; }
         IReadOnlyList<Exception> flattened = aggregateEscaped is null ? [] : Flattened(aggregateEscaped);
@@ -635,7 +635,7 @@ public static partial class ChangeRunnerChecks
         var failing = SeedSingleCompletion(fixture, FailingCompletion, LocalId);
         InstallCompletionFkFault(fixture.DatabasePath!, failing.AnchorWorkId);
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:638");
+        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         var first = fixture.Inner.Issues(PairId, [IssueKind.Failure]).Single();
         Check.Require(PendingAt(fixture, Side.Local, FailingCompletion).Count == 1 &&
             fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)) == 1,
@@ -652,7 +652,7 @@ public static partial class ChangeRunnerChecks
         };
         try
         {
-            await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:655");
+            await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         }
         finally { fixture.Hooks.AfterCall = null; }
         var current = fixture.Inner.Issues(PairId, [IssueKind.Failure]);
@@ -665,7 +665,7 @@ public static partial class ChangeRunnerChecks
             fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)) == 2,
             "B204-09: completion failed twice, and no automatic additional opportunity ran");
         RemoveCompletionFkFault(fixture.DatabasePath!);
-        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B204.cs:668");
+        await LiveSyncer(fixture, failing, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         Check.Require(PendingAt(fixture, Side.Local, FailingCompletion).Count == 0 &&
             fixture.Inner.Issues(PairId).Count == 0,
             "B204-09: after the fault is removed the pending work completes and the notice closes");

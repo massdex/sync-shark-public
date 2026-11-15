@@ -770,16 +770,17 @@ public static class LiveRunChecks
                         scenario.Pair.Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
                         scenario.Store.SyncedByKey(pairId, Side.Local, PathNames.Key(FilePath))!.LocalId).Any(),
                     "W1: a real change is retained rather than stopping the host");
-                ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                auto.Kick(pairId);
-                ended.Task.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+                // EndWorkPass signals per pass; retiring the older anchor lets Syncer repeat while older progress is positive.
+                completed.WaitAsync(TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
             }
-            scenario.Require(completed.IsCompleted && opportunities == (related ? 2 : 1),
-                "W1: unrelated volume progress completes immediately; a real change settles on its following wake" +
+            scenario.Require(completed.IsCompleted && opportunities == 1 && reads == changedRead &&
+                (!related || scenario.EndedWorkPasses == 2),
+                "W1: unrelated progress completes immediately; a real change completes in two passes of the same opportunity" +
                 "; related=" + related + "; completed=" + completed.IsCompleted + "; opportunities=" + opportunities +
                 "; reads=" + reads + "; passes=" + scenario.EndedWorkPasses);
         }
         finally { auto.StopAsync().GetAwaiter().GetResult(); }
+        scenario.Require(opportunities == 1, "W1: no second opportunity starts.");
     }
 
     private static void ResolveWake(Scenario scenario)
@@ -957,7 +958,7 @@ public static class LiveRunChecks
                     PendingWork.ByIdentity(scenario.Store, Side.Local, domain, entry.Id).Any() &&
                     scenario.LocalFiles().ContainsKey(folder) && scenario.Snapshot().Contains("D:" + folder + "/");
             };
-            session.Syncer.CensusWorkAsync(Scenario.Cancellation, "Scenarios/LiveRunChecks.cs:958").GetAwaiter().GetResult();
+            session.Syncer.SyncWorkAsync(Scenario.Cancellation).GetAwaiter().GetResult();
             scenario.Require(injected == 1 && scenario.LiveValidations >= 3 &&
                 scenario.Store.Issues(pairId, [IssueKind.Failure]).Count == 0,
                 "R4: the live replacement re-observes its row after its admission; injected=" + injected +
@@ -972,7 +973,7 @@ public static class LiveRunChecks
             scenario.InSession("replace-folder-next-opportunity", session =>
             {
                 session.Store.EndWorkPass(pairId);
-                session.Syncer.CensusWorkAsync(Scenario.Cancellation, "Scenarios/LiveRunChecks.cs:973").GetAwaiter().GetResult();
+                session.Syncer.SyncWorkAsync(Scenario.Cancellation).GetAwaiter().GetResult();
             });
         }
         scenario.Require(scenario.DropboxFiles().TryGetValue(folder, out var content) &&

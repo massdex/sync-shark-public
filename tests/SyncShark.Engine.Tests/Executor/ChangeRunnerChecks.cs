@@ -221,7 +221,7 @@ public static partial class ChangeRunnerChecks
         };
         var syncer = new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
             RefusingExecutionBoundary.Instance, 1));
-        await syncer.CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:224").WaitAsync(guard.Token);
+        await syncer.SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
 
         var stages = events.Where(value => value.StageKey == TextKey.StageRows && value.Path.Length != 0).ToArray();
         // Every row-stage record names a side and a work id; the anchor row's record is the Dropbox edit.
@@ -831,7 +831,7 @@ public static partial class ChangeRunnerChecks
             // A later wake may try the pending work again, but debt is never contention within either wake.
             for (var wake = 1; wake <= 2; wake++)
             {
-                await syncer.CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:834").WaitAsync(guard.Token);
+                await syncer.SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
                 Check.Require(rounds == wake && captures == 2 * wake && refusals == 2 * wake &&
                     LocalWrites(localCalls) == 0 && PendingAt(fixture, Side.Dropbox, "First").Count == 1 &&
                     PendingAt(fixture, Side.Dropbox, "Second").Count == 1,
@@ -895,7 +895,7 @@ public static partial class ChangeRunnerChecks
         };
         await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
                 RefusingExecutionBoundary.Instance, 1))
-            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:898").WaitAsync(guard.Token);
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         (int Pass, string Path, TextKey? Cause, Side? Side, long? WorkId)[] held;
         lock (reports) held = reports.Where(report => report.Cause == TextKey.LocalWriteHeld).ToArray();
         var perPass = held.GroupBy(report => report.Pass).Select(group => group.Count()).ToArray();
@@ -1169,7 +1169,7 @@ public static partial class ChangeRunnerChecks
             };
         var events = new List<RunEvent>();
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events)
-            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:1172").WaitAsync(guard.Token);
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         var failures = events.Where(value => value.Kind == RunEventKind.Failed).ToArray();
         Check.Require(failures.Length == 1 && failures[0].Cause == (held ? TextKey.LocalWriteHeld : null) &&
             string.Equals(failures[0].Path, target.Path, StringComparison.OrdinalIgnoreCase) &&
@@ -1239,7 +1239,7 @@ public static partial class ChangeRunnerChecks
         ClearObligations(fixture);
         var events = new List<RunEvent>();
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events)
-            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:1242").WaitAsync(guard.Token);
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         var failures = events.Where(value => value.Kind == RunEventKind.Failed).ToArray();
         var moved = old with { Path = Item };
         var localStillMoved = await fixture.Local.ReadOneAsync(Item, default) == moved;
@@ -1268,7 +1268,7 @@ public static partial class ChangeRunnerChecks
         // The stale cause persists, so the next opportunity defers the same row again without replaying the move.
         var repeat = new List<RunEvent>();
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), repeat)
-            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:1271").WaitAsync(guard.Token);
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         var repeated = repeat.Where(value => value.Kind == RunEventKind.Failed).ToArray();
         Check.Require(dropboxCalls.Moves == 1 && localCalls.Moves == 0 && repeated.Length == 1 &&
             string.Equals(repeated[0].Path, OldPath, StringComparison.OrdinalIgnoreCase) &&
@@ -1299,7 +1299,7 @@ public static partial class ChangeRunnerChecks
         };
         var events = new List<RunEvent>();
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events)
-            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:1302").WaitAsync(guard.Token);
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         var failures = events.Where(value => value.Kind == RunEventKind.Failed).ToArray();
         Check.Require(failures.Length == 1 && failures[0].Cause is null &&
             string.Equals(failures[0].Path, Item, StringComparison.OrdinalIgnoreCase) &&
@@ -1444,7 +1444,7 @@ public static partial class ChangeRunnerChecks
                             tagged.Add((fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)) - passes, value));
                         }
                     }
-                }).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:1447").WaitAsync(guard.Token);
+                }).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
                 return wake;
             }
             var events = await WakeAsync();
@@ -1499,7 +1499,7 @@ public static partial class ChangeRunnerChecks
             // EngineHostChecks.RepairHeldSurvivorPollAsync proves; here both renames complete and nothing stays pending.
             ClearObligations(fixture);
             var done = new List<RunEvent>();
-            await LiveSyncer(fixture, selected!, boundary, done).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:1502").WaitAsync(guard.Token);
+            await LiveSyncer(fixture, selected!, boundary, done).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
             Check.Require(done.All(value => value.Kind is not (RunEventKind.Failed or RunEventKind.Issue)) &&
                 await CompletedAsync(),
                 "F2/R7 repaying the owed Local write recovers both renames: " + Seen(done) +
@@ -1856,7 +1856,7 @@ public static partial class ChangeRunnerChecks
             var context = fixture.Context(selected) with { ItemAttempts = attempts };
             var syncer = new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
                 RefusingExecutionBoundary.Instance, 0));
-            await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:1859");
+            await syncer.SyncWorkAsync(default);
             Check.Require(moves == 1 && attempts.Reported == 1 &&
                 await fixture.Local.ReadOneAsync("Other.txt", default) is not null &&
                 fixture.Inner.Issues(PairId).Count == 0 &&
@@ -1865,7 +1865,7 @@ public static partial class ChangeRunnerChecks
                 "P2-2b: the run attempts a temporary rename once, completes later work, and keeps the rename pending " +
                 "without a notice; moves=" + moves + "; real=" + real);
             // A new run is a new opportunity: the exclusion lasts one RunWorkAsync only.
-            await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:1868");
+            await syncer.SyncWorkAsync(default);
             Check.Require(moves == 2 && attempts.Reported == 2,
                 "§6.3: the temporary exclusion ends with its run; the next run attempts the rename again; real=" + real);
         }
@@ -1924,7 +1924,7 @@ public static partial class ChangeRunnerChecks
             boundary.Capture = (selection, _, _) => Task.FromResult(Coverage(selection));
             var context = fixture.Context(selected) with { ItemAttempts = attempts };
             await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-                RefusingExecutionBoundary.Instance, 0)).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:1927");
+                RefusingExecutionBoundary.Instance, 0)).SyncWorkAsync(default);
             fixture.Hooks.BeforeCall = null;
             var expected = mode == "later" ? 2 : 1;
             var passes = fixture.Hooks.Count(nameof(IStateStore.EndWorkPass));
@@ -1981,7 +1981,7 @@ public static partial class ChangeRunnerChecks
             boundary.Capture = (selection, _, _) => Task.FromResult(Coverage(selection));
             var context = fixture.Context(first!) with { ItemAttempts = attempts };
             await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-                RefusingExecutionBoundary.Instance, 0)).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:1984");
+                RefusingExecutionBoundary.Instance, 0)).SyncWorkAsync(default);
             var passes = fixture.Hooks.Count(nameof(IStateStore.EndWorkPass));
             Check.Require(moves == 2 && attempts.Reported == 2 && passes == 2 &&
                 await fixture.Local.ReadOneAsync("Other.txt", default) is not null &&
@@ -2029,7 +2029,7 @@ public static partial class ChangeRunnerChecks
             var attempts = new TemporaryAttempts();
             var events = new List<RunEvent>();
             var boundary = new Boundary(_ => new Lease());
-            await LiveSyncer(fixture, selection, boundary, events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2032");
+            await LiveSyncer(fixture, selection, boundary, events, attempts: attempts).SyncWorkAsync(default);
             var passes = fixture.Hooks.Count(nameof(IStateStore.EndWorkPass));
             var label = "; real=" + real + "; ancestorFirst=" + ancestorFirst + "; passes=" + passes;
             Check.Require(passes >= 2 && await fixture.Local.ReadOneAsync("Other.txt", default) is not null,
@@ -2039,7 +2039,7 @@ public static partial class ChangeRunnerChecks
                 events.All(item => item.Error is not LiveAdmissionStaleException),
                 "§6.3 F2: a child under a temporary ancestor is skipped and kept, with no stale refusal" + label +
                 "; reported=" + attempts.Reported + "; events=" + string.Join(" | ", events.Select(item => item.Path + ":" + item.Error)));
-            await LiveSyncer(fixture, selection, boundary, events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2042");
+            await LiveSyncer(fixture, selection, boundary, events, attempts: attempts).SyncWorkAsync(default);
             Check.Require(await SyncedAsync(fixture, Plain) && fixture.Inner.Issues(PairId).Count == 0,
                 "§6.3: the next run reaches the ancestor and then its child" + label);
         }
@@ -2094,14 +2094,14 @@ public static partial class ChangeRunnerChecks
                 if (request.Selection.AnchorWorkId == selected.AnchorWorkId && ++folderAdmissions == 2) armed = true;
                 return new Lease();
             });
-            await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2097");
+            await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).SyncWorkAsync(default);
             var label = "; real=" + real + "; folderAdmissions=" + folderAdmissions + "; faults=" + faults;
             Check.Require(faults == 1 && folderAdmissions == 2 && attempts.Reported == 1 &&
                 await fixture.Local.ReadOneAsync(Plain, default) is not null &&
                 await fixture.Local.ReadOneAsync("Other.txt", default) is not null &&
                 fixture.Inner.Issues(PairId).Count == 0 && PendingAt(fixture, Side.Dropbox, Folder).Any(),
                 "HARD-3: a temporary deferred plan is attempted once per run and stays pending without a notice" + label);
-            await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2104");
+            await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).SyncWorkAsync(default);
             Check.Require(folderAdmissions > 2,
                 "§6.3: the temporary exclusion ends with its run; the next run admits the plan again" + label);
         }
@@ -2174,7 +2174,7 @@ public static partial class ChangeRunnerChecks
             }
             var events = new List<RunEvent>();
             var boundary = new Boundary(_ => new Lease());
-            await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2177");
+            await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).SyncWorkAsync(default);
             var label = "; mode=" + mode + "; real=" + real + "; writes=" + writes + "; reported=" + attempts.Reported +
                 "; events=" + string.Join(" | ", events.Select(item => item.Path + ":" + item.Error?.GetType().Name));
             if (mode == "once")
@@ -2187,7 +2187,7 @@ public static partial class ChangeRunnerChecks
                     attempts.Reported == 1 && await fixture.Local.ReadOneAsync(Plain, default) is not null &&
                     fixture.Inner.Issues(PairId) is [{ Kind: IssueKind.Info, Cause: TextKey.InfoEditBeatsDelete } kept] &&
                     kept.Path == Plain, "the released continuation retries the due survivor and keeps the edit" + label);
-            await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2190");
+            await LiveSyncer(fixture, selected, boundary, events, attempts: attempts).SyncWorkAsync(default);
             Check.Require(writes == 2,
                 "§6.3: the survivor completes its second attempt by the next run; real=" + real + "; writes=" + writes);
         }
@@ -2259,7 +2259,7 @@ public static partial class ChangeRunnerChecks
         var attempts = new TemporaryAttempts();
         var events = new List<RunEvent>();
         var boundary = new Boundary(_ => new Lease());
-        await LiveSyncer(fixture, own, boundary, events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2262");
+        await LiveSyncer(fixture, own, boundary, events, attempts: attempts).SyncWorkAsync(default);
         var label = "; replaced=" + replaced + "; observations=" + observations + "; otherReads=" + otherReads +
             "; reported=" + attempts.Reported +
             "; events=" + string.Join(" | ", events.Select(item => item.Path + ":" + item.Error?.GetType().Name)) +
@@ -2271,7 +2271,7 @@ public static partial class ChangeRunnerChecks
             "HARD-R3: a survivor whose own selection ended temporarily is observed once in the run" + label);
         Check.Require(otherReads > 0,
             "HARD-R3: the prefix-related operation's survivor still continues in the same run" + label);
-        await LiveSyncer(fixture, own, boundary, events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2274");
+        await LiveSyncer(fixture, own, boundary, events, attempts: attempts).SyncWorkAsync(default);
         Check.Require(observations >= 2, "§6.3: the next run reaches the survivor again" + label);
     }
 
@@ -2332,7 +2332,7 @@ public static partial class ChangeRunnerChecks
         };
         var attempts = new TemporaryAttempts();
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, own, new Boundary(_ => new Lease()), events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2335");
+        await LiveSyncer(fixture, own, new Boundary(_ => new Lease()), events, attempts: attempts).SyncWorkAsync(default);
         var label = "; reads=" + reads + "; hashes=" + hashes + "; reported=" + attempts.Reported + "; events=" +
             string.Join(" | ", events.Select(item => item.Path + ":" + item.EffectKind + ":" + item.Error?.GetType().Name));
         Check.Require(reads == 1 && hashes == 0 && attempts.Reported == 1 &&
@@ -2384,7 +2384,7 @@ public static partial class ChangeRunnerChecks
         var boundary = new Boundary(_ => new Lease());
         for (var run = 1; run <= 2; run++)
         {
-            await LiveSyncer(fixture, pending[0], boundary, events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2387");
+            await LiveSyncer(fixture, pending[0], boundary, events, attempts: attempts).SyncWorkAsync(default);
             var left = PendingAt(fixture, Side.Local, current.Path);
             Check.Require(readsA == run && readsB >= 1 &&
                 left.Count == 2 && left.Select(s => s.Obligation).ToHashSet().SetEquals(pending.Select(s => s.Obligation)),
@@ -2447,7 +2447,7 @@ public static partial class ChangeRunnerChecks
         var attempts = new TemporaryAttempts();
         var events = new List<RunEvent>();
         var selected = PendingAt(fixture, Side.Local, "a.txt").Single();
-        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2450");
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts).SyncWorkAsync(default);
         var label = "; hardLink=" + hardLink + "; stages=" + stages + "; reported=" + attempts.Reported + "; events=" +
             string.Join(" | ", events.Select(item => item.Path + ":" + item.Error?.GetType().Name));
         // Exact: a hard link stages twice (b.txt's saved binding is a.txt's new begun preimage); a lone row stages once.
@@ -2519,7 +2519,7 @@ public static partial class ChangeRunnerChecks
             var attempts = new TemporaryAttempts();
             var events = new List<RunEvent>();
             await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts)
-                .CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2522");
+                .SyncWorkAsync(default);
             var passes = fixture.Hooks.Count(nameof(IStateStore.EndWorkPass));
             Check.Require(stages > 0, "HARD-1 fixture: the upload stage is reached; real=" + real + "; shape=" + shape +
                 "; stages=" + stages + "; reported=" + attempts.Reported + "; passes=" + passes);
@@ -2548,7 +2548,7 @@ public static partial class ChangeRunnerChecks
             var boundary = new Boundary(_ => new Lease());
             var scope = ExcludedScope(fixture);
             await LiveSyncer(fixture, selected, boundary, [], configure: context => context with { Scope = scope })
-                .CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2551");
+                .SyncWorkAsync(default);
             Check.Require(local.Reads + dropbox.Reads + local.Listings + dropbox.Listings == 0 && boundary.Calls == 0 &&
                 fixture.Hooks.Count(nameof(IStateStore.CompleteOutOfScope)) == 1 &&
                 !PendingAt(fixture, Side.Dropbox, "Skip/File").Any(),
@@ -2576,7 +2576,7 @@ public static partial class ChangeRunnerChecks
             };
             var scope = ExcludedScope(fixture);
             var result = await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [],
-                configure: context => context with { Scope = scope }).CensusWorkAsync(cancel.Token, "Executor/ChangeRunnerChecks.cs:2582");
+                configure: context => context with { Scope = scope }).SyncWorkAsync(cancel.Token);
             fixture.Hooks.BeforeCall = null;
             var completions = fixture.Hooks.Count(nameof(IStateStore.CompleteOutOfScope));
             Check.Require(cancel.IsCancellationRequested && result == (false, false) && completions == 1 &&
@@ -2614,7 +2614,7 @@ public static partial class ChangeRunnerChecks
             var boundary = new Boundary(_ => new Lease());
             var scope = ExcludedScope(fixture);
             await LiveSyncer(fixture, selected, boundary, [], configure: context => context with { Scope = scope })
-                .CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2622");
+                .SyncWorkAsync(default);
             var recorded = fixture.Inner.UnreadableUnder(PairId, PathNames.Key("Skip"));
             var providerWork = local.Reads + local.Listings + dropbox.Reads + dropbox.Listings;
             var releases = fixture.Hooks.Count(nameof(IStateStore.ReleaseUnreadable));
@@ -2680,7 +2680,7 @@ public static partial class ChangeRunnerChecks
             [fixture.Pair]);
         var events = new List<RunEvent>();
         await LiveSyncer(fixture, child, new Boundary(_ => new Lease()), events,
-            configure: context => context with { Scope = scope }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2688");
+            configure: context => context with { Scope = scope }).SyncWorkAsync(default);
         var uploaded = await fixture.Dropbox.ReadOneAsync(movedFile.Path, default);
         Check.Require(uploaded is not null &&
             await fixture.Dropbox.ContentHashAsync(uploaded, default) == DropboxContentHash.Compute(new byte[] { 2 }) &&
@@ -2728,7 +2728,7 @@ public static partial class ChangeRunnerChecks
         });
         var events = new List<RunEvent>();
         await LiveSyncer(f, dependent, new Boundary(_ => new Lease()), events,
-            configure: context => context with { Store = store }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:2736");
+            configure: context => context with { Store = store }).SyncWorkAsync(default);
         var issues = f.Inner.Issues(PairId);
         var order = store.Order.ToArray();
         var refused = Array.IndexOf(order, "refused");
@@ -3615,7 +3615,7 @@ public static partial class ChangeRunnerChecks
                             batches++;
                             await SyncJobs.RunBatchAsync(context, ports, work, scope, ct);
                         }
-                    }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:3631");
+                    }).SyncWorkAsync(default);
                 }
                 Check.Require(batches == (fail ? 2 : 1) &&
                     await fixture.Dropbox.ReadOneAsync(last.Path, default) is not null &&
@@ -4277,7 +4277,7 @@ public static partial class ChangeRunnerChecks
             fixture.Inner.PendingAncestors(PairId, Generation, Side.Dropbox, keys, 0).Count();
         for (var pending = Pending(); pending != 0;)
         {
-            await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:4293");
+            await syncer.SyncWorkAsync(default);
             var after = Pending();
             Check.Require(after < pending, $"{label}: an AutoSync call retires tree work; pending {pending} -> {after}");
             pending = after;
@@ -5372,7 +5372,7 @@ public static partial class ChangeRunnerChecks
             };
             var syncer = new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
                 RefusingExecutionBoundary.Instance, 0));
-            await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:5379");
+            await syncer.SyncWorkAsync(default);
             Check.Require(!PendingAt(fixture, side, Item).Any() &&
                 fixture.Inner.SelectWork(PairId, Generation, context.Scope) is null,
                 "A deletion whose counterpart belongs elsewhere retires from live selection");
@@ -5406,7 +5406,7 @@ public static partial class ChangeRunnerChecks
             fixture.Inner.ValidateLiveCoverage(request.Selection, request.Coverage, request.Footprint);
             return new Lease();
         });
-        await LiveSyncer(fixture, selected, boundary, []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:5413");
+        await LiveSyncer(fixture, selected, boundary, []).SyncWorkAsync(default);
         using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + fixture.DatabasePath + ";Pooling=False");
         connection.Open();
         using var remaining = connection.CreateCommand();
@@ -5603,7 +5603,7 @@ public static partial class ChangeRunnerChecks
             };
             return syncer;
         }
-        await Live().CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:5610");
+        await Live().SyncWorkAsync(default);
         var firstCallRefusals = events.Count(item => item.Error is LiveAdmissionStaleException);
         var heldIntact = shape != B101Shape.Held || (await f.Local.ReadOneAsync("P/a", default))?.Id == local.Id &&
             events.All(item => item.EffectKind is not (EffectKind.DeletedLocal or EffectKind.MovedLocal)) &&
@@ -5612,7 +5612,7 @@ public static partial class ChangeRunnerChecks
             f.Inner.Commit(PairId, StateChange.Empty with { Close = [("P/c", new[] { IssueKind.NameClash })] });
         if (shape == B101Shape.Restart) f.RestartStore();
         // The destination acquisition (WorkCommitted), the hold's closure or the restart brings the work to a later pass.
-        if (shape is B101Shape.PageSplit or B101Shape.Restart or B101Shape.Held) await Live().CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:5619");
+        if (shape is B101Shape.PageSplit or B101Shape.Restart or B101Shape.Held) await Live().SyncWorkAsync(default);
         var completed = await f.Local.ReadOneAsync(moved ? "P/c" : "P/a", default);
         var refusals = events.Count(item => item.Error is LiveAdmissionStaleException);
         var pathAdmissions = boundary.Requests.Count(request => request.Single().Selection.Identity is null);
@@ -5727,7 +5727,7 @@ public static partial class ChangeRunnerChecks
         var syncer = LiveSyncer(f, first, boundary, events);
         boundary.Capture = (chosen, _, _) =>
             Task.FromResult(f.Inner.CaptureLiveCoverage(chosen, Coverage(chosen).Local, Coverage(chosen).Dropbox));
-        await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:5734");
+        await syncer.SyncWorkAsync(default);
         var effects = events.Where(item => item.EffectKind is not null).ToArray();
         Check.Require((await f.Local.ReadOneAsync("P/c", default))?.Id == localFolder.Id &&
             (await f.Local.ReadOneAsync("P/c/x", default))?.Id == localChild.Id &&
@@ -5924,7 +5924,7 @@ public static partial class ChangeRunnerChecks
             branches.Clear();
             var start = events.Count;
             Exception? failed = null;
-            try { await LiveSyncer(f, selection, boundary, events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:5931"); }
+            try { await LiveSyncer(f, selection, boundary, events).SyncWorkAsync(default); }
             catch (Exception error) when (failingStore is not null) { failed = error; }
             if (failingStore is not null)
             {
@@ -6097,7 +6097,7 @@ public static partial class ChangeRunnerChecks
                 ? PendingAt(f, side, "B").Single(work => work.Identity == incoming.Id).AnchorWorkId : 0;
             // A hung wake fails the case instead of the run, so a persistent refusal cannot spin unseen.
             using var guard = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            await LiveSyncer(f, initial!, boundary, events, attempts: temporaryAttempts).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:6104").WaitAsync(guard.Token);
+            await LiveSyncer(f, initial!, boundary, events, attempts: temporaryAttempts).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
             if (mode == "temporary")
                 Check.Require(temporaryMoves == 1 && temporaryAttempts!.Reported == 1 && f.Inner.Issues(PairId).Count == 0 &&
                     (await target.ReadOneAsync("A", default))?.Id == incomingPeer.Id &&
@@ -6147,7 +6147,7 @@ public static partial class ChangeRunnerChecks
                 // added row, report or notice, and no lost work. It is not an exit: with no later wake both rows
                 // stay pending (B-151).
                 var repeat = new List<RunEvent>();
-                await LiveSyncer(f, initial!, boundary, repeat).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:6154").WaitAsync(guard.Token);
+                await LiveSyncer(f, initial!, boundary, repeat).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
                 var seenRepeat = Deferred(repeat);
                 Check.Require(seenRepeat.Ok && (await target.ReadOneAsync("A", default))?.Id == incomingPeer.Id,
                     "B-147 a persistent deferral accumulates no duplicate and loses no work: " + side + "/" + folder +
@@ -6156,7 +6156,7 @@ public static partial class ChangeRunnerChecks
                 // repeat itself (Syncer.RunLanesAsync), not another call.
                 refusals = 1;
                 var recovered = new List<RunEvent>();
-                await LiveSyncer(f, initial!, boundary, recovered).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:6163").WaitAsync(guard.Token);
+                await LiveSyncer(f, initial!, boundary, recovered).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
                 Check.Require(refusals == 0 && recovered.Count(value => value.Kind == RunEventKind.Failed) == 1 &&
                     recovered.All(value => value.Kind != RunEventKind.Issue) &&
                     f.Inner.Issues(PairId).Count == 0 &&
@@ -6286,7 +6286,7 @@ public static partial class ChangeRunnerChecks
                     new Boundary(_ => throw new NotSupportedException()), RefusingExecutionBoundary.Instance, 0));
                 // ChangeTable.cs:710-726 separates the residual; Syncer.cs:158-163 replays it if still protected after retirement.
                 var initialObservations = residual ? 1 : firstRun ? 3 : 2;
-                await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:6293");
+                await syncer.SyncWorkAsync(default);
                 if (firstRun)
                 {
                     Check.Require(fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true &&
@@ -6294,7 +6294,7 @@ public static partial class ChangeRunnerChecks
                         remoteReads.Reads == initialObservations && store.CommitCalls == initialObservations,
                         "Absent-row closure preserves the current first-run responsibility and its work.");
                     fixture.Inner.Commit(PairId, StateChange.Empty with { FirstRunAcknowledged = issue.Subject.Items });
-                    await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:6301");
+                    await syncer.SyncWorkAsync(default);
                 }
                 var observations = initialObservations + (firstRun ? 1 : 0);
                 Check.Require(fixture.Inner.IssueById(PairId, issue.Id) is null &&
@@ -6311,7 +6311,7 @@ public static partial class ChangeRunnerChecks
                 firstCounts = store.MemberCalls.ToDictionary(value => value.Key, value => value.Value);
                 fixture.RestartStore();
                 store.Reset();
-                foreach (var later in new[] { 1, 2 }) await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:6318");
+                foreach (var later in new[] { 1, 2 }) await syncer.SyncWorkAsync(default);
                 Check.Require(localReads.Reads == observations && remoteReads.Reads == observations && store.CommitCalls == 0 &&
                     fixture.Inner.IssueById(PairId, unrelated.Id)?.Matches(unrelated) == true &&
                     fixture.Inner.SelectWork(PairId, Generation, context.Scope) is null,
@@ -6507,7 +6507,7 @@ public static partial class ChangeRunnerChecks
             {
                 var context = fixture.Context(selection);
                 await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-                    RefusingExecutionBoundary.Instance, 0)).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:6514");
+                    RefusingExecutionBoundary.Instance, 0)).SyncWorkAsync(default);
                 Check.Require(fixture.Inner.ReadPairExecution(PairId)!.Value.Generation == Generation + 1 &&
                     fixture.Inner.Pair(PairId)!.Exclusions.Single() == new Exclusion(Side.Local, local.Path, true) &&
                     fixture.Inner.SyncedByKey(PairId, Side.Local, saved.LocalKey) == saved &&
@@ -6620,7 +6620,7 @@ public static partial class ChangeRunnerChecks
                 fixture.LocalView = localCalls;
                 fixture.DropboxView = remoteCalls;
                 var events = new List<RunEvent>();
-                await LiveSyncer(fixture, selection!, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:6627");
+                await LiveSyncer(fixture, selection!, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
                 var settledReads = localCalls.Reads + remoteCalls.Reads;
                 Check.Require(previousReads is null || previousReads == settledReads,
                     "B66 fixed child work does not grow with unrelated saved state.");
@@ -6630,8 +6630,8 @@ public static partial class ChangeRunnerChecks
                     PendingAt(fixture, Side.Local, entry.Path).Count == 0 &&
                     PendingAt(fixture, Side.Dropbox, entry.Path).Count == 0);
                 fixture.RestartStore();
-                await LiveSyncer(fixture, selection!, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:6637");
-                await LiveSyncer(fixture, selection!, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:6638");
+                await LiveSyncer(fixture, selection!, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
+                await LiveSyncer(fixture, selection!, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
                 Check.Require(settled && fixture.Inner.Issues(PairId).Count == 0 &&
                     localCalls.Reads + remoteCalls.Reads == settledReads &&
                     localCalls.Listings + remoteCalls.Listings + localCalls.Work + remoteCalls.Work == 0 &&
@@ -7514,7 +7514,7 @@ public static partial class ChangeRunnerChecks
             };
             var syncer = new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
                 RefusingExecutionBoundary.Instance, hashSlots));
-            var run = syncer.CensusWorkAsync(cancel.Token, "Executor/ChangeRunnerChecks.cs:7521");
+            var run = syncer.SyncWorkAsync(cancel.Token);
             try
             {
                 await (await Task.WhenAny(entered.Task, run).WaitAsync(guard.Token));
@@ -7584,7 +7584,7 @@ public static partial class ChangeRunnerChecks
         };
         var context = fixture.Context(opportunity!, new FakeAdmission { Level = 2 });
         await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-            RefusingExecutionBoundary.Instance, 1)).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:7590").WaitAsync(guard.Token);
+            RefusingExecutionBoundary.Instance, 1)).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         var parent = await fixture.Dropbox.ReadOneAsync("Parent", guard.Token);
         var saved = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key("Parent"));
         Check.Require(parent is { IsFolder: true } && saved?.DropboxId == parent.Id,
@@ -7622,7 +7622,7 @@ public static partial class ChangeRunnerChecks
         var context = fixture.Context(opportunity) with { Store = store };
         // Pass and effect counts stay unchanged; arrivals can now span orderly opportunities.
         var calls = await UntilDrainedAsync(new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-            RefusingExecutionBoundary.Instance, 1)), guard.Token, "Executor/ChangeRunnerChecks.cs:7626").WaitAsync(guard.Token);
+            RefusingExecutionBoundary.Instance, 1)), guard.Token).WaitAsync(guard.Token);
         Check.Require(counters.Commands == 108, "Three sustained-arrival opportunities use 108 store calls.");
         Check.Require(calls == 3, "Only post-floor arrival progress yields; the final opportunity drains.");
         Check.Require(rounds == arrivals + 2,
@@ -7674,7 +7674,7 @@ public static partial class ChangeRunnerChecks
             };
             var context = fixture.Context(opportunity!, admission) with { Store = store };
             await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-                RefusingExecutionBoundary.Instance, 1)).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:7676").WaitAsync(guard.Token);
+                RefusingExecutionBoundary.Instance, 1)).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
             Check.Require(rounds == 3 && attempts[PathNames.DropboxKey("Second")] == 2 &&
                 attempts[PathNames.DropboxKey("First")] == (makesProgress ? 1 : 2),
                 "N: a refused selection retries in the same call, including a no-progress serial fallback");
@@ -7758,7 +7758,7 @@ public static partial class ChangeRunnerChecks
         var context = fixture.Context(opportunity, new FakeAdmission { Level = 2 }) with { Store = store };
         await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
             RefusingExecutionBoundary.Instance, 1) { RunBatchAsync = (_, _, _, _, _, _) => Task.CompletedTask })
-            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:7760").WaitAsync(guard.Token);
+            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
         Check.Require(skipped.Task.IsCompletedSuccessfully &&
             fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(child.Path)) is not null &&
             PendingAt(fixture, Side.Dropbox, child.Path).Count == 0,
@@ -7862,7 +7862,7 @@ public static partial class ChangeRunnerChecks
             };
             await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
                 RefusingExecutionBoundary.Instance, 1) { RunBatchAsync = (_, _, _, _, _, _) => Task.CompletedTask })
-                .CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:7864");
+                .SyncWorkAsync(default);
             Check.Require(rounds == (held ? 1 : 2) && completions == 0 && fixture.Inner.Issues(PairId).Count == 0 &&
                 PendingAt(fixture, Side.Dropbox, parent.Path).Count == 1,
                 "B84-01: only genuine refusal causes contention replay; skipped dependencies credit no retirement.");
@@ -7973,7 +7973,7 @@ public static partial class ChangeRunnerChecks
             };
             var context = fixture.Context(opportunity!, admission) with { Store = store };
             var run = new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-                RefusingExecutionBoundary.Instance, 1)).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:7975");
+                RefusingExecutionBoundary.Instance, 1)).SyncWorkAsync(guard.Token);
             try
             {
                 await failed.Task.WaitAsync(guard.Token);
@@ -8079,7 +8079,7 @@ public static partial class ChangeRunnerChecks
             var context = fixture.Context(opportunity!, admission) with { Store = store, Events = events.Enqueue };
             var syncer = new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
                 RefusingExecutionBoundary.Instance, hashSlots));
-            var run = syncer.CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.cs:8081");
+            var run = syncer.SyncWorkAsync(guard.Token);
             try
             {
                 await (await Task.WhenAny(staging.Task, run).WaitAsync(guard.Token));
@@ -8133,7 +8133,7 @@ public static partial class ChangeRunnerChecks
         { Store = store, Local = local, Dropbox = remote, Events = events.Add };
         var syncer = new Syncer(context, new SyncPorts(new RecoveryBoundary(),
             RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0));
-        await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:8135");
+        await syncer.SyncWorkAsync(default);
         Check.Require(store.MemberCalls.GetValueOrDefault(nameof(IStateStore.FirstRepairDone)) == 0 &&
             store.MemberCalls.GetValueOrDefault(nameof(IStateStore.SelectWork)) == 1 &&
             store.MemberCalls.GetValueOrDefault(nameof(IStateStore.BeginSelection)) == 0,
@@ -8311,7 +8311,7 @@ public static partial class ChangeRunnerChecks
         Check.Require(PendingAt(fixture, Side.Dropbox, Folder).Any(),
             "A108a: the fixture holds a pending counterpart-side ancestor");
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, selections[0], new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:8313");
+        await LiveSyncer(fixture, selections[0], new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         Check.Require(events.All(item => item.Error is not LiveAdmissionStaleException),
             "A108a: a counterpart-side ancestor leaves no refusal behind");
         var firstAncestor = events.FindIndex(item => item.Path == Folder);
@@ -8377,8 +8377,8 @@ public static partial class ChangeRunnerChecks
         fixture.Dropbox.FailNext(Folder, new ItemFailedException(Folder, TextKey.FailDropboxNoPermission, null));
         var events = new List<RunEvent>();
         var boundary = new Boundary(_ => new Lease());
-        await LiveSyncer(fixture, selection, boundary, events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:8379");
-        await LiveSyncer(fixture, selection, boundary, events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:8380");
+        await LiveSyncer(fixture, selection, boundary, events).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, boundary, events).SyncWorkAsync(default);
         var notices = fixture.Inner.Issues(PairId, [IssueKind.Failure]).Where(issue => issue.Path == Folder).ToArray();
         Check.Require(notices.Length == 1,
             "A108c: a failed ancestor leaves exactly one deduplicated notice; found " + notices.Length + " at " +
@@ -8441,7 +8441,7 @@ public static partial class ChangeRunnerChecks
             return new Lease { AllowsRelease = true };
         });
         await LiveSyncer(fixture, selection, boundary, events,
-            new FakeRecovery { Evidence = new DriveEvidence(1, 1, 1) }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:8443");
+            new FakeRecovery { Evidence = new DriveEvidence(1, 1, 1) }).SyncWorkAsync(default);
         Check.Require(!PendingAt(fixture, side, "Folder", "Folder/File", "Other/File").Any(),
             $"move-out {side}: both selections retire; " + string.Join(" | ", events.Select(e =>
                 e.Path + ":" + e.Error + ":" + (e.Error as LiveAdmissionStaleException)?.Detail)) +
@@ -8676,7 +8676,7 @@ public static partial class ChangeRunnerChecks
             var boundary = new Boundary(_ => new Lease { AllowsRelease = true });
             // The deleted Local folder was never seeded, so Local answers its saved identity as absent.
             fixture.LocalView = IdentitySide.Truthful(fixture.Local, fixture.Local);
-            await LiveSyncer(fixture, root, boundary, events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:8678");
+            await LiveSyncer(fixture, root, boundary, events).SyncWorkAsync(default);
             var issues = fixture.Inner.Issues(PairId).Where(value => value.Cause == TextKey.FailFolderDependencyCycle).ToArray();
             var issue = issues.Single(value => value.Path == remoteLeaf.Path);
             Check.Require(issues.Length == survivorCount, "each refused survivor has its own cycle Failure");
@@ -8689,7 +8689,7 @@ public static partial class ChangeRunnerChecks
             var pendingWork = fixture.Inner.ReadWork(root).Count() + fixture.Inner.ReadWork(branch).Count();
             fixture.RestartStore();
             for (var attempt = 0; attempt < 2; attempt++)
-                await LiveSyncer(fixture, root, boundary, events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:8691");
+                await LiveSyncer(fixture, root, boundary, events).SyncWorkAsync(default);
             Check.Require(fixture.Inner.Issues(PairId).Where(value => value.Cause == TextKey.FailFolderDependencyCycle)
                     .Select(value => value.Id).Order().SequenceEqual(issues.Select(value => value.Id).Order()) &&
                 fixture.Inner.ActiveFolderRemovals(PairId, default).Single().OperationId == operation.OperationId &&
@@ -9030,7 +9030,7 @@ public static partial class ChangeRunnerChecks
         // B-214: only the echo-deleted row proves its exact echo settled; every other row keeps the unchanged store.
         var counters = parent == "echo-deleted" ? new StoreCounters(fixture.Store) : null;
         Task Pass(CancellationToken ct = default) => LiveSyncer(fixture, root, boundary, events, recovery,
-            configure: counters is null ? null : context => context with { Store = counters }).CensusWorkAsync(ct, "Executor/ChangeRunnerChecks.cs:9032");
+            configure: counters is null ? null : context => context with { Store = counters }).SyncWorkAsync(ct);
         int Deletes(EffectKind kind) => events.Count(item => item.EffectKind == kind);
         using var statements = new StatementCount(fixture);
         // Printed per case for the CI record (3.7): cumulative admissions, validations, publications and SQL.
@@ -9215,7 +9215,7 @@ public static partial class ChangeRunnerChecks
         var events = new List<RunEvent>();
         string Failures() => string.Join(" | ", events.Where(item => item.Error is not null).Select(item =>
             item.Path + ":" + item.Error + ":" + (item.Error as LiveAdmissionStaleException)?.Detail));
-        await LiveSyncer(fixture, created, boundary, events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:9217");
+        await LiveSyncer(fixture, created, boundary, events).SyncWorkAsync(default);
         Check.Require(events.Count(item => item.EffectKind == EffectKind.Uploaded) == 1 &&
             await fixture.Dropbox.ReadOneAsync(file.Path, default) is not null,
             $"{name}: the engine uploads the file into the folder; failures=" + Failures());
@@ -9232,7 +9232,7 @@ public static partial class ChangeRunnerChecks
         var refusals = fixture.Hooks.Refusals.Count;
         // The Local folder was deleted above, so Local answers its saved identity as absent.
         fixture.LocalView = IdentitySide.Truthful(fixture.Local, fixture.Local);
-        await LiveSyncer(fixture, folder!, boundary, events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:9234");
+        await LiveSyncer(fixture, folder!, boundary, events).SyncWorkAsync(default);
         Check.Require(events.All(item => item.Error is not LiveAdmissionStaleException) &&
             fixture.Hooks.Refusals.Count == refusals && events.Any(item => item.EffectKind == EffectKind.DeletedDropbox) &&
             await fixture.Dropbox.ReadOneAsync(Folder, default) is null &&
@@ -9395,7 +9395,7 @@ public static partial class ChangeRunnerChecks
             localCalls.Work + remoteCalls.Work == 0, "A108: mapped refusal makes zero provider calls");
         fixture.Inner.EndWorkPass(PairId);
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, child, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:9397");
+        await LiveSyncer(fixture, child, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         var refused = events.Select(item => item.Error).OfType<LiveAdmissionStaleException>().FirstOrDefault();
         Check.Require(refused is null, "A108a: the mapped counterpart ancestor is run, not refused; " +
             refused?.Detail + "; trail=" + string.Join(" | ", events.Where(item => item.Path.Length > 0)
@@ -9427,7 +9427,7 @@ public static partial class ChangeRunnerChecks
         Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Renamed, moved.Path, "Old", moved.Id,
             moved, false, false));
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, folder, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:9429");
+        await LiveSyncer(fixture, folder, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         Check.Require(await fixture.Dropbox.ReadOneAsync("Target/New", default) is not null &&
             await fixture.Dropbox.ReadOneAsync("Old", default) is null &&
             await fixture.Local.ReadOneAsync("Target/New", default) is not null &&
@@ -9451,7 +9451,7 @@ public static partial class ChangeRunnerChecks
         Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, "Old", null,
             "old-folder", FolderEntry("Old", "old-folder"), false, false), 3);
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, child, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:9453");
+        await LiveSyncer(fixture, child, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         Check.Require(!PendingAt(fixture, Side.Local, "Old", "Earlier").Any() &&
             events.FindIndex(item => item.Path == "Earlier") >= 0 &&
             events.FindIndex(item => item.Path == "Earlier") < events.FindIndex(item => item.Path == "New/Child") &&
@@ -9492,7 +9492,7 @@ public static partial class ChangeRunnerChecks
         SeedRemote(fixture, FolderEntry("A/B", "remote-ab"));
         SeedRemote(fixture, FolderEntry("A", "remote-a"));
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, child, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:9494");
+        await LiveSyncer(fixture, child, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         var nestedRefused = events.Select(item => item.Error).OfType<LiveAdmissionStaleException>().FirstOrDefault();
         Check.Require(nestedRefused is null, "A108a: both nested ancestors are run, not refused; " +
             nestedRefused?.Detail + "; trail=" + string.Join(" | ", events.Where(item => item.Path.Length > 0)
@@ -9510,7 +9510,7 @@ public static partial class ChangeRunnerChecks
         new(Side.Local, ChangeKind.Deleted, path, null, id, null, false, true);
 
     // Drive the same Syncer across orderly yields; the caller's guard bounds the complete drain.
-    internal static async Task<int> UntilDrainedAsync(Syncer syncer, CancellationToken ct, string censusSite)
+    internal static async Task<int> UntilDrainedAsync(Syncer syncer, CancellationToken ct)
     {
         var calls = 0;
         bool drained;
@@ -9518,7 +9518,7 @@ public static partial class ChangeRunnerChecks
         {
             calls++;
             bool revisit;
-            (revisit, drained) = await syncer.CensusWorkAsync(ct, censusSite).ConfigureAwait(false);
+            (revisit, drained) = await syncer.SyncWorkAsync(ct).ConfigureAwait(false);
             Check.Require(drained || revisit, "Every yielded opportunity requests a revisit.");
         } while (!drained);
         return calls;
@@ -10092,7 +10092,7 @@ public static partial class ChangeRunnerChecks
             "A-B123: the Follow to Cur has the stated owner count and the Local-id lookup selects Stage (B-new)");
         var selection = Seed(f, new ChangeNotice(Side.Local, ChangeKind.Renamed, "Cur", "Stage", "L-new", incoming, false, false), 2);
         var events = new List<RunEvent>();
-        await LiveSyncer(f, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:10079");
+        await LiveSyncer(f, selection, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         var raised = f.Inner.Issues(PairId).Single();
         // One owner: SettleOccupied adds the refused move's occupant to the moved item and the saved-path peer
         // (RenameRunner.cs:210-225, :505-511). Two owners: RefusePrerequisite names the notice, the saved pair and every
@@ -10133,7 +10133,7 @@ public static partial class ChangeRunnerChecks
                     occupant.Id, occupant, false, false));
                 await Counted(f, batch, () => batches++, context: f.Context(batch) with { Events = events.Add }).RunAsync(batch, default);
             }
-            else await LiveSyncer(f, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:10120");
+            else await LiveSyncer(f, selection, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
             var issues = f.Inner.Issues(PairId);
             Check.Require(dropbox.Work + local.Work == work && dropbox.BytesRead + local.BytesRead == bytes && submissions == 0 &&
                 (opportunity != "folder batch" || batches == 1) &&
@@ -10187,7 +10187,7 @@ public static partial class ChangeRunnerChecks
         });
         var events = new List<RunEvent>();
         var selection = Seed(f, new ChangeNotice(Side.Local, ChangeKind.Changed, file.Path, null, file.Id, file, false, false), 2);
-        await LiveSyncer(f, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:10174");
+        await LiveSyncer(f, selection, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
         var raised = f.Inner.Issues(PairId).Single();
         var heldKey = PathNames.KeyFor(Side.Local, file.Path);
         Check.Require(placed && raised is { Kind: IssueKind.NameClash, Cause: TextKey.ClashNameTaken, Path: "Box/Doc",
@@ -10223,7 +10223,7 @@ public static partial class ChangeRunnerChecks
                     .RunAsync(batch, default);
                 batchCommits.Add(Commits(f) - commits);
             }
-            else await LiveSyncer(f, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.cs:10210");
+            else await LiveSyncer(f, selection, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
             var issues = f.Inner.Issues(PairId);
             // Box's own root settles in each batch and the held Box/Doc child is never settled again; each batch re-files that
             // child under its holder exactly once so its Retry reaches it alone (ScanPass.cs:276-284).
@@ -11003,14 +11003,14 @@ public static partial class ChangeRunnerChecks
                 attached |= result is true;
         };
         var syncer = LiveSyncer(fixture, selection, boundary, events);
-        await syncer.CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.cs:11014");
+        await syncer.SyncWorkAsync(default);
         Check.Require(attached && PendingAt(fixture, Side.Local, Folder).All(work => work.AnchorWorkId != selection.AnchorWorkId) &&
             PendingAt(fixture, Side.Local, Folder).Count == 1 &&
             events.All(item => item.Error is not LiveAdmissionStaleException),
             "A held descendant parks the folder under its exact notice and retires the anchor without a stale event.");
         var calls = boundary.Calls;
         var commands = counters.Commands;
-        await syncer.CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.cs:11021");
+        await syncer.SyncWorkAsync(default);
         Console.WriteLine($"Held scope {mode}: first commands={commands}, parked commands={counters.Commands - commands}");
         Check.Require(commands == 25 && counters.Commands - commands == 7,
             "The held refusal parks in 25 store calls; its next parked opportunity uses seven without re-admission.");
@@ -11029,7 +11029,7 @@ public static partial class ChangeRunnerChecks
             await repair.SyncScannedAsync(token, new ListedSkips([], [], [], []), null, default);
             await fixture.Inner.EndScanAsync(PairId, token, 1);
         }
-        await syncer.CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.cs:11038");
+        await syncer.SyncWorkAsync(default);
         Check.Require(events.All(item => item.Error is not LiveAdmissionStaleException),
             "A holder event resumes durable work without a stale refusal.");
         if (mode == "item-acquired")
@@ -11062,7 +11062,7 @@ public static partial class ChangeRunnerChecks
         var syncer = LiveSyncer(fixture, selection, boundary, []);
         for (var call = 0; call < 2; call++)
         {
-            await syncer.CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.cs:11071");
+            await syncer.SyncWorkAsync(default);
             Check.Require(recreated is not null && fixture.Inner.Issues(PairId).Any(issue => issue.Id == holder.Id) &&
                 fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Folder)) is not null &&
                 PendingAt(fixture, Side.Local, holder.Path).Any(work => work.Identity == OccupantId),
@@ -11110,13 +11110,13 @@ public static partial class ChangeRunnerChecks
             var coverage = Coverage(chosen);
             return Task.FromResult(fixture.Store.CaptureLiveCoverage(chosen, coverage.Local, coverage.Dropbox));
         };
-        await syncer.CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.cs:11119");
+        await syncer.SyncWorkAsync(default);
         Check.Require(holder is not null && attached &&
             PendingAt(fixture, Side.Local, Item).All(work => work.AnchorWorkId != selection.AnchorWorkId) &&
             PendingAt(fixture, Side.Local, Item).Count == 1 && events.All(item => item.Error is not LiveAdmissionStaleException),
             "A hold raised after file preparation parks the exact file under its notice without a stale event.");
         var calls = boundary.Calls;
-        await syncer.CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.cs:11125");
+        await syncer.SyncWorkAsync(default);
         Check.Require(boundary.Calls == calls && events.All(item => item.Error is not LiveAdmissionStaleException),
             "A parked exact file does not seek admission again without a holder event.");
     }

@@ -37,7 +37,7 @@ public static partial class ChangeRunnerChecks
             Check.Require(expected == (0, paths.Length),
                 "B-137 every pending row is in the queue before the pass" + name + ": " + expected);
             var events = new List<RunEvent>();
-            await LiveSyncer(fixture, selected!, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.PassTotal.cs:40");
+            await LiveSyncer(fixture, selected!, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
             var line = Text.Get(TextKey.AutoSyncQueueAtStart,
                 (TextArg.Count, paths.Length.ToString(CultureInfo.InvariantCulture)),
                 (TextArg.Local, "0"), (TextArg.Dropbox, paths.Length.ToString(CultureInfo.InvariantCulture)));
