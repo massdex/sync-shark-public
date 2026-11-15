@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "folder-deletes",
+    "syncer"
+  ],
+  "core": [],
+  "ui": []
+}
