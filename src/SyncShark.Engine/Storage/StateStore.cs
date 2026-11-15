@@ -802,7 +802,7 @@ public sealed partial class StateStore : IStateStore
 
     public Issue? UnknownMoveCovering(string pairId, string key)
     {
-        lock (_lock) return _issueFacts.Read(pairId).UnknownMoveCovering(key);
+        lock (_lock) return _issueFacts.Read(pairId).Covering(key, null);
     }
 
     private void RequireExpectedIssue(string pairId, Issue? expected)
