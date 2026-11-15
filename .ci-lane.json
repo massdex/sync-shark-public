@@ -1,0 +1,13 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "issues",
+    "mapped-holds",
+    "store",
+    "folder-move"
+  ],
+  "core": [],
+  "ui": []
+}
