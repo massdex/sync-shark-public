@@ -1,0 +1,18 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "folder-move",
+    "unknown-move-live",
+    "syncer",
+    "dropbox",
+    "repair",
+    "no-effect-closure",
+    "gone-identities",
+    "safety",
+    "local-split"
+  ],
+  "core": [],
+  "ui": []
+}
