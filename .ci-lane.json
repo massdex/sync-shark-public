@@ -1,0 +1,13 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "carried-folders",
+    "user-moves",
+    "unknown-move-live",
+    "syncer"
+  ],
+  "core": [],
+  "ui": []
+}
