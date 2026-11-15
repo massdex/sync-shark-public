@@ -69,13 +69,15 @@ Line ranges describe this correction; named units remain the identity if subsequ
 
 ## src/SyncShark.Engine/Storage/StateStore.cs
 
+Current NoEffect-closure delta: IssueForWork :3121-3132 reads the exact work association through issue_member_work, then the issue by id if present. CloseNoEffectFailure :3135-3148 owns one transaction validating pair/operation state, the exact read-failure subject and ChangeTable's evidence fence before calling IssueTable.CloseExact and the existing CommitClosure. No new issue-release owner or storage schema is introduced; retained class/file split obligations remain. Earlier inventories below are historical coordinates.
+
 B-222 disposition: StateStore class-size and file-size - reason recorded; the growth extends existing retry, closing and persistence jobs (EndAbsentEpisode, CloseIdentityAbsent, CommitClosure, the HeldFolderMembers reader and the ResponsibilityRetained split), not a new workflow; split destination REFACTOR-PLAN-2, no row deleted. StateStore.SettleFolderRemovalItems - accepted as one atomic transition; do not split validation from commit. StateStore.SettleItemAttempt - pre-existing at lane base, not B-222; CompleteItemAttempt reads as improved only because SettleItemAttempt carries its old key.
 
 Category-change split clearing condition (class-size and file-size rows, and the FinishRepair row that cites this condition): open: the release feature freeze allows only live-defect fixes. Owner: the structural refactor lane. Clearing condition: that lane's extraction of the unit. Trigger: the first release after that lane lands. Destination: this register section and the extracted owners under src/SyncShark.Engine/Storage/. Closure requires the completed extraction preserving transaction, locking and publication semantics, plus a fresh cross-family verdict; the obligation stays open until that closure.
 
 Current inventory: class :8-4185 (4178), file 4185. SettleEchoes :1759-1761 is ordered queue forwarding, not a new job. Long-member ranges below are current; embedded release histories in the class/file rows are historical, not current coordinates. Existing split verdicts remain.
 
-<!-- spec-source: 082bda7260f5~2efdc3f14d53~4b39e0be2ffa~6098774a7d2c~3ee4c0f313ef~8de6 -->
+<!-- spec-source: 22a8bf0bdb30~3a802de9224a~2a52c21c6856~6c0c37d129a6~90549178770a~a1e6 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -123,9 +125,11 @@ Current temporary-wait change: existing split obligations remain. The change tou
 
 ## src/SyncShark.Engine/Executor/FolderDeleteRunner.cs
 
+Current delete-safety delta: send-time automatic authority at :853 delegates to FolderIdentity.Checks; :856-862 retains the root identity read and conservative refusal on item errors. The identity owner now requires documented absence. No orchestration job moved and no retained size obligation is cleared. Earlier release inventories below are historical coordinates.
+
 B-222 disposition: FolderDeleteRunner class-size and file-size - reason recorded; the growth is proof forwarding (:36-63, :131-187, :591-633, :645-706, :724-750), the _held field and the D4 delegation, which extend existing orchestration jobs; split destination REFACTOR-PLAN-2, no row deleted. CloseWindowAsync - accepted as one job (post-window settlement); the additions are the proven argument and the D4 delegation, and the order is fail-safe. ConcludeAsync - accepted; only the forwarded parameter changed.
 
-<!-- spec-source: 0957883f7355~665caea6bbba~6171f846d820~51699ab3aacf~d6e46f84a379~20e1 -->
+<!-- spec-source: 242a8a02ea5c~a84ca54e99a9~7f161b1ca949~5fc491beefa0~0e6198063a75~5f18 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -139,6 +143,8 @@ B-222 disposition: FolderDeleteRunner class-size and file-size - reason recorded
 
 ## src/SyncShark.Engine/Storage/ChangeTable.cs
 
+Current NoEffect-closure delta: CanCloseFolderFailure :1220-1242 validates the selection and exact work/issue association (:1223-1226), then both source epochs/domains and root/descendant current/old-path acquisitions (:1227-1240) inside its caller's transaction. It does not close issues or admit effects. This extends existing work-selection evidence custody without clearing the retained class/file split obligations. Earlier inventories below are historical coordinates.
+
 B-222 disposition: ChangeTable class-size and file-size, and CoalescePathWork - pre-existing at lane base; not in the lane's src diff. CompleteWork's 52 to 50 improvement predates B-222 at the lane base.
 
 Category-change split clearing condition (class-size and file-size rows): open: the release feature freeze allows only live-defect fixes. Owner: the structural refactor lane. Clearing condition: that lane's extraction of the unit. Trigger: the first release after that lane lands. Destination: this register section and the extracted owners under src/SyncShark.Engine/Storage/. Closure requires the completed extraction preserving transaction, locking and publication semantics, plus a fresh cross-family verdict; the obligation stays open until that closure.
@@ -149,7 +155,7 @@ ValidateLiveCoverage :1557-1581 retains main's freshness obligation. ValidateSel
 
 SettleEchoes :326-382 (57): the earlier REASON-RECORDED verdict needs current-delta confirmation; reason :325 keeps one page's walk, staged predecessors, budget and post-commit publication together. EchoSelection :385-421 is 37 lines; RetireEchoPage :441-462 is one atomic page. CoalescePathWork :466-528 and TransferBound :530-558 retain main's coalescing responsibility; only ordinary NextCandidate :285-322 reaches it. IntegrityRefusal :1211-1212 and RollbackMutation :1214-1220 remain single owners. These units add no new class job.
 
-<!-- spec-source: 01930d9398df~0a8ac549adab~4df5689199cb~99876109d75b~36ac039a0b79~4fd3 -->
+<!-- spec-source: 41506813d918~4bb701b81571~6478271c30ac~2bd4e614e5ae~fbd85252e748~f1b3 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -464,9 +470,11 @@ B-222 disposition: IssueTable class-size and file-size - reason recorded; the op
 
 ## src/SyncShark.Engine/Executor/FolderSync.cs
 
+Current delete-safety delta: JustifiedAsync :151-170 delegates automatic authority and documented identity checking to FolderIdentity. RunLiveFolderPlanAsync :677-738 captures the exact work-associated read failure and watermark before reads (:685-689), distinguishes a fresh rebuild from an unfinished operation (:711-713), and requests transactional exact closure only after successful settlement (:734-737). Admission, fallback and runner orchestration remain in this owner; storage owns the evidence fence and issue closure. No size verdict is granted by this description. Earlier inventories below are historical coordinates.
+
 Current temporary-wait change: RunLiveFolderPlanAsync :482-532 forwards the reporting turn's wait through its existing callback. No new job or line growth; the class/file and RemoveVacatedAsync split obligations remain with the folder structural lane.
 
-<!-- spec-source: ceac99f005af~72fae46cf6e3~30e9fca0193b~52613555b63b~acaa38fa0a05~dda4 -->
+<!-- spec-source: 6c3965df2df7~7bf55901d138~9e6212e0faf3~c58df8e96782~f98c61f125c1~16bf -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -634,7 +642,9 @@ Closed rows: the class (362) and file (368) REASON-RECORDED verdicts stand in th
 
 ## src/SyncShark.Engine/Executor/FolderPlanBuilder.cs
 
-<!-- spec-source: 69315e3364a9~e1977d24b5ad~d49cd26b29fd~da679138acec~2e506dce734e~16d6 -->
+Current classification inventory: ClassifyAsync :122-164 (43) gathers scope/unreadable/replacement facts (:127-142), asks the identity owner for moved-out protection (:143-147), reads local content evidence when needed (:148-159), then delegates the verdict and follow-up (:160-163). BuildCoreAsync :33-105 retains the existing plan-handle lifetime and every-descendant traversal. ClassifyAsync newly crosses the long-member prompt; its size disposition is reviewer-owned and remains unresolved here. The added identity I/O stays outside the pure planner.
+
+<!-- spec-source: 21a8452e9faf~ff7e619cee02~36d311314853~6e8320f9db1b~1a2ccc9b07c6~a6e0 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -720,7 +730,9 @@ No open §1.3 size obligation. Since 07ff9d097 (3b9d021a9, 36efd4772, cb637f88a)
 
 ## src/SyncShark.Engine/Planner/FolderDeletes.cs
 
-<!-- spec-source: 0b6f2b672e43~a2aa893ea3a7~875eae21c452~e4ae86840c27~b9d5e59efb66~4097 -->
+Current delete-safety delta: Classify :36-49 treats MovedOut as a survivor fact; FollowUp :108-109 leaves that survivor to its queued rename. Both remain pure decisions over supplied facts. FirstRun :55-98 (44) is unchanged and retains its existing reason; the row below uses its historical start coordinate.
+
+<!-- spec-source: b119470c90f5~5d694891b56f~df44c25024bc~109094bc573a~70422bad04f0~a7f0 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -824,13 +836,15 @@ No open §1.3 size obligation. Since 07ff9d097 (3b9d021a9, 36efd4772, cb637f88a)
 
 ## src/SyncShark.Engine/IStateStore.cs
 
+Current NoEffect-closure delta: IssueForWork :182-183 exposes the exact work-associated issue read; CloseNoEffectFailure :184-186 exposes the fresh-evidence-fenced exact closure transaction. Both extend the existing work-completion and issue-custody contract beside CompleteWork, rather than creating a separate release owner. Every engine-interface implementation is updated; retained file-size debt is not cleared. Earlier inventories below are historical coordinates.
+
 B-222 disposition: IStateStore file-size - reason recorded; HeldFolderMembers and CloseIdentityAbsent extend the existing folder-removal persistence group, not a new job; split destination REFACTOR-PLAN-2, no row deleted.
 
 Category-change split clearing condition: open: the release feature freeze allows only live-defect fixes. Owner: the structural refactor lane. Clearing condition: that lane's extraction of the unit. Trigger: the first release after that lane lands. The earlier replacement trigger, the first growth of this unit after B-214 (3712ae9c6), is met: the duplicate-folder obligation reads (UnresolvedFolderRemovals, DuplicateRepairPage, CheckDuplicateRepair) and the removal authority on BeginFolderRemoval grow it. The interface split remains open until extraction and a fresh cross-family verdict.
 
 Current file: 436 lines. SettleEchoes :147-148 joins SelectWork :145 and EndWorkPass :150 in the existing work group; the historical interface ranges below describe their cited releases, not the current file.
 
-<!-- spec-source: c0df83272ac0~2deca8d4637f~d8687efce896~7646000b190f~170aace7fec6~a4fb -->
+<!-- spec-source: f5b76a9ed74f~b2a66061fcf3~4dc4d2bfe85d~c58770b1ec42~7cad949f73bb~6626 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

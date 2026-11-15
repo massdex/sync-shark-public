@@ -10,8 +10,13 @@ public static partial class ChangeRunnerChecks
 
     private static async Task NoEffectClosureCasesAsync()
     {
+        var failures = new List<Exception>();
         foreach (var shape in new[] { "plain-fault", "fault-new-evidence", "fault-other-cause" })
-            await LocalSplitAsync(shape, 2, 8);
+        {
+            try { await LocalSplitAsync(shape, 2, 8); }
+            catch (Exception error) { failures.Add(new InvalidOperationException(shape, error)); }
+        }
+        if (failures.Count != 0) throw new AggregateException(failures);
     }
 
     // Two siblings expose partial deletion; quadrupling them separates descendant work from constant work.
@@ -124,6 +129,9 @@ public static partial class ChangeRunnerChecks
                 followUps += fixture.Inner.PendingFolderFollowUps(PairId, (string)result!, -1, int.MaxValue).Count();
             if (method == nameof(IStateStore.RetireFolderRemoval))
                 retirements.Add((FolderRetirementDisposition)args[3]!);
+            if (method == nameof(IStateStore.CloseNoEffectFailure))
+                Console.WriteLine($"CLOSURE {shape}: result={result}, through={args[4]}, watermark={fixture.Inner.ReadWorkWatermark()}, " +
+                    $"issue={fixture.Inner.IssueById(PairId, ((Issue)args[3]!).Id)?.Cause}, reads={documented}, retirements={string.Join(",", retirements)}");
         };
         var faultId = childFault ? members.Single(value => value.LocalPath == oldPath + "/Loose").LocalId : root.LocalId;
         Task<(IdentityLocation Location, bool InScope)?> Identity(string id, bool strict)
@@ -280,11 +288,14 @@ public static partial class ChangeRunnerChecks
                         after?.Invoke(method, args, result);
                         if (method != nameof(IStateStore.RetireFolderRemoval)) return;
                         fixture.Hooks.AfterCall = after;
-                        Notice(new ChangeNotice(Side.Local, ChangeKind.Changed, oldPath + "/Loose", null,
+                        var news = Notice(new ChangeNotice(Side.Local, ChangeKind.Changed, oldPath + "/Loose", null,
                             members.Single(value => value.LocalPath == oldPath + "/Loose").LocalId, null, false, false));
+                        Console.WriteLine($"CLOSURE news {shape}: selection={news}, watermark={fixture.Inner.ReadWorkWatermark()}, reads={documented}");
                     };
                 }
                 await Runner().SyncWorkAsync(default);
+                Console.WriteLine($"CLOSURE final {shape}: effects={effects.Count}, moves={remoteCalls.Moves}, issue={fixture.Inner.IssueById(PairId, issue.Id)?.Cause}, " +
+                    $"watermark={fixture.Inner.ReadWorkWatermark()}, reads={documented}, retirements={string.Join(",", retirements)}");
                 Check.Require(retirements.Contains(FolderRetirementDisposition.NoEffect) && effects.Count == 0 &&
                     remoteCalls.Moves == 0 && fixture.Inner.IssueById(PairId, issue.Id)?.Cause == faultCause,
                     "NoEffect keeps the exact issue after later evidence or an unrelated failure cause: " + shape);
