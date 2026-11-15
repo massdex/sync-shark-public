@@ -8,7 +8,7 @@ internal sealed class UnknownMoveSettlement(ExecutorContext context, ItemSync it
 {
     // A restore re-raises the same responsibility with a different issue id.
     private readonly ConcurrentDictionary<IssueSubject.UnknownMove, Issue> _requested = new();
-    private readonly HashSet<IssueSubject.UnknownMove> _tried = [];
+    private readonly HashSet<long> _tried = [];
 
     internal void Request(Issue holder) => _requested.TryAdd(holder.Subject.Move!, holder);
 
@@ -16,7 +16,7 @@ internal sealed class UnknownMoveSettlement(ExecutorContext context, ItemSync it
     {
         var closed = false;
         foreach (var (move, holder) in _requested)
-            if (_tried.Add(move) && context.Store.IssueById(context.Pair.PairId, holder.Id) is { } current &&
+            if (_tried.Add(holder.Id) && context.Store.IssueById(context.Pair.PairId, holder.Id) is { } current &&
                 IssuePolicy.UnknownMove(current.Kind, current.Subject))
                 closed |= (await SettleAsync(current, true, ct).ConfigureAwait(false)).Resolved;
         _requested.Clear();
