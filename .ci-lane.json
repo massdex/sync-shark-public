@@ -1,0 +1,15 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "issues",
+    "store",
+    "work-lifecycle",
+    "folder-deletes",
+    "repair-held",
+    "failure-episodes"
+  ],
+  "core": [],
+  "ui": []
+}

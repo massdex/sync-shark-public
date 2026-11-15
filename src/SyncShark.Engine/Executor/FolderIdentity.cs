@@ -1,0 +1,26 @@
+namespace Massdex.SyncShark.Engine.Executor;
+
+/// <summary>Owns the one identity check for automatic folder deletes (B-213).</summary>
+internal static class FolderIdentity
+{
+    // A user's choice, an exclusion and Repair's own proof are not rechecked.
+    internal static bool Checks(FolderRemovalAuthority authority) =>
+        authority is FolderRemovalAuthority.Inferred or FolderRemovalAuthority.Vacate or FolderRemovalAuthority.Legacy;
+
+    // An inferred folder delete is a move or a duplicate, never a delete, when the saved identity on the absent side is
+    // in scope anywhere, or the deleting side's identity is bound by another binding. Local absence must be documented;
+    // any other answer throws and holds (RQ-034).
+    // A root this run restored is asked about its original identity, read now: found where the plan keeps the restored
+    // folder it is that folder, and found anywhere else in scope it moved.
+    internal static async Task<bool> KeptElsewhereAsync(ExecutorContext context, SyncedEntry? saved, Side deletingFrom,
+        CancellationToken ct, string? originalId = null, string? keptPath = null)
+    {
+        if (saved is null) return false;
+        if (context.Store.SyncedBindingsById(context.Pair.PairId, deletingFrom, saved.IdOn(deletingFrom))
+            .Any(binding => binding != saved)) return true;
+        var absent = PathNames.Other(deletingFrom);
+        return context.For(absent) is not IIdentitySide identities ||
+            await identities.ReadByIdDocumentedAsync(originalId ?? saved.IdOn(absent), ct) is { InScope: true } found &&
+            !(originalId is not null && PathNames.Same(found.Location.Entry.Path, keptPath));
+    }
+}
