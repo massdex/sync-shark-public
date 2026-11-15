@@ -6,11 +6,14 @@ namespace Massdex.SyncShark.Engine.Executor;
 /// <summary>Hands oversized moves into durable custody and fills each recorded destination without adopting occupants.</summary>
 internal sealed class FolderMoveRunner(ExecutorContext context)
 {
-    private readonly Dictionary<string, FolderMove> _byId = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, List<string>> _children = new(StringComparer.Ordinal);
+    // All-too-many results are bisected into a first and a second half, never a configurable fan-out.
+    private const int Halves = 2;
+    private Dictionary<string, FolderMove> _byId = null!;
+    private Dictionary<string, List<string>> _children = null!;
     private FolderMove _root = null!;
     private Action? _tick;
     private long _moved;
+    internal bool Advanced { get; private set; }
     private string PairId => context.Pair.PairId;
     private IFolderMoveSide Provider => (IFolderMoveSide)context.Dropbox;
 
@@ -61,6 +64,8 @@ internal sealed class FolderMoveRunner(ExecutorContext context)
     {
         _tick = tick;
         _root = rows.Single(row => row.ParentId is null);
+        _byId = new(StringComparer.Ordinal);
+        _children = new(StringComparer.Ordinal);
         foreach (var row in rows)
         {
             _byId.Add(row.SourceId, row);
@@ -86,6 +91,7 @@ internal sealed class FolderMoveRunner(ExecutorContext context)
     private void Write(FolderMove? expected, FolderMove? next)
     {
         context.Store.SetFolderMove(PairId, context.ExpectedGeneration, expected, next);
+        Advanced |= next is null || expected is not null && next.Phase != expected.Phase;
         if (next is null) _byId.Remove(expected!.SourceId);
         else
         {
@@ -264,7 +270,7 @@ internal sealed class FolderMoveRunner(ExecutorContext context)
             result is FolderMemberResult.KnownNoEffect { Cause: TextKey.FailDropboxTooManyFiles }))
         {
             Update(row, row with { Launch = null, JobId = null });
-            var middle = (launch.Count + 1) / 2;
+            var middle = (launch.Count + 1) / Halves;
             var first = await LaunchAsync(row.SourceId, launch.Take(middle).ToArray(), ct);
             var second = await LaunchAsync(row.SourceId, launch.Skip(middle).ToArray(), ct);
             return (first.Progress + second.Progress, first.Armed || second.Armed, first.Refusal ?? second.Refusal);

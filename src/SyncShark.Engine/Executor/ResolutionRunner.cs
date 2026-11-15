@@ -135,9 +135,10 @@ internal sealed class ResolutionRunner(
         var held = new SyncOutcome(ActionKind.None, NoneReason.Held, null, IssueKind.Failure, false, issue.Cause);
         try
         {
-            if (await items.Renames.SettleMoveAsync(issue, () => Close(issue), ct) is not { } settled) return held;
+            var settled = await items.Renames.SettleMoveAsync(issue, () => Close(issue), ct);
+            if (settled.Outcome is not { } outcome) return held;
             Resolved = !settled.Kept;
-            return settled.Outcome;
+            return outcome;
         }
         // Settlement has already decided the restore; an item error is this Retry's outcome, as in an ordinary Retry.
         catch (Exception error) when (ItemFailures.IsItemError(error))

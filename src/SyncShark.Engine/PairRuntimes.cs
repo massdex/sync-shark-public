@@ -6,6 +6,10 @@ public static class PairRuntimes
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, ReplaceTurn> Runtimes = new();
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> FolderJobs = new();
+    private const string FolderMovePrefix = "move:";
+
+    /// <summary>Separates split-root custody claims from provider submission claims.</summary>
+    public static string FolderMoveClaim(string sourceId) => FolderMovePrefix + sourceId;
 
     /// <summary>Claims the one active observation owner of a durable folder submission.</summary>
     public static bool TryClaimFolderJob(string submissionId) => FolderJobs.TryAdd(submissionId, 0);

@@ -682,9 +682,9 @@ Split-folder delta: the common receipts prelude restores state-only custody afte
 
 ## src/SyncShark.Engine/Executor/ResolutionRunner.cs
 
-The ordinary unknown-move observation/settlement composition now lives in ItemRenames.SettleMoveAsync; Retry retains its outcome, close and error bookkeeping. This extraction does not clear the choice-versus-Retry split or ResolveAsync obligations below. Their existing structural-lane owner and clearing conditions remain.
+The ordinary unknown-move observation/settlement composition now lives in ItemRenames.SettleMoveAsync; Retry retains its outcome, close and error bookkeeping. Its caller now reads the nullable Outcome from the extended result and ignores continuation-only Skipped/Advanced facts; no new job. This extraction does not clear the choice-versus-Retry split or ResolveAsync obligations below. Their existing structural-lane owner and clearing conditions remain.
 
-<!-- spec-source: 0184a545fdf1~bc77afb73cbe~1b2a7c7d0e24~1e0644101dfd~b19e78a5d5fa~d322 -->
+<!-- spec-source: 77a16e05b4d8~0b24a3159e38~940956931aed~ad0835e18765~a4cb4ce794e9~9ae9 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -1036,9 +1036,9 @@ No open §1.3 size obligation. The 0.3.82 extraction moved branch enumeration to
 
 ## src/SyncShark.Engine/Executor/ItemRenames.cs
 
-SettleMoveAsync now owns the split claim/admission and atomic relabel before the ordinary by-ID observation/settlement composition extracted from ResolutionRunner. Split fill and cleanup have separate owners; the existing settlement body remains unchanged. It delegates to the existing observation, decision and act owners; Repair still uses observation alone. SettleUnknownMoveAsync is unchanged, so its read/act/restore extraction remains open under the owner and clearing conditions below. This is not a new reviewer verdict.
+SettleMoveAsync now owns the split claim/admission and atomic relabel before the ordinary by-ID observation/settlement composition extracted from ResolutionRunner. Split fill and cleanup have separate owners; the existing settlement body remains unchanged. The composition reports its own durable advancement and claim skip separately, so the walk does not infer either by reloading custody. It uses the ordinary folder-rename subtree scope owner. It delegates to the existing observation, decision and act owners; Repair still uses observation alone. SettleUnknownMoveAsync is unchanged, so its read/act/restore extraction remains open under the owner and clearing conditions below. This is not a new reviewer verdict.
 
-<!-- spec-source: 0d3718fc4c71~fc16cca5a7f3~38bf17a31218~2d170dbfa549~6a5d3e52d44d~85a0 -->
+<!-- spec-source: 9743fd21b243~aa40710f791f~8bc8ea16bd47~8074174efbb2~b1e506d96e2d~7250 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

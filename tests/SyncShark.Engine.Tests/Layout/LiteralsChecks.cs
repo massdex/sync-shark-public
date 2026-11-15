@@ -375,6 +375,8 @@ public static class LiteralsChecks
         {
             ("EngineHost", "private const int SingleHolder = 1; private const int LatestStatusCapacity = 1;"),
             ("Monitor", "private const int QuietSeconds = 30;"),
+            ("PairRuntimes", "private const string FolderMovePrefix = \"move:\";"),
+            ("FolderMoveRunner", "private const int Halves = 2;"),
             ("EngineSettings", "private const int AtomicReplaceDelayMultiplier = 2;"),
             ("SettingsParser", "private const int MaximumAtomicReplaceAttempts = 10; private const int MaximumAtomicReplaceInitialDelayMilliseconds = 60_000;"),
             ("DropboxListing", "private const int SpellingQueued = 1; private const int SpellingReleased = -1;"),
@@ -603,6 +605,8 @@ public static class LiteralsChecks
         ["ReplaceTurn"] = "src/SyncShark.Engine/ReplaceTurn.cs",
         ["EngineHost"] = "src/SyncShark.Engine/Run/EngineHost.cs",
         ["Monitor"] = "src/SyncShark.Engine/Run/Monitor.cs",
+        ["PairRuntimes"] = "src/SyncShark.Engine/PairRuntimes.cs",
+        ["FolderMoveRunner"] = "src/SyncShark.Engine/Executor/FolderMoveRunner.cs",
         ["EngineCliCatalog"] = "src/SyncShark.Core/Engine/EngineCliCatalog.cs",
     };
 
@@ -616,6 +620,8 @@ public static class LiteralsChecks
         ["EngineHost"] = new HashSet<string>(StringComparer.Ordinal)
             { "SingleHolder", "LatestStatusCapacity" },
         ["Monitor"] = new HashSet<string>(StringComparer.Ordinal) { "QuietSeconds" },
+        ["PairRuntimes"] = new HashSet<string>(StringComparer.Ordinal) { "FolderMovePrefix" },
+        ["FolderMoveRunner"] = new HashSet<string>(StringComparer.Ordinal) { "Halves" },
         ["ResourceFailures"] = new HashSet<string>(StringComparer.Ordinal)
             { "ErrorDiskFull", "ErrorHandleDiskFull", "DiskFullHResult", "HandleDiskFullHResult" },
     };

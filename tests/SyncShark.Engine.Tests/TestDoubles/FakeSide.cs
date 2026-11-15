@@ -25,6 +25,9 @@ public sealed class FakeSide : ISide, IFolderMoveSide
 
     /// <summary>Optional synthetic descendant limit; absent for ordinary side checks.</summary>
     public int? MoveEntryLimit { get; set; }
+    public bool AggregateMoveLimit { get; set; }
+    public int MoveBatchCalls { get; private set; }
+    public int ExclusiveCreates { get; private set; }
 
     /// <summary>Whether a folder ensure also creates missing ancestors, the seeding shortcut most checks use. False
     /// behaves like the native Local adapter, which fails rather than recreate a vanished parent (B-140A R1).</summary>
@@ -278,6 +281,7 @@ public sealed class FakeSide : ISide, IFolderMoveSide
 
     public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct)
     {
+        ExclusiveCreates++;
         ct.ThrowIfCancellationRequested();
         ThrowIfFailing(path);
         lock (_gate)
@@ -290,6 +294,19 @@ public sealed class FakeSide : ISide, IFolderMoveSide
     public async Task<FolderSubmitResult> SubmitMoveBatchAsync(IReadOnlyList<(string From, string To)> members,
         RequestAttempt attempt, CancellationToken ct)
     {
+        MoveBatchCalls++;
+        if (AggregateMoveLimit && MoveEntryLimit is { } limit)
+        {
+            lock (_gate)
+            {
+                var affected = members.Sum(member => FindById(member.From) is { } entry
+                    ? 1 + _entries.Values.Count(child => PathNames.IsSelfOrUnder(child.Path, entry.Path) && child.Id != entry.Id) : 0);
+                if (affected > limit)
+                    return new FolderSubmitResult.Terminal(Enumerable.Range(0, members.Count)
+                        .Select(ordinal => (FolderMemberResult)new FolderMemberResult.KnownNoEffect(ordinal,
+                            TextKey.FailDropboxTooManyFiles)).ToArray());
+            }
+        }
         var results = new List<FolderMemberResult>();
         for (var ordinal = 0; ordinal < members.Count; ordinal++)
         {

@@ -19,7 +19,7 @@ internal sealed class FolderMoveContinuation(ExecutorContext context, ItemRename
                 root.Phase == FolderMovePhase.Relabelled ? root.DestinationId! : root.SourceId);
             if (issue is null && root.Phase == FolderMovePhase.Relabelled)
             {
-                var claim = $"move:{root.SourceId}";
+                var claim = PairRuntimes.FolderMoveClaim(root.SourceId);
                 if (!PairRuntimes.TryClaimFolderJob(claim)) continue;
                 try
                 {
@@ -37,17 +37,11 @@ internal sealed class FolderMoveContinuation(ExecutorContext context, ItemRename
             }
             try
             {
-                var closed = false;
-                void Close()
-                {
-                    context.Store.Commit(context.Pair.PairId, StateChange.Empty with { Close = [(issue.Path, [issue.Kind])] });
-                    closed = true;
-                }
+                void Close() => context.Store.Commit(context.Pair.PairId,
+                    StateChange.Empty with { Close = [(issue.Path, [issue.Kind])] });
                 var result = await renames.SettleMoveAsync(issue, Close, ct, Tick);
-                var current = context.Store.FolderMoves(context.Pair.PairId, root.SourceId)
-                    .FirstOrDefault(row => row.ParentId is null);
-                advanced |= closed || current is null || current.Phase != root.Phase;
-                if (result is null || result.Value.Kept) ended.Add(root.SourceId);
+                advanced |= result.Advanced;
+                if (!result.Skipped && (result.Outcome is null || result.Kept)) ended.Add(root.SourceId);
             }
             catch (Exception error) when (ItemFailures.IsItemError(error))
             {

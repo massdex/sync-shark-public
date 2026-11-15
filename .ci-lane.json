@@ -4,13 +4,9 @@
   ],
   "engine": [
     "folder-move",
-    "store",
-    "syncer",
-    "unknown-move-repair",
-    "duplicate-repair",
     "literals",
-    "dependencies",
-    "strings"
+    "unknown-move-repair",
+    "dependencies"
   ],
   "core": [],
   "ui": []
