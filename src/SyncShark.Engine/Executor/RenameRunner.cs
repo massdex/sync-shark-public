@@ -142,7 +142,7 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
         IReadOnlyList<RenameCandidate> current, SyncedEntry synced,
         Entry? localById, IReadOnlyList<(Side Side, string Path, bool Destination)> paths, IReadOnlyList<string> heldKeys,
         Action<IReadOnlyList<RenameCandidate>, Entry?> reacquire,
-        Action<IReadOnlyList<(Side Side, string Path, bool Destination)>> observed,
+        Action<IReadOnlyList<(Side Side, string Path, bool Destination)>> observeFootprint,
         Action<Issue>? retainUnfinished, Guid attempt, ItemRetryCandidate? expected,
         IssueSubject registeredSubject, CancellationToken ct)
     {
@@ -168,7 +168,7 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
                 localById = refreshed.LocalById;
                 if (current.Count == 0) return Renames.None();
                 paths = Paths(current).ToArray();
-                observed(paths);
+                observeFootprint(paths);
                 observations = Observe(current, synced, paths, refreshed.Local, refreshed.Dropbox);
                 var required = LockKeys.ForPaths(context.Pair, LockPaths(paths, localById)).ToArray();
                 if (required.Any(key => !heldKeys.Contains(key, PathLocks.KeyComparer)))
