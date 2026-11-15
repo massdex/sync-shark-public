@@ -7665,7 +7665,7 @@ public static partial class ChangeRunnerChecks
                 "Unknown move automatic real=" + real + " scenario=" + scenario + " children=" + children, error)); }
         }
         foreach (var real in new[] { false, true })
-        foreach (var entrance in new[] { "primary", "old-path", "walked", "local", "older-holder", "older-root" })
+        foreach (var entrance in new[] { "primary", "old-path", "old-path-restart", "walked", "local", "older-holder", "older-root" })
         {
             try { await UnknownMoveEntranceAsync(real, entrance); }
             catch (Exception error) { failures.Add(new InvalidOperationException(
@@ -8061,6 +8061,8 @@ public static partial class ChangeRunnerChecks
     private static async Task UnknownMoveEntranceAsync(bool real, string entrance)
     {
         using var fixture = new Fixture(realStore: real);
+        var oldPath = entrance is "old-path" or "old-path-restart";
+        SyncedEntry? outside = null;
         var local = LocalEntry("Source/Child", LocalId);
         var remote = RemoteEntry(local.Path, DropboxId);
         var saved = SyncedEntries.From(local, remote);
@@ -8081,13 +8083,14 @@ public static partial class ChangeRunnerChecks
             fixture.Hooks.RepairDone = false;
             selection = Selected(fixture, parentLocal.Path, parentLocal);
         }
-        else if (entrance == "old-path")
+        else if (oldPath)
         {
             var outsideLocal = LocalEntry("Outside", "outside-local");
             var outsideRemote = RemoteEntry("Outside", "outside-remote");
             fixture.Local.Seed(outsideLocal, [1]);
             fixture.Dropbox.Seed(outsideRemote, [1]);
-            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(outsideLocal, outsideRemote)] });
+            outside = SyncedEntries.From(outsideLocal, outsideRemote);
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [outside] });
             selection = SeedRemote(fixture, outsideRemote, new ChangeNotice(Side.Dropbox, ChangeKind.Changed,
                 outsideRemote.Path, remote.Path, outsideRemote.Id, outsideRemote, false, false));
         }
@@ -8163,6 +8166,31 @@ public static partial class ChangeRunnerChecks
         }
         fixture.Hooks.BeforeCallWith = null;
         fixture.Hooks.AfterCall = null;
+        if (oldPath)
+        {
+            var parkedSelection = PendingAt(fixture, Side.Dropbox, remote.Path).Single();
+            var retained = fixture.Inner.ReadWork(parkedSelection).Single();
+            Check.Require(retained.Notice is { Side: Side.Dropbox, OldPath: null, Id: null, Observed: null } &&
+                retained.Notice.Path == remote.Path && reads.Count(path => path == outside!.DropboxPath) == 1 &&
+                PendingAt(fixture, Side.Dropbox, outside!.DropboxPath).Count == 0,
+                "Old-path custody retains only the unfinished branch after observing Outside once.");
+            if (entrance == "old-path-restart")
+            {
+                fixture.RestartStore();
+                var reopened = PendingAt(fixture, Side.Dropbox, remote.Path).Single();
+                Check.Require(fixture.Inner.ReadWork(reopened).Single() == retained && StoredWorkCount(fixture) == 1 &&
+                    fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true &&
+                    PendingAt(fixture, Side.Dropbox, outside!.DropboxPath).Count == 0,
+                    "Restart between Park and wake preserves exactly the old-path receipt without replaying Outside.");
+            }
+        }
+        if (entrance == "walked")
+        {
+            var retained = fixture.Inner.ReadWork(PendingAt(fixture, Side.Local, movedLocal.Path).Single()).Single();
+            Check.Require(retained.Notice is { Side: Side.Local, OldPath: null } && retained.Notice.Path == movedLocal.Path &&
+                retained.Notice.Id == local.Id && retained.Notice.Observed == movedLocal && retained.Before is null,
+                "A walked child keeps its original-null branch shape rather than retaining its parent notice.");
+        }
         settle = true;
         reads.Clear();
         var resolution = await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events)
@@ -8200,13 +8228,17 @@ public static partial class ChangeRunnerChecks
             }
         };
         await UntilDrainedAsync(LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events), default);
-        var residualPath = entrance == "old-path" ? remote.Path : movedRemote.Path;
+        var residualPath = oldPath ? remote.Path : movedRemote.Path;
         var residualReads = entrance == "primary" ? 0 : 1;
         Check.Require(reads.Count == residualReads && reads.All(path => path == residualPath) &&
             StoredWorkCount(fixture) == (older is null ? 0 : 1) && postParks == (older is null ? 0 : 1) && byId == 2 &&
             events.All(item => item.Kind != RunEventKind.Failed),
             "Each non-echo entrance gets one post-close observation and never repeats; entrance=" + entrance +
             " reads=" + string.Join(",", reads));
+        if (outside is not null) Check.Require(fixture.Inner.SyncedById(PairId, Side.Dropbox, outside.DropboxId) == outside &&
+            fixture.Local.FindById(outside.LocalId) == LocalEntry(outside.LocalPath, outside.LocalId) &&
+            fixture.Dropbox.FindById(outside.DropboxId) == RemoteEntry(outside.DropboxPath, outside.DropboxId),
+            "Finishing the old path neither loses nor changes the completed Outside item.");
         if (older is not null) Check.Require(fixture.Inner.IssueById(PairId, older.Id)?.Matches(older) == true,
             "The exact move close leaves the older independent holder intact.");
     }
