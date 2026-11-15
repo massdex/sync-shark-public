@@ -3,7 +3,13 @@
     "engine-tests"
   ],
   "engine": [
-    "engine-host"
+    "engine-host",
+    "work-lifecycle",
+    "temporary-retry-time",
+    "serial-lane-lifetime",
+    "gone-identities",
+    "syncer",
+    "store"
   ],
   "core": [],
   "ui": []
