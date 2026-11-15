@@ -401,8 +401,10 @@ public static class RepairChecks
             using (var first = rig.Log(folder, "exit-1"))
             {
                 if (exit == "configured" && !edited)
-                    await rig.Host.DispatchSessionAsync(rig.Pair.PairId, () => first, async (session, token) =>
+                    await rig.Host.DispatchAsync(rig.Pair.PairId, async (registration, pair, generation, token) =>
                     {
+                        var session = PairSession.Open(rig.Store, pair, rig.Host.Settings, rig.Http, false, first,
+                            rig.Instance.StateAuthority, rig.Host, registration, generation, TimeProvider.System);
                         var issue = rig.Store.Issues(rig.Pair.PairId).Single(item => item.Subject.Move == move);
                         var source = rig.Store.ReadSource(rig.Pair.PairId, Side.Dropbox)!.Value;
                         var notice = new ChangeNotice(Side.Dropbox, ChangeKind.Changed, "Source", null,
