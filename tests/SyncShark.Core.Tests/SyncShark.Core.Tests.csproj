@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\SyncShark.UiFixture\LegacyHistoryFixture.cs" Link="LegacyHistoryFixture.cs" />
+    <!-- Compile the installer-only read adapter without running any installer or journal mutation. -->
+    <Compile Include="..\..\tools\SyncShark.DiscoverySetupNative.cs" Link="DiscoverySetupNative.cs" />
+    <!-- Keep the prepared M7 test source, but never enable unreviewed destructive history code. -->
+    <Compile Remove="AuthorityHistoryRetentionChecks.cs" />
+    <!-- Keep the prepared activity-context retention PLAN proof for the same reason: the retention planner it
+         exercises is itself excluded from the product build, so this source compiles only when M7 is separately
+         activated. It calls PlanHistoryRetentionAsync only and never ExpireHistoryAsync. -->
+    <Compile Remove="ActivityContextRetentionChecks.cs" />
+    <ProjectReference Include="..\..\src\SyncShark.Core\SyncShark.Core.csproj" />
+  </ItemGroup>
+</Project>
+
