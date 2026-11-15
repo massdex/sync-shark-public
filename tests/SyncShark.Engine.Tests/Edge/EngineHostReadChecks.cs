@@ -42,6 +42,8 @@ public static class EngineHostReadChecks
             using var productRoot = OverrideProductRoot(root);
             Massdex.SyncShark.Engine.Tests.Run.EngineHostChecks.StepAsync(nameof(EngineHostReadChecks), () => RunAsync(root))
                 .GetAwaiter().GetResult();
+            Massdex.SyncShark.Engine.Tests.Run.EngineHostChecks.StepAsync(nameof(LiveRetryNoticeAsync),
+                () => LiveRetryNoticeAsync(Path.Combine(root, "live-retry"))).GetAwaiter().GetResult();
             Massdex.SyncShark.Engine.Tests.Run.EngineHostChecks.PrintSlowestStep();
         }
         finally
@@ -247,6 +249,43 @@ public static class EngineHostReadChecks
             issues.Single(issue => issue.Path == InfoPath).Id,
             issues.Single(issue => issue.Path == FailPath).Id,
             store.Issues("pair-b").Single(issue => issue.Path == InfoBPath).Id);
+    }
+
+    private static async Task LiveRetryNoticeAsync(string root)
+    {
+        var armed = false;
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var clock = new FakeTimeProvider();
+        await using var rig = await Massdex.SyncShark.Engine.Tests.Run.RepairChecks.ComposeRigAsync(root,
+            time: clock, mode: EngineHost.Mode.Persistent,
+            openLog: id => RunLog.Open(root, id, Guid.NewGuid().ToString("N"), _ => { }, Settings.LogBufferCharacters),
+            decorate: store => new HookStore(store)
+            {
+                OnFolderJobProgress = () => { if (armed) finished.TrySetResult(); }
+            }).ConfigureAwait(false);
+        using (var baseline = rig.Log(root, "baseline"))
+            Check.Require((await rig.RunAsync(baseline, default).ConfigureAwait(false)).Completed,
+                "the live Retry route begins after baseline Repair");
+        rig.Host.LiveWorkFailed(PairId, new InsufficientSpaceException(new IOException("synthetic")), null);
+        var runtime = new EngineCliRuntime(rig.Host.Operations);
+        var listed = await ReadAsync(runtime, ["--cli", "engine", "issues", "--pair", PairId,
+            "--kind", "failure", "--json"]).ConfigureAwait(false);
+        var notice = listed.GetProperty("issues").EnumerateArray().Single();
+        Check.Require(notice.GetProperty("cause").GetString() == nameof(TextKey.RequiredRepairRetryNoSpace) &&
+            EngineOperations.ResolutionChoices(rig.Store.Issues(PairId).Single()).Contains(ResolutionChoice.Retry),
+            "the CLI lists the out-of-space notice with Retry");
+        var resolved = await ReadAsync(runtime, ["--cli", "engine", "resolve", "--pair", PairId, "--issue",
+            notice.GetProperty("id").GetInt64().ToString(CultureInfo.InvariantCulture), "--reviewed",
+            notice.GetProperty("reviewed").GetString()!, "--choice", "retry", "--yes", "--json"]).ConfigureAwait(false);
+        Check.Require(!resolved.GetProperty("resolved").GetBoolean() && rig.Store.ReadPrerequisiteRetry(PairId) is not null,
+            "Retry hands work back without prematurely resolving the notice");
+        armed = true;
+        await rig.Host.StartAsync(default).ConfigureAwait(false);
+        await finished.Task.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+        var after = await ReadAsync(runtime, ["--cli", "engine", "issues", "--pair", PairId,
+            "--kind", "failure", "--json"]).ConfigureAwait(false);
+        Check.Require(after.GetProperty("issues").GetArrayLength() == 0 && rig.Store.ReadPrerequisiteRetry(PairId) is null,
+            "the handed opportunity closes its retry row and removes the notice from the CLI");
     }
 
     private static void Raise(IStateStore store, string pairId, IssueKind kind, TextKey cause, string path) =>

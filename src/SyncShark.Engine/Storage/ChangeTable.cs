@@ -539,7 +539,7 @@ internal sealed partial class ChangeTable
         if (pass.Attempted is { } attempted)
         {
             var after = first.WorkId - StateSchema.OneRow;
-            while (Rows(transaction, StateSchema.PeerPathPage, Evidence(pair.Row, pair.Generation, Side.Local,
+            while (after < through && Rows(transaction, StateSchema.PeerPathPage, Evidence(pair.Row, pair.Generation, Side.Local,
                        first.SourceEpoch, first.Domain, (StateSchema.ParamJoinKey, first.Key), (StateSchema.ParamAfter, after),
                        (StateSchema.ParamThrough, through), (StateSchema.ParamTake, StateSchema.OneRow))).FirstOrDefault()
                    is { } row)
@@ -1442,8 +1442,6 @@ internal sealed partial class ChangeTable
                     (StateSchema.ParamEpoch, selection.SourceEpoch)).FirstOrDefault() is not { } later ||
                 later.Side != selection.Side || later.Domain != selection.Domain || later.Key != selection.Key ||
                 later.Identity != selection.Identity ||
-                Read(transaction, StateSchema.WorkHasChildren, static reader => StateEncoding.ReadBool(reader, StateSchema.FirstColumn),
-                    (StateSchema.ParamParent, anchor.WorkId)).First() ||
                 TransferBound(transaction, pair, anchor, pass, laterWorkId, selection.AnchorWorkId) != laterWorkId) return false;
             var pathOnly = selection.Identity is null;
             (ChangeNotice? Notice, string? Before, long Acquisition) debt = (null, null, BeforeFirstWork);

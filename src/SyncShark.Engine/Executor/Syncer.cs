@@ -104,6 +104,7 @@ public sealed class Syncer
         try
         {
             var (waiting, yielded) = await RunLanesAsync(floor, Progress, ct).ConfigureAwait(false);
+            if (ct.IsCancellationRequested) return (false, false);
             // The follow-ups always run; a waiting repair revisits only when one of them completed an operation.
             try
             {
@@ -230,7 +231,7 @@ public sealed class Syncer
                             _context.Events(RunEvent.Failed(joined));
                     });
                 // The join may substitute a lane token; a requested opportunity stop still ends normally at its owner.
-                if (failure is OperationCanceledException && ct.IsCancellationRequested) ct.ThrowIfCancellationRequested();
+                if (failure is OperationCanceledException && ct.IsCancellationRequested) return (waiting, true);
                 if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             }
             finally { retired = _context.Store.EndWorkPass(pairId); }

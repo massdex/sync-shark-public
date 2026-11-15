@@ -170,6 +170,7 @@ internal sealed class AutoSync
                 else
                 {
                     var (revisit, drained) = await session.Syncer.SyncWorkAsync(token).ConfigureAwait(false);
+                    if (token.IsCancellationRequested) return false;
                     // Only a drain under the still-admitted generation clears the exact wait; a yield leaves it due.
                     if (drained && admitted is { } due && _host.TryHoldGeneration(session.Registration))
                         _store.CompleteItemRetry(pairId, generation, due);

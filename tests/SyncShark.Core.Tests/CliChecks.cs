@@ -723,6 +723,7 @@ internal static partial class CliChecks
                 "dropbox-wins", "--yes"],
             ["engine", "resolve", "--pair", "p", "--issue", "1", "--choice", "sync-normally", "--yes"],
             ["engine", "issues", "--pair", "p", "--kind", "drive-change"],
+            ["engine", "issues", "--pair", "p", "--kind", "failure", "--json"],
             ["engine", "issues", "--pair", "p", "--ignored"],
             ["engine", "resolve", "--pair", "p", "--issue", "1", "--choice", "ignore", "--yes"],
             ["engine", "resolve", "--pair", "p", "--issue", "1", "--choice", "unignore", "--yes"]

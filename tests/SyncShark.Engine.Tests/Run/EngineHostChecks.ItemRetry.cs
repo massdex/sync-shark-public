@@ -282,6 +282,12 @@ public static partial class EngineHostChecks
         await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, unexpected: false)).ConfigureAwait(false);
         await StepAsync(nameof(ContendedFailureAccountingAsync), () => ContendedFailureAccountingAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(HandedStaleRearmsAsync), () => HandedStaleRearmsAsync(root)).ConfigureAwait(false);
+        foreach (var mode in new[] { "unexpected", "pause", "mixed", "configuration", "stop" })
+            await StepAsync(nameof(OpportunityCancellationClassificationAsync) + mode,
+                () => OpportunityCancellationClassificationAsync(root, mode)).ConfigureAwait(false);
+        foreach (var early in new[] { false, true })
+            await StepAsync(nameof(LiveFailureLogOwnershipAsync) + early,
+                () => LiveFailureLogOwnershipAsync(root, early)).ConfigureAwait(false);
         await StepAsync(nameof(PausedDueDispatchKeepsRowAsync), () => PausedDueDispatchKeepsRowAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(RepairWithoutTurnReleasesRowAsync), () => RepairWithoutTurnReleasesRowAsync(root)).ConfigureAwait(false);
         // N-161 before C2-C5: their settles after a Repair turn also cross its window, so N-161 owns that protection.
@@ -547,6 +553,103 @@ public static partial class EngineHostChecks
             rig.Store.Issues(rig.PairId).Count(issue => issue.Path.Length == 0) == 1 &&
             rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
             "one transaction advances the now-absent row without a host-side retry");
+    }
+
+    private static async Task LiveFailureLogOwnershipAsync(string root, bool early)
+    {
+        await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "live-log-" + early), turn: false)
+            .ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
+        await rig.SettledIdleAsync("before log ownership failure").ConfigureAwait(false);
+        var calls = rig.LogCalls;
+        var files = rig.Logs.Count;
+        rig.NullLog = !early;
+        Action fail = () =>
+        {
+            rig.BeforeSelect = rig.BeforeRefusal = null;
+            throw new InvalidOperationException("synthetic");
+        };
+        if (early) rig.BeforeRefusal = fail;
+        else rig.BeforeSelect = fail;
+        rig.Host.WakeAfterOperation(rig.PairId);
+        await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(rig.PairId)?.Attempts == 1 && rig.AutoSyncIdle(),
+            "the unlogged failure is durably accounted").ConfigureAwait(false);
+        Check.Require(rig.Store.Issues(rig.PairId).Count == 1 && rig.Logs.Count == files &&
+            rig.LogCalls == calls + (early ? 0 : 1) && rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
+            "early failure opens no log; a deliberate null factory is called once with no fallback log");
+        rig.NullLog = false;
+        var dispatched = rig.Dispatches;
+        rig.Host.WakeAfterOperation(rig.PairId);
+        await UntilAsync(() => rig.Dispatches > dispatched && rig.AutoSyncIdle(),
+            "a later wake still dispatches after an unlogged failure").ConfigureAwait(false);
+    }
+
+    private static async Task OpportunityCancellationClassificationAsync(string root, string mode)
+    {
+        await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "opportunity-cancel-" + mode), turn: false)
+            .ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
+        await rig.SettledIdleAsync("before cancellation classification").ConfigureAwait(false);
+        var firstLog = rig.Logs.Count;
+        var entered = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.BeforeSelect = () =>
+        {
+            rig.BeforeSelect = null;
+            const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+            CancellationToken token;
+            lock (typeof(EngineHost).GetField("_gate", Private)!.GetValue(rig.Host)!)
+            {
+                var registrations = (System.Collections.IDictionary)typeof(EngineHost)
+                    .GetField("_registrations", Private)!.GetValue(rig.Host)!;
+                var dispatch = registrations.Values.Cast<object>().Single(value =>
+                    (EngineHost.RegistrationKind)value.GetType().GetProperty("Kind", Private)!.GetValue(value)! ==
+                    EngineHost.RegistrationKind.Dispatch);
+                token = ((CancellationTokenSource)dispatch.GetType().GetProperty("Cancellation", Private)!
+                    .GetValue(dispatch)!).Token;
+            }
+            entered.TrySetResult(token);
+            rig.Hold(release.Task, "the cancellation hook is released");
+            if (mode == "unexpected") throw new OperationCanceledException();
+            if (mode == "configuration") throw new OperationCanceledException(new CancellationToken(true));
+            throw new AggregateException(new OperationCanceledException(), mode == "mixed"
+                ? new InvalidOperationException("synthetic") : new OperationCanceledException());
+        };
+        rig.Host.WakeAfterOperation(rig.PairId);
+        var opportunity = await entered.Task.WaitAsync(HookBound).ConfigureAwait(false);
+        Task ending = Task.CompletedTask;
+        try
+        {
+            ending = mode switch
+            {
+                "pause" or "mixed" => rig.Host.PauseAsync(rig.PairId, default),
+                "configuration" => rig.Host.ChangeGenerationAsync(rig.Rig.Pair,
+                    (_, _, _, _) => Task.FromResult(true), default),
+                "stop" => rig.Host.DisposeAsync().AsTask(),
+                _ => Task.CompletedTask
+            };
+            if (mode != "unexpected") await UntilAsync(() => opportunity.IsCancellationRequested,
+                "the opportunity's linked token observes its own drain").ConfigureAwait(false);
+        }
+        finally { release.TrySetResult(); }
+        await ending.WaitAsync(HookBound).ConfigureAwait(false);
+        if (mode != "stop")
+        {
+            var failed = mode is "unexpected" or "mixed";
+            await UntilAsync(() => rig.AutoSyncIdle() && (!failed || rig.Store.ReadPrerequisiteRetry(rig.PairId) is not null),
+                "the cancelled opportunity completes its accounting").ConfigureAwait(false);
+            Check.Require((rig.Store.ReadPrerequisiteRetry(rig.PairId) is not null) == failed &&
+                (rig.Store.Issues(rig.PairId).Count != 0) == failed &&
+                rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
+                "only unexpected or mixed failures create pair retry debt");
+        }
+        string[] logs;
+        lock (rig.Logs) logs = rig.Logs.Skip(firstLog).ToArray();
+        var failedLines = logs.SelectMany(path => System.IO.File.ReadAllLines(path))
+            .Count(line => line.Contains("Failed\t", StringComparison.Ordinal));
+        Check.Require(mode is "unexpected" or "mixed" ? failedLines > 0 : failedLines == 0,
+            "requested cancellation is classified before failure logging");
+        if (mode is "pause" or "mixed") await rig.Host.ResumeAsync(rig.PairId, default).ConfigureAwait(false);
     }
 
     private static async Task HandedStaleRearmsAsync(string root)
@@ -1436,6 +1539,8 @@ public static partial class EngineHostChecks
         internal Action? AfterDispatch;
         // Every run log the host opened, in order.
         internal readonly List<string> Logs = [];
+        internal bool NullLog;
+        internal int LogCalls;
 
         internal bool AutoSyncIdle() => EngineHostChecks.AutoSyncIdle(Host, PairId);
 
@@ -1508,6 +1613,8 @@ public static partial class EngineHostChecks
             rig.Rig = await RepairChecks.ComposeRigAsync(folder, time: clock, monitor: rig.Monitor,
                 openLog: id =>
                 {
+                    Interlocked.Increment(ref rig.LogCalls);
+                    if (rig.NullLog) return null;
                     var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, Settings.LogBufferCharacters);
                     lock (rig.Logs) rig.Logs.Add(log.Path);
                     return log;

@@ -3,7 +3,7 @@
     "engine-tests"
   ],
   "engine": [
-    "store"
+    "engine-host"
   ],
   "core": [],
   "ui": []

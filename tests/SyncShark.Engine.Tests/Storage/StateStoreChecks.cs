@@ -2084,7 +2084,7 @@ public static class StateStoreChecks
             });
         Case("retry cause validation", (store, _, generation) =>
         {
-            var invalid = Raise(TextKey.FailChanged, string.Empty, new IssueSubject([], null));
+            var invalid = Raise(TextKey.FailLocalNoSpace, string.Empty, new IssueSubject([], null));
             Refuses<ArgumentException>(() => store.RecordPrerequisiteFailure(PairId, generation, _ => first, invalid));
             Refuses<ArgumentException>(() => store.RecordPrerequisitePageWait(PairId, generation, new object(), invalid));
             Check.Require(store.ReadPrerequisiteRetry(PairId) is null && store.Issues(PairId).Count == 0,
