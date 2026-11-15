@@ -44,7 +44,7 @@ public static partial class ChangeRunnerChecks
             VacateSupersedeNotWholeAsync, VacateSupersedeGapAsync, VacateSupersedeCostAsync, VacateForeignAsync,
             VacateGoneAsync, VacateGonePriorAsync, ReplaceDeferredJobAsync, RepairJobBesideLanesAsync, RepairJobsBesideEachOtherAsync,
             RepairJobsWithinRoomAsync, RepairOwnLookupCostAsync, SplitCleanupPreparationAsync, SplitCleanupMountReuseAsync,
-            SplitCleanupCostAsync
+            SplitCleanupMixedMembersAsync, SplitCleanupCostAsync
         })
         {
             try { await witness(); }

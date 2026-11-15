@@ -68,6 +68,65 @@ public static partial class ChangeRunnerChecks
         }
     }
 
+    private static async Task SplitCleanupMixedMembersAsync()
+    {
+        using var fixture = new Fixture(realStore: true);
+        var (context, row) = SplitCleanupContext(fixture);
+        var root = row.Dropbox!;
+        var branches = Enumerable.Range(0, 3).Select(index =>
+            FolderEntry(PathNames.Child(root.Path, "Branch" + index), "branch-" + index)).ToArray();
+        var survivor = FolderEntry(PathNames.Child(root.Path, "Survivor"), "survivor-id");
+        foreach (var child in branches.Append(survivor)) fixture.Dropbox.Seed(child, null);
+        fixture.Inner.Commit(PairId, StateChange.Empty with
+        {
+            Record = branches.Select(child => SyncedEntries.From(child with { Id = "local-" + child.Id }, child)).ToArray()
+        });
+        string existing;
+        using (var plan = await new FolderPlanBuilder(context).BuildAsync(row, Side.Dropbox,
+            new HashSet<string>(), true, default))
+            existing = fixture.Inner.BeginFolderRemoval(PairId, plan, FolderRemovalAuthority.Inferred,
+                fixture.Settings.StoragePageSize, default);
+        var effects = fixture.Inner.ReadyFolderEffects(PairId, existing, -1, branches.Length).ToArray();
+        Check.Require(effects.Length == branches.Length, "a survivor leaves three independently selected branches");
+        fixture.Inner.ArmFolderSubmission(PairId, [effects[^1]]);
+        var members = Recovery.Members(fixture.Inner, PairId, existing, fixture.Settings.StoragePageSize).ToArray();
+        Check.Require(members.Count(member => member.EffectState == FolderRemovalItem.EffectStatus.Ready) == 2 &&
+            members.Count(member => member.EffectState == FolderRemovalItem.EffectStatus.Armed) == 1,
+            "two proven-unsent branches precede one possibly-sent branch");
+        // Make a successor's empty-plan proof possible, so only the mixed custody prevents supersession.
+        foreach (var child in branches.Append(survivor)) await fixture.Dropbox.DeleteAsync(child, null, default);
+        fixture.Inner.Commit(PairId, StateChange.Empty with
+        {
+            ForgetSelf = branches.Select(child => (Side.Dropbox, PathNames.DropboxKey(child.Path))).ToArray()
+        });
+        var before = fixture.Inner.FolderRemoval(PairId, existing);
+        var folders = SyncJobs.Create(context, new SyncPorts(new RecoveryBoundary(),
+            RefusingExecutionBoundary.Instance, RefusingExecutionBoundary.Instance, 0)).Items.Folders;
+        var begun = fixture.Hooks.Count(nameof(IStateStore.BeginFolderRemoval));
+        var retired = fixture.Hooks.Count(nameof(IStateStore.RetireFolderRemoval));
+        var result = await folders.PrepareCheckedAsync(new FolderRemovalRequest(row, Side.Dropbox, FolderRemovalRoute.SplitCleanup)
+        {
+            ExpectedRootId = root.Id, Live = true, Accepts = FolderRemovalRequest.EmptyPlan
+        }, default);
+        Check.Require(result.Check == FolderRemovalCheck.Passed && result.OperationId == existing &&
+            fixture.Inner.FolderRemoval(PairId, existing) == before &&
+            Recovery.Members(fixture.Inner, PairId, existing, fixture.Settings.StoragePageSize).SequenceEqual(members) &&
+            fixture.Hooks.Count(nameof(IStateStore.BeginFolderRemoval)) == begun &&
+            fixture.Hooks.Count(nameof(IStateStore.RetireFolderRemoval)) == retired && fixture.Inner.Issues(PairId).Count == 0,
+            "one possibly-sent member preserves the whole mixed operation without retirement, successor or notice");
+        var disposition = FolderRetirementDisposition.NoEffect;
+        var walk = await SqlStatementsAsync(fixture, () =>
+        {
+            disposition = FolderRetirement.For(Recovery.Members(fixture.Inner, PairId, existing,
+                fixture.Settings.StoragePageSize));
+            return Task.CompletedTask;
+        });
+        var throughArmed = members.TakeWhile(member => member.EffectState != FolderRemovalItem.EffectStatus.Armed).Count() + 1;
+        Check.Require(disposition == FolderRetirementDisposition.Acknowledged &&
+            walk.Total == 2 * ((throughArmed + fixture.Settings.StoragePageSize - 1) / fixture.Settings.StoragePageSize),
+            "the mixed-member walk stops on the page containing its first possibly-sent member");
+    }
+
     private static async Task SplitCleanupMountReuseAsync()
     {
         using var fixture = new Fixture(realStore: true);
