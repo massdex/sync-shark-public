@@ -1,0 +1,13 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "syncer",
+    "unknown-move-live",
+    "local-split",
+    "repair"
+  ],
+  "core": [],
+  "ui": []
+}
