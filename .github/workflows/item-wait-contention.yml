@@ -1,0 +1,84 @@
+name: Item wait contention (G7)
+
+# G7 (B-161): baseline and candidate builds of the item-wait-contention check, interleaved on one runner. The
+# candidate is the pushed or dispatched branch; the baseline is a second exported branch whose src/ alone is swapped in.
+#
+# Push route (workflow_dispatch only registers from the default branch, which stays untouched): push the baseline
+# export as g7/<name>-base FIRST, then the candidate export as g7/<name>-cand. A -cand push runs with baseline
+# g7/<name>-base and the default rounds and repetitions; a -base push runs nothing. Dispatch, where registered,
+# names its baseline branch explicitly.
+on:
+  push:
+    branches: ['g7/**']
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: 'Exported branch whose src/ is the baseline'
+        required: true
+      rounds:
+        description: 'ABBA rounds (each runs both builds once)'
+        default: '2'
+      repetitions:
+        description: 'Repetitions of both arms in each process'
+        default: '1'
+
+concurrency:
+  group: item-wait-contention-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+
+jobs:
+  contention:
+    if: ${{ github.event_name == 'workflow_dispatch' || endsWith(github.ref_name, '-cand') }}
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Fetch the baseline branch
+        shell: pwsh
+        env:
+          BASELINE: ${{ inputs.baseline }}
+          CANDIDATE: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # A push carries no inputs: g7/<name>-cand takes its baseline from g7/<name>-base.
+          if ('${{ github.event_name }}' -ceq 'push') { $env:BASELINE = $env:CANDIDATE -creplace '-cand$', '-base' }
+          if ($env:BASELINE -cnotmatch '^[A-Za-z0-9._/-]+$') { throw "Invalid baseline branch '$env:BASELINE'." }
+          git fetch --no-tags --depth 1 origin "refs/heads/$($env:BASELINE):refs/g7/baseline"
+          if ($LASTEXITCODE -ne 0) { throw "Fetching $env:BASELINE failed." }
+
+      - name: Run G7
+        shell: pwsh
+        env:
+          ROUNDS: ${{ inputs.rounds || '2' }}
+          REPETITIONS: ${{ inputs.repetitions || '1' }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Short C: roots, as the engine groups use: the store and journal checks need SQLite path headroom.
+          $scratch = Join-Path $env:SystemDrive 'ss'
+          New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+          $env:TEMP = $scratch
+          $env:TMP = $scratch
+          $env:SYNCSHARK_TEST_ROOT = $scratch
+          ./tools/ci/Run-ItemWaitContention.ps1 -BaselineSource refs/g7/baseline -Rounds ([int]$env:ROUNDS) `
+            -Repetitions ([int]$env:REPETITIONS) -Out (Join-Path $env:RUNNER_TEMP 'g7')
+
+      - name: Retain G7 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: item-wait-contention
+          path: |
+            ${{ runner.temp }}/g7/*.txt
+            ${{ runner.temp }}/g7/*.log
