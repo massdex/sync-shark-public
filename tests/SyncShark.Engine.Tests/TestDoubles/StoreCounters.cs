@@ -830,6 +830,18 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         inner.RetireFolderRemoval(pairId, operationId, expectedGeneration, disposition, issueOnlyAcknowledgement);
     }
 
+    public Issue? IssueForWork(WorkSelection selection)
+    {
+        Command();
+        return inner.IssueForWork(selection);
+    }
+
+    public bool CloseNoEffectFailure(WorkSelection selection, LiveCoverage coverage, string operationId, Issue expected, long through)
+    {
+        Command();
+        return inner.CloseNoEffectFailure(selection, coverage, operationId, expected, through);
+    }
+
     public string ArmFolderSubmission(string pairId, IReadOnlyList<FolderRemovalEffect> effects)
     {
         Command();

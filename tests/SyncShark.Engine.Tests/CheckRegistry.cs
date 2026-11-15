@@ -75,6 +75,7 @@ public static class CheckRegistry
         ["completion-containment-cost"] = [Executor.ChangeRunnerChecks.CompletionFailureCost],
         ["containment-move-out"] = [Executor.ChangeRunnerChecks.RunMoveOutSafety],
         ["local-split"] = [Executor.ChangeRunnerChecks.RunLocalSplit],
+        ["no-effect-closure"] = [Executor.ChangeRunnerChecks.RunNoEffectClosure],
         // Its own key: the syncer group aborts before this case on an inherited red (CI-B153-1).
         ["leftover-upload"] = [Executor.ChangeRunnerChecks.RunLeftoverUpload],
         // B-181: a refused new folder's retry under a '/' Dropbox root; its own key, so a red control fails here first.

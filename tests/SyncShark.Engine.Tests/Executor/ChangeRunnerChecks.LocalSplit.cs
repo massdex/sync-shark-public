@@ -6,6 +6,13 @@ namespace Massdex.SyncShark.Engine.Tests.Executor;
 public static partial class ChangeRunnerChecks
 {
     public static void RunLocalSplit() => LocalSplitCasesAsync().GetAwaiter().GetResult();
+    public static void RunNoEffectClosure() => NoEffectClosureCasesAsync().GetAwaiter().GetResult();
+
+    private static async Task NoEffectClosureCasesAsync()
+    {
+        foreach (var shape in new[] { "plain-fault", "fault-new-evidence", "fault-other-cause" })
+            await LocalSplitAsync(shape, 2, 8);
+    }
 
     // Two siblings expose partial deletion; quadrupling them separates descendant work from constant work.
     // Doubling unrelated bindings independently detects pair-wide work.
@@ -70,7 +77,8 @@ public static partial class ChangeRunnerChecks
         var root = saved.Single(value => value.LocalPath == oldPath);
         var members = saved.Where(value => value.LocalPath.StartsWith(oldPath + "/", StringComparison.Ordinal)).ToArray();
         var moved = new List<(Entry Entry, string OldPath)>();
-        var pureDelete = shape is "deleted" or "remote-delete" or "root-fault" or "send-fault";
+        var childFault = shape.StartsWith("fault", StringComparison.Ordinal);
+        var pureDelete = shape is "deleted" or "remote-delete" or "root-fault" or "send-fault" or "plain-fault";
         if (!pureDelete)
         {
             await fixture.Local.EnsureFolderAsync(newPath, default);
@@ -102,7 +110,8 @@ public static partial class ChangeRunnerChecks
         var documented = 0;
         var remoteIdentity = 0;
         var rootReads = 0;
-        var fault = shape is "fault" or "root-fault" or "send-fault";
+        var fault = childFault || shape is "root-fault" or "send-fault" or "plain-fault";
+        var faultCause = shape == "fault-other-cause" ? TextKey.FailChanged : TextKey.ReadLocalFailed;
         var submissions = 0;
         var effects = new List<FolderRemovalEffect>();
         var batches = 0;
@@ -116,7 +125,7 @@ public static partial class ChangeRunnerChecks
             if (method == nameof(IStateStore.RetireFolderRemoval))
                 retirements.Add((FolderRetirementDisposition)args[3]!);
         };
-        var faultId = shape == "fault" ? members.Single(value => value.LocalPath == oldPath + "/Loose").LocalId : root.LocalId;
+        var faultId = childFault ? members.Single(value => value.LocalPath == oldPath + "/Loose").LocalId : root.LocalId;
         Task<(IdentityLocation Location, bool InScope)?> Identity(string id, bool strict)
         {
             if (strict) documented++; else plain++;
@@ -124,7 +133,7 @@ public static partial class ChangeRunnerChecks
             if (fault && id == faultId && (shape != "send-fault" || rootReads > 1))
             {
                 // Plain absence models the native answer that is insufficient to authorize deletion.
-                if (strict) throw new ItemFailedException(id, TextKey.ReadLocalFailed, null);
+                if (strict || shape == "plain-fault") throw new ItemFailedException(id, faultCause, null);
                 return Task.FromResult<(IdentityLocation Location, bool InScope)?>(null);
             }
             var found = fixture.Local.FindById(id);
@@ -179,6 +188,21 @@ public static partial class ChangeRunnerChecks
         }
         void Removed() => Notice(new ChangeNotice(shape == "remote-delete" ? Side.Dropbox : Side.Local,
             ChangeKind.Deleted, oldPath, null, shape == "remote-delete" ? root.DropboxId : root.LocalId, null, false, true));
+        if (shape == "plain-fault")
+        {
+            // Existing unreadable-member protection yields NoEffect without moved-out identity classification.
+            foreach (var member in members.Where(value => PathNames.Parent(value.LocalPath) == oldPath))
+                UnreadableMember.Record(fixture.Inner, PairId, member.LocalPath);
+            Removed();
+            await Runner().SyncWorkAsync(default);
+            var issue = fixture.Inner.Issues(PairId).Single(value => value.Path == oldPath);
+            Check.Require(issue.Cause == TextKey.ReadLocalFailed && effects.Count == 0, "Plain folder read failure is retained");
+            fault = false;
+            await Runner().SyncWorkAsync(default);
+            Check.Require(retirements.Contains(FolderRetirementDisposition.NoEffect) && effects.Count == 0 &&
+                fixture.Inner.IssueById(PairId, issue.Id) is null, "Fresh plain NoEffect closes its exact read failure");
+            return Counts();
+        }
         if (shape is "chosen" or "excluded")
         {
             selected = new WorkSelection(PairId, Generation, 1, Side.Local, VolumeKey, root.LocalId, root.LocalKey, 0, 0);
@@ -244,6 +268,28 @@ public static partial class ChangeRunnerChecks
         {
             Renames();
             await Runner().SyncWorkAsync(default);
+            if (shape is "fault-new-evidence" or "fault-other-cause")
+            {
+                var issue = fixture.Inner.Issues(PairId).Single(value => value.Path == oldPath);
+                fault = false;
+                if (shape == "fault-new-evidence")
+                {
+                    var after = fixture.Hooks.AfterCall;
+                    fixture.Hooks.AfterCall = (method, args, result) =>
+                    {
+                        after?.Invoke(method, args, result);
+                        if (method != nameof(IStateStore.RetireFolderRemoval)) return;
+                        fixture.Hooks.AfterCall = after;
+                        Notice(new ChangeNotice(Side.Local, ChangeKind.Changed, oldPath + "/Loose", null,
+                            members.Single(value => value.LocalPath == oldPath + "/Loose").LocalId, null, false, false));
+                    };
+                }
+                await Runner().SyncWorkAsync(default);
+                Check.Require(retirements.Contains(FolderRetirementDisposition.NoEffect) && effects.Count == 0 &&
+                    remoteCalls.Moves == 0 && fixture.Inner.IssueById(PairId, issue.Id)?.Cause == faultCause,
+                    "NoEffect keeps the exact issue after later evidence or an unrelated failure cause: " + shape);
+                return Counts();
+            }
             if (shape == "fault")
             {
                 Check.Require(remoteCalls.Moves == 0 && effects.Count == 0 &&
@@ -335,24 +381,24 @@ public static partial class ChangeRunnerChecks
             {
                 ("reference", 2) => "0,0,5,6,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,80,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,83",
                 ("reference", 8) => "0,0,5,6,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,80,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,83",
-                ("stall", 2) => "1,2,21,25,0,0,0,0,0,0,0,0,0,1,0,0,0,3,0,10,0,0,0,1,9,9,433,11,1,10,11,0,1,2,0,0,0,0,0,0,0,0,0,0,0,11,2,0,0,41,448",
-                ("stall", 8) => "1,2,51,61,0,0,0,0,0,0,0,0,0,1,0,0,0,9,0,34,0,0,0,1,33,33,1081,29,1,34,35,0,1,2,0,0,0,0,0,0,0,0,0,0,0,35,2,0,0,137,1102",
-                ("batch", 2) => "1,2,21,25,0,0,0,0,0,0,0,0,0,1,0,0,0,3,0,10,0,0,0,1,9,9,444,11,1,10,11,0,1,2,0,0,0,0,0,0,0,0,0,0,0,11,2,0,0,41,461",
-                ("batch", 8) => "1,2,51,61,0,0,0,0,0,0,0,0,0,1,0,0,0,9,0,34,0,0,0,1,33,33,1092,29,1,34,35,0,1,2,0,0,0,0,0,0,0,0,0,0,0,35,2,0,0,137,1115",
-                ("historic", 2) => "1,3,22,26,0,0,0,0,0,0,0,0,0,1,0,0,0,3,0,2,0,1,1,1,9,0,417,11,1,10,11,0,1,3,0,0,0,0,0,0,0,0,0,0,0,11,2,0,0,3,432",
-                ("historic", 8) => "1,3,52,62,0,0,0,0,0,0,0,0,0,1,0,0,0,9,0,2,0,1,1,1,33,0,945,29,1,34,35,0,1,3,0,0,0,0,0,0,0,0,0,0,0,35,2,0,0,3,966",
-                ("deleted-child", 2) => "1,3,17,21,0,0,0,0,0,0,0,0,0,1,0,0,0,2,0,11,0,1,1,1,5,12,397,8,1,6,7,0,1,3,0,0,0,0,0,0,0,0,0,0,0,7,2,0,0,54,411",
-                ("deleted-child", 8) => "1,3,47,57,0,0,0,0,0,0,0,0,0,1,0,0,0,8,0,35,0,1,1,1,29,36,1093,26,1,30,31,0,1,3,0,0,0,0,0,0,0,0,0,0,0,31,2,0,0,150,1113",
-                ("deleted", 2) => "0,2,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11,0,1,1,0,0,18,159,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,39,163",
-                ("deleted", 8) => "0,2,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,35,0,1,1,0,0,66,327,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,135,331",
-                ("remote-delete", 2) => "2,0,4,4,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,2,0,0,0,18,0,160,1,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,39,172",
-                ("remote-delete", 8) => "2,0,4,4,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,2,0,0,0,66,0,328,1,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,135,358",
-                ("excluded-child", 2) => "1,2,17,21,0,0,0,0,0,0,0,0,0,1,0,0,0,2,0,11,0,1,1,1,8,9,391,8,1,9,10,0,1,2,0,0,0,0,0,0,0,0,0,0,0,10,2,0,0,46,403",
-                ("excluded-child", 8) => "1,2,47,57,0,0,0,0,0,0,0,0,0,1,0,0,0,8,0,35,0,1,1,1,32,33,1063,26,1,33,34,0,1,2,0,0,0,0,0,0,0,0,0,0,0,34,2,0,0,142,1081",
-                ("fresh", 2) => "1,2,22,26,0,0,1,0,0,1,0,1,0,1,0,0,0,3,0,10,0,0,0,1,10,9,462,12,1,11,12,0,1,2,0,0,1,0,1,0,0,0,0,0,0,12,2,0,0,41,479",
-                ("fresh", 8) => "1,2,52,62,0,0,1,0,0,1,0,1,0,1,0,0,0,9,0,34,0,0,0,1,34,33,1110,30,1,35,36,0,1,2,0,0,1,0,1,0,0,0,0,0,0,36,2,0,0,137,1133",
-                ("root-fault", 2) => "0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,37,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,40",
-                ("root-fault", 8) => "0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,37,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,40",
+                ("stall", 2) => "1,2,21,25,0,0,0,0,0,0,0,0,0,1,0,0,0,3,0,10,0,0,0,1,9,9,434,11,1,10,11,0,1,2,0,0,0,0,0,0,0,0,0,0,0,11,2,0,0,41,449",
+                ("stall", 8) => "1,2,51,61,0,0,0,0,0,0,0,0,0,1,0,0,0,9,0,34,0,0,0,1,33,33,1082,29,1,34,35,0,1,2,0,0,0,0,0,0,0,0,0,0,0,35,2,0,0,137,1103",
+                ("batch", 2) => "1,2,21,25,0,0,0,0,0,0,0,0,0,1,0,0,0,3,0,10,0,0,0,1,9,9,445,11,1,10,11,0,1,2,0,0,0,0,0,0,0,0,0,0,0,11,2,0,0,41,462",
+                ("batch", 8) => "1,2,51,61,0,0,0,0,0,0,0,0,0,1,0,0,0,9,0,34,0,0,0,1,33,33,1093,29,1,34,35,0,1,2,0,0,0,0,0,0,0,0,0,0,0,35,2,0,0,137,1116",
+                ("historic", 2) => "1,3,22,26,0,0,0,0,0,0,0,0,0,1,0,0,0,3,0,2,0,1,1,1,9,0,418,11,1,10,11,0,1,3,0,0,0,0,0,0,0,0,0,0,0,11,2,0,0,3,433",
+                ("historic", 8) => "1,3,52,62,0,0,0,0,0,0,0,0,0,1,0,0,0,9,0,2,0,1,1,1,33,0,946,29,1,34,35,0,1,3,0,0,0,0,0,0,0,0,0,0,0,35,2,0,0,3,967",
+                ("deleted-child", 2) => "1,3,17,21,0,0,0,0,0,0,0,0,0,1,0,0,0,2,0,11,0,1,1,1,5,12,398,8,1,6,7,0,1,3,0,0,0,0,0,0,0,0,0,0,0,7,2,0,0,54,412",
+                ("deleted-child", 8) => "1,3,47,57,0,0,0,0,0,0,0,0,0,1,0,0,0,8,0,35,0,1,1,1,29,36,1094,26,1,30,31,0,1,3,0,0,0,0,0,0,0,0,0,0,0,31,2,0,0,150,1114",
+                ("deleted", 2) => "0,2,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,11,0,1,1,0,0,18,160,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,39,164",
+                ("deleted", 8) => "0,2,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,35,0,1,1,0,0,66,328,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,135,332",
+                ("remote-delete", 2) => "2,0,4,4,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,2,0,0,0,18,0,161,1,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,39,173",
+                ("remote-delete", 8) => "2,0,4,4,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,2,0,0,0,66,0,329,1,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,135,359",
+                ("excluded-child", 2) => "1,2,17,21,0,0,0,0,0,0,0,0,0,1,0,0,0,2,0,11,0,1,1,1,8,9,392,8,1,9,10,0,1,2,0,0,0,0,0,0,0,0,0,0,0,10,2,0,0,46,404",
+                ("excluded-child", 8) => "1,2,47,57,0,0,0,0,0,0,0,0,0,1,0,0,0,8,0,35,0,1,1,1,32,33,1064,26,1,33,34,0,1,2,0,0,0,0,0,0,0,0,0,0,0,34,2,0,0,142,1082",
+                ("fresh", 2) => "1,2,22,26,0,0,1,0,0,1,0,1,0,1,0,0,0,3,0,10,0,0,0,1,10,9,463,12,1,11,12,0,1,2,0,0,1,0,1,0,0,0,0,0,0,12,2,0,0,41,480",
+                ("fresh", 8) => "1,2,52,62,0,0,1,0,0,1,0,1,0,1,0,0,0,9,0,34,0,0,0,1,34,33,1111,30,1,35,36,0,1,2,0,0,1,0,1,0,0,0,0,0,0,36,2,0,0,137,1134",
+                ("root-fault", 2) => "0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,38,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,41",
+                ("root-fault", 8) => "0,0,3,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,38,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,41",
                 ("chosen", 2) => "0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,9,3,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,29,3",
                 ("chosen", 8) => "0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,33,3,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,101,3",
                 ("excluded", 2) => "0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,9,3,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,29,3",

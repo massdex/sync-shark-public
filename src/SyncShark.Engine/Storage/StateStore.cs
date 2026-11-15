@@ -3117,6 +3117,36 @@ public sealed partial class StateStore : IStateStore
         UpdateClosures(pairId, issueOnlyAcknowledgement);
     });
 
+    /// <inheritdoc />
+    public Issue? IssueForWork(WorkSelection selection)
+    {
+        lock (_lock)
+        {
+            using var query = StorageCommand.Create(_connection, null, StateSchema.WorkIssue,
+                (StateSchema.ParamWork, selection.AnchorWorkId));
+            using var rows = query.ExecuteReader();
+            var id = rows.Read() && !rows.IsDBNull(StateSchema.WorkIssueId) ? rows.GetInt64(StateSchema.WorkIssueId) : (long?)null;
+            rows.Close();
+            return id is null ? null : IssueTable.ById(_connection, selection.PairId, id.Value);
+        }
+    }
+
+    /// <inheritdoc />
+    public bool CloseNoEffectFailure(WorkSelection selection, LiveCoverage coverage, string operationId, Issue expected, long through) => Ordered(() =>
+    {
+        using var transaction = _connection.BeginTransaction();
+        var pair = RequireGeneration(transaction, selection.PairId, selection.PairGeneration);
+        var operation = ReadFolder(transaction, pair, operationId);
+        if (operation.Active || operation.Cause is not null || operation.RetirementDisposition != FolderRetirementDisposition.NoEffect ||
+            expected.Kind != IssueKind.Failure || expected.Cause != TextKey.ReadLocalFailed ||
+            expected.Subject.Move is not null || expected.Subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None ||
+            !PathNames.Same(expected.Path, operation.RootEntry.Path) ||
+            !_changes.CanCloseFolderFailure(transaction, selection, coverage, operation, expected.Id, through) ||
+            !IssueTable.CloseExact(_connection, transaction, selection.PairId, expected)) return false;
+        CommitClosure(transaction, selection.PairId, false);
+        return true;
+    });
+
     private IEnumerable<FolderRemovalItem> FolderMembers(SqliteTransaction transaction, long pair, string operationId)
     {
         long after = StateSchema.BeforeFirstOrdinal;

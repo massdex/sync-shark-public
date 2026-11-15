@@ -2338,6 +2338,10 @@ public sealed class InMemoryStateStore : IStateStore
         }
     }
 
+    public Issue? IssueForWork(WorkSelection selection) => null;
+    // This double has no transactional source-evidence proof; closure witnesses use the real store.
+    public bool CloseNoEffectFailure(WorkSelection selection, LiveCoverage coverage, string operationId, Issue expected, long through) => false;
+
     public void RetireFolderRemoval(string pairId, string operationId, long expectedGeneration,
         FolderRetirementDisposition disposition, StateChange issueOnlyAcknowledgement)
     {

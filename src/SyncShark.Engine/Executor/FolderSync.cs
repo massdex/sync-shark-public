@@ -682,6 +682,11 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         var deletingFrom = FolderDeletes.DeletingSide(folder);
         Row observed = folder;
         SyncOutcome? fallback = null;
+        var failure = _context.Store.IssueForWork(selection);
+        if (failure is not { Kind: IssueKind.Failure, Cause: TextKey.ReadLocalFailed } ||
+            !PathNames.Same(failure.Path, Row.Path(folder))) failure = null;
+        var through = failure is null ? 0 : _context.Store.ReadWorkWatermark();
+        var fresh = false;
         var id = await _ports.Live.ExecuteAsync([new LiveExecutionRequest(selection, coverage, footprint)],
             async (execution, token) =>
             {
@@ -704,6 +709,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
                         return (string?)null;
                     }
                     RequireAncestorsClear(observed);
+                    fresh = UnfinishedAt(observed, deletingFrom, token) is null;
                     return (await FreezeCheckedTailAsync(request, observed, execution, preRestoreId, token)).OperationId;
                 }
                 catch (Exception error) when (error is not ChangedUnderneathException && ItemFailures.IsItemError(error))
@@ -725,6 +731,9 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             failed |= !outcome.Succeeded();
             if (outcome.None == NoneReason.Unfinished) temporary?.Invoke(outcome.RetryWait);
         }, retainUnfinished, absent: absent);
-        return !failed && SettlementReady(result);
+        var ready = !failed && SettlementReady(result);
+        if (ready && fresh && failure is not null)
+            _context.Store.CloseNoEffectFailure(selection, coverage, id, failure, through);
+        return ready;
     }
 }

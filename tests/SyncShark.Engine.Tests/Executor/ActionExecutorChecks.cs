@@ -2809,6 +2809,9 @@ public static class ActionExecutorChecks
         public void RetireFolderRemoval(string pairId, string operationId, long expectedGeneration,
             FolderRetirementDisposition disposition, StateChange issueOnlyAcknowledgement) =>
             throw new NotSupportedException();
+        public Issue? IssueForWork(WorkSelection selection) => throw new NotSupportedException();
+        public bool CloseNoEffectFailure(WorkSelection selection, LiveCoverage coverage, string operationId, Issue expected, long through) =>
+            throw new NotSupportedException();
         public string ArmFolderSubmission(string pairId, IReadOnlyList<FolderRemovalEffect> effects) =>
             throw new NotSupportedException();
         public FolderSubmission FolderSubmission(string submissionId) => throw new NotSupportedException();

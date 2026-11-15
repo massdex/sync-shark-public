@@ -179,6 +179,11 @@ public partial interface IStateStore : IDisposable
     void EndSelection(WorkSelection selection, WorkSelection? prerequisite = null);
     /// <summary>Retires completed membership and observed peers; returns false while the anchor remains owned by an issue or live parent.</summary>
     bool CompleteWork(WorkSelection selection, SelectionPeer? peer);
+    /// <summary>Reads the exact issue associated with this work anchor, never a descendant issue scan.</summary>
+    Issue? IssueForWork(WorkSelection selection);
+    /// <summary>After fresh documented folder reads, closes only the exact read Failure attached to this work,
+    /// if cause-free NoEffect and both sources' root/descendant evidence still match in the closing transaction.</summary>
+    bool CloseNoEffectFailure(WorkSelection selection, LiveCoverage coverage, string operationId, Issue expected, long through);
     /// <summary>Atomically transfers selected pre-episode same-item content debt to its exact newer wait; never retries it.</summary>
     bool TransferOlderEpisodeWork(WorkSelection selection, ItemRetryCandidate expected);
     /// <summary>Registers unfinished branches against the exact committed issue without retiring their parent.</summary>

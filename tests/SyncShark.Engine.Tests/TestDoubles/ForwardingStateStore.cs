@@ -253,6 +253,9 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
     public virtual void RetireFolderRemoval(string pairId, string operationId, long expectedGeneration,
         FolderRetirementDisposition disposition, StateChange issueOnlyAcknowledgement) =>
         Inner.RetireFolderRemoval(pairId, operationId, expectedGeneration, disposition, issueOnlyAcknowledgement);
+    public virtual Issue? IssueForWork(WorkSelection selection) => Inner.IssueForWork(selection);
+    public virtual bool CloseNoEffectFailure(WorkSelection selection, LiveCoverage coverage, string operationId, Issue expected, long through) =>
+        Inner.CloseNoEffectFailure(selection, coverage, operationId, expected, through);
     public virtual string ArmFolderSubmission(string pairId, IReadOnlyList<FolderRemovalEffect> effects) =>
         Inner.ArmFolderSubmission(pairId, effects);
     public virtual FolderSubmission FolderSubmission(string submissionId) => Inner.FolderSubmission(submissionId);

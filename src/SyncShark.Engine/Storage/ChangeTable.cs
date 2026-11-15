@@ -1216,6 +1216,31 @@ internal sealed partial class ChangeTable
         return true;
     }
 
+    // A fresh plan's read proof expires on any later root/descendant acquisition, including an old-path alias.
+    internal bool CanCloseFolderFailure(SqliteTransaction transaction, WorkSelection selection, LiveCoverage coverage,
+        FolderRemovalState operation, long issueId, long through)
+    {
+        var pair = RequireCurrent(transaction, selection);
+        var anchor = RequireAnchor(transaction, pair.Row, selection);
+        if (!Read(transaction, StateSchema.WorkIssue, reader => Number(reader, StateSchema.WorkIssueId),
+                (StateSchema.ParamWork, anchor.WorkId)).Contains(issueId)) return false;
+        var roots = Roots(pair);
+        foreach (var side in new[] { Side.Local, Side.Dropbox })
+        {
+            var epoch = EpochOn(coverage, side);
+            if (ReadSourceRow(transaction, pair.Row, side)?.Epoch != epoch || Domain(roots, side) is not { } domain) return false;
+            var path = operation.SavedRoot?.PathOn(side) ?? (side == operation.DeletingSide
+                ? operation.RootEntry.Path : operation.CounterpartPath);
+            var key = PathNames.KeyFor(side, path);
+            var (low, high) = PathNames.DescendantBounds(key);
+            var range = Evidence(pair.Row, selection.PairGeneration, side, epoch, domain,
+                (StateSchema.ParamJoinKey, key), (StateSchema.ParamLow, low), (StateSchema.ParamHigh, high));
+            foreach (var probe in ExactProbes.Concat(BelowProbes))
+                if (Rows(transaction, probe, range).Any(row => row.Acquisition > through)) return false;
+        }
+        return true;
+    }
+
     private static bool IntegrityRefusal(SqliteException error) =>
         error.SqliteErrorCode == SQLitePCL.raw.SQLITE_CONSTRAINT;
 

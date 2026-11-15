@@ -22,6 +22,7 @@
     "completion-containment-cost",
     "containment-move-out",
     "local-split",
+    "no-effect-closure",
     "leftover-upload",
     "refused-folder-retry",
     "late-local-child",
