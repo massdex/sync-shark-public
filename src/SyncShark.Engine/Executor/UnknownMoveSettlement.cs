@@ -37,8 +37,7 @@ internal sealed class UnknownMoveSettlement(ExecutorContext context, ItemSync it
             var settled = await items.Renames.SettleUnknownMoveAsync(issue, observed!.Value.Location.Entry,
                 bound, decision == UnknownMoveCheck.Outcome.RemainingHop,
                 () => context.Store.CloseUnknownMove(context.Pair.PairId, context.ExpectedGeneration, issue,
-                    decision == UnknownMoveCheck.Outcome.Adopt && bound is not null
-                        ? SelectionObservation.SettlesDropboxEcho : null), ct);
+                    null), ct);
             return (settled.Outcome, !settled.Kept);
         }
         // The exact close precedes the rename owner's try, so a refused close has restored nothing.
