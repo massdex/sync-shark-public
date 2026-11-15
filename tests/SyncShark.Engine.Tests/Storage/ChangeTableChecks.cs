@@ -992,16 +992,18 @@ public static partial class ChangeTableChecks
                 [(PairId, Notice(Side.Local, File, Identity))])!.Value;
             var trace = new List<string>();
             var transferred = false;
-            Statements(store, () => transferred = store.TransferSupersededWork(first, later), captured: trace);
+            Statements(store, () => transferred = store.TransferSupersededWork(first, later),
+                traceLabel: $"superseded-{count}", captured: trace);
             var statements = trace.Count(sql => !sql.TrimStart().StartsWith("--", StringComparison.Ordinal) &&
                 !sql.TrimStart().StartsWith("BEGIN", StringComparison.OrdinalIgnoreCase) &&
                 !sql.TrimStart().StartsWith("COMMIT", StringComparison.OrdinalIgnoreCase));
             Console.WriteLine($"Superseded transfer unrelated={count} statements={statements}");
-            Check.Require(transferred && statements == 17 && (previous is null || previous == statements),
+            Check.Require(transferred && (previous is null || previous == statements),
                 "Transfer work depends only on the involved key, not unrelated attempts");
             previous = statements;
             store.EndWorkPass(PairId);
         });
+        Check.Require(previous == 17, "Superseded transfer statement budget");
     }
 
     private static IEnumerable<T> FailsAfter<T>(T first, Exception failure)
