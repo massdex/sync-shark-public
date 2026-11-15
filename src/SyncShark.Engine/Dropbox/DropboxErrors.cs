@@ -135,6 +135,56 @@ public static partial class DropboxErrors
     internal static FolderMemberResult MapFolderFailure(JsonElement failure, int ordinal) =>
         new FolderMemberResult.Unknown(ordinal, FolderCause(failure));
 
+    /// <summary>Only documented, well-shaped relocation refusals prove no effect; all other members require identity resolution.</summary>
+    internal static FolderMemberResult MapMoveFailure(JsonElement failure, int ordinal)
+    {
+        var tag = UnionTag(failure);
+        if (tag == DropboxProtocol.TooManyWriteOperations)
+            return new FolderMemberResult.KnownNoEffect(ordinal, TextKey.WaitTooManyWrites);
+        TextKey? cause = null;
+        if (tag == DropboxProtocol.RelocationError && failure.TryGetProperty(tag, out var relocation))
+            cause = MoveCause(relocation);
+        return cause is { } known ? new FolderMemberResult.KnownNoEffect(ordinal, known)
+            : new FolderMemberResult.Unknown(ordinal, null);
+    }
+
+    private static TextKey? MoveCause(JsonElement relocation)
+    {
+        var tag = UnionTag(relocation);
+        if (tag is DropboxProtocol.FromLookup or DropboxProtocol.FromWrite or DropboxProtocol.To)
+        {
+            if (!relocation.TryGetProperty(tag, out var path)) return null;
+            var reason = UnionTag(path);
+            // Payloads are evidence too: a recognized outer tag alone proves nothing.
+            if (reason == DropboxProtocol.MalformedPath)
+                return path.TryGetProperty(reason, out var malformed) &&
+                    malformed.ValueKind is JsonValueKind.String or JsonValueKind.Null
+                    ? TextKey.FailDropboxNameRejected : null;
+            if (tag == DropboxProtocol.FromLookup)
+                return IsNotFoundTag(reason) ? TextKey.FailChanged : null;
+            if (reason == DropboxProtocol.Conflict)
+                return path.TryGetProperty(reason, out var conflict) &&
+                    UnionTag(conflict) is DropboxProtocol.TagFile or DropboxProtocol.TagFolder or DropboxProtocol.FileAncestor
+                    ? tag == DropboxProtocol.To ? TextKey.ClashNameTaken : CauseOf(reason) : null;
+            return reason switch
+            {
+                DropboxProtocol.TooManyWriteOperations => TextKey.WaitTooManyWrites,
+                DropboxProtocol.DisallowedName or DropboxProtocol.NoWritePermission or DropboxProtocol.InsufficientSpace or
+                    DropboxProtocol.TeamFolder or DropboxProtocol.OperationSuppressed => CauseOf(reason),
+                _ => null
+            };
+        }
+        return tag switch
+        {
+            DropboxProtocol.TooManyFiles => TextKey.FailDropboxTooManyFiles,
+            DropboxProtocol.CantCopySharedFolder or DropboxProtocol.CantNestSharedFolder or
+                DropboxProtocol.CantMoveFolderIntoItself or DropboxProtocol.DuplicatedOrNestedPaths or
+                DropboxProtocol.CantTransferOwnership or DropboxProtocol.InsufficientQuota or
+                DropboxProtocol.CantMoveSharedFolder => TextKey.DropboxRefused,
+            _ => null
+        };
+    }
+
     /// <summary>True only for the exact structured invalid_async_job_id refusal, which blocks visibly and is checked
     /// again at the next Repair or AutoSync opportunity; no expired tag or time-based release.</summary>
     internal static bool IsInvalidFolderJob(DropboxApiException error) =>

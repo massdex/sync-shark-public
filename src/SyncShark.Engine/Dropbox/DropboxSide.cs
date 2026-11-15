@@ -4,7 +4,7 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 
 /// <summary>The Dropbox side (section 5.2): delegates to DropboxListing and DropboxWriter. Only the listing view is
 /// an <see cref="ISide"/>; the concrete side keeps identity, evidence, cursor and writer functions.</summary>
-public sealed partial class DropboxSide : IIdentitySide
+public sealed partial class DropboxSide : IIdentitySide, IFolderMoveSide
 {
     private readonly DropboxApi _api;
     private readonly PairConfig _pair;
@@ -33,7 +33,7 @@ public sealed partial class DropboxSide : IIdentitySide
     internal ISide WithListingContext(Func<ListingReadContext> beginListing) => new ListingView(this, beginListing);
 
     // The one ISide for this side: only ReadAllAsync reads its bound listing context; the rest forward to the owner.
-    private sealed class ListingView(DropboxSide owner, Func<ListingReadContext> beginListing) : ISide, IIdentitySide
+    private sealed class ListingView(DropboxSide owner, Func<ListingReadContext> beginListing) : ISide, IIdentitySide, IFolderMoveSide
     {
         public Side Side => owner.Side;
         public Task<(IdentityLocation Location, bool InScope)?> ReadByIdAsync(string id, CancellationToken ct) =>
@@ -49,6 +49,11 @@ public sealed partial class DropboxSide : IIdentitySide
         public Task<RemovalResult> PublishAsync(IStaged staged, Entry? expected, RemovalSelection? selection,
             CancellationToken ct) => owner.PublishAsync(staged, expected, selection, ct);
         public Task<Entry> EnsureFolderAsync(string path, CancellationToken ct) => owner.EnsureFolderAsync(path, ct);
+        public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct) => owner.CreateFolderExclusiveAsync(path, ct);
+        public Task<FolderSubmitResult> SubmitMoveBatchAsync(IReadOnlyList<(string From, string To)> members,
+            RequestAttempt attempt, CancellationToken ct) => owner.SubmitMoveBatchAsync(members, attempt, ct);
+        public Task<FolderJobResult> ReadMoveBatchAsync(string jobId, int expectedCount, RequestAttempt attempt,
+            CancellationToken ct) => owner.ReadMoveBatchAsync(jobId, expectedCount, attempt, ct);
         public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct) =>
             owner.DeleteAsync(expected, selection, ct);
         public Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct) =>
@@ -72,6 +77,11 @@ public sealed partial class DropboxSide : IIdentitySide
     public Task<RemovalResult> PublishAsync(IStaged staged, Entry? expected, RemovalSelection? selection, CancellationToken ct) =>
         _writer.PublishAsync(staged, expected, selection, ct);
     public Task<Entry> EnsureFolderAsync(string path, CancellationToken ct) => _writer.EnsureFolderAsync(path, ct);
+    public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct) => _writer.CreateFolderExclusiveAsync(path, ct);
+    public Task<FolderSubmitResult> SubmitMoveBatchAsync(IReadOnlyList<(string From, string To)> members,
+        RequestAttempt attempt, CancellationToken ct) => _writer.SubmitMoveBatchAsync(members, attempt, ct);
+    public Task<FolderJobResult> ReadMoveBatchAsync(string jobId, int expectedCount, RequestAttempt attempt,
+        CancellationToken ct) => _writer.ReadMoveBatchAsync(jobId, expectedCount, attempt, ct);
     /// <summary>Returns the classified removal; folder effects require the selected folder operation.</summary>
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct) => _writer.DeleteAsync(expected, selection, ct);
     /// <summary>Moves expected to newPath, which must be free.</summary>

@@ -10,7 +10,10 @@ public abstract record FolderMemberResult(int Ordinal)
     public sealed record Receipt(int Ordinal, Entry Entry) : FolderMemberResult(Ordinal);
 
     /// <summary>A positively established no-effect outcome; a later replan needs a new operation.</summary>
-    public sealed record KnownNoEffect(int Ordinal, TextKey? Cause) : FolderMemberResult(Ordinal);
+    public sealed record KnownNoEffect(int Ordinal, TextKey? Cause) : FolderMemberResult(Ordinal)
+    {
+        internal bool WriteThrottled => Cause == TextKey.WaitTooManyWrites;
+    }
 
     /// <summary>Missing, duplicate, malformed or uncertain evidence grants neither success nor replay.</summary>
     public sealed record Unknown(int Ordinal, TextKey? Cause) : FolderMemberResult(Ordinal);

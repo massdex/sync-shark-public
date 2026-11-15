@@ -204,12 +204,13 @@ public sealed partial class DropboxApi(
         return response.Reply;
     }
 
-    public void ReportBatchOutcome(bool writeThrottled) => ReportBatchOutcome(writeThrottled, null);
+    public void ReportBatchOutcome(bool writeThrottled) =>
+        ReportBatchOutcome(DropboxProtocol.UploadSessionFinishBatch, writeThrottled, null);
 
-    internal partial void ReportBatchOutcome(bool writeThrottled, TimeSpan? providerWait);
+    internal partial void ReportBatchOutcome(string route, bool writeThrottled, TimeSpan? providerWait);
 
-    internal partial void ReportBatchOutcome(bool writeThrottled, TimeSpan? providerWait) =>
-        _limiter.ReportBatchOutcome(AdmissionIdentity(DropboxProtocol.UploadSessionFinishBatch), writeThrottled, providerWait);
+    internal partial void ReportBatchOutcome(string route, bool writeThrottled, TimeSpan? providerWait) =>
+        _limiter.ReportBatchOutcome(AdmissionIdentity(route), writeThrottled, providerWait);
 
     // The retry claim, the current attempt and its wait are one loop: the claim authorizes the wait, so a separate attempt could retry without it.
     // Request alone owns this loop. Listener, Prerequisite, Transfer and Recovery retain their supplied identity.

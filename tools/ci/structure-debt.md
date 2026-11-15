@@ -274,7 +274,9 @@ B-222 disposition: ScanPass class-size and file-size, and ReconcileIssuesAsync -
 
 ## src/SyncShark.Engine/Dropbox/DropboxWriter.cs
 
-<!-- spec-source: e6f929f25beb~7729614b59b7~e3099b0548c4~59a0cd5fbb3d~b157f91536c1~8baa -->
+Exclusive creation and positional move submit/check extend the existing folder-mutation job; the upload/folder ownership split remains open for the structural refactor lane under the feature freeze. StageAsync and SettleCohort retain their shared verification and single-feedback lifetimes. This change does not clear the existing rows.
+
+<!-- spec-source: 2d89aed63b81~a0498fec6087~7b7397a2f194~3f00cae6bcd5~90daaf178001~fd11 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -804,9 +806,9 @@ No open §1.3 size obligation. Since 07ff9d097 (3b9d021a9, 36efd4772, cb637f88a)
 
 ## src/SyncShark.Engine/Dropbox/DropboxErrors.cs
 
-The oversized-move classification adds one route-specific refusal to Map, not a new job. The existing disposition/decoration split remains open: changing that boundary is outside this refusal-classification change. No debt row is cleared.
+Oversized-move and positional move-member classification extend the existing provider-refusal job, including required payload-shape validation. The existing disposition/decoration split remains open for the structural refactor lane under the feature freeze; changing that boundary is outside this adapter change. No debt row is cleared.
 
-<!-- spec-source: 30245696576b~e4b6487c20f5~faac8f53290f~a54bd15f22bf~15fa36749422~fd73 -->
+<!-- spec-source: 8937a4fd37eb~c05e23c9b5ab~3e9fb9f0a348~ac075aa50244~39b596a42573~890f -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

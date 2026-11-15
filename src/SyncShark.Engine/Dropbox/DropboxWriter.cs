@@ -293,7 +293,7 @@ public sealed partial class DropboxWriter(
         Exception? feedback = null;
         try
         {
-            if (throttled) api.ReportBatchOutcome(true, attempt.Completion?.ProviderWait);
+            if (throttled) api.ReportBatchOutcome(DropboxProtocol.UploadSessionFinishBatch, true, attempt.Completion?.ProviderWait);
             else if (classified) api.ReportBatchOutcome(false);
         }
         catch (Exception error)
@@ -316,6 +316,15 @@ public sealed partial class DropboxWriter(
         if (existing is not null)
             return existing.IsFolder ? existing : throw new PathOccupiedException(path);
 
+        return await CreateFolderCoreAsync(path, exclusive: false, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Creates a folder without adopting an occupant, even after an uncertain earlier create.</summary>
+    public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct) =>
+        CreateFolderCoreAsync(path, exclusive: true, ct);
+
+    private async Task<Entry> CreateFolderCoreAsync(string path, bool exclusive, CancellationToken ct)
+    {
         var attempt = Attempt();
         try
         {
@@ -328,7 +337,8 @@ public sealed partial class DropboxWriter(
         {
             var mapped = DropboxErrors.Map(DropboxProtocol.CreateFolder, error, true, path, attempt);
             if (!mapped.IsAbsent) throw mapped.Error;
-            existing = await listing.ReadOneAsync(path, ct).ConfigureAwait(false)
+            if (exclusive) throw new PathOccupiedException(path, inner: error);
+            var existing = await listing.ReadOneAsync(path, ct).ConfigureAwait(false)
                 ?? throw new ChangedUnderneathException(path);
             return existing.IsFolder ? existing : throw new PathOccupiedException(path);
         }

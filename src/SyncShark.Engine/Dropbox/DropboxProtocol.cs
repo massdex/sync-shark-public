@@ -21,6 +21,8 @@ public static class DropboxProtocol
     public const string DeleteBatch = "files/delete_batch";
     public const string DeleteBatchCheck = "files/delete_batch/check";
     public const string Move = "files/move_v2";
+    public const string MoveBatch = "files/move_batch_v2";
+    public const string MoveBatchCheck = "files/move_batch/check_v2";
     public const string ListFolderLongpoll = "files/list_folder/longpoll";
     public const string ListRevisions = "files/list_revisions";
     public const string GetCurrentAccount = "users/get_current_account";
@@ -46,6 +48,20 @@ public static class DropboxProtocol
     public const string TooManyWriteOperations = "too_many_write_operations";
     public const string TooManyRequests = "too_many_requests";
     public const string TooManyFiles = "too_many_files";
+    // RelocationBatchErrorEntry and RelocationError, files.stone in the Dropbox API specification.
+    public const string RelocationError = "relocation_error";
+    public const string FromLookup = "from_lookup";
+    public const string FromWrite = "from_write";
+    public const string To = "to";
+    public const string TeamFolder = "team_folder";
+    public const string OperationSuppressed = "operation_suppressed";
+    public const string CantCopySharedFolder = "cant_copy_shared_folder";
+    public const string CantNestSharedFolder = "cant_nest_shared_folder";
+    public const string CantMoveFolderIntoItself = "cant_move_folder_into_itself";
+    public const string DuplicatedOrNestedPaths = "duplicated_or_nested_paths";
+    public const string CantTransferOwnership = "cant_transfer_ownership";
+    public const string InsufficientQuota = "insufficient_quota";
+    public const string CantMoveSharedFolder = "cant_move_shared_folder";
     // async.PollError on files/delete_batch/check: an invalid job ID blocks visibly until a later check.
     public const string InvalidAsyncJobId = "invalid_async_job_id";
 

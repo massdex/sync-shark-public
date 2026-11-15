@@ -4,10 +4,9 @@
   ],
   "engine": [
     "dropbox",
-    "issues",
-    "mapped-holds",
-    "syncer",
-    "unknown-move-repair"
+    "literals",
+    "dependencies",
+    "strings"
   ],
   "core": [],
   "ui": []

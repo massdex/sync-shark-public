@@ -10,7 +10,7 @@ using DropboxWriter = Massdex.SyncShark.Engine.Dropbox.DropboxWriter;
 namespace Massdex.SyncShark.Engine.Tests.Dropbox;
 
 /// <summary>Checks for DropboxWriter (`--engine-checks dropbox`), written by DropboxWriter's writer.</summary>
-public static class DropboxWriterChecks
+public static partial class DropboxWriterChecks
 {
     private const int OneByte = 1;
     private const int InitialConcurrency = 1;
@@ -67,6 +67,8 @@ public static class DropboxWriterChecks
         await ConditionalFileRequiresFrozenRevision();
         await UnknownFolderSubmissionKeepsCustodyAsync();
         await FolderJobsAsync();
+        await MoveBatchContractsAsync();
+        await ExclusiveFolderContractsAsync();
     }
 
     private static void AllocationProbe()

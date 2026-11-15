@@ -18,6 +18,10 @@ internal static partial class DropboxReplyShapes
     private static readonly Selection UploadMember = UploadMemberValue();
     private static readonly Selection FolderMember = Object((DropboxProtocol.Tag, Scalar),
         (DropboxWriter.MetadataName, MetadataValue), (DropboxProtocol.TagFailure, Failure));
+    private static readonly Selection MoveMember = Object((DropboxProtocol.Tag, Scalar),
+        (DropboxProtocol.TagSuccess, MetadataValue), (DropboxProtocol.TagFailure,
+            FailureUnion(DropboxProtocol.RelocationError, DropboxProtocol.FromLookup, DropboxProtocol.FromWrite,
+                DropboxProtocol.To, DropboxProtocol.Conflict, DropboxProtocol.MalformedPath)));
     private static readonly Selection Head = Object((DropboxEntries.IdName, Scalar), (DropboxEntries.RevName, Scalar),
         (DropboxEntries.PathDisplayName, Scalar), (DropboxProtocol.ServerDeleted, Scalar),
         (DropboxEntries.ContentHashName, Scalar));
@@ -45,10 +49,10 @@ internal static partial class DropboxReplyShapes
     };
 
     // Dropbox failure unions nest one selected tag vocabulary at every level.
-    private static Selection FailureUnion()
+    private static Selection FailureUnion(params string[] extra)
     {
         string[] names = [DropboxProtocol.Tag, DropboxProtocol.Path, DropboxErrors.ReasonName,
-            DropboxProtocol.PathLookup, DropboxProtocol.PathWrite];
+            DropboxProtocol.PathLookup, DropboxProtocol.PathWrite, .. extra];
         var fields = new Selection?[names.Length];
         var union = new Selection { Names = names, Fields = fields };
         System.Array.Fill(fields, union);
@@ -94,9 +98,9 @@ internal static partial class DropboxReplyShapes
         bool KnownNoEffect, bool WriteThrottled)>> FinishBatch(PairConfig pair,
             IReadOnlyList<(string Path, bool ExpectedIsNull)> targets);
 
-    internal static partial DropboxReply<FolderSubmitResult> FolderSubmit(PairConfig pair, int expectedCount);
+    internal static partial DropboxReply<FolderSubmitResult> FolderSubmit(PairConfig pair, int expectedCount, bool move = false);
 
-    internal static partial DropboxReply<FolderJobResult> FolderJob(PairConfig pair, int expectedCount);
+    internal static partial DropboxReply<FolderJobResult> FolderJob(PairConfig pair, int expectedCount, bool move = false);
 
     internal static partial DropboxReply<DropboxPage> Page(PairConfig pair)
     {
@@ -203,57 +207,71 @@ internal static partial class DropboxReplyShapes
         }
     }
 
-    internal static partial DropboxReply<FolderSubmitResult> FolderSubmit(PairConfig pair, int expectedCount) =>
-        Of<FolderSubmitResult>(FolderStatus(expectedCount), root =>
+    internal static partial DropboxReply<FolderSubmitResult> FolderSubmit(PairConfig pair, int expectedCount, bool move) =>
+        FolderSubmit(pair, expectedCount, move ? MoveMember : FolderMember,
+            move ? DropboxProtocol.TagSuccess : DropboxWriter.MetadataName,
+            move ? DropboxErrors.MapMoveFailure : DropboxErrors.MapFolderFailure);
+
+    private static DropboxReply<FolderSubmitResult> FolderSubmit(PairConfig pair, int expectedCount,
+        Selection selection, string successField, Func<JsonElement, int, FolderMemberResult> failure) =>
+        Of<FolderSubmitResult>(FolderStatus(expectedCount, selection), root =>
         {
             var tag = DropboxEntries.RequiredString(root, DropboxProtocol.Tag);
             if (tag == DropboxProtocol.AsyncJobId)
                 return new FolderSubmitResult.Accepted(NonEmpty(root, DropboxProtocol.AsyncJobId));
             if (tag == DropboxProtocol.TagComplete)
-                return new FolderSubmitResult.Terminal(Members(root, pair, expectedCount));
+                return new FolderSubmitResult.Terminal(Members(root, pair, expectedCount, successField, failure));
             throw new JsonException();
         });
 
-    internal static partial DropboxReply<FolderJobResult> FolderJob(PairConfig pair, int expectedCount) =>
-        Of<FolderJobResult>(FolderStatus(expectedCount), root =>
+    internal static partial DropboxReply<FolderJobResult> FolderJob(PairConfig pair, int expectedCount, bool move) =>
+        FolderJob(pair, expectedCount, move ? MoveMember : FolderMember,
+            move ? DropboxProtocol.TagSuccess : DropboxWriter.MetadataName,
+            move ? DropboxErrors.MapMoveFailure : DropboxErrors.MapFolderFailure);
+
+    private static DropboxReply<FolderJobResult> FolderJob(PairConfig pair, int expectedCount,
+        Selection selection, string successField, Func<JsonElement, int, FolderMemberResult> failure) =>
+        Of<FolderJobResult>(FolderStatus(expectedCount, selection), root =>
         {
             var tag = DropboxEntries.RequiredString(root, DropboxProtocol.Tag);
             if (tag == DropboxProtocol.TagInProgress) return new FolderJobResult.InProgress();
             if (tag == DropboxProtocol.TagComplete)
-                return new FolderJobResult.Terminal(Members(root, pair, expectedCount));
+                return new FolderJobResult.Terminal(Members(root, pair, expectedCount, successField, failure));
             // An explicit failure is terminal job evidence with unattributed members, not proof of no effect.
             if (tag == DropboxProtocol.TagFailed)
-                return new FolderJobResult.Terminal(Members(default, pair, expectedCount));
+                return new FolderJobResult.Terminal(Members(default, pair, expectedCount, successField, failure));
             throw new JsonException();
         });
 
-    private static Selection FolderStatus(int expectedCount) => Object((DropboxProtocol.Tag, Scalar),
+    private static Selection FolderStatus(int expectedCount, Selection member) => Object((DropboxProtocol.Tag, Scalar),
         (DropboxProtocol.AsyncJobId, Scalar),
-        (DropboxListing.EntriesName, new Selection { Items = FolderMember, Limit = expectedCount }));
+        (DropboxListing.EntriesName, new Selection { Items = member, Limit = expectedCount }));
 
     // Wrong cardinality proves job completion but attributes no member.
-    private static IReadOnlyList<FolderMemberResult> Members(JsonElement root, PairConfig pair, int expectedCount)
+    private static IReadOnlyList<FolderMemberResult> Members(JsonElement root, PairConfig pair, int expectedCount,
+        string successField, Func<JsonElement, int, FolderMemberResult> failure)
     {
         var entries = Field(root, DropboxListing.EntriesName);
         var attributable = entries.ValueKind == JsonValueKind.Array && entries.GetArrayLength() == expectedCount;
         var results = new FolderMemberResult[expectedCount];
         for (int ordinal = 0; ordinal < expectedCount; ordinal++)
-            results[ordinal] = attributable ? Member(entries[ordinal], ordinal, pair)
+            results[ordinal] = attributable ? Member(entries[ordinal], ordinal, pair, successField, failure)
                 : new FolderMemberResult.Unknown(ordinal, null);
         return results;
     }
 
-    private static FolderMemberResult Member(JsonElement member, int ordinal, PairConfig pair)
+    private static FolderMemberResult Member(JsonElement member, int ordinal, PairConfig pair,
+        string successField, Func<JsonElement, int, FolderMemberResult> failure)
     {
         var tag = Field(member, DropboxProtocol.Tag);
         if (tag.ValueKind == JsonValueKind.String && tag.ValueEquals(DropboxProtocol.TagFailure))
-            return DropboxErrors.MapFolderFailure(Field(member, DropboxProtocol.TagFailure), ordinal);
+            return failure(Field(member, DropboxProtocol.TagFailure), ordinal);
         if (tag.ValueKind != JsonValueKind.String || !tag.ValueEquals(DropboxProtocol.TagSuccess))
             return new FolderMemberResult.Unknown(ordinal, null);
         try
         {
             return new FolderMemberResult.Receipt(ordinal,
-                DropboxEntries.RequireLive(Field(member, DropboxWriter.MetadataName), pair, null));
+                DropboxEntries.RequireLive(Field(member, successField), pair, null));
         }
         catch (Exception error) when (IsItemFailure(error))
         {
