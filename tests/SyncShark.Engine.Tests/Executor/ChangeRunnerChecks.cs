@@ -7665,6 +7665,12 @@ public static partial class ChangeRunnerChecks
                 "Unknown move automatic real=" + real + " scenario=" + scenario + " children=" + children, error)); }
         }
         foreach (var real in new[] { false, true })
+        {
+            try { await UnknownMoveCrossItemHeldAsync(real); }
+            catch (Exception error) { failures.Add(new InvalidOperationException(
+                "Unknown move cross-item holder real=" + real, error)); }
+        }
+        foreach (var real in new[] { false, true })
         foreach (var entrance in new[] { "primary", "old-path", "old-path-restart", "walked", "local", "older-holder", "older-root" })
         {
             try { await UnknownMoveEntranceAsync(real, entrance); }
@@ -8056,6 +8062,82 @@ public static partial class ChangeRunnerChecks
                     " close-statements=" + normalized.Count + " by-id=" + byId + " path-reads=" + remoteCalls.Reads);
             }
         }
+    }
+
+    private static async Task UnknownMoveCrossItemHeldAsync(bool real)
+    {
+        using var fixture = new Fixture(realStore: real);
+        var bindings = new List<SyncedEntry>();
+        foreach (var path in new[] { "Inbox", "Work" })
+        {
+            var local = FolderEntry(path, "local-" + path);
+            var remote = FolderEntry(path, "remote-" + path);
+            fixture.Local.Seed(local, null);
+            fixture.Dropbox.Seed(remote, null);
+            bindings.Add(SyncedEntries.From(local, remote));
+        }
+        var localA = FolderEntry("Inbox/Notes", "local-notes");
+        var remoteA = FolderEntry(localA.Path, "remote-notes");
+        var localB = FolderEntry("Inbox/Proj", "local-project");
+        var remoteB = FolderEntry(localB.Path, "remote-project");
+        var savedA = SyncedEntries.From(localA, remoteA);
+        var savedB = SyncedEntries.From(localB, remoteB);
+        bindings.AddRange([savedA, savedB]);
+        var observedA = remoteA with { Path = "Work/Proj/Notes" };
+        var observedB = remoteB with { Path = "Work/Proj" };
+        fixture.Local.Seed(localB with { Path = observedB.Path }, null);
+        fixture.Dropbox.Seed(observedB, null);
+        fixture.Local.Seed(localA with { Path = observedA.Path }, null);
+        fixture.Dropbox.Seed(observedA, null);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = bindings });
+        var selection = SeedRemote(fixture, observedA);
+        SourceFixture.AcquireJournal(fixture.Inner, fixture.Pair);
+        ClearObligations(fixture);
+        var moveA = new IssueSubject.UnknownMove(remoteA.Id, remoteA.Path, observedA.Path, null, true);
+        var moveB = new IssueSubject.UnknownMove(remoteB.Id, remoteB.Path, observedB.Path, null, true);
+        var subjectA = new IssueSubject([new(Side.Local, observedA.Path, localA.Id),
+            new(Side.Dropbox, remoteA.Path, remoteA.Id)], Side.Dropbox) { Move = moveA };
+        var subjectB = new IssueSubject([new(Side.Local, observedB.Path, localB.Id),
+            new(Side.Dropbox, remoteB.Path, remoteB.Id)], Side.Dropbox) { Move = moveB };
+        fixture.Inner.Commit(PairId, StateChange.Empty with
+            { Raise = [(IssueKind.Failure, TextKey.DropboxRefused, remoteA.Path, subjectA)] });
+        var original = fixture.Inner.Issues(PairId).Single();
+        Issue? holder = null;
+        fixture.Hooks.BeforeCallWith = (method, _) =>
+        {
+            if (method.Name != nameof(IStateStore.CloseUnknownMove) || holder is not null) return;
+            // B appears after A's work parks, but is already open when A releases its own footprint.
+            fixture.Inner.Commit(PairId, StateChange.Empty with
+                { Raise = [(IssueKind.Failure, TextKey.DropboxRefused, remoteB.Path, subjectB)] });
+            holder = fixture.Inner.Issues(PairId).Single(issue => issue.Subject.Move == moveB);
+        };
+        var localCalls = new CountingSide(fixture.Local);
+        var remoteCalls = new CountingSide(fixture.Dropbox);
+        fixture.LocalView = localCalls;
+        fixture.DropboxView = IdentitySide.Truthful(remoteCalls, fixture.Dropbox);
+        var events = new List<RunEvent>();
+        var syncer = LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events);
+        await UntilDrainedAsync(syncer, default);
+        var restored = fixture.Inner.Issues(PairId).SingleOrDefault(issue => issue.Subject.Move == moveA);
+        Check.Require(holder is not null && fixture.Inner.IssueById(PairId, original.Id) is null &&
+            fixture.Inner.IssueById(PairId, holder.Id)?.Matches(holder) == true &&
+            fixture.Inner.SyncedById(PairId, Side.Dropbox, remoteA.Id) == savedA &&
+            fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Dropbox == 0,
+            "Cross-item hold closes A exactly and retires its proven echo without rebasing its unrelated source.");
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events)
+            .ResolveAsync(holder!, ResolutionChoice.Retry, null, null, default);
+        Check.Require(restored is { Ignored: false, Dismissed: false } && restored.Id != original.Id &&
+            fixture.Inner.IssueById(PairId, restored.Id)?.Matches(restored) == true &&
+            fixture.Inner.SyncedById(PairId, Side.Dropbox, remoteA.Id) == savedA,
+            "A cross-item holder cannot inherit A's rebase: A is restored and visible even after Retry of B; open=" +
+            string.Join(";", fixture.Inner.Issues(PairId).Select(issue => issue.Path)));
+        Check.Require(fixture.Local.FindById(localA.Id)?.Path == observedA.Path &&
+            fixture.Dropbox.FindById(remoteA.Id)?.Path == observedA.Path &&
+            fixture.Local.FindById(localB.Id)?.Path == observedB.Path &&
+            fixture.Dropbox.FindById(remoteB.Id)?.Path == observedB.Path &&
+            localCalls.Work == 0 && remoteCalls.Work == 0 &&
+            events.All(item => item.Kind != RunEventKind.Failed),
+            "Cross-item settlement preserves both identities and performs no destructive provider work.");
     }
 
     private static async Task UnknownMoveEntranceAsync(bool real, string entrance)
