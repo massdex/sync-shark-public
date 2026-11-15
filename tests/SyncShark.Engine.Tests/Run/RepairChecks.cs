@@ -458,7 +458,7 @@ public static class RepairChecks
                         ? (Exception)new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged)
                         : new ItemFailedException(path, TextKey.FailLocalInUse, null);
                 };
-                return faults;
+                return new HookStore(faults);
             });
             await SeedLinkedAsync(rig, "Source");
             using (var baseline = rig.Log(folder, "baseline"))

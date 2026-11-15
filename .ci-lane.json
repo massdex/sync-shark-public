@@ -6,7 +6,8 @@
     "unknown-move-live",
     "unknown-move-repair",
     "dropbox",
-    "syncer"
+    "syncer",
+    "work-lifecycle"
   ],
   "core": [],
   "ui": []

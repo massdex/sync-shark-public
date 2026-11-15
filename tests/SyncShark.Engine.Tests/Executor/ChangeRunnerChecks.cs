@@ -7655,7 +7655,7 @@ public static partial class ChangeRunnerChecks
         var endpointCounts = new Dictionary<(bool Real, int Children), int>();
         var closeCounts = new Dictionary<int, int>();
         foreach (var real in new[] { false, true })
-        foreach (var scenario in new[] { "adopt", "ambiguous", "ignored", "same-key", "replacement", "generation", "clash" })
+        foreach (var scenario in new[] { "adopt", "ambiguous", "ignored", "same-key", "replacement", "generation", "clash", "remote-edit" })
         // Doubling the three-child subtree adds exactly six proven registrations, not another per-child read.
         foreach (var children in scenario == "adopt" ? new[] { 3, 6 } : new[] { 3 })
         {
@@ -7681,8 +7681,10 @@ public static partial class ChangeRunnerChecks
                 var remote = index == 0 ? FolderEntry("Source", DropboxId) : RemoteEntry("Source" + suffix, DropboxId + index);
                 bindings.Add(SyncedEntries.From(local, remote));
                 var moved = remote with { Path = "Destination" + suffix };
+                var edited = scenario == "remote-edit" && index == 1;
+                if (edited) moved = moved with { Revision = "rev-2", ContentHash = DropboxContentHash.Compute(new byte[] { 2 }) };
                 fixture.Local.Seed(scenario == "clash" ? local : local with { Path = moved.Path }, index == 0 ? null : [1]);
-                fixture.Dropbox.Seed(moved, index == 0 ? null : [1]);
+                fixture.Dropbox.Seed(moved, index == 0 ? null : edited ? [2] : [1]);
                 notices.Add(new ChangeNotice(Side.Dropbox, ChangeKind.Changed, moved.Path, null, moved.Id, moved, false, false));
                 notices.Add(new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, remote.Path, null, null, null, false, false));
             }
@@ -7730,14 +7732,26 @@ public static partial class ChangeRunnerChecks
                 return SyncJobs.RunBatchAsync(context, ports, work, scope, ct, side, retries, settles);
             } });
             var sql = new List<string>();
+            var attachments = new List<List<string>>();
             var connection = real ? StoreConnection(fixture) : null;
             Issue? replacement = null;
+            var retained = 0L;
             var closes = 0;
             fixture.Hooks.BeforeCallWith = (method, _) =>
             {
+                if (method.Name == nameof(IStateStore.AttachIssueWork) && connection is not null)
+                {
+                    attachments.Add([]);
+                    StartTrace(connection, attachments[^1]);
+                }
                 if (method.Name != nameof(IStateStore.CloseUnknownMove)) return;
                 Check.Require(++closes == 1, "One responsibility reaches exact close only once per opportunity.");
-                if (scenario == "generation") AdvanceGeneration(fixture);
+                if (scenario == "generation")
+                {
+                    retained = StoredWorkCount(fixture);
+                    Check.Require(retained == notices.Count, "All echo registrations exist before the generation changes.");
+                    AdvanceGeneration(fixture);
+                }
                 if (scenario is "same-key" or "replacement")
                 {
                     if (scenario == "replacement") fixture.Inner.Commit(PairId, StateChange.Empty with
@@ -7752,6 +7766,7 @@ public static partial class ChangeRunnerChecks
             };
             fixture.Hooks.AfterCall = (method, _, _) =>
             {
+                if (method == nameof(IStateStore.AttachIssueWork) && connection is not null) StopTrace(connection);
                 if (method != nameof(IStateStore.CloseUnknownMove)) return;
                 closed = true;
                 if (connection is not null) StopTrace(connection);
@@ -7761,9 +7776,12 @@ public static partial class ChangeRunnerChecks
             Console.WriteLine("Unknown move paths real=" + real + " scenario=" + scenario + " children=" + children +
                 ": " + string.Join(",", paths.Select(read => read.Path + (read.Closed ? ":after-close" : ":before-close"))));
             var expectedEndpoints = scenario is "ambiguous" or "replacement" or "generation" ? 0 : 2;
-            Check.Require(byId == 1 && paths.All(read => read.Closed && read.Path is "Source" or "Destination") &&
-                remoteCalls.Reads == expectedEndpoints && remoteCalls.Moves == 0 && remoteCalls.Listings == 0 && batches == 0,
-                "One opportunity uses one by-id read, zero child reads and only rename endpoint freshness reads; byId=" + byId +
+            var expectedEdits = scenario == "remote-edit" ? 1 : 0;
+            Check.Require(byId == 1 && paths.All(read => read.Closed &&
+                    (read.Path is "Source" or "Destination" || expectedEdits == 1 && read.Path == "Destination/Child1")) &&
+                paths.Count(read => read.Path == "Destination/Child1") == expectedEdits &&
+                remoteCalls.Reads == expectedEndpoints + expectedEdits && remoteCalls.Moves == 0 && remoteCalls.Listings == 0 && batches == 0,
+                "One opportunity uses one by-id read, zero echo-child reads, one per genuine edit and rename endpoint freshness reads; byId=" + byId +
                 " reads=" + remoteCalls.Reads + " moves=" + remoteCalls.Moves + " listings=" + remoteCalls.Listings + " batches=" + batches);
             if (scenario == "adopt")
             {
@@ -7780,6 +7798,8 @@ public static partial class ChangeRunnerChecks
             {
                 Check.Require(scenario != "generation" || fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true,
                     "A generation refusal leaves the exact move open.");
+                if (scenario == "generation") Check.Require(StoredWorkCount(fixture) == retained,
+                    "A generation refusal retains every old-generation registration, even though it is no longer selectable.");
                 foreach (var saved in bindings) Check.Require(
                     fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId) == saved,
                     "A refused close cannot rename saved bindings.");
@@ -7802,6 +7822,14 @@ public static partial class ChangeRunnerChecks
             Check.Require(fixture.Inner.IssueById(PairId, issue.Id) is null &&
                 fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Dropbox == 0,
                 "Adoption closes the move and retires all proven echoes without residual work.");
+            if (scenario == "remote-edit")
+            {
+                var current = fixture.Inner.SyncedById(PairId, Side.Dropbox, DropboxId + 1)!;
+                var local = fixture.Local.FindById(current.LocalId)!;
+                Check.Require(await fixture.Local.ContentHashAsync(local, default) == DropboxContentHash.Compute(new byte[] { 2 }),
+                    "The genuine edit survives echo retirement and is downloaded once.");
+                return;
+            }
             if (scenario == "clash")
             {
                 var clash = fixture.Inner.Issues(PairId).Single(item => item.Kind == IssueKind.NameClash);
@@ -7823,20 +7851,42 @@ public static partial class ChangeRunnerChecks
                     "Destination" + saved.DropboxPath["Source".Length..], "Adoption rebases every saved descendant.");
             if (real && scenario != "ambiguous")
             {
-                var expected = new[] { StateSchema.PairFence, StateSchema.SelectIssueById, StateSchema.SourceFence,
-                    StateSchema.IssueRegistrations, StateSchema.DeleteWork, StateSchema.SelectIssueByPathKeyKind,
-                    StateSchema.HasInvalidFolderJob, StateSchema.ReadIssueMembers, StateSchema.ReadItemEpisode,
-                    StateSchema.CloseIssueExact };
-                var normalized = NormalizedTraced(sql, expected).Where(statement => statement != TransactionBegin &&
+                string[] expected = [StateSchema.PairFence, StateSchema.SelectIssueById, StateSchema.PairFence,
+                    StateSchema.SourceFence, StateSchema.IssueRegistrations,
+                    .. Enumerable.Repeat(StateSchema.DeleteWork, notices.Count), StateSchema.SelectIssueByPathKeyKind,
+                    StateSchema.PairFence, StateSchema.HasInvalidFolderJob, StateSchema.ReadIssueMembers,
+                    StateSchema.ReadItemEpisode, StateSchema.CloseIssueExact];
+                var normalized = NormalizedTraced(sql, expected.Distinct().ToArray()).Where(statement => statement != TransactionBegin &&
                     statement != TransactionCommit && statement != TransactionRollback).ToList();
-                Check.Require(normalized.Count == 11 + notices.Count &&
-                    normalized.Count(statement => statement == StateSchema.DeleteWork) == notices.Count,
-                    "The exact-close transaction costs 11 + R statements, with R proven deletes; observed=" + normalized.Count);
+                Check.Require(normalized.SequenceEqual(expected),
+                    "The exact-close trace is the 11 + R model, with only proven-row deletes growing; observed=" + normalized.Count);
+                string[] attachExpected = [StateSchema.PairFence, StateSchema.SourceFence, StateSchema.ValidateIssue,
+                    StateSchema.Anchor, StateSchema.WorkWatermark, StateSchema.Registration,
+                    StateSchema.RegistrationByParent, StateSchema.InsertWork, StateSchema.WorkIssue, StateSchema.InsertIssueMember];
+                Check.Require(attachments.Count == notices.Count, "Each primary branch attaches exactly once.");
+                foreach (var trace in attachments)
+                {
+                    var attach = NormalizedTraced(trace, attachExpected).Where(statement => statement != TransactionBegin &&
+                        statement != TransactionCommit && statement != TransactionRollback).ToList();
+                    Check.Require(attach.SequenceEqual(attachExpected),
+                        "Each primary park has exactly the ten-statement attachment sequence; observed=" + attach.Count);
+                }
                 if (scenario == "adopt") closeCounts[children] = normalized.Count;
                 Console.WriteLine("Unknown move adopt children=" + children + " registrations=" + notices.Count +
                     " close-statements=" + normalized.Count + " by-id=" + byId + " path-reads=" + remoteCalls.Reads);
             }
         }
+    }
+
+    private static long StoredWorkCount(Fixture fixture)
+    {
+        // Current-generation queue APIs deliberately hide stale rows; this witness checks retained custody instead.
+        if (fixture.Inner is InMemoryStateStore memory)
+            return ((System.Collections.ICollection)typeof(InMemoryStateStore)
+                .GetField("_work", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(memory)!).Count;
+        using var command = StoreConnection(fixture).CreateCommand();
+        command.CommandText = "SELECT count(*) FROM change_work;";
+        return (long)command.ExecuteScalar()!;
     }
 
     public static void UnknownMoveClose()
@@ -7886,6 +7936,7 @@ public static partial class ChangeRunnerChecks
             Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count == 1,
                 "The parked registration remains durable before exact closure.");
             Issue? replacement = null;
+            var retained = StoredWorkCount(fixture);
             if (scenario == "generation") AdvanceGeneration(fixture);
             if (scenario is "replacement" or "same-key")
             {
@@ -7913,7 +7964,9 @@ public static partial class ChangeRunnerChecks
             if (replacement is not null) Check.Require(
                 fixture.Inner.IssueById(PairId, replacement.Id)?.Matches(replacement) == true,
                 "A same-key or same-endpoint replacement survives the exact close.");
-            if (scenario != "generation") Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count ==
+            if (scenario == "generation") Check.Require(StoredWorkCount(fixture) == retained,
+                "Generation refusal preserves the raw durable work, not just the visible queue.");
+            else Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count ==
                 (scenario is "deleted-echo" or "changed-echo" or "same-key" ? 0 : 1),
                 "Only proven source deletes and unchanged destination entries retire; unrelated work stays durable.");
         }
