@@ -17,6 +17,7 @@ internal sealed class SelectionPass
     internal readonly Func<WorkSelection?, Side, string, IReadOnlySet<long>?, bool, CancellationToken, Task>? RunBatch;
     internal readonly Action<WorkSelection, long?>? RecordTemporary;
     private readonly Func<WorkSelection, bool>? _temporaryThisRun;
+    private readonly Action<Issue>? _requestSettlement;
     // Roots this selection already batched; a folder notice under one is entry-only.
     internal readonly PrefixSet Batched = new();
     // D-1105-1: folder batches start after the pair's first Repair, which cannot complete during a selection.
@@ -27,10 +28,12 @@ internal sealed class SelectionPass
     internal SelectionPass(ExecutorContext context, ItemSync items, AncestorFence ancestors, ILiveExecutionBoundary liveBoundary,
         ActionExecutor executor, RowContexts rows, Action<RowStage, bool> progress,
         Func<WorkSelection?, Side, string, IReadOnlySet<long>?, bool, CancellationToken, Task>? runBatch = null,
-        Action<WorkSelection, long?>? recordTemporary = null, Func<WorkSelection, bool>? temporaryThisRun = null)
+        Action<WorkSelection, long?>? recordTemporary = null, Func<WorkSelection, bool>? temporaryThisRun = null,
+        Action<Issue>? requestSettlement = null)
     {
         RunBatch = runBatch;
         RecordTemporary = recordTemporary;
+        _requestSettlement = requestSettlement;
         _temporaryThisRun = temporaryThisRun;
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _items = items ?? throw new ArgumentNullException(nameof(items));
@@ -120,7 +123,7 @@ internal sealed class SelectionPass
         Func<Side, string, string?, bool>? separateWork = null;
         LocalEcho = null;
         var observation = new SelectionObservation(this, _context, _observer, _parents, _rows, _executor);
-        await foreach (var (work, walkFailure, original, initialPrimary, primaryExcluded, gone) in new SelectionBranches(this, _context).ReadBranchesAsync(selection, ct).ConfigureAwait(false))
+        await foreach (var (work, walkFailure, original, initialPrimary, primaryExcluded, gone, parked) in new SelectionBranches(this, _context).ReadBranchesAsync(selection, ct).ConfigureAwait(false))
         {
             ct.ThrowIfCancellationRequested();
             found = true;
@@ -146,13 +149,20 @@ internal sealed class SelectionPass
                 }
                 Visited.Add(key, default);
             }
+            // The primary was checked by its enumerator; old paths and walked children are checked here.
+            var move = parked ?? (walkFailure is null && key != selection.Key ? RefuseBeforeProvider(notice, work.Before) : null);
+            if (move is not null)
+            {
+                var heldRow = Row.ForOneSide(notice.Side, key, notice.Observed, work.Before, [], null, RowContext.Neutral);
+                ready &= new SelectionExecution(this, _context, _items, _executor, _boundary)
+                    .Park(selection, notice, original, key, heldRow, work.Before, move).Ready;
+                _requestSettlement?.Invoke(move);
+                continue;
+            }
             var throughPeer = peer is null && key == selection.Key
                 ? _context.Store.ReadWorkWatermark() : (long?)null;
             var branch = new SelectionBranch(this, _parents, selection, work, original, key, peer,
                 throughPeer, separateWork, initialPrimary) { Excluded = primaryExcluded };
-            // A walked child or old path refuses from its notice alone, before any provider call; the enumerator
-            // already refused the selection's own primary branch.
-            if (walkFailure is null && key != selection.Key) RefuseBeforeProvider(notice, work.Before);
             var row = await observation.ReadAsync(branch, walkFailure, branch.ClaimPeer, ct).ConfigureAwait(false);
             peer = branch.Peer;
             if (branch.Failed) ready &= branch.Attached;
@@ -230,11 +240,13 @@ internal sealed class SelectionPass
 
     // A held branch never reaches the fence: it attaches to its holder, so refusing it early would replace that.
     // The notice's own side and path are the evidence here: an unobserved notice still names the path it is about.
-    internal void RefuseBeforeProvider(ChangeNotice notice, SyncedEntry? before)
+    internal Issue? RefuseBeforeProvider(ChangeNotice notice, SyncedEntry? before)
     {
-        var path = notice.Observed?.Path ?? notice.Path;
-        if (_rows.Covers(PathNames.KeyFor(notice.Side, path))) return;
+        var key = PathNames.KeyFor(notice.Side, notice.Observed?.Path ?? notice.Path);
+        if (_context.Store.UnknownMoveCovering(_context.Pair.PairId, key) is { } move) return move;
+        if (_rows.Covers(key)) return null;
         _ancestors.RequireClear(notice, before, _parents);
+        return null;
     }
 
 

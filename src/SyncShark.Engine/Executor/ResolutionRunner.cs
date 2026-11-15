@@ -112,7 +112,7 @@ internal sealed class ResolutionRunner(
         // Settlement closes and may restore, so it acts on the stored row, not the caller's snapshot.
         if (IssuePolicy.UnknownMove(current.Kind, current.Subject))
         {
-            var settled = await new UnknownMoveSettlement(context, items).SettleAsync(current, ct);
+            var settled = await new UnknownMoveSettlement(context, items).SettleAsync(current, false, ct);
             Resolved = settled.Resolved;
             return settled.Outcome;
         }

@@ -28,6 +28,8 @@ internal static class UnknownMoveCheck
         outcome is Outcome.Adopt or Outcome.ReplanFromSource or Outcome.ReplanFromObserved ||
         outcome == Outcome.RemainingHop && bound;
 
+    internal static bool Decisive(Outcome outcome) => outcome is Outcome.Adopt or Outcome.ReplanFromSource;
+
     /// <summary>Ancestors compare by the path key; a case-only distinction compares the last component's exact
     /// spelling, which Dropbox guarantees for path_display. The observation is the pair side's by-ID read
     /// (<c>DropboxSide.ReadByIdAsync</c>), whose InScope answer covers both the pair root and its exclusions.</summary>
