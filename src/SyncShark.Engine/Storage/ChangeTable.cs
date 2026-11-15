@@ -488,7 +488,7 @@ internal sealed partial class ChangeTable
         return notice.Kind == ChangeKind.Deleted
             ? PathNames.IsSelfOrUnderKey(key, source) && settles(notice, before, false)
             : before is not null && PathNames.IsSelfOrUnderKey(before.DropboxKey, source) &&
-              settles(notice, Moved(before, move), false);
+              notice.Observed is { } observed && observed.Id == before.DropboxId && observed.Path == Moved(before, move).DropboxPath;
     }
 
     private static SyncedEntry Moved(SyncedEntry before, IssueSubject.UnknownMove move)
