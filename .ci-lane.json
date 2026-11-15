@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "local-split",
+    "folder-deletes"
+  ],
+  "core": [],
+  "ui": []
+}
