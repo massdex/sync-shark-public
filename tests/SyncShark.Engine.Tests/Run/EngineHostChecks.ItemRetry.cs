@@ -269,6 +269,8 @@ public static partial class EngineHostChecks
         await StepAsync(nameof(ConsumedWaitReleasesSyncedFileAsync), () => ConsumedWaitReleasesSyncedFileAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(StaleWaitHoldsNothingAsync), () => StaleWaitHoldsNothingAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(RowClearedDuringDispatchAsync), () => RowClearedDuringDispatchAsync(root)).ConfigureAwait(false);
+        foreach (var mode in new[] { "carry", "other-pair-pause", "late-cancel" })
+            await StepAsync(nameof(YieldKeepsAdmittedRetryAsync) + mode, () => YieldKeepsAdmittedRetryAsync(root, mode)).ConfigureAwait(false);
         await StepAsync(nameof(ConcurrentItemsAccountOnceAsync), () => ConcurrentItemsAccountOnceAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(StaleRefreshKeepsObservedWaitAsync), () => StaleRefreshKeepsObservedWaitAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(ItemWaitFiresWithoutEventAsync), () => ItemWaitFiresWithoutEventAsync(root)).ConfigureAwait(false);
@@ -1055,6 +1057,108 @@ public static partial class EngineHostChecks
     }
 
     // D3: a user Retry of another issue on a waiting pair runs at once; the item wait is untouched.
+    private static async Task YieldKeepsAdmittedRetryAsync(string root, string mode)
+    {
+        await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "yield-" + mode), turn: false).ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
+        await rig.TurnAsync().ConfigureAwait(false);
+        var row = rig.Store.ReadItemRetry(rig.PairId)!.Value;
+        await rig.SettledIdleAsync("yield setup").ConfigureAwait(false);
+        var dispatches = rig.Dispatches;
+        int logs;
+        lock (rig.Logs) logs = rig.Logs.Count;
+        var selects = 0;
+        var withheld = 0;
+        var admitted = false;
+        var keptRow = false;
+        var noRefresh = false;
+        var refreshes = -1;
+        var reset = false;
+        RunLog? first = null;
+        RunLog? second = null;
+        const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+        RunLog? Log(object? registration) => registration is null ? null :
+            (RunLog?)registration.GetType().GetField("Log", Private)!.GetValue(registration);
+        rig.BeforeSelect = () =>
+        {
+            if (rig.Dispatches == dispatches)
+            {
+                if (++selects == 1)
+                {
+                    var registration = rig.CheckedDispatch();
+                    admitted = registration is not null && rig.Store.ReadItemRetry(rig.PairId) == row;
+                    first = Log(registration);
+                }
+                if (selects != 2) return;
+                JournalSource source;
+                lock (typeof(EngineHost).GetField("_gate", Private)!.GetValue(rig.Host)!)
+                {
+                    var volumes = (System.Collections.IDictionary)typeof(EngineHost).GetField("_volumes", Private)!.GetValue(rig.Host)!;
+                    var volume = volumes.Values.Cast<object>().Single();
+                    source = (JournalSource)volume.GetType().GetField("Source", Private)!.GetValue(volume)!;
+                }
+                var committed = source.WorkCommitted;
+                source.WorkCommitted = _ => Interlocked.Increment(ref withheld);
+                try { rig.Hold(rig.DeliverLocalAsync("other.txt"), "post-floor arrival commits without its acquisition wake"); }
+                finally { source.WorkCommitted = committed; }
+                first!.Failed(new IOException("synthetic carried failure"));
+            }
+            else if (second is null)
+            {
+                keptRow = rig.Store.ReadItemRetry(rig.PairId) == row;
+                noRefresh = rig.Refreshes == Volatile.Read(ref refreshes);
+                second = Log(rig.CheckedDispatch());
+                if (second is not null)
+                    reset = ((HashSet<Exception>)typeof(RunLog).GetField("_reportedFailures", Private)!.GetValue(second)!).Count == 0;
+            }
+        };
+        rig.AfterDispatch = () =>
+        {
+            if (rig.Dispatches != dispatches + 1) return;
+            Volatile.Write(ref refreshes, rig.Refreshes);
+            if (mode == "other-pair-pause")
+            {
+                var auto = (AutoSync)typeof(EngineHost).GetField("_auto", Private)!.GetValue(rig.Host)!;
+                auto.PublishPause("pair-b", true);
+            }
+            else if (mode == "late-cancel")
+            {
+                var registration = rig.CheckedDispatch()!;
+                ((CancellationTokenSource)registration.GetType().GetProperty("Cancellation", Private)!.GetValue(registration)!).Cancel();
+            }
+        };
+        try
+        {
+            await rig.FireAsync(rig.FirstWait).ConfigureAwait(false);
+            await UntilAsync(() => rig.Dispatches == dispatches + 2 && rig.AutoSyncIdle(),
+                "the yield alone schedules the second dispatch").ConfigureAwait(false);
+        }
+        finally { rig.BeforeSelect = null; rig.AfterDispatch = null; }
+        Check.Require(admitted && withheld > 0 && noRefresh,
+            "The exact due row was admitted; acquisition and Monitor supplied no wake between the two dispatches.");
+        Check.Require(keptRow && rig.Store.ReadItemRetry(rig.PairId) is null,
+            "Yield keeps the admitted retry row until the next opportunity drains.");
+        Check.Require(first is not null && second is not null && reset,
+            "Each next opportunity starts with no previous failure dedup state.");
+        lock (rig.Logs)
+            Check.Require(rig.Logs.Count == logs + (mode == "late-cancel" ? 2 : 1),
+                "An orderly yield carries one log, including across another pair's pause; cancellation closes the chain.");
+        Check.Require(ReferenceEquals(first, second) == (mode != "late-cancel"),
+            "Only an uncancelled opportunity hands its log to the next dispatch.");
+        using var firstClosed = new FileStream(first!.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        if (!ReferenceEquals(first, second))
+        {
+            using var secondClosed = new FileStream(second!.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        }
+        else
+        {
+            using var reader = new StreamReader(firstClosed, leaveOpen: true);
+            var text = await reader.ReadToEndAsync().ConfigureAwait(false);
+            Check.Require(text.Split('\n').Count(line => line.Contains(nameof(TextKey.AutoSyncQueueAtStart), StringComparison.Ordinal)) == 2,
+                "The carried log records both opportunity queue snapshots.");
+        }
+    }
+
     private static async Task ResolveRunsBesideItemWaitAsync(string root)
     {
         await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "item-resolve")).ConfigureAwait(false);

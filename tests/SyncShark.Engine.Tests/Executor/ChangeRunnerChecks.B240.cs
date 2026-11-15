@@ -69,7 +69,8 @@ public static partial class ChangeRunnerChecks
             if (ends.Count <= 3) SeedRetryFile(fixture, "churn-" + ends.Count + ".txt");
             if (ends.Count == 2) pending.Remove(1);
         };
-        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], attempts: attempts).SyncWorkAsync(default);
+        // Pass and effect counts stay unchanged across orderly opportunities.
+        await UntilDrainedAsync(LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], attempts: attempts), default);
         Check.Require(ends.SequenceEqual([1, 1, 2, 2, 2]) && attempts.Reported == 2 &&
             fixture.Inner.Issues(PairId).Count == 0 && PendingAt(fixture, Side.Dropbox, Item).Any(),
             "a due temporary rename runs again in the same opportunity, then its next wait holds; real=" + real);
@@ -115,7 +116,8 @@ public static partial class ChangeRunnerChecks
                 if (ends == 2) pending.Clear();
             };
             var events = new List<RunEvent>();
-            await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts).SyncWorkAsync(default);
+            // Pass and effect counts stay unchanged across orderly opportunities.
+            await UntilDrainedAsync(LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts), default);
             Check.Require(ends == 4 && firstSynced == 3 && await SyncedAsync(fixture, Plain) &&
                 fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Folder)) is not null &&
                 attempts.Reported == 1 && fixture.Inner.Issues(PairId).Count == 0 &&

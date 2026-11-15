@@ -10,6 +10,10 @@ internal sealed class AutoSync
     // Each wake kind is kept, so a receipt wake coalesced into an ordinary one still runs while an item wait holds.
     private readonly Dictionary<string, (bool Ordinary, bool Receipts)> _pending = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Task> _active = new(StringComparer.Ordinal);
+    // Carry only within one generation and one pair/global pause publication stamp.
+    private readonly Dictionary<string, (RunLog Log, long Generation, (long Global, long Pair) Pauses)> _yielded = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> _pairPauses = new(StringComparer.Ordinal);
+    private long _globalPauses;
     private TaskCompletionSource _changed = NewSignal();
     private CancellationTokenSource? _stop;
     private Task? _loop;
@@ -59,6 +63,7 @@ internal sealed class AutoSync
                 ct.ThrowIfCancellationRequested();
                 Task changed;
                 List<(string PairId, (bool Ordinary, bool Receipts) Wake, TaskCompletionSource Completion)> starts = [];
+                List<RunLog> closed = [];
                 lock (_gate)
                 {
                     if (_failure is { } failure) throw failure;
@@ -66,13 +71,18 @@ internal sealed class AutoSync
                     {
                         if (_active.ContainsKey(id)) continue;
                         _pending.Remove(id);
-                        if (IsPaused(id)) continue;
+                        if (IsPaused(id))
+                        {
+                            if (_yielded.Remove(id, out var carried)) closed.Add(carried.Log);
+                            continue;
+                        }
                         var completion = NewSignal();
                         _active.Add(id, completion.Task);
                         starts.Add((id, wake, completion));
                     }
                     changed = _changed.Task;
                 }
+                foreach (var log in closed) log.Dispose();
                 foreach (var start in starts) _ = ObserveAsync(start.PairId, start.Wake, start.Completion, ct);
                 await changed.WaitAsync(ct).ConfigureAwait(false);
             }
@@ -80,10 +90,34 @@ internal sealed class AutoSync
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
 
+    // The supervisor owns the log; only an orderly yield can hand it to the pair's next opportunity.
     private async Task ObserveAsync(string pairId, (bool Ordinary, bool Receipts) wake, TaskCompletionSource completion,
         CancellationToken ct)
     {
-        try { await OpportunityAsync(pairId, wake, ct).ConfigureAwait(false); }
+        (RunLog Log, long Generation, (long Global, long Pair) Pauses)? carried = null;
+        lock (_gate) if (_yielded.Remove(pairId, out var entry)) carried = entry;
+        RunLog? log = null;
+        var opened = false;
+        (long Generation, (long Global, long Pair) Pauses) stamp = default;
+        RunLog? Open(long generation)
+        {
+            if (opened) return log;
+            opened = true;
+            lock (_gate) stamp = (generation, (_globalPauses, _pairPauses.GetValueOrDefault(pairId)));
+            if (carried is { } kept)
+            {
+                carried = null;
+                if ((kept.Generation, kept.Pauses) == stamp)
+                {
+                    kept.Log.StartOpportunity();
+                    return log = kept.Log;
+                }
+                kept.Log.Dispose();
+            }
+            return log = _openLog(pairId);
+        }
+        var yielded = false;
+        try { yielded = await OpportunityAsync(pairId, wake, Open, ct).ConfigureAwait(false); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested || IsPaused(pairId)) { }
         catch (LiveAdmissionStaleException) { }
         catch (EngineRequestException) { }
@@ -94,8 +128,11 @@ internal sealed class AutoSync
         }
         finally
         {
+            carried?.Log.Dispose();
+            if (!yielded) log?.Dispose();
             lock (_gate)
             {
+                if (yielded && log is not null) _yielded[pairId] = (log, stamp.Generation, stamp.Pauses);
                 _active.Remove(pairId);
                 completion.TrySetResult();
                 Signal();
@@ -103,11 +140,12 @@ internal sealed class AutoSync
         }
     }
 
-    private async Task OpportunityAsync(string pairId, (bool Ordinary, bool Receipts) wake, CancellationToken ct)
+    private async Task<bool> OpportunityAsync(string pairId, (bool Ordinary, bool Receipts) wake,
+        Func<long, RunLog?> openLog, CancellationToken ct)
     {
         var current = _store.ReadPairExecution(pairId);
         if (current is null || _host.Admission(pairId, current.Value.Pair) != EngineHost.PairAdmission.Admitted ||
-            _store.ReadLiveRefusal(pairId) == LiveRefusal.Pair) return;
+            _store.ReadLiveRefusal(pairId) == LiveRefusal.Pair) return false;
         var generation = current.Value.Generation;
         Massdex.SyncShark.V2.FailureRetryOwner.State? admitted = null;
         // Receipt reconciliation is never held.
@@ -118,14 +156,16 @@ internal sealed class AutoSync
             // the pair.
             if (!_host.ItemWaitNarrows(pairId, admitted!.Value))
             {
-                if (!wake.Receipts) return;
+                if (!wake.Receipts) return false;
                 receiptsOnly = true;
             }
             admitted = null;
         }
         else if (wake.Ordinary) _host.ReleaseItemWait(pairId, admitted);
-        await _host.DispatchSessionAsync(pairId, () => _openLog(pairId), async (session, token) =>
+        var log = openLog(generation);
+        return await _host.DispatchSessionAsync(pairId, () => log, async (session, token) =>
         {
+            var yielded = false;
             try
             {
                 if (receiptsOnly)
@@ -135,13 +175,12 @@ internal sealed class AutoSync
                 }
                 else
                 {
-                    var revisit = await session.Syncer.SyncWorkAsync(token).ConfigureAwait(false);
-                    // A normal return means no selectable work remained only while the host still admits this
-                    // dispatch: a drain refuses lanes before cancellation reaches the token, and its state stays set
-                    // until retirement. Only the exact admitted wait is cleared.
-                    if (admitted is { } drained && _host.TryHoldGeneration(session.Registration))
-                        _store.CompleteItemRetry(pairId, generation, drained);
-                    // A waiting cleanup's blocker finished after the lanes: one coalesced revisit.
+                    var (revisit, drained) = await session.Syncer.SyncWorkAsync(token).ConfigureAwait(false);
+                    // Only a drain under the still-admitted generation clears the exact wait; a yield leaves it due.
+                    if (drained && admitted is { } due && _host.TryHoldGeneration(session.Registration))
+                        _store.CompleteItemRetry(pairId, generation, due);
+                    yielded = !drained;
+                    // A yield or a released cleanup blocker asks for one coalesced revisit.
                     if (revisit) Kick(pairId);
                 }
                 _host.ScheduleFolderPoll(pairId, _store.HasFolderJobProgress(pairId, token),
@@ -149,9 +188,10 @@ internal sealed class AutoSync
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested && !ct.IsCancellationRequested)
             {
+                yielded = false;
             }
-            return session.Pair;
-        }, ct).ConfigureAwait(false);
+            return yielded && !token.IsCancellationRequested;
+        }, ct, startupLog: log).ConfigureAwait(false);
     }
 
     internal bool IsGloballyPaused => _pause.Global;
@@ -163,13 +203,21 @@ internal sealed class AutoSync
     }
     internal void PublishPause(string? pairId, bool paused)
     {
-        var prior = _pause;
-        if (pairId is null) _pause = new PauseSnapshot(paused, prior.Pairs);
-        else
+        lock (_gate)
         {
-            var pairs = new HashSet<string>(prior.Pairs, StringComparer.Ordinal);
-            if (paused) pairs.Add(pairId); else pairs.Remove(pairId);
-            _pause = new PauseSnapshot(prior.Global, pairs);
+            var prior = _pause;
+            if (pairId is null)
+            {
+                _globalPauses++;
+                _pause = new PauseSnapshot(paused, prior.Pairs);
+            }
+            else
+            {
+                _pairPauses[pairId] = _pairPauses.GetValueOrDefault(pairId) + 1;
+                var pairs = new HashSet<string>(prior.Pairs, StringComparer.Ordinal);
+                if (paused) pairs.Add(pairId); else pairs.Remove(pairId);
+                _pause = new PauseSnapshot(prior.Global, pairs);
+            }
         }
     }
 
@@ -186,6 +234,14 @@ internal sealed class AutoSync
             Task[] active;
             lock (_gate) active = _active.Values.ToArray();
             await Task.WhenAll(active).ConfigureAwait(false);
+            RunLog[] carried;
+            lock (_gate)
+            {
+                carried = [.. _yielded.Values.Select(entry => entry.Log)];
+                _yielded.Clear();
+                _pairPauses.Clear();
+            }
+            foreach (var log in carried) log.Dispose();
         }
     }
     private void Signal()

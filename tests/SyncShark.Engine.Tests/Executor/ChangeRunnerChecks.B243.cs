@@ -123,7 +123,8 @@ public static partial class ChangeRunnerChecks
                 return Task.FromResult(Coverage(work));
             }
         };
-        await LaneSyncer(fixture, selected, boundary, _ => { }).SyncWorkAsync(default);
+        // Pass counts stay unchanged across orderly opportunities.
+        await UntilDrainedAsync(LaneSyncer(fixture, selected, boundary, _ => { }), default);
         Check.Require(arrivalPass == 1 && fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)) == 3,
             "a newly arrived top-level row waits for the next finite pass; real=" + real);
     }
@@ -173,7 +174,8 @@ public static partial class ChangeRunnerChecks
                 return Task.FromResult(Coverage(work));
             }
         };
-        await LaneSyncer(fixture, selected, boundary, _ => { }, batch: true).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        // Pass and effect counts stay unchanged across orderly opportunities.
+        await UntilDrainedAsync(LaneSyncer(fixture, selected, boundary, _ => { }, batch: true), guard.Token).WaitAsync(guard.Token);
         Check.Require(ancestors.Count == 3 && ancestors.Select((anchor, i) => begun.Contains((anchor, i + 1)) &&
             completed.Contains((anchor, i + 1))).All(value => value) &&
             begun.Where(item => item.Anchor == selected.AnchorWorkId).All(item => item.Pass == 3) &&

@@ -7631,10 +7631,12 @@ public static partial class ChangeRunnerChecks
         var boundary = new Boundary(_ => new Lease())
         { Capture = (selection, _, _) => Task.FromResult(Coverage(selection)) };
         var context = fixture.Context(opportunity) with { Store = store };
-        await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-            RefusingExecutionBoundary.Instance, 1)).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+        // Pass and effect counts stay unchanged; arrivals can now span orderly opportunities.
+        var calls = await UntilDrainedAsync(new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
+            RefusingExecutionBoundary.Instance, 1)), guard.Token).WaitAsync(guard.Token);
+        Check.Require(calls == 3, "Only post-floor arrival progress yields; the final opportunity drains.");
         Check.Require(rounds == arrivals + 2,
-            "N8, G4-open: sustained arrivals extend the same call until the feed stops, then one empty pass ends it");
+            "Sustained arrivals remain reachable across yields; one empty pass ends the drain.");
         for (var index = 0; index <= arrivals; index++)
             Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key("Arrival" + index)) is not null,
                 "N7/N8: every finite arrival remains reachable and commits");
@@ -9516,6 +9518,21 @@ public static partial class ChangeRunnerChecks
 
     private static ChangeNotice Deleting(string path, string id) =>
         new(Side.Local, ChangeKind.Deleted, path, null, id, null, false, true);
+
+    // Drive the same Syncer across orderly yields; the caller's guard bounds the complete drain.
+    internal static async Task<int> UntilDrainedAsync(Syncer syncer, CancellationToken ct)
+    {
+        var calls = 0;
+        bool drained;
+        do
+        {
+            calls++;
+            bool revisit;
+            (revisit, drained) = await syncer.SyncWorkAsync(ct).ConfigureAwait(false);
+            Check.Require(drained || revisit, "Every yielded opportunity requests a revisit.");
+        } while (!drained);
+        return calls;
+    }
 
     private static Syncer LiveSyncer(Fixture fixture, WorkSelection selection, Boundary boundary,
         List<RunEvent> events, FakeRecovery? recovery = null, IItemAttempts? attempts = null,

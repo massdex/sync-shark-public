@@ -19,6 +19,7 @@ internal static class LoggingRepairChecks
         var folder = Directory.CreateTempSubdirectory();
         try
         {
+            RunLogDedupBounded(Path.Combine(folder.FullName, "carried-dedup"));
             await SavingAsync(Path.Combine(folder.FullName, "saved"), false);
             await SavingAsync(Path.Combine(folder.FullName, "refused"), true);
             await QuietAsync(Path.Combine(folder.FullName, "quiet"));
@@ -72,6 +73,32 @@ internal static class LoggingRepairChecks
             await ExtremeRetentionAsync(Path.Combine(folder.FullName, "retention-writer"), true);
         }
         finally { folder.Delete(recursive: true); }
+    }
+
+    private static void RunLogDedupBounded(string folder)
+    {
+        foreach (var count in new[] { 10, 1000 })
+        {
+            var log = RunLog.Open(folder, "pair-a", "carried-" + count, _ => { }, 262144);
+            using (log)
+            {
+                var reported = (HashSet<Exception>)typeof(RunLog).GetField("_reportedFailures",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(log)!;
+                Exception last = null!;
+                for (var index = 0; index < count; index++)
+                {
+                    last = new IOException("synthetic-" + index);
+                    log.Failed(last);
+                    log.Failed(last);
+                    Check.Require(reported.Count == 1, "One opportunity deduplicates its same failure object.");
+                    log.StartOpportunity();
+                    Check.Require(reported.Count == 0, "A carried log retains no prior opportunity's failures.");
+                }
+                log.Failed(last);
+            }
+            Check.Require(Lines(log.Path).Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Failed)) == count + 1,
+                "Each opportunity writes one failure, including the same exception reused in the next opportunity.");
+        }
     }
 
     private static async Task SavingAsync(string folder, bool throws)

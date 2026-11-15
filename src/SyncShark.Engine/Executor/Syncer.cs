@@ -73,11 +73,12 @@ public sealed class Syncer
     // This session's one live copy, so every effect live work reaches meets the live refusal.
     private Syncer Live => _context.Live ? this : _live ??= new Syncer(_context with { Live = true }, _ports);
 
-    /// <summary>Runs pending work on this session's one live copy. True when a duplicate-folder repair still waits and
-    /// a follow-up completed an operation after the lanes, so one more opportunity may unblock it.</summary>
-    internal Task<bool> SyncWorkAsync(CancellationToken ct) => Live.RunWorkAsync(ct);
+    /// <summary>Runs pending work on this session's one live copy. Drained is false when the opportunity yielded after a
+    /// pass that served only work acquired during it; Revisit asks for one more opportunity after a yield, or when a
+    /// waiting duplicate-folder repair's follow-up completed an operation after the lanes.</summary>
+    internal Task<(bool Revisit, bool Drained)> SyncWorkAsync(CancellationToken ct) => Live.RunWorkAsync(ct);
 
-    private async Task<bool> RunWorkAsync(CancellationToken ct)
+    private async Task<(bool Revisit, bool Drained)> RunWorkAsync(CancellationToken ct)
     {
         await ReconcileReceiptsAsync(ct).ConfigureAwait(false);
         _temporary.Clear();
@@ -102,9 +103,13 @@ public sealed class Syncer
         _context.Events(RunEvent.Stage(TextKey.StageRows));
         try
         {
-            var waiting = await RunLanesAsync(floor, Progress, ct).ConfigureAwait(false);
+            var (waiting, yielded) = await RunLanesAsync(floor, Progress, ct).ConfigureAwait(false);
             // The follow-ups always run; a waiting repair revisits only when one of them completed an operation.
-            try { return waiting & await _folders.ContinueReleasedFollowUpsAsync(ct, _temporary.SkipsAt).ConfigureAwait(false); }
+            try
+            {
+                var revisit = waiting & await _folders.ContinueReleasedFollowUpsAsync(ct, _temporary.SkipsAt).ConfigureAwait(false);
+                return (revisit || yielded, !yielded);
+            }
             catch (LiveAdmissionStaleException error)
             {
                 // A refused follow-up stays durable and pending; the refusal is reported, never silent.
@@ -116,7 +121,7 @@ public sealed class Syncer
     }
 
     // The finite watermark and pass retirement govern the same lane schedule, including its contention fallback.
-    private async Task<bool> RunLanesAsync(long floor, Action<RowStage, bool> progress, CancellationToken ct)
+    private async Task<(bool Waiting, bool Yielded)> RunLanesAsync(long floor, Action<RowStage, bool> progress, CancellationToken ct)
     {
         var pairId = _context.Pair.PairId;
         RowContexts? rows = null;
@@ -128,6 +133,7 @@ public sealed class Syncer
         var settling = true;
         bool repeat;
         bool waiting;
+        var yielded = false;
         do
         {
             // Outside any pass: the previous iteration ended its pass and this one has not selected yet. Duplicate-folder
@@ -136,6 +142,7 @@ public sealed class Syncer
             var lanes = 0;
             var refused = 0;
             var progress0 = 0;
+            var refused0 = 0;
             var alone = serial;
             var progressed = false;
             var refusedAlone = 0;
@@ -154,7 +161,11 @@ public sealed class Syncer
             async Task RunLaneAsync(SelectionPass pass, WorkSelection selection, Action? release)
             {
                 await SyncSelectionAsync(pass, selection, cancel.Token, release,
-                    () => Interlocked.Increment(ref refused),
+                    () =>
+                    {
+                        Interlocked.Increment(ref refused);
+                        if (selection.AnchorWorkId <= floor) Interlocked.Increment(ref refused0);
+                    },
                     anchor =>
                     {
                         Volatile.Write(ref progressed, true);
@@ -221,12 +232,14 @@ public sealed class Syncer
             if (alone) LeaveSerial();
             // Alone refusals are not competition; any refused remainder lane of a serial-started pass is.
             var competed = (serial || lanes > 1) && Volatile.Read(ref refused) > refusedAlone;
-            // A continuation can complete after the last selection, when no pass records its released endpoint.
-            repeat = competed || retired || Volatile.Read(ref completed);
+            // Progress only on arrivals, with no older refusal or completed continuation, yields to the opportunity boundary.
+            yielded = retired && !competed && !Volatile.Read(ref completed) && Volatile.Read(ref progressed) &&
+                Volatile.Read(ref progress0) == 0 && Volatile.Read(ref refused0) == 0;
+            repeat = !yielded && (competed || retired || Volatile.Read(ref completed));
             serialOnly = !retired && (serialOnly || serial && competed);
             serial = competed && Volatile.Read(ref progress0) == 0;
         } while (repeat);
-        return waiting;
+        return (waiting, yielded);
     }
 
     private (int Settled, bool More)? SettleEchoPage(string pairId)

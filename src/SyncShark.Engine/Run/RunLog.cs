@@ -214,6 +214,12 @@ public sealed class RunLog : IDisposable, IProgress<RunEvent>
     /// <summary>Writes a failure line for the exception with one classified reason in place of its message.</summary>
     public void Failed(Exception error, TextKey reason) => Event(RunEvent.Failed(error, reason));
 
+    /// <summary>Starts the next opportunity on a carried log; failures are deduplicated per opportunity.</summary>
+    internal void StartOpportunity()
+    {
+        lock (_gate) _reportedFailures.Clear();
+    }
+
     void IProgress<RunEvent>.Report(RunEvent item) => Event(item);
 
     /// <summary>Writes the line and counts it: Effect events by What (an EffectKind name), Issue events by What (an
