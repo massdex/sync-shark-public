@@ -17,6 +17,7 @@ public sealed class Syncer
     private readonly ItemSync _items;
     private readonly AncestorFence _ancestors;
     private readonly DuplicateRepairRunner _repairs;
+    private readonly FolderMoveContinuation _moves;
     internal Syncer(ExecutorContext context, SyncPorts ports)
     {
         ArgumentNullException.ThrowIfNull(context.Opportunity);
@@ -33,6 +34,7 @@ public sealed class Syncer
         _firstRunFolders = new FirstRunFolders(context, _parents, _executor, _items);
         _folders = _items.Folders;
         _repairs = new DuplicateRepairRunner(context, _folders);
+        _moves = new FolderMoveContinuation(context, _items.Renames, _folders);
         _exclusions = new ExclusionRunner(context, _parents, _executor, _keepBoth, _items);
     }
 
@@ -127,105 +129,137 @@ public sealed class Syncer
         var serialOnly = false;
         var settling = true;
         bool repeat;
-        bool waiting;
-        do
+        var waiting = false;
+        using var moveCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var walks = new TaskSet(moveCancel);
+        var ended = new HashSet<string>(StringComparer.Ordinal);
+        Task<bool>? walk = null;
+        var wanted = true;
+        async ValueTask BoundaryAsync(bool laneProgress)
         {
-            // Outside any pass: the previous iteration ended its pass and this one has not selected yet. Duplicate-folder
-            // checks and freezes run here; each frozen removal's send and job join continue inside this pass.
-            (waiting, var continuations) = await _repairs.RunAsync(ct).ConfigureAwait(false);
-            var lanes = 0;
-            var refused = 0;
-            var progress0 = 0;
-            var alone = serial;
-            var progressed = false;
-            var refusedAlone = 0;
-            var completed = false;
-            if (alone) _context.Events(RunEvent.Snapshot(TextKey.LanesSerial, Text.Get(TextKey.LanesSerial)));
-            void LeaveSerial()
+            wanted |= laneProgress;
+            while (walk is null || walk.IsCompleted)
             {
-                alone = false;
-                refusedAlone = Volatile.Read(ref refused);
-                _context.Events(RunEvent.Snapshot(TextKey.LanesParallel, Text.Get(TextKey.LanesParallel)));
+                if (walk is not null)
+                {
+                    wanted |= await walk;
+                    walk = null;
+                }
+                if (!wanted) return;
+                wanted = false;
+                walks.Add(walk = _moves.RunAsync(ended, moveCancel.Token));
             }
-            using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var tasks = new TaskSet(cancel);
-            Exception? failure = null;
-            bool retired;
-            async Task RunLaneAsync(SelectionPass pass, WorkSelection selection, Action? release)
+        }
+        Exception? walkFailure = null;
+        try
+        {
+            await BoundaryAsync(false);
+            do
             {
-                await SyncSelectionAsync(pass, selection, cancel.Token, release,
-                    () => Interlocked.Increment(ref refused),
-                    anchor =>
-                    {
-                        Volatile.Write(ref progressed, true);
-                        if (anchor <= floor) Interlocked.Increment(ref progress0);
-                    });
-            }
-            // Beside the lanes and each other, never ahead of them: an unfinished provider job delays only the work under
-            // its locks and the obligation's own held work. It is no selection, so it adds no lane, refusal or progress.
-            async Task ContinueRepairAsync(string id)
-            {
-                if ((await _folders.ContinueOwnAsync(_context.Store.FolderRemoval(pairId, id), null, cancel.Token))
-                    .Status == FolderRemovalStatus.Complete) Volatile.Write(ref completed, true);
-            }
-            try
-            {
-                SelectionPass? serialPass = null;
+                // Outside any pass: the previous iteration ended its pass and this one has not selected yet. Duplicate-folder
+                // checks and freezes run here; each frozen removal's send and job join continue inside this pass.
+                (waiting, var continuations) = await _repairs.RunAsync(ct).ConfigureAwait(false);
+                var lanes = 0;
+                var refused = 0;
+                var progress0 = 0;
+                var alone = serial;
+                var progressed = false;
+                var refusedAlone = 0;
+                var completed = false;
+                if (alone) _context.Events(RunEvent.Snapshot(TextKey.LanesSerial, Text.Get(TextKey.LanesSerial)));
+                void LeaveSerial()
+                {
+                    alone = false;
+                    refusedAlone = Volatile.Read(ref refused);
+                    _context.Events(RunEvent.Snapshot(TextKey.LanesParallel, Text.Get(TextKey.LanesParallel)));
+                }
+                using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                var tasks = new TaskSet(cancel);
+                Exception? failure = null;
+                bool retired;
+                async Task RunLaneAsync(SelectionPass pass, WorkSelection selection, Action? release)
+                {
+                    await SyncSelectionAsync(pass, selection, cancel.Token, release,
+                        () => Interlocked.Increment(ref refused),
+                        anchor =>
+                        {
+                            Volatile.Write(ref progressed, true);
+                            if (anchor <= floor) Interlocked.Increment(ref progress0);
+                        });
+                }
+                // Beside the lanes and each other, never ahead of them: an unfinished provider job delays only the work under
+                // its locks and the obligation's own held work. It is no selection, so it adds no lane, refusal or progress.
+                async Task ContinueRepairAsync(string id)
+                {
+                    if ((await _folders.ContinueOwnAsync(_context.Store.FolderRemoval(pairId, id), null, cancel.Token))
+                        .Status == FolderRemovalStatus.Complete) Volatile.Write(ref completed, true);
+                }
                 try
                 {
-                    // Each share is released at once, as an upload's is once it holds its permits: a job wait takes no
-                    // lane's capacity. Released members still count against the live ceiling, so at most WorkCapacity start
-                    // here: TotalCapacity minus the largest RowCapacity, so no Level rise in this iteration can shorten the
-                    // ordinary allowance. The rest stay durable and continue in a later iteration.
-                    foreach (var id in continuations.Take(_context.Admission.WorkCapacity))
-                        tasks.Add(release => { release(); return ContinueRepairAsync(id); });
-                    while (true)
+                    SelectionPass? serialPass = null;
+                    try
                     {
-                        while (settling && SettleEchoPage(pairId) is var page)
+                        // Each share is released at once, as an upload's is once it holds its permits: a job wait takes no
+                        // lane's capacity. Released members still count against the live ceiling, so at most WorkCapacity start
+                        // here: TotalCapacity minus the largest RowCapacity, so no Level rise in this iteration can shorten the
+                        // ordinary allowance. The rest stay durable and continue in a later iteration.
+                        foreach (var id in continuations.Take(_context.Admission.WorkCapacity))
+                            tasks.Add(release => { release(); return ContinueRepairAsync(id); });
+                        while (true)
                         {
-                            if (page is null) settling = false;
-                            else if (!page.Value.More) break;
+                            while (settling && SettleEchoPage(pairId) is var page)
+                            {
+                                if (page is null) settling = false;
+                                else if (!page.Value.More) break;
+                                cancel.Token.ThrowIfCancellationRequested();
+                            }
+                            if (_context.Store.SelectWork(pairId, _context.ExpectedGeneration, _context.Scope) is not { } selection) break;
                             cancel.Token.ThrowIfCancellationRequested();
-                        }
-                        if (_context.Store.SelectWork(pairId, _context.ExpectedGeneration, _context.Scope) is not { } selection) break;
-                        cancel.Token.ThrowIfCancellationRequested();
-                        if (!_ports.Live.TryHoldGeneration(pairId))
-                        {
-                            var error = new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
-                            _context.Events(RunEvent.Failed(error, path: selection.Key)
-                                with { Side = selection.Side, WorkId = selection.AnchorWorkId });
-                            throw error;
-                        }
-                        if (alone)
-                        {
-                            await RunLaneAsync(serialPass ??= CreatePass(), selection, null);
-                            if (!serialOnly && Volatile.Read(ref progressed)) LeaveSerial();
-                        }
-                        else
-                        {
-                            lanes++;
-                            var pass = CreatePass();
-                            tasks.Add(release => RunLaneAsync(pass, selection, release));
-                            await tasks.WaitForCapacityAsync(() => ScanPass.RowCapacity(_context.Admission, _ports.LocalHashSlots),
-                                ct, ScanPass.TotalCapacity(_context.Admission, _ports.LocalHashSlots));
+                            if (!_ports.Live.TryHoldGeneration(pairId))
+                            {
+                                var error = new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
+                                _context.Events(RunEvent.Failed(error, path: selection.Key)
+                                    with { Side = selection.Side, WorkId = selection.AnchorWorkId });
+                                throw error;
+                            }
+                            if (alone)
+                            {
+                                await RunLaneAsync(serialPass ??= CreatePass(), selection, null);
+                                if (!serialOnly && Volatile.Read(ref progressed)) LeaveSerial();
+                            }
+                            else
+                            {
+                                lanes++;
+                                var pass = CreatePass();
+                                tasks.Add(release => RunLaneAsync(pass, selection, release));
+                                await tasks.WaitForCapacityAsync(() => ScanPass.RowCapacity(_context.Admission, _ports.LocalHashSlots),
+                                    ct, ScanPass.TotalCapacity(_context.Admission, _ports.LocalHashSlots));
+                            }
                         }
                     }
+                    catch (Exception error) { failure = error; }
+                    failure = await tasks.JoinAsync(failure, failure is not null and not LiveAdmissionStaleException,
+                        joined => _context.Events(RunEvent.Failed(joined)));
+                    if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
                 }
-                catch (Exception error) { failure = error; }
-                failure = await tasks.JoinAsync(failure, failure is not null and not LiveAdmissionStaleException,
-                    joined => _context.Events(RunEvent.Failed(joined)));
-                if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
-            }
-            finally { retired = _context.Store.EndWorkPass(pairId); }
-            // Retirement or a newly released endpoint justifies another pass; re-registering failure does not.
-            if (alone) LeaveSerial();
-            // Alone refusals are not competition; any refused remainder lane of a serial-started pass is.
-            var competed = (serial || lanes > 1) && Volatile.Read(ref refused) > refusedAlone;
-            // A continuation can complete after the last selection, when no pass records its released endpoint.
-            repeat = competed || retired || Volatile.Read(ref completed);
-            serialOnly = !retired && (serialOnly || serial && competed);
-            serial = competed && Volatile.Read(ref progress0) == 0;
-        } while (repeat);
+                finally { retired = _context.Store.EndWorkPass(pairId); }
+                // Retirement or a newly released endpoint justifies another pass; re-registering failure does not.
+                if (alone) LeaveSerial();
+                // Alone refusals are not competition; any refused remainder lane of a serial-started pass is.
+                var competed = (serial || lanes > 1) && Volatile.Read(ref refused) > refusedAlone;
+                // A continuation can complete after the last selection, when no pass records its released endpoint.
+                await BoundaryAsync(retired);
+                repeat = competed || retired || Volatile.Read(ref completed) || walk is not null;
+                serialOnly = !retired && (serialOnly || serial && competed);
+                serial = competed && Volatile.Read(ref progress0) == 0;
+                if (!competed && !retired && !Volatile.Read(ref completed) && walk is not null)
+                    await Task.WhenAny(walk, _moves.NextTick).WaitAsync(ct);
+            } while (repeat);
+        }
+        catch (Exception error) { walkFailure = error; }
+        walkFailure = await walks.JoinAsync(walkFailure, walkFailure is not null,
+            joined => _context.Events(RunEvent.Failed(joined)));
+        if (walkFailure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(walkFailure).Throw();
         return waiting;
     }
 

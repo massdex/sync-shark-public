@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 /// <summary>Wraps a side with a supplied by-ID observation, for checks whose subject reads an identity.</summary>
 internal sealed class IdentitySide(ISide inner,
     Func<string, CancellationToken, Task<(IdentityLocation Location, bool InScope)?>> identity,
-    Func<string, CancellationToken, Task<(IdentityLocation Location, bool InScope)?>>? documented = null) : ISide, IIdentitySide
+    Func<string, CancellationToken, Task<(IdentityLocation Location, bool InScope)?>>? documented = null) : ISide, IIdentitySide, IFolderMoveSide
 {
     /// <summary>Both production adapters answer identity; this answers from the fake holding the scenario's entries, so
     /// an absent id is proven absent and a present one is in scope. onRead counts the read as the provider call it is.</summary>
@@ -30,6 +30,12 @@ internal sealed class IdentitySide(ISide inner,
     public Task<Entry> EnsureFolderAsync(string path, CancellationToken ct) => inner.EnsureFolderAsync(path, ct);
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct) => inner.DeleteAsync(expected, selection, ct);
     public Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct) => inner.MoveAsync(expected, newPath, ct);
+    public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct) =>
+        ((IFolderMoveSide)inner).CreateFolderExclusiveAsync(path, ct);
+    public Task<FolderSubmitResult> SubmitMoveBatchAsync(IReadOnlyList<(string From, string To)> members,
+        RequestAttempt attempt, CancellationToken ct) => ((IFolderMoveSide)inner).SubmitMoveBatchAsync(members, attempt, ct);
+    public Task<FolderJobResult> ReadMoveBatchAsync(string jobId, int expectedCount, RequestAttempt attempt, CancellationToken ct) =>
+        ((IFolderMoveSide)inner).ReadMoveBatchAsync(jobId, expectedCount, attempt, ct);
     public Task<FolderSubmitResult> SubmitFolderRemovalAsync(FolderSubmission submission,
         IReadOnlyList<FolderRemovalEffect> effects, RequestAttempt attempt, CancellationToken ct) =>
         inner.SubmitFolderRemovalAsync(submission, effects, attempt, ct);

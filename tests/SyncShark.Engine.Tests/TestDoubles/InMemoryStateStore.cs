@@ -11,6 +11,7 @@ public sealed class InMemoryStateStore : IStateStore
 {
     public void HoldFolderMoves(string pairId) { }
     public IEnumerable<FolderMove> FolderMoveRoots(string pairId, CancellationToken ct) => [];
+    public IReadOnlyList<FolderMove> FolderMoves(string pairId, string rootId) => [];
 
     private readonly object _gate = new();
     private readonly Dictionary<string, PairConfig> _pairs = new(StringComparer.Ordinal);

@@ -3,12 +3,14 @@
     "engine-tests"
   ],
   "engine": [
+    "folder-move",
     "store",
-    "work-lifecycle",
+    "syncer",
+    "unknown-move-repair",
+    "duplicate-repair",
     "literals",
     "dependencies",
-    "strings",
-    "duplicate-repair"
+    "strings"
   ],
   "core": [],
   "ui": []

@@ -258,7 +258,7 @@ public sealed class ActionExecutor(
                 var before = row.EntryOn(written.Value)!;
                 path = Target(action);
                 RequireReadable(action, ct);
-                var moved = await context.For(written.Value).MoveAsync(before, path, ct);
+                var moved = await new FolderMoveRunner(context).MoveAsync(written.Value, before, path, ct);
                 applied = moved;
                 detail = before.Path;
                 effect = EffectKinds.Moved(written.Value);

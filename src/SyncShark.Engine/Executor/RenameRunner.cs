@@ -461,7 +461,7 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
                 RequireUnblockedDestination(synced, counterpart, moved!, written, path);
                 await parents.EnsureAsync(written, path, ct);
             }
-            var result = await context.For(written).MoveAsync(counterpart, path, ct);
+            var result = await new FolderMoveRunner(context).MoveAsync(written, counterpart, path, ct);
             var after = finishing ? synced with
             {
                 DropboxPath = result.Path, DropboxKey = PathNames.DropboxKey(result.Path), DropboxId = result.Id

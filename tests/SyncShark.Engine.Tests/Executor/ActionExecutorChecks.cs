@@ -2580,6 +2580,7 @@ public static class ActionExecutorChecks
         public void HoldFolderMoves(string pairId) => inner?.HoldFolderMoves(pairId);
         public IEnumerable<FolderMove> FolderMoveRoots(string pairId, CancellationToken ct) =>
             inner?.FolderMoveRoots(pairId, ct) ?? [];
+        public IReadOnlyList<FolderMove> FolderMoves(string pairId, string rootId) => inner?.FolderMoves(pairId, rootId) ?? [];
 
         public int Commits { get; private set; }
         public int AsyncCommits { get; private set; }

@@ -303,7 +303,9 @@ Exclusive creation and positional move submit/check extend the existing folder-m
 
 ## src/SyncShark.Engine/Executor/ActionExecutor.cs
 
-<!-- spec-source: db9dd53109c1~a87a0bf2d4d9~3357e78805a0~787c716445d5~8aaa146070e9~6312 -->
+Split-folder delta: ApplyAsync :261 delegates its ordinary move expression to FolderMoveRunner; its successful commit body and job ranges below are unchanged. Existing extraction debt remains with the recorded structural lane; this receipt is not an independent verdict.
+
+<!-- spec-source: 2ca0506b1c72~0a4ef8315eb9~c9ec90538cab~99f65776eda3~c42a21307000~b085 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -314,9 +316,11 @@ Exclusive creation and positional move submit/check extend the existing folder-m
 
 ## src/SyncShark.Engine/Executor/RenameRunner.cs
 
+Split-folder delta: ApplyAsync :464 delegates its ordinary move expression to FolderMoveRunner; successful settlement and the current job ranges below remain unchanged. The existing structural lane owns the remaining debt; no verdict is changed here.
+
 Current temporary-wait change: Failure :528-556 carries one additional result argument. Existing file and long-member split obligations remain with the rename structural lane; no new job or split clearance is claimed.
 
-<!-- spec-source: 6e7b8a1d4f99~854a597a82fc~bcb0233a7385~224dbd6af253~4c0c200d3b22~db71 -->
+<!-- spec-source: 0d755e296a22~c77b0009505c~3072310bbd2d~4b07cf1c1273~230fd13d2fbe~daf4 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -457,7 +461,9 @@ Split-folder delta: ordered launch JSON and the folder-row projection stay in th
 
 ## src/SyncShark.Engine/Dropbox/DropboxApi.cs
 
-<!-- spec-source: 074db16536bf~881b7e71f18e~f4bb76fd457c~94913e310a30~4aadccf43aa3~14c0 -->
+Split-folder delta: route-aware batch feedback :207-213 reuses AdmissionIdentity :82-84 and AdaptiveLimiter.ReportBatchOutcome; the public upload-batch entry point preserves its route and null wait. The partial declaration adds no exchange or retry policy. Current jobs remain request observation :24-78, exchange entry points :80-213, retry orchestration :215-276, and exchange execution/settlement :278-540. The existing transport structural lane owns their extraction under the clearing condition below. Its class/file debt stays open; this source receipt is not an independent size verdict.
+
+<!-- spec-source: f5d4461be9eb~56478054d3f2~077e14cec467~664b02814416~4bc1a52c727b~472e -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -976,7 +982,9 @@ One oversized-move cause is appended to the existing vocabulary, preserving all 
 
 ## src/SyncShark.Engine/Executor/Syncer.cs
 
-<!-- spec-source: 364213d7154e~0ceae2804f79~9ed7583d1a6b~f55f1e09a19b~180067ef91b0~bf8e -->
+Split-folder delta: RunLanesAsync owns one separate TaskSet across passes; the same scheduler now admits a walk only on first entry, lane progress or advancement. Reply ticks only pace empty passes. Duplicate-repair continuations and TaskSet error priority remain intact. The scheduler and facade extraction debt below remains with the structural lane, pending independent review of the combined candidate; this author receipt grants no size clearance.
+
+<!-- spec-source: 7849cb2494e2~c9e3bbe091fd~a93b18b734a7~ecc265f5b5ce~6832cb535d34~640e -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -1028,9 +1036,9 @@ No open §1.3 size obligation. The 0.3.82 extraction moved branch enumeration to
 
 ## src/SyncShark.Engine/Executor/ItemRenames.cs
 
-SettleMoveAsync now owns the ordinary by-ID observation/settlement composition extracted from ResolutionRunner. It delegates to the existing observation, decision and act owners; Repair still uses observation alone. SettleUnknownMoveAsync is unchanged, so its read/act/restore extraction remains open under the owner and clearing conditions below. This is not a new reviewer verdict.
+SettleMoveAsync now owns the split claim/admission and atomic relabel before the ordinary by-ID observation/settlement composition extracted from ResolutionRunner. Split fill and cleanup have separate owners; the existing settlement body remains unchanged. It delegates to the existing observation, decision and act owners; Repair still uses observation alone. SettleUnknownMoveAsync is unchanged, so its read/act/restore extraction remains open under the owner and clearing conditions below. This is not a new reviewer verdict.
 
-<!-- spec-source: c41fc1030be8~d222db16f65e~275f5f97bab0~2fad85f63975~acfd0e5c11a4~8449 -->
+<!-- spec-source: 0d3718fc4c71~fc16cca5a7f3~38bf17a31218~2d170dbfa549~6a5d3e52d44d~85a0 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

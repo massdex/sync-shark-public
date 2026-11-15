@@ -86,6 +86,7 @@ public static class CheckRegistry
         ["path-only-coalescing"] = [Storage.ChangeTableChecks.PathOnlyCoalescing, Executor.ChangeRunnerChecks.PathOnlyLiveReads],
         ["work-lifecycle"] = [Storage.ChangeTableChecks.Run, Storage.QueryPlanChecks.Run],
         ["duplicate-repair"] = [Executor.ChangeRunnerChecks.RunDuplicateRepair],
+        ["folder-move"] = [Executor.ChangeRunnerChecks.RunSplitMoves],
         ["repair-held"] = [Storage.ChangeTableChecks.RepairHeldSelection, Executor.ChangeRunnerChecks.RunRepairHeld, Executor.FolderDeleteRunnerChecks.RunRepairHeld, Executor.ScanPassChecks.RunRepairHeld],
         ["repair-claims"] = [Storage.StateStoreChecks.ClaimedRepair, Storage.QueryPlanChecks.ClaimedRetirement,
             Executor.ChangeRunnerChecks.FailedSelectionReleasesClaim],

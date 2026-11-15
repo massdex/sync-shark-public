@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 /// <summary>An in-memory ISide for Executor and Run checks: entries by path, with call counts for mutations.</summary>
-public sealed class FakeSide : ISide
+public sealed class FakeSide : ISide, IFolderMoveSide
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, Exception> _failures = new();
@@ -22,6 +22,9 @@ public sealed class FakeSide : ISide
 
     public Side Side { get; }
     public int StagesDisposed { get; private set; }
+
+    /// <summary>Optional synthetic descendant limit; absent for ordinary side checks.</summary>
+    public int? MoveEntryLimit { get; set; }
 
     /// <summary>Whether a folder ensure also creates missing ancestors, the seeding shortcut most checks use. False
     /// behaves like the native Local adapter, which fails rather than recreate a vanished parent (B-140A R1).</summary>
@@ -257,6 +260,8 @@ public sealed class FakeSide : ISide
                 .Select(p => (Entry: p.Value, Content: _content.GetValueOrDefault(p.Key)))
                 .ToList();
 
+            if (MoveEntryLimit is { } limit && children.Count > limit)
+                throw new ItemFailedException(expected.Path, TextKey.FailDropboxTooManyFiles, null);
             RemoveSubtree(key);
             _entries[destination] = moved;
             if (movedContent is not null) _content[destination] = movedContent;
@@ -269,6 +274,43 @@ public sealed class FakeSide : ISide
             }
             return Task.FromResult(moved);
         }
+    }
+
+    public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        ThrowIfFailing(path);
+        lock (_gate)
+        {
+            if (_entries.ContainsKey(PathNames.Key(path))) throw new PathOccupiedException(path);
+            return Task.FromResult(EnsureFolderLocked(path));
+        }
+    }
+
+    public async Task<FolderSubmitResult> SubmitMoveBatchAsync(IReadOnlyList<(string From, string To)> members,
+        RequestAttempt attempt, CancellationToken ct)
+    {
+        var results = new List<FolderMemberResult>();
+        for (var ordinal = 0; ordinal < members.Count; ordinal++)
+        {
+            var member = members[ordinal];
+            if (FindById(member.From) is not { } entry)
+            {
+                results.Add(new FolderMemberResult.KnownNoEffect(ordinal, TextKey.FailChanged));
+                continue;
+            }
+            try { results.Add(new FolderMemberResult.Receipt(ordinal, await MoveAsync(entry, member.To, ct))); }
+            catch (PathOccupiedException) { results.Add(new FolderMemberResult.KnownNoEffect(ordinal, TextKey.ClashNameTaken)); }
+            catch (ItemFailedException error) { results.Add(new FolderMemberResult.KnownNoEffect(ordinal, error.Cause)); }
+        }
+        return new FolderSubmitResult.Terminal(results);
+    }
+
+    public Task<FolderJobResult> ReadMoveBatchAsync(string jobId, int expectedCount, RequestAttempt attempt, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult<FolderJobResult>(new FolderJobResult.Terminal(Enumerable.Range(0, expectedCount)
+            .Select(ordinal => (FolderMemberResult)new FolderMemberResult.Unknown(ordinal, null)).ToArray()));
     }
 
     public Task<FolderSubmitResult> SubmitFolderRemovalAsync(FolderSubmission submission,

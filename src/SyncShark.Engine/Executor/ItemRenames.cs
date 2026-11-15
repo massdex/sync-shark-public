@@ -22,8 +22,52 @@ internal readonly struct ItemRenames(ExecutorContext _context, Parents _parents,
     }
 
     /// <summary>Observes and settles a held move; null means its identity is not yet proven settleable.</summary>
-    internal async Task<(SyncOutcome Outcome, bool Kept)?> SettleMoveAsync(Issue issue, Action close, CancellationToken ct)
+    internal async Task<(SyncOutcome Outcome, bool Kept)?> SettleMoveAsync(Issue issue, Action close, CancellationToken ct,
+        Action? tick = null)
     {
+        var move = issue.Subject.Move!;
+        var claim = $"move:{move.ExpectedId}";
+        if (!PairRuntimes.TryClaimFolderJob(claim)) return null;
+        try
+        {
+            var rows = _context.Store.FolderMoves(_context.Pair.PairId, move.ExpectedId);
+            if (rows.FirstOrDefault(row => row.ParentId is null) is { Phase: < FolderMovePhase.Relabelled } root)
+            {
+                await using var work = await _context.Admission.EnterWorkAsync(false, ct);
+                await using var permit = await _context.EnterOperationAsync(ct);
+                await using var hold = await PathLocks.Shared.EnterAsync(LockKeys.ForPaths(_context.Pair,
+                    [(Side.Local, move.Source), (Side.Dropbox, move.Source),
+                     (Side.Local, move.Destination), (Side.Dropbox, move.Destination)]).ToArray(), ct);
+                Entry destination;
+                try { destination = await new FolderMoveRunner(_context).FinishAsync(rows, ct, tick); }
+                catch (PathOccupiedException) when (root.Phase == FolderMovePhase.Armed)
+                {
+                    close();
+                    _context.Store.SetFolderMove(_context.Pair.PairId, _context.ExpectedGeneration, root, null);
+                    return (SyncOutcome.InSync, false);
+                }
+                catch (ItemFailedException error) when (error.Move is not null)
+                {
+                    issue = issue with { Cause = error.Cause };
+                    RestoreUnknownMove(issue);
+                    return (new SyncOutcome(ActionKind.None, NoneReason.Held, null,
+                        IssueKind.Failure, false, issue.Cause), true);
+                }
+                var subject = issue.Subject with
+                {
+                    Move = move with { ExpectedId = destination.Id },
+                    Items = issue.Subject.Items.Select(item => item.Side == Side.Dropbox && item.Id == root.SourceId
+                        ? item with { Id = destination.Id } : item).ToArray()
+                };
+                _context.Store.Commit(_context.Pair.PairId, StateChange.Empty with
+                {
+                    SplitRelabel = root.SourceId,
+                    Raise = [(IssueKind.Failure, TextKey.FailMoveInParts, issue.Path, subject)]
+                });
+                issue = _context.Store.MoveResponsibility(_context.Pair.PairId, destination.Id)!;
+            }
+        }
+        finally { PairRuntimes.ReleaseFolderJob(claim); }
         if (await ObserveUnknownMoveAsync(issue, ct) is not { } read) return null;
         var (decision, observed) = read;
         var bound = _context.Store.SyncedById(_context.Pair.PairId, Side.Dropbox, issue.Subject.Move!.ExpectedId);
