@@ -120000,8 +120000,8 @@
       "verdict": "SPLIT-PENDING",
       "family": "anthropic",
       "register": "tools/ci/structure-debt.md",
-      "reason": "RunCurrentAsync :145-251 keeps the recorded inventory: callback/error boundary, listed or fresh observation and footprint checks, evidence and Planner choice, the fenced-footprint hold, destination identity, application, the OccupiedAsync clash catch and freshness/failure mapping. The only change is the observeFootprint parameter :149 and its call :175, which reports the footprint the refreshed group was decided at so RunCoreAsync can hold it on Hold or Notice; no job is added. The split by job recorded for this member stands. The split obligation is unchanged and stays with the rename structural lane; closure requires the extraction and a fresh cross-family verdict. Writer record: an independent cross-family review of this delta is still pending.",
-      "source_revision": "2a2cfb79b"
+      "reason": "RunCurrentAsync :147-253 keeps the recorded inventory: callback/error boundary, listed or fresh observation and footprint checks, evidence and Planner choice, the fenced-footprint hold, destination identity, application, the OccupiedAsync clash catch and freshness/failure mapping. The only change is the observeFootprint parameter :151 and its call :177, which reports the footprint the refreshed group was decided at so RunCoreAsync can hold it on Hold or Notice; no job is added. The split by job recorded for this member stands. The split obligation is unchanged and stays with the rename structural lane; closure requires the extraction and a fresh cross-family verdict. Writer record: an independent cross-family review of this delta is still pending.",
+      "source_revision": "a7fa7e385"
     },
     {
       "key": [
@@ -120010,8 +120010,8 @@
         "SyncShark.Engine:Massdex.SyncShark.Engine.Executor.RenameRunner",
         ""
       ],
-      "hash": "4c375389f815~018498e07dc9~7ce44b64018d~34750202a010~2374fb672b65~0ad0",
-      "size": 669,
+      "hash": "27e61dd930bf~76dadb544fee~cba50717894e~506d7ff39f3f~d2771423a96b~002b",
+      "size": 671,
       "members": [
         "RenameRunner:AdoptAsync(WorkSelection?,RenameDecision,IReadOnlyList<RenameCandidate>,SyncedEntry,Observations,Action<Issue>?,Guid,ItemRetryCandidate?,CancellationToken)",
         "RenameRunner:ApplyAsync(WorkSelection?,RenameDecision,IReadOnlyList<RenameCandidate>,SyncedEntry,Observations,Action<Issue>?,Guid,ItemRetryCandidate?,CancellationToken)",
@@ -120043,6 +120043,7 @@
         "RenameRunner:field:_listedAdoption",
         "RenameRunner:field:_selectedIssue",
         "RenameRunner:static Closes(SyncedEntry,IReadOnlyList<RenameCandidate>)",
+        "RenameRunner:static HeldFootprint(IReadOnlyList<(Side Side, string Path, bool Destination)>,IReadOnlyList<(Side Side, string Path, bool Destination)>)",
         "RenameRunner:static Lists(List<RenameCandidate>,RenameCandidate)",
         "RenameRunner:static LockPaths(IEnumerable<(Side Side, string Path, bool Destination)>,Entry?)",
         "RenameRunner:static MappedDestination(IReadOnlyList<(Side Side, string Path, bool Destination)>,Side)",
@@ -120052,8 +120053,8 @@
       "verdict": "SPLIT-PENDING",
       "family": "anthropic",
       "register": "tools/ci/structure-debt.md",
-      "reason": "Same jobs as the file row; grew 660 to 669. RunCoreAsync :34-50 now holds the handed footprint together with the footprint the group was decided at, adding the decided paths only when they differ from the handed ones; RunUnrecordedAsync :53-110 returns that footprint beside its decision and RunCurrentAsync :145-251 reports it through its new footprint callback. This is the existing rename-hold job; no member or job is added. The split obligation is unchanged and stays with the rename structural lane; closure requires the extraction and a fresh cross-family verdict. Writer record: an independent cross-family review of this delta is still pending.",
-      "source_revision": "2a2cfb79b"
+      "reason": "Same jobs as the file row; grew 660 to 671. RunCoreAsync :34-46 now holds the handed footprint together with the footprint the group was decided at; HeldFootprint :47-53 adds the decided paths only when they differ from the handed ones, so an ordinary hold keys each path once, and is a pure helper its counting check calls directly. RunUnrecordedAsync :55-112 returns that footprint beside its decision and RunCurrentAsync :147-253 reports it through its new footprint callback. This is the existing rename-hold job; no job is added. The split obligation is unchanged and stays with the rename structural lane; closure requires the extraction and a fresh cross-family verdict. Writer record: an independent cross-family review of this delta is still pending.",
+      "source_revision": "a7fa7e385"
     },
     {
       "key": [
@@ -120062,8 +120063,8 @@
         "",
         ""
       ],
-      "hash": "3f5f26e43688~c44a3e783a03~905b0a25c882~c0a54800af5f~3fb887f692c9~b450",
-      "size": 674,
+      "hash": "17251cf741b4~e8fb8d369e67~9f8270243586~00260ebe25b3~b1bf5351d9d6~4b70",
+      "size": 676,
       "members": [
         "RenameRunner:AdoptAsync(WorkSelection?,RenameDecision,IReadOnlyList<RenameCandidate>,SyncedEntry,Observations,Action<Issue>?,Guid,ItemRetryCandidate?,CancellationToken)",
         "RenameRunner:ApplyAsync(WorkSelection?,RenameDecision,IReadOnlyList<RenameCandidate>,SyncedEntry,Observations,Action<Issue>?,Guid,ItemRetryCandidate?,CancellationToken)",
@@ -120095,6 +120096,7 @@
         "RenameRunner:field:_listedAdoption",
         "RenameRunner:field:_selectedIssue",
         "RenameRunner:static Closes(SyncedEntry,IReadOnlyList<RenameCandidate>)",
+        "RenameRunner:static HeldFootprint(IReadOnlyList<(Side Side, string Path, bool Destination)>,IReadOnlyList<(Side Side, string Path, bool Destination)>)",
         "RenameRunner:static Lists(List<RenameCandidate>,RenameCandidate)",
         "RenameRunner:static LockPaths(IEnumerable<(Side Side, string Path, bool Destination)>,Entry?)",
         "RenameRunner:static MappedDestination(IReadOnlyList<(Side Side, string Path, bool Destination)>,Side)",
@@ -120105,8 +120107,8 @@
       "verdict": "SPLIT-PENDING",
       "family": "anthropic",
       "register": "tools/ci/structure-debt.md",
-      "reason": "Jobs: clash/entry routing and the hold of the handed and decided footprints :12-50; binding/admission preparation :52-142 (RunUnrecordedAsync :53-110, CurrentBinding :113-118, ReadRetry :120-142); current observation/decision execution :144-251, including the fenced-footprint hold :206-211 and the refused-parent hold :240-246; occupied target :253-311; readability/adoption :313-350; observation/identity projection :352-422 (relocation :387-401); application/adopt/follow :424-538; destination ownership :540-547; settlement :549-574; failure mapping :576-604; subject/closure/footprint :606-673. Grew 665 to 674 with the decided-footprint hold only. The split obligation is unchanged and stays with the rename structural lane; closure requires the extraction and a fresh cross-family verdict. Writer record: an independent cross-family review of this delta is still pending.",
-      "source_revision": "2a2cfb79b"
+      "reason": "Jobs: clash/entry routing and the hold of the handed and decided footprints :12-53 (HeldFootprint :47-53); binding/admission preparation :54-144 (RunUnrecordedAsync :55-112, CurrentBinding :115-120, ReadRetry :122-144); current observation/decision execution :146-253, including the fenced-footprint hold :208-213 and the refused-parent hold :242-248; occupied target :255-313; readability/adoption :315-352; observation/identity projection :354-424 (relocation :389-403); application/adopt/follow :426-540; destination ownership :542-549; settlement :551-576; failure mapping :578-606; subject/closure/footprint :608-675. Grew 665 to 676 with the decided-footprint hold only. The split obligation is unchanged and stays with the rename structural lane; closure requires the extraction and a fresh cross-family verdict. Writer record: an independent cross-family review of this delta is still pending.",
+      "source_revision": "a7fa7e385"
     },
     {
       "key": [
@@ -120730,10 +120732,10 @@
     },
     {
       "path": "src/SyncShark.Engine/Executor/RenameRunner.cs",
-      "hash": "3f5f26e43688~c44a3e783a03~905b0a25c882~c0a54800af5f~3fb887f692c9~b450",
+      "hash": "17251cf741b4~e8fb8d369e67~9f8270243586~00260ebe25b3~b1bf5351d9d6~4b70",
       "family": "anthropic",
-      "source_revision": "2a2cfb79b",
-      "reason": "Jobs unchanged: a relocated or rebased rename group that ends in Hold or Notice now holds the footprint it was decided at as well as the one it was handed, adding the decided paths only when they differ (RunCoreAsync :34-50, the footprint RunUnrecordedAsync :53-110 returns, and RunCurrentAsync's observeFootprint callback :149, :175). This stays inside the existing rename-hold and observation jobs and adds no job. The recorded split of RenameRunner's class, file, RunUnrecordedAsync and RunCurrentAsync rows remains valid and open, owned by the rename structural lane; closure requires that lane's extraction and a fresh cross-family verdict. Writer record: an independent cross-family review of this delta is still pending."
+      "source_revision": "a7fa7e385",
+      "reason": "Jobs unchanged: a relocated or rebased rename group that ends in Hold or Notice now holds the footprint it was decided at as well as the one it was handed, adding the decided paths only when they differ (RunCoreAsync :34-46 and its pure HeldFootprint helper :47-53, the footprint RunUnrecordedAsync :55-112 returns, and RunCurrentAsync's observeFootprint callback :151, :177). This stays inside the existing rename-hold and observation jobs and adds no job. The recorded split of RenameRunner's class, file, RunUnrecordedAsync and RunCurrentAsync rows remains valid and open, owned by the rename structural lane; closure requires that lane's extraction and a fresh cross-family verdict. Writer record: an independent cross-family review of this delta is still pending."
     }
   ]
 }

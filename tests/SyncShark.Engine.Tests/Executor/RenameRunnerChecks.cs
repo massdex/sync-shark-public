@@ -2519,7 +2519,38 @@ public static class RenameRunnerChecks
         }
     }
 
-    public static void RebasedHold() => RebasedHoldAsync().GetAwaiter().GetResult();
+    public static void RebasedHold()
+    {
+        HeldFootprintCost();
+        RebasedHoldAsync().GetAwaiter().GetResult();
+    }
+
+    // Counted work of a held group's footprint, per candidate (a group has one or two): an ordinary hold, whose decided
+    // footprint equals the handed one, keys the 4 handed paths and copies nothing; a rebased or relocated hold keys the
+    // 4 handed and 4 decided paths. The count follows the group, never the pair's size.
+    private static void HeldFootprintCost()
+    {
+        foreach (var candidates in new[] { 1, 2 })
+        {
+            (Side Side, string Path, bool Destination)[] handed = Enumerable.Range(0, candidates)
+                .SelectMany(i => new (Side Side, string Path, bool Destination)[]
+                {
+                    (Side.Local, "Old" + i, false), (Side.Dropbox, "Old" + i, false),
+                    (Side.Local, "New" + i, false), (Side.Dropbox, "New" + i, true)
+                }).ToArray();
+            var ordinary = RenameRunner.HeldFootprint(handed, handed.ToArray());
+            var rebased = RenameRunner.HeldFootprint(handed,
+                handed.Select(path => path.Path.StartsWith("Old", StringComparison.Ordinal)
+                    ? (path.Side, "Rebased" + path.Path, path.Destination) : path).ToArray());
+            var relocated = RenameRunner.HeldFootprint(handed,
+                handed.Select(path => path.Path.StartsWith("New", StringComparison.Ordinal)
+                    ? (path.Side, "Home/" + path.Path, path.Destination) : path).ToArray());
+            Check.Require(ReferenceEquals(ordinary, handed) && rebased.Count == 8 * candidates &&
+                relocated.Count == 8 * candidates && handed.All(rebased.Contains) && handed.All(relocated.Contains),
+                "An ordinary hold keys only its handed paths, without a copy; a rebased or relocated hold keys the " +
+                "handed and decided paths, 8 per candidate; candidates=" + candidates);
+        }
+    }
 
     // An earlier rename rebased the group's binding outside the footprint it was handed, so it is decided at the rebased
     // home. Ending in Hold (a refused move) or Notice (a folder carrying another pair), later renames into the handed or

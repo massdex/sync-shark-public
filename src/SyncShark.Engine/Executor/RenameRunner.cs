@@ -37,17 +37,19 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
     {
         var (decision, decided) = await RunUnrecordedAsync(execution, selection, group, localById,
             retainUnfinished, opportunity, ct);
-        // The handed footprint stays held; a relocated or rebased group also holds the home it was decided at.
         if (decision.Kind == RenameKind.Notice ||
             decision.Kind == RenameKind.Hold &&
             decision.Destination?.Identity is not (DestinationIdentity.Moving or DestinationIdentity.MovingAncestor))
-        {
-            var handed = Paths(group).ToArray();
-            rows.HoldRenamePaths((decided.SequenceEqual(handed) ? handed : handed.Concat(decided))
-                .Select(path => (path.Side, path.Path)));
-        }
+            rows.HoldRenamePaths(HeldFootprint(Paths(group).ToArray(), decided).Select(path => (path.Side, path.Path)));
         return decision;
     }
+
+    /// <summary>The handed footprint stays held; a relocated or rebased group also holds the home it was decided at.
+    /// An unchanged decided footprint adds nothing, so an ordinary hold keys each path once.</summary>
+    internal static IReadOnlyList<(Side Side, string Path, bool Destination)> HeldFootprint(
+        IReadOnlyList<(Side Side, string Path, bool Destination)> handed,
+        IReadOnlyList<(Side Side, string Path, bool Destination)> decided) =>
+        decided.SequenceEqual(handed) ? handed : handed.Concat(decided).ToArray();
 
     // The next pass reads captured retry locals after hold release; an async extraction cannot take them by ref.
     private async Task<(RenameDecision Decision, IReadOnlyList<(Side Side, string Path, bool Destination)> Footprint)> RunUnrecordedAsync(
