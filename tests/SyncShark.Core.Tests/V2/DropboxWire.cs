@@ -135,6 +135,13 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     /// </summary>
     public Func<string, Exception?>? RequestException { get; set; }
 
+    private TaskCompletionSource<bool>? _longpoll;
+    private int _heldLongpolls;
+    public bool HoldLongpolls { get; set; }
+    public int HeldLongpolls => Volatile.Read(ref _heldLongpolls);
+    public void ReleaseLongpoll(bool changes) =>
+        Interlocked.Exchange(ref _longpoll, null)?.TrySetResult(changes);
+
     /// <summary>Returns change-feed metadata for the current live file, preserving its downloadable id/revision.</summary>
     public object ChangeExistingFile(string relative) => Metadata(_items[relative]);
 
@@ -238,6 +245,13 @@ internal sealed partial class DropboxWire : HttpMessageHandler
                         home_namespace_id = AccountBinding?.HomeNamespaceId ?? "home-namespace"
                     }
                 });
+            case "/2/files/list_folder/longpoll" when HoldLongpolls:
+            {
+                var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Volatile.Write(ref _longpoll, held);
+                Interlocked.Increment(ref _heldLongpolls);
+                return Json(new { changes = await held.Task.WaitAsync(token) });
+            }
             case "/2/files/list_folder/get_latest_cursor":
                 return Json(new { cursor = LatestCursor });
             case "/2/files/list_folder":

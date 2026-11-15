@@ -45,7 +45,7 @@ public static partial class ChangeRunnerChecks
         // Each ordinary AutoSync call is one retry opportunity; the live folder never converged in any number.
         for (var pass = 0; pass < 3 && PendingAt(fixture, Side.Local, "T").Count +
             PendingAt(fixture, Side.Dropbox, "T").Count != 0; pass++)
-            await syncer.SyncWorkAsync(default);
+            await syncer.CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B181.cs:48");
         var missing = new List<string>();
         foreach (var file in files)
             if (await fixture.Dropbox.ReadOneAsync(file, default) is null) missing.Add(file);

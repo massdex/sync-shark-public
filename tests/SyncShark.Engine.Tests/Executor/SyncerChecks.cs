@@ -3790,7 +3790,7 @@ public static class SyncerChecks
         var (held, other) = (ActiveRemoval("held"), ActiveRemoval("other"));
         attempts.Held.Add((Side.Local, held.SavedRoot!.LocalKey));
         store.Removals = [held, other];
-        await NewSyncer(context).SyncWorkAsync(default);
+        await NewSyncer(context).CensusWorkAsync(default, "Executor/SyncerChecks.cs:3793");
         Check.Require(!store.Read.Contains(held.OperationId) && store.Read.Contains(other.OperationId),
             "B-161 a released follow-up at a held key waits; another runs");
     }

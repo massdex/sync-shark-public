@@ -206,7 +206,7 @@ public static class RandomSequenceChecks
     {
         session.Store.EndWorkPass(session.Pair.PairId);
         Trace(steps, "settle:start");
-        session.Syncer.SyncWorkAsync(ct).GetAwaiter().GetResult();
+        session.Syncer.CensusWorkAsync(ct, "Run/RandomSequenceChecks.cs:209").GetAwaiter().GetResult();
         Trace(steps,"settle:production-opportunity-completed");
     }
 

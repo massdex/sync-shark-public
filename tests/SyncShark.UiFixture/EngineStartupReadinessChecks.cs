@@ -44,6 +44,7 @@ internal static class EngineStartupReadinessChecks
     internal static async Task<int> RunAsync()
     {
         await RefusalCleanupAsync();
+        await HostStartVersionAsync();
         RetainedNoticeReachesTheEdge();
         var previous = Environment.GetEnvironmentVariable(RendezvousVariable);
         try
@@ -154,6 +155,24 @@ internal static class EngineStartupReadinessChecks
             }
             finally { Directory.Delete(root, recursive: true); }
         }
+    }
+
+    private static async Task HostStartVersionAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "SyncShark.VersionProbe." + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var isolated = SyncSharkRuntimePaths.OverrideProductRootForTest(root);
+            var result = await EngineHostEntry.RunAsync(new CancellationToken(canceled: true));
+            var version = typeof(EngineHostEntry).Assembly.GetName().Version;
+            var lines = File.ReadAllLines(AutoSyncLog.FilePath(root));
+            Require(result == (int)SyncCliExitCode.Canceled &&
+                lines.Count(line => line.Contains("host start version=" + version, StringComparison.Ordinal)) == 1 &&
+                lines.Count(line => line.Contains("host start version=", StringComparison.Ordinal)) == 1,
+                "An admitted host logs its assembly version once, even when startup is cancelled");
+        }
+        finally { Directory.Delete(root, recursive: true); }
     }
 
     private static void Require(bool condition, string message)

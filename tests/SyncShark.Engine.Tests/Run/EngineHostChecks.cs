@@ -2212,8 +2212,8 @@ public static partial class EngineHostChecks
     // B-179b (DESIGN-B179B-2 section 4, claim 3): the last same-path rewrite commits after its selection's finite
     // boundary and before that selection's Dropbox read, through the host's own local catch-up, so its acquisition's
     // wake reaches AutoSync while the refusing opportunity is still active. The early check refuses with no Dropbox
-    // call and that opportunity ends with the file still pending. Then nothing is written, kicked, timed or repaired:
-    // exactly one later dispatch, the one that retained wake starts, binds the newest local file. ItemRig's
+    // call. Same-item custody now transfers to the successor and finishes within that opportunity. The retained wake
+    // still starts exactly one later dispatch, without another write, kick, timer or Repair. ItemRig's
     // Opportunities counts every ReadLiveRefusal, which a live upload also makes twice (PairSafety.ExecuteLiveAsync
     // validates before admission and again at its lease), so dispatches and opened logs are what is counted here.
     private static async Task FinalRewriteWakeSettlesAsync(string root)
@@ -2301,13 +2301,12 @@ public static partial class EngineHostChecks
             $"newestAtSecondEnd={newestAtSecondEnd}, saved={saved}");
         Check.Require(committed && callsAtRefusal >= 0 && callsAtRefusal == callsAtRewrite,
             "B-179b the selection was refused early, with no Dropbox call after the last rewrite committed");
-        Check.Require(pendingAtEnd && !newestAtEnd,
-            "B-179b the refused opportunity ends with the file still pending and the newest bytes not yet sent");
-        // One later dispatch, no other run-log owner (Repair, explicit operation) and no prerequisite schedule: the
-        // retained wake's dispatch is the only progress source, and it is the one that sent the newest bytes.
+        Check.Require(!pendingAtEnd && newestAtEnd,
+            "same-item custody reaches the newest bytes before the refusing opportunity ends");
+        // The retained acquisition wake still dispatches once; the dispatch and log counts are unchanged.
         Check.Require(rig.Dispatches == refusingDispatches + 2 && logs == logsAtRewrite + 1 && newestAtSecondEnd &&
             !rig.RepairRegistered() && rig.Store.ReadPrerequisiteRetry(rig.PairId) is null,
-            "B-179b exactly one later dispatch (the retained wake's) made the progress");
+            "the retained wake dispatches exactly once after same-item custody already made progress");
         Check.Require(saved is { IsFolder: false } && saved.LocalId == setup.LocalId && saved.LocalPath == Name &&
             saved.LocalSize == local.Length && saved.LocalModifiedTicks == local.LastWriteTimeUtc.Ticks &&
             saved.DropboxContentHash == DropboxContentHash.Compute(Encoding.UTF8.GetBytes(Newest)) &&

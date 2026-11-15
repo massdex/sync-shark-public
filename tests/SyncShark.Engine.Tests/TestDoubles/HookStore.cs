@@ -64,6 +64,14 @@ internal sealed class HookStore(IStateStore inner) : ForwardingStateStore(inner)
         return pending;
     }
 
+    public Action? AfterEndWorkPass { get; init; }
+    public override bool EndWorkPass(string pairId)
+    {
+        var retired = base.EndWorkPass(pairId);
+        AfterEndWorkPass?.Invoke();
+        return retired;
+    }
+
     public Action? BeforeBeginSelection { get; init; }
     public override WorkSelection? BeginSelection(WorkSelection selection)
     {

@@ -104,7 +104,7 @@ public static partial class ChangeRunnerChecks
         {
             ((FakeTimeProvider)context.Time).Advance(Stamp.AddDays(1) - context.Time.GetUtcNow());
             return context with { Store = counters };
-        }).SyncWorkAsync(default);
+        }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:107");
         Console.WriteLine($"B214 entry={shape} settled={counters.EchoesSettled} reads={string.Join(',', reads)} opens={remoteCounter.Opens} " +
             $"issues={string.Join(';', fixture.Inner.Issues(PairId))} events={string.Join(';', events)}");
         var eligible = shape is "exact" or "metadata";
@@ -137,7 +137,7 @@ public static partial class ChangeRunnerChecks
         fixture.DropboxView = counter;
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, first, new Boundary(_ => new Lease()), [], configure: context => context with
-            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:140");
         Console.WriteLine($"B214 later rename={rename} first={first.AnchorWorkId} later={later.AnchorWorkId} " +
             $"settled={counters.EchoesSettled} begins={string.Join(',', fixture.Hooks.BegunSelections.Select(row => row.AnchorWorkId))} " +
             $"opens={counter.Opens} issues={string.Join(';', fixture.Inner.Issues(PairId))}");
@@ -194,7 +194,7 @@ public static partial class ChangeRunnerChecks
         fixture.DropboxView = remoteCounter;
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, first, new Boundary(_ => new Lease()), [], configure: context => context with
-            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:197");
         var y = order.FindIndex(item => item == (nameof(IStateStore.BeginSelection), move.AnchorWorkId));
         var end = order.FindIndex(item => item.Call == nameof(IStateStore.EndWorkPass));
         Check.Require(y >= 0 && y < end && remoteCounter.Moves == 1,
@@ -244,7 +244,7 @@ public static partial class ChangeRunnerChecks
                 }
             }
         };
-        await LiveSyncer(fixture, first, new Boundary(_ => new Lease()), events, configure: Configure).SyncWorkAsync(default);
+        await LiveSyncer(fixture, first, new Boundary(_ => new Lease()), events, configure: Configure).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:247");
         var begin = order.FindIndex(item => item == (nameof(IStateStore.BeginSelection), faulted));
         var failed = order.Select((item, index) => (item, index)).Where(row => row.item == ("Failed", faulted))
             .Select(row => row.index).ToArray();
@@ -259,7 +259,7 @@ public static partial class ChangeRunnerChecks
             "B214-T6c: exactly one durable Failure and unrelated Y completes in the same opportunity");
         ExecuteDatabase(fixture.DatabasePath!, "DROP TRIGGER echo_abort;");
         await LiveSyncer(fixture, first, new Boundary(_ => new Lease()), [], configure: context => context with
-            { Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+            { Settings = context.Settings with { StoragePageSize = 100 } }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:262");
         Check.Require(fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0L, 0L),
             "B214-T6c: after removing the fault the next opportunity empties the queue");
     }
@@ -348,7 +348,7 @@ public static partial class ChangeRunnerChecks
             ExecuteDatabase(database, "DROP TRIGGER echo_host_abort;");
             await rig.Host.DispatchSessionAsync(pairId, () => log, async (session, ct) =>
             {
-                await session.Syncer.SyncWorkAsync(ct);
+                await session.Syncer.CensusWorkAsync(ct, "Executor/ChangeRunnerChecks.DropboxEcho.cs:351");
                 return true;
             }, default);
             Check.Require(rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark()) == (0L, 0L),
@@ -383,7 +383,7 @@ public static partial class ChangeRunnerChecks
         var move = SeedEchoUnrelatedMove(fixture);
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: context => context with
-            { Store = counters }).SyncWorkAsync(default);
+            { Store = counters }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:386");
         Check.Require(counters.EchoesSettled == 0 &&
             fixture.Hooks.BegunSelections.Any(row => row.AnchorWorkId == selected.AnchorWorkId) &&
             fixture.Hooks.BegunSelections.Any(row => row.AnchorWorkId == move.AnchorWorkId) &&
@@ -407,7 +407,7 @@ public static partial class ChangeRunnerChecks
         fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: reads.Add);
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: context => context with
-            { Store = counters }).SyncWorkAsync(default);
+            { Store = counters }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:410");
         Console.WriteLine($"B214 responsibility settled={counters.EchoesSettled} reads={string.Join(',', reads)} " +
             $"issues={string.Join(';', fixture.Inner.Issues(PairId))}");
         Check.Require(counters.EchoesSettled == 0 && reads.Count(path => path == remote.Path) == 1 &&
@@ -456,7 +456,7 @@ public static partial class ChangeRunnerChecks
         fixture.LocalView = new HookedSide(localCounter);
         fixture.DropboxView = new HookedSide(fixture.Dropbox, beforeRead: reads.Add);
         await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: context => context with
-            { Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+            { Settings = context.Settings with { StoragePageSize = 100 } }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:459");
         Check.Require(localCounter.Deletes == 0 && await fixture.Local.ReadOneAsync("New/c", default) is not null,
             "B214-T6: restart never deletes the moved child, including after an aborted binding save");
         if (failedSave)
@@ -494,7 +494,7 @@ public static partial class ChangeRunnerChecks
         });
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], configure: context => context with
-            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:497");
         Console.WriteLine($"B214 bound explicit={explicitKey} parent={boundParent} settled={counters.EchoesSettled} reads={string.Join(',', reads)} " +
             $"before={readBeforeDelete} remains={fixture.Local.FindById(local.Id) is not null} issues={string.Join(';', fixture.Inner.Issues(PairId))}");
         if (!boundParent)
@@ -524,7 +524,7 @@ public static partial class ChangeRunnerChecks
         fixture.DropboxView = counter;
         var counters = new StoreCounters(fixture.Store);
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [], configure: context => context with
-            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).SyncWorkAsync(default);
+            { Store = counters, Settings = context.Settings with { StoragePageSize = 100 } }).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.DropboxEcho.cs:527");
         var settles = overrides < 100 && !inherited;
         Check.Require(counters.EchoesSettled == (settles ? 1 : 0) && counter.Reads == (settles ? 0 : 1) &&
             (settles || fixture.Hooks.BegunSelections.Any(row => row.AnchorWorkId == selection.AnchorWorkId)),

@@ -587,7 +587,7 @@ public static class FolderDeleteRunnerChecks
                     var syncer = new Syncer(f.Context with { ItemAttempts = new PassingItemAttempts() },
                         new SyncPorts(new PassthroughBoundary(), RefusingExecutionBoundary.Instance,
                             RefusingExecutionBoundary.Instance, 0));
-                    await syncer.SyncWorkAsync(default);
+                    await syncer.CensusWorkAsync(default, "Executor/FolderDeleteRunnerChecks.cs:590");
                 }
                 if (scenario is "R1" or "R2")
                     Check.Require(f.Store.SyncedByKey(f.Pair.PairId, Side.Dropbox, PathNames.DropboxKey(target.Path)) is null,
@@ -2058,7 +2058,7 @@ public static class FolderDeleteRunnerChecks
             counts.Selections.Enqueue(new WorkSelection(f.Pair.PairId, f.Context.ExpectedGeneration, 0, Side.Local,
                 "local", null, "unrelated" + index.ToString(CultureInfo.InvariantCulture) + ".txt", 0, 0));
         f.Dropbox.Returns(new FolderJobResult.InProgress());
-        await syncer.SyncWorkAsync(default);
+        await syncer.CensusWorkAsync(default, "Executor/FolderDeleteRunnerChecks.cs:2061");
         // DESIGN-114 §3.6: multiple refused lanes with no progress require one serial fallback round.
         Check.Require(counts.Selected == 3 && counts.Ended == 2 && boundary.Holds == 3,
             "three refused selections trigger one empty serial fallback without losing the generation hold");

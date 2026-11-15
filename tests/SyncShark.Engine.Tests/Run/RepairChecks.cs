@@ -1925,7 +1925,7 @@ public static class RepairChecks
         using var ordinary = rig.Log(folder, "ordinary-successor");
         await rig.Host.DispatchSessionAsync(pairId, () => ordinary, async (session, ct) =>
         {
-            await session.Syncer.SyncWorkAsync(ct);
+            await session.Syncer.CensusWorkAsync(ct, "Run/RepairChecks.cs:1928");
             return true;
         }, default);
         Check.Require(store.IssueById(pairId, issue.Id) is null,
@@ -5156,7 +5156,7 @@ public static class RepairChecks
         public Task<bool> DrainWorkAsync(RunLog log, CancellationToken ct) =>
             Host.DispatchSessionAsync(Pair.PairId, () => log, async (session, token) =>
             {
-                await session.Syncer.SyncWorkAsync(token);
+                await session.Syncer.CensusWorkAsync(token, "Run/RepairChecks.cs:5159");
                 Check.Require(Store.CountWork(Pair.PairId, session.Context.ExpectedGeneration, Store.ReadWorkWatermark()) == (0L, 0L),
                     "The composed baseline queue is empty before acquiring test work.");
                 return true;

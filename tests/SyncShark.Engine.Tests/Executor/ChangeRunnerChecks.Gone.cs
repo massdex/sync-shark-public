@@ -471,7 +471,7 @@ public static partial class ChangeRunnerChecks
         int? passes = null;
         // The last ensure is the one that created the folder when it exists afterwards.
         var reads = Watch(fixture, live, () => passes = fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)));
-        await LiveSyncer(fixture, first!, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, first!, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:472");
         var obsoleteOnce = Enumerable.Range(1, rewrites - 1).All(index => reads.AskedOf(Churn + "-" + index) == 1);
         var newestAsks = reads.AskedOf(newest.Id);
         var firstRun = reads.Take();
@@ -484,7 +484,7 @@ public static partial class ChangeRunnerChecks
         live.Remove(newest.Id);
         live[Churn + "-new"] = Churn;
         fixture.Local.Seed(LocalEntry(Churn, Churn + "-new"), [0xA0]);
-        await LiveSyncer(fixture, next, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, next, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:485");
         return (firstRun, reads.Take(), passes, freshCreated, bytes, binding, queued,
             (Binding(fixture, Churn), await DropboxByte(fixture, Churn)), obsoleteOnce && newestAsks <= 1, newestAsks);
     }
@@ -527,7 +527,7 @@ public static partial class ChangeRunnerChecks
         var store = fixture.Hooks.Total;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var sql = await SqlStatementsAsync(fixture, () =>
-            LiveSyncer(fixture, first!, new Boundary(_ => new Lease()), []).SyncWorkAsync(default));
+            LiveSyncer(fixture, first!, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:528"));
         clock.Stop();
         var run = reads.Take();
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
@@ -558,7 +558,7 @@ public static partial class ChangeRunnerChecks
                 withId ? LocalId : null, withId ? file : null, true, false));
             var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal) { [LocalId] = Churn });
             var sql = await SqlStatementsAsync(fixture, () =>
-                LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default));
+                LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:559"));
             costs.Add((reads.Take(), sql));
             Check.Require(await DropboxByte(fixture, Churn) == 5 && Binding(fixture, Churn) == LocalId,
                 $"B-179 (s) the present unsaved file syncs (acquired {(withId ? "with" : "without")} its id)");
@@ -611,7 +611,7 @@ public static partial class ChangeRunnerChecks
         fixture.Dropbox.Seed(remote, [1]);
         SeedRemote(fixture, remote);
         var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal));
-        await LiveSyncer(fixture, gone, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, gone, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:612");
         var run = reads.Take();
         var arrived = await fixture.Local.ReadOneAsync(Churn, default);
         Check.Require(arrived is not null && run.Identity == 1 &&
@@ -632,7 +632,7 @@ public static partial class ChangeRunnerChecks
             LocalEntry(Churn, LocalId), true, false));
         var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal)
             { [LocalId] = Moved, [OccupantId] = Churn });
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:633");
         var run = reads.Take();
         Check.Require(await DropboxByte(fixture, Moved) == 7 && Binding(fixture, Moved) == LocalId &&
             await DropboxByte(fixture, Churn) == 8 && Binding(fixture, Churn) == OccupantId && run.Identity == 1,
@@ -663,7 +663,7 @@ public static partial class ChangeRunnerChecks
             }
             fixture.Local.Seed(saved, [9]);
             var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal) { [LocalId] = Churn });
-            await LiveSyncer(fixture, first!, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+            await LiveSyncer(fixture, first!, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:664");
             costs.Add(reads.Take());
             Check.Require(await DropboxByte(fixture, Churn) == 9,
                 $"B-179 (k) an in-place rewrite still syncs its newest bytes ({rewrites} rewrites)");
@@ -685,7 +685,7 @@ public static partial class ChangeRunnerChecks
         var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Churn, null, LocalId,
             LocalEntry(Churn, LocalId), true, false));
         var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal) { [LocalId] = Moved });
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:686");
         var run = reads.Take();
         Check.Require(await DropboxByte(fixture, Moved) == 7 && Binding(fixture, Moved) == LocalId && run.Identity == 1,
             $"B-179 (g) a moved unsaved identity syncs at its new path with one by-id read: {run}, " +
@@ -710,7 +710,7 @@ public static partial class ChangeRunnerChecks
                 throw new ItemFailedException(Churn, TextKey.ReadLocalFailed, null);
             });
         var sql = await SqlStatementsAsync(fixture, () =>
-            LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default));
+            LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:711"));
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         var issues = fixture.Inner.Issues(PairId);
         var attempts = fixture.Hooks.BegunSelections.Count;
@@ -729,7 +729,7 @@ public static partial class ChangeRunnerChecks
         // Recovery: the read works again and proves the identity gone; the kept work then settles, nothing uploads.
         fixture.LocalView = new HookedSide(fixture.Local, identity: (_, _) =>
             Task.FromResult<(IdentityLocation Location, bool InScope)?>(null));
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:730");
         queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         issues = fixture.Inner.Issues(PairId);
         Check.Require(queued == (0, 0) && await fixture.Dropbox.ReadOneAsync(Churn, default) is null &&
@@ -749,7 +749,7 @@ public static partial class ChangeRunnerChecks
             LocalEntry(Churn, LocalId), true, false));
         var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal) { [OccupantId] = Churn });
         var sql = await SqlStatementsAsync(fixture, () =>
-            LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default));
+            LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:750"));
         var run = reads.Take();
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         // Absolute: one binding lookup, and three separate-work statements (both exact path probes and the identity
@@ -772,7 +772,7 @@ public static partial class ChangeRunnerChecks
         var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Deleted, Churn, null, LocalId, null,
             false, true));
         var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal) { [OccupantId] = Churn });
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:773");
         var run = reads.Take();
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         Check.Require(await DropboxByte(fixture, Churn) == 8 && Binding(fixture, Churn) == OccupantId &&
@@ -795,7 +795,7 @@ public static partial class ChangeRunnerChecks
             LocalEntry(Churn, LocalId), true, false));
         Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Deleted, Churn, null, OccupantId, null, false, true), 2);
         var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal));
-        await LiveSyncer(fixture, gone, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, gone, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:796");
         var run = reads.Take();
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         Check.Require(await fixture.Dropbox.ReadOneAsync(Churn, default) is null && Binding(fixture, Churn) is null &&
@@ -819,7 +819,7 @@ public static partial class ChangeRunnerChecks
                 LocalEntry(Churn, LocalId), false, false), 2);
             var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal)
                 { [present ? LocalId : "none"] = Churn });
-            await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+            await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:820");
             var run = reads.Take();
             var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
             Check.Require(queued == (0, 0) && fixture.Inner.Issues(PairId).Count == 0 &&
@@ -846,7 +846,7 @@ public static partial class ChangeRunnerChecks
             return Task.FromResult<(IdentityLocation Location, bool InScope)?>(
                 (new IdentityLocation(VolumeKey, "outside", LocalEntry("outside", LocalId)), false));
         });
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:847");
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         Check.Require(identity == 1 && queued == (0, 0) && fixture.Inner.Issues(PairId).Count == 0 &&
             await fixture.Dropbox.ReadOneAsync(Churn, default) is null,
@@ -873,10 +873,10 @@ public static partial class ChangeRunnerChecks
             Selected(fixture, Fresh, later, 2);
         };
         var reads = Watch(fixture, live);
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:874");
         fixture.Hooks.BeforeCall = null;
         if (await fixture.Dropbox.ReadOneAsync(Fresh, default) is null)
-            await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+            await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:877");
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         Check.Require(added && await DropboxByte(fixture, Fresh) == 4 && Binding(fixture, Fresh) == LocalId &&
             queued == (0, 0),
@@ -910,7 +910,7 @@ public static partial class ChangeRunnerChecks
                 selected.Domain, selected.Identity, selected.Key, selected.Key).Dirty;
         };
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.Gone.cs:913");
         var refused = events.Count(item => item.Error is LiveAdmissionStaleException);
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         if (!replacement)
@@ -924,7 +924,7 @@ public static partial class ChangeRunnerChecks
             $"A replacement keeps the original item's retry: transfer={transferred}, refusals={refused}, queued={queued}");
         fixture.Hooks.BeforeCall = null;
         fixture.Hooks.AfterCall = null;
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.Gone.cs:927");
         Check.Require(fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark()) == (0, 0) &&
             await DropboxByte(fixture, Churn) == 4,
             "The replacement's next opportunity drains both rows and uploads its bytes");
@@ -940,7 +940,7 @@ public static partial class ChangeRunnerChecks
             LocalEntry(Churn, LocalId), true, false));
         fixture.LocalView = new HookedSide(fixture.Local, identity: (_, _) => throw new OperationCanceledException());
         var cancelled = false;
-        try { await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default); }
+        try { await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:895"); }
         catch (OperationCanceledException) { cancelled = true; }
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         Check.Require(cancelled && queued.Local == 1 && await fixture.Dropbox.ReadOneAsync(Churn, default) is null,
@@ -962,7 +962,7 @@ public static partial class ChangeRunnerChecks
         var pathOnly = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Item, null, null, null, true, false));
         Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Item, null, LocalId, local, false, false), page: 2);
         var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal));
-        await LiveSyncer(fixture, pathOnly, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, pathOnly, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:917");
         var run = reads.Take();
         Check.Require(await DropboxByte(fixture, Item) == 2 && run.Identity == 0,
             $"B-179 (1) a path-only dirty notice is kept and its changed bytes reach Dropbox: {run}");
@@ -981,7 +981,7 @@ public static partial class ChangeRunnerChecks
         var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Item, null, LocalId, saved,
             true, false));
         var reads = Watch(fixture, new Dictionary<string, string>(StringComparer.Ordinal));
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:936");
         var run = reads.Take();
         Check.Require(await DropboxByte(fixture, Item) == 5 && run.Identity == 0,
             $"B-179 (2) a saved identity is never asked by id and its change syncs: {run}");
@@ -1103,8 +1103,8 @@ public static partial class ChangeRunnerChecks
             RewriteAgain(fixture);
         });
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:1058");
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.Gone.cs:1059");
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         var bytes = await DropboxByte(fixture, Item);
         Check.Require(rewritten && bytes == 3 && Binding(fixture, Item) == LocalId && queued == (0, 0) &&

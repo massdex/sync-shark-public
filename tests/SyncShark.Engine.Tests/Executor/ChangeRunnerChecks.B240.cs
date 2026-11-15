@@ -70,7 +70,7 @@ public static partial class ChangeRunnerChecks
             if (ends.Count == 2) pending.Remove(1);
         };
         // Pass and effect counts stay unchanged across orderly opportunities.
-        await UntilDrainedAsync(LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], attempts: attempts), default);
+        await UntilDrainedAsync(LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], attempts: attempts), default, "Executor/ChangeRunnerChecks.B240.cs:72");
         Check.Require(ends.SequenceEqual([1, 1, 2, 2, 2]) && attempts.Reported == 2 &&
             fixture.Inner.Issues(PairId).Count == 0 && PendingAt(fixture, Side.Dropbox, Item).Any(),
             "a due temporary rename runs again in the same opportunity, then its next wait holds; real=" + real);
@@ -117,7 +117,7 @@ public static partial class ChangeRunnerChecks
             };
             var events = new List<RunEvent>();
             // Pass and effect counts stay unchanged across orderly opportunities.
-            await UntilDrainedAsync(LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts), default);
+            await UntilDrainedAsync(LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts), default, "Executor/ChangeRunnerChecks.B240.cs:118");
             Check.Require(ends == 4 && firstSynced == 3 && await SyncedAsync(fixture, Plain) &&
                 fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(Folder)) is not null &&
                 attempts.Reported == 1 && fixture.Inner.Issues(PairId).Count == 0 &&
@@ -138,7 +138,7 @@ public static partial class ChangeRunnerChecks
         {
             if (method.Name == nameof(IStateStore.EndWorkPass)) attempts.Held.Clear();
         };
-        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], attempts: attempts).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B240.cs:139");
         Check.Require(moves == 1 && attempts.Reported == 1 && fixture.Hooks.Count(nameof(IStateStore.EndWorkPass)) == 2,
             "a host-only held key is not re-recorded for the run; real=" + real);
     }
@@ -175,7 +175,7 @@ public static partial class ChangeRunnerChecks
             { Capture = (selection, _, _) => Task.FromResult(Coverage(selection)) };
         var context = fixture.Context(selected, new FakeAdmission { Level = 2 }) with { ItemAttempts = attempts };
         await new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
-            RefusingExecutionBoundary.Instance, 1)).SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            RefusingExecutionBoundary.Instance, 1)).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B240.cs:176").WaitAsync(guard.Token);
         Check.Require(attempts.Order.IndexOf("report:A.txt") < attempts.Order.IndexOf("report:B.txt") &&
             attempts.Order.IndexOf("report:B.txt") < attempts.Order.IndexOf("executed:" + keyA) &&
             attempts.Reported == 2 && fixture.Inner.Issues(PairId).Count == 0 &&
@@ -215,7 +215,7 @@ public static partial class ChangeRunnerChecks
             if (++ends == 1) attempts.Held.Clear();
             if (ends == 2) syncedInSecond = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key("A.txt")) is not null;
         };
-        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], attempts: attempts).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), [], attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B240.cs:216");
         Check.Require(syncedInSecond && ends == 3, "eligibility is fresh at each probe within the pass; real=" + real);
     }
 
@@ -241,7 +241,7 @@ public static partial class ChangeRunnerChecks
             if (method.Name == nameof(IStateStore.EndSelection)) attempts.Held.Clear();
         };
         var events = new List<RunEvent>();
-        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts).SyncWorkAsync(default);
+        await LiveSyncer(fixture, selected, new Boundary(_ => new Lease()), events, attempts: attempts).CensusWorkAsync(default, "Executor/ChangeRunnerChecks.B240.cs:242");
         Check.Require(held && fixture.Hooks.BegunSelections.Any(work => work.Key == ancestor.Key) &&
             events.All(item => item.Error is not LiveAdmissionStaleException) && fixture.Inner.Issues(PairId).Count == 0 &&
             PendingAt(fixture, Side.Local, Plain).Any(),

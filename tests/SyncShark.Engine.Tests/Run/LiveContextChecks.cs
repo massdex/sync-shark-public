@@ -136,7 +136,7 @@ public static class LiveContextChecks
             };
             var syncer = new Syncer(context, new SyncPorts(new RecoveryExecutionBoundary(() => session),
                 new LiveExecutionBoundary(_ => session), PairSafety.SelectedBoundaryFor(session), 1));
-            var run = syncer.SyncWorkAsync(ct);
+            var run = syncer.CensusWorkAsync(ct, "Run/LiveContextChecks.cs:139");
             try
             {
                 staged.Task.WaitAsync(ct).GetAwaiter().GetResult();
@@ -264,7 +264,7 @@ public static class LiveContextChecks
                 };
                 var syncer = new Syncer(context, new SyncPorts(new RecoveryExecutionBoundary(() => session),
                     new LiveExecutionBoundary(_ => session), PairSafety.SelectedBoundaryFor(session), 1));
-                var run = syncer.SyncWorkAsync(ct);
+                var run = syncer.CensusWorkAsync(ct, "Run/LiveContextChecks.cs:267");
                 Exception? first = null;
                 try
                 {
@@ -526,7 +526,7 @@ public static class LiveContextChecks
     {
         // Setup inspects selections; production must own a fresh complete pass, not its leftover traversal.
         session.Store.EndWorkPass(session.Pair.PairId);
-        session.Syncer.SyncWorkAsync(CancellationToken.None).GetAwaiter().GetResult();
+        session.Syncer.CensusWorkAsync(CancellationToken.None, "Run/LiveContextChecks.cs:529").GetAwaiter().GetResult();
     }
 
     // PendingAncestors omits held work unless a coverage watermark is supplied; 0 is below every work id, so the
@@ -611,7 +611,7 @@ public static class LiveContextChecks
             session.Store.EndWorkPass(session.Pair.PairId);
             using (scenario.DenyLocalContent("Locked.txt"))
             {
-                session.Syncer.SyncWorkAsync(default).GetAwaiter().GetResult();
+                session.Syncer.CensusWorkAsync(default, "Run/LiveContextChecks.cs:614").GetAwaiter().GetResult();
                 Check.Require(session.Store.Issues(session.Pair.PairId).Any(issue =>
                         issue.Path == "Locked.txt" && IssuePolicy.IsLocalAccessRetryCause(issue.Cause)),
                     "A live locked hash read records its in-use Failure without faulting the host dispatch.");
@@ -633,7 +633,7 @@ public static class LiveContextChecks
         {
             session.Host.CatchUpLocalAsync(session.Pair.PairId, session.ExpectedGeneration, default).GetAwaiter().GetResult();
             session.Store.EndWorkPass(session.Pair.PairId);
-            session.Syncer.SyncWorkAsync(default).GetAwaiter().GetResult();
+            session.Syncer.CensusWorkAsync(default, "Run/LiveContextChecks.cs:636").GetAwaiter().GetResult();
             Check.Require(!session.Store.Issues(session.Pair.PairId).Any(issue =>
                     issue.Path == "Locked.txt" && IssuePolicy.IsLocalAccessRetryCause(issue.Cause)) &&
                 System.Text.Encoding.UTF8.GetString(scenario.DropboxFiles()["Locked.txt"]) == "edited",
@@ -658,7 +658,7 @@ public static class LiveContextChecks
             var acquired = session.Store.ReadWork(initial!).Count();
             session.Store.EndWorkPass(pairId);
             var passes = scenario.EndedWorkPasses;
-            session.Syncer.SyncWorkAsync(CancellationToken.None).GetAwaiter().GetResult();
+            session.Syncer.CensusWorkAsync(CancellationToken.None, "Run/LiveContextChecks.cs:661").GetAwaiter().GetResult();
             // Coalescing several journal rows into one residual is real progress; replacing that residual is not.
             var expectedPasses = acquired > 1 ? 2 : 1;
             Check.Require(scenario.EndedWorkPasses == passes + expectedPasses &&
@@ -693,14 +693,14 @@ public static class LiveContextChecks
             passes = scenario.EndedWorkPasses;
             var syncer = new Syncer(context, new SyncPorts(new RecoveryExecutionBoundary(() => session),
                 new LiveExecutionBoundary(_ => session), PairSafety.SelectedBoundaryFor(session), 1));
-            syncer.SyncWorkAsync(guard.Token).GetAwaiter().GetResult();
+            syncer.CensusWorkAsync(guard.Token, "Run/LiveContextChecks.cs:696").GetAwaiter().GetResult();
             // DESIGN-114 §3.6: contention without P0 progress
             // requires a serial round; its fresh-notice retirement then requires the final no-progress round.
             Check.Require(refused.Task.IsCompletedSuccessfully && scenario.EndedWorkPasses == passes + 3 &&
                 PendingKeys(session, initial.Side, initial.Key).Single().AnchorWorkId == residual,
                 "LG05: contention, serial coalescing and the final no-progress round preserve the same Failure residual");
             passes = scenario.EndedWorkPasses;
-            session.Syncer.SyncWorkAsync(CancellationToken.None).GetAwaiter().GetResult();
+            session.Syncer.CensusWorkAsync(CancellationToken.None, "Run/LiveContextChecks.cs:703").GetAwaiter().GetResult();
             Check.Require(scenario.EndedWorkPasses == passes + 1 &&
                 PendingKeys(session, initial.Side, initial.Key).Single().AnchorWorkId == residual,
                 "LG05: retrying the unchanged Failure residual earns no repeat and creates no successor");

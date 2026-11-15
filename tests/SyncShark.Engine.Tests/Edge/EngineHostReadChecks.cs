@@ -271,7 +271,7 @@ public static class EngineHostReadChecks
         var listed = await ReadAsync(runtime, ["--cli", "engine", "issues", "--pair", PairId,
             "--kind", "failure", "--json"]).ConfigureAwait(false);
         var notice = listed.GetProperty("issues").EnumerateArray().Single();
-        Check.Require(notice.GetProperty("cause").GetString() == nameof(TextKey.RequiredRepairRetryNoSpace) &&
+        Check.Require(notice.GetProperty("cause").GetInt32() == (int)TextKey.RequiredRepairRetryNoSpace &&
             EngineOperations.ResolutionChoices(rig.Store.Issues(PairId).Single()).Contains(ResolutionChoice.Retry),
             "the CLI lists the out-of-space notice with Retry");
         var resolved = await ReadAsync(runtime, ["--cli", "engine", "resolve", "--pair", PairId, "--issue",

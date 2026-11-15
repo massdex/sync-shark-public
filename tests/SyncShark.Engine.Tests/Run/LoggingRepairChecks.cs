@@ -30,6 +30,8 @@ internal static class LoggingRepairChecks
             await SchemaQuietAsync(Path.Combine(folder.FullName, "schema-failure"), true);
             await MonitorPromotionAsync(Path.Combine(folder.FullName, "promotion"));
             await SourceRetryWaitAsync(Path.Combine(folder.FullName, "source-wait"));
+            foreach (var finite in new[] { false, true })
+                await LiveSourceFailureRecoversAsync(Path.Combine(folder.FullName, "live-source-" + finite), finite);
             await SourceLossPublishesAllMembersAsync(Path.Combine(folder.FullName, "source-members"));
             await SourceLossPublishesAllMembersAsync(Path.Combine(folder.FullName, "source-members-several"), several: true);
             await ReplacementBaseAfterRestartWakesRepairAsync(Path.Combine(folder.FullName, "replacement-wake"));
@@ -1384,6 +1386,100 @@ internal static class LoggingRepairChecks
                 raw.SyncedByKey(id, Side.Local, PathNames.Key("after.txt")) is not null) && rig.Wire.Snapshot()
                 .Any(item => item.Path == "after.txt" && !item.Folder && Encoding.UTF8.GetString(item.Bytes) == "later"), AfterEvidence);
         }
+    }
+
+    private static async Task LiveSourceFailureRecoversAsync(string folder, bool finite)
+    {
+        var clock = new FakeTimeProvider();
+        clock.Advance(DateTimeOffset.UtcNow - clock.GetUtcNow());
+        DropboxWire wire;
+        await using (var baseline = await RepairChecks.ComposeRigAsync(folder, time: clock))
+        {
+            using var log = baseline.Log(folder, "baseline");
+            Check.Require((await baseline.RunAsync(log, default)).Completed && !baseline.Store.Obligated(baseline.Pair.PairId),
+                "the live-source fixture starts with a completed baseline and no Repair obligation");
+            wire = baseline.Wire;
+        }
+        wire.HoldLongpolls = true;
+        var monitor = new Massdex.SyncShark.Engine.Run.Monitor(clock);
+        var refreshes = 0;
+        var logs = new ConcurrentQueue<string>();
+        await using var rig = await RepairChecks.ComposeRigAsync(folder, time: clock, monitor: monitor,
+            mode: EngineHost.Mode.Persistent, wire: wire, composeBeforeStart: false,
+            decorate: store => new HookStore(store) { AfterPrerequisiteRetries = () => Interlocked.Increment(ref refreshes) },
+            openLog: id =>
+            {
+                var log = RunLog.Open(folder, id, Guid.NewGuid().ToString("N"), _ => { }, 262144, clock);
+                logs.Enqueue(log.Path);
+                return log;
+            });
+        var pairId = rig.Pair.PairId;
+        int Calls(string path) { lock (wire.Calls) return wire.Calls.Count(call => call == path); }
+        bool Idle() => EngineHostChecks.AutoSyncIdle(rig.Host, pairId) && MonitorIdle(monitor, pairId);
+        async Task SettleAsync()
+        {
+            do
+            {
+                await UntilAsync(Idle);
+                var settled = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var deadline = monitor.ScheduleQuietStatus(TimeSpan.Zero, () => settled.TrySetResult(Volatile.Read(ref refreshes)));
+                var mark = await settled.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                await UntilAsync(() => Volatile.Read(ref refreshes) > mark);
+            } while (!Idle());
+        }
+        await rig.Host.StartAsync(default);
+        await UntilAsync(() => wire.HeldLongpolls > 0);
+        await SettleAsync();
+        while (logs.TryDequeue(out _)) { }
+        var continuations = Calls("/2/files/list_folder/continue");
+        var uploads = Calls("/2/files/upload");
+        var polls = wire.HeldLongpolls;
+        var refreshMark = Volatile.Read(ref refreshes);
+        var refuse = 1;
+        wire.RequestException = path => path == "/2/files/list_folder/continue" &&
+            (finite ? Interlocked.Exchange(ref refuse, 0) : Volatile.Read(ref refuse)) == 1
+                ? new InsufficientSpaceException(new IOException("synthetic", unchecked((int)0x80070070))) : null;
+        if (finite) File.WriteAllText(Path.Combine(rig.Pair.LocalRoot, "child.txt"), "pending");
+        else wire.ReleaseLongpoll(changes: true);
+        await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(pairId) is { Attempts: 1 } &&
+            Volatile.Read(ref refreshes) > refreshMark && logs.SelectMany(Lines)
+                .Any(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Failed)));
+        await SettleAsync();
+        if (finite) await UntilAsync(() => wire.HeldLongpolls == polls + 1);
+        var notice = rig.Store.Issues(pairId).Single(issue => issue.Path.Length == 0);
+        Check.Require(notice.Cause == TextKey.RequiredRepairRetryNoSpace &&
+            rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off) &&
+            Calls("/2/files/list_folder/continue") == continuations + 1 && Calls("/2/files/upload") == uploads &&
+            wire.HeldLongpolls == polls + (finite ? 1 : 0) &&
+            logs.SelectMany(Lines).Count(fields => fields[RunLog.FieldKind] == nameof(RunEventKind.Failed)) == 1 &&
+            (finite || logs.Count == 1) && !logs.SelectMany(File.ReadAllLines).Any(line => line.Contains("synthetic", StringComparison.Ordinal)),
+            "one live failure retains one retry notice and one Failed line, with one refused continuation and no upload or premature restart");
+        var row = rig.Store.ReadPrerequisiteRetry(pairId)!.Value;
+        if (!finite)
+        {
+            await UntilAsync(() => clock.NextDueIn == row.RetryAfter - clock.GetUtcNow());
+            clock.Advance(row.RetryAfter - clock.GetUtcNow());
+            await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(pairId) is { Attempts: 2 });
+            await SettleAsync();
+            Check.Require(Calls("/2/files/list_folder/continue") == continuations + 2 && wire.HeldLongpolls == polls &&
+                Calls("/2/files/upload") == uploads && rig.Store.Issues(pairId).Single(issue => issue.Path.Length == 0).Id == notice.Id,
+                "a still-refused deadline drains once without restarting the ended feed or replacing its notice");
+            row = rig.Store.ReadPrerequisiteRetry(pairId)!.Value;
+        }
+        Volatile.Write(ref refuse, 0);
+        continuations = Calls("/2/files/list_folder/continue");
+        polls = wire.HeldLongpolls;
+        await UntilAsync(() => clock.NextDueIn == row.RetryAfter - clock.GetUtcNow());
+        clock.Advance(row.RetryAfter - clock.GetUtcNow());
+        await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(pairId) is null && wire.HeldLongpolls > polls &&
+            (!finite || wire.Snapshot().Any(item => item.Path == "child.txt" && Encoding.UTF8.GetString(item.Bytes) == "pending")));
+        await SettleAsync();
+        Check.Require(Calls("/2/files/list_folder/continue") == continuations + 2 &&
+            Calls("/2/files/upload") == uploads + (finite ? 1 : 0) &&
+            (finite ? wire.HeldLongpolls - polls is >= 1 and <= 2 : wire.HeldLongpolls == polls + 1) &&
+            rig.Store.Issues(pairId).All(issue => issue.Id != notice.Id) &&
+            rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
+            "recovery drains once, restarts only an ended feed, and closes after the recovered opportunity; coverage adds one catch-up only for selected work");
     }
 
     private static async Task ReplacementBaseAfterRestartWakesRepairAsync(string folder)

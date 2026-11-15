@@ -247,7 +247,7 @@ public static partial class ChangeRunnerChecks
                 if (method == nameof(IStateStore.BeginFolderRemoval)) frozen = (string)result!;
             };
             var syncer = LiveSyncer(fixture, c.Selection, new Boundary(_ => new Lease()), []);
-            await syncer.SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            await syncer.CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212Vacate.cs:250").WaitAsync(guard.Token);
             var old = fixture.Inner.FolderRemoval(PairId, existing);
             var notices = fixture.Inner.Issues(PairId).Select(issue => issue.Cause).ToArray();
             var work = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
@@ -276,7 +276,7 @@ public static partial class ChangeRunnerChecks
                 while (opportunities < 3 && !VacateLanded(c))
                 {
                     opportunities++;
-                    await syncer.SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+                    await syncer.CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212Vacate.cs:279").WaitAsync(guard.Token);
                 }
             }
             catch (Exception error) { second = error; }
@@ -561,7 +561,7 @@ public static partial class ChangeRunnerChecks
         fixture.DropboxView = jobs;
         var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Renamed, VacateNew, VacateOld, VacateMoved,
             arrived, false, false));
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(guard.Token)
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212Vacate.cs:564")
             .WaitAsync(guard.Token);
         var raised = fixture.Inner.Issues(PairId).SingleOrDefault(issue => issue.Kind == IssueKind.NameClash);
         Check.Require(raised is { Cause: TextKey.ClashNameTaken, Path: VacateNew } && jobs.Submissions == 0,
@@ -626,7 +626,7 @@ public static partial class ChangeRunnerChecks
             jobs.Submissions == 1 && VacateRows(fixture) == 1,
             "B212-T9r-c2 (iv): the receipt completes the operation and the re-issue closes with release" + Trace("C", c));
         jobs.Accepting = false;
-        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(guard.Token)
+        await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212Vacate.cs:629")
             .WaitAsync(guard.Token);
         var landed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(VacateNew));
         Check.Require(landed is { LocalId: VacateMoved, DropboxId: VacateCounterpart } &&
@@ -849,7 +849,7 @@ public static partial class ChangeRunnerChecks
     }
 
     private static Task VacateOpportunityAsync(VacateCase c, CancellationToken ct) =>
-        LiveSyncer(c.Fixture, c.Selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(ct).WaitAsync(ct);
+        LiveSyncer(c.Fixture, c.Selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(ct, "Executor/ChangeRunnerChecks.B212Vacate.cs:852").WaitAsync(ct);
 
     // The vacate removes B, and the rename it unblocks may run in a later selection; at most two opportunities.
     private static async Task<int> VacateUntilLandedAsync(VacateCase c, CancellationToken ct)

@@ -76,7 +76,7 @@ public static partial class ChangeRunnerChecks
             }
         };
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:79").WaitAsync(guard.Token);
         fixture.Hooks.BeforeCall = null;
         var settled = calls.IndexOf(nameof(IStateStore.CompleteFolderRemoval));
         // E1's exact measured count: the observation reads both sides of both bindings (2 + 2), the send's
@@ -109,7 +109,7 @@ public static partial class ChangeRunnerChecks
         using var fixture = RepairFixture(victimPresent: false);
         var (local, dropbox, submits) = RepairViews(fixture);
         await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:112").WaitAsync(guard.Token);
         var renamed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew));
         Check.Require(local.Deletes == 0 && LocalEffects(local) == 0 && submits.Count == 0 && dropbox.Moves == 1 &&
             await fixture.Dropbox.ReadOneAsync(RepairNew, default) is { Id: RepairR } &&
@@ -138,7 +138,7 @@ public static partial class ChangeRunnerChecks
                 { Record = [SyncedEntries.From(LocalEntry(late, "late-local"), RemoteEntry(late, "late-dropbox"))] });
         };
         await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:141").WaitAsync(guard.Token);
         var operations = fixture.Inner.UnresolvedFolderRemovals(PairId, default).ToArray();
         Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew)) == RepairBinding(RepairNew, RepairE) &&
             operations is [{ Active: true, Phase: FolderRemovalPhase.Retained, Cause: TextKey.FailChanged,
@@ -166,7 +166,7 @@ public static partial class ChangeRunnerChecks
                 beforeLanes ??= local.Reads + local.Listings + dropbox.Reads + dropbox.Listings + submits.Count;
         };
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:169").WaitAsync(guard.Token);
         fixture.Hooks.BeforeCall = null;
         var renamed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew));
         Check.Require(RepairRows(fixture) == 0 && fixture.Inner.Issues(PairId).Count == 0 && beforeLanes == 0 &&
@@ -186,7 +186,7 @@ public static partial class ChangeRunnerChecks
         fixture.Dropbox.Seed(FolderEntry(RepairThird, "folder-f"), null);
         var (local, _, submits) = RepairViews(fixture);
         await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:189").WaitAsync(guard.Token);
         var issues = fixture.Inner.Issues(PairId);
         Check.Require(RepairRows(fixture) == 0 && issues is [{ Cause: TextKey.FailDuplicateFolderLinks }] &&
             submits.Count == 0 && local.Deletes == 0,
@@ -205,7 +205,7 @@ public static partial class ChangeRunnerChecks
             { Record = [SyncedEntries.From(FolderEntry(RepairZed, "folder-z"), FolderEntry(RepairZed, RepairE))] });
         var (local, _, submits) = RepairViews(fixture);
         await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:208").WaitAsync(guard.Token);
         var issues = fixture.Inner.Issues(PairId);
         Check.Require(submits.Count == 0 && local.Deletes == 0 && issues is [{ Cause: TextKey.FailDuplicateFolderBinding,
                 Path: RepairOld } failure] && failure.Subject.Folders ==
@@ -228,7 +228,7 @@ public static partial class ChangeRunnerChecks
             RepairX, null, false, false));
         var (local, dropbox, submits) = RepairViews(fixture);
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:231").WaitAsync(guard.Token);
         var issues = fixture.Inner.Issues(PairId);
         Check.Require(submits.Count == 0 && dropbox.Moves == 0 && issues is [{ Cause: TextKey.FailDuplicateFolderBinding } held] &&
             held.Subject.Folders == new IssueSubject.DuplicateFolders(TextKey.ReasonHistory, TextKey.ReasonNotEmpty) &&
@@ -248,7 +248,7 @@ public static partial class ChangeRunnerChecks
             "B212-E5: Retry releases the hold and reads none of X's paths: reads=" + retryReads +
             "; heldBy=" + RepairHeldBy(fixture) + "; obligations=" + RepairRows(fixture));
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:251").WaitAsync(guard.Token);
         var renamed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew));
         Check.Require(submits.Count == 1 && dropbox.Moves == 1 && LocalEffects(local) == 0 && RepairRows(fixture) == 0 &&
             fixture.Inner.Issues(PairId).Count == 0 && renamed is { LocalId: RepairX, DropboxId: RepairR },
@@ -276,7 +276,7 @@ public static partial class ChangeRunnerChecks
         for (var opportunity = 0; opportunity < 3; opportunity++)
         {
             await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
-                .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+                .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:279").WaitAsync(guard.Token);
             notices.Add(string.Join(" | ", fixture.Inner.Issues(PairId)
                 .Select(issue => issue.Id + ":" + issue.Cause + ":" + issue.Path + ":" + issue.Subject.Folders)));
         }
@@ -344,7 +344,7 @@ public static partial class ChangeRunnerChecks
                 });
             };
             await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [], configure: Counted)
-                .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+                .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:347").WaitAsync(guard.Token);
             var calls = new List<string>();
             fixture.Hooks.BeforeCall = method =>
             {
@@ -355,7 +355,7 @@ public static partial class ChangeRunnerChecks
                 calls.Clear();
                 var before = ProviderCalls(local, dropbox, submits) + windows;
                 await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [], configure: Counted)
-                    .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+                    .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:358").WaitAsync(guard.Token);
                 profiles.Add((size, ProviderCalls(local, dropbox, submits) + windows - before, string.Join(",",
                     calls.GroupBy(name => name).OrderBy(group => group.Key, StringComparer.Ordinal)
                         .Select(group => group.Key + "=" + group.Count()))));
@@ -398,7 +398,7 @@ public static partial class ChangeRunnerChecks
         var (local, dropbox, submits) = RepairViews(fixture);
         var begun = fixture.Hooks.Count(nameof(IStateStore.BeginFolderRemoval));
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:401").WaitAsync(guard.Token);
         Check.Require(submits.Count == 0 && local.Deletes == 0 && dropbox.Moves == 0 &&
             fixture.Inner.Issues(PairId).Count == 0 && RepairRows(fixture) == 1 && RepairHeldBy(fixture) is null &&
             fixture.Hooks.Count(nameof(IStateStore.BeginFolderRemoval)) == begun &&
@@ -411,7 +411,7 @@ public static partial class ChangeRunnerChecks
             .RecoverAsync(new RecoveryTarget(foreign, retained.Generation, null, null), RecoveryChoice.AcceptCurrent,
                 guard.Token).WaitAsync(guard.Token);
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:414").WaitAsync(guard.Token);
         var renamed = fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key(RepairNew));
         Check.Require(submits.Count == 1 && dropbox.Moves == 1 && LocalEffects(local) == 0 && RepairRows(fixture) == 0 &&
             renamed is { LocalId: RepairX, DropboxId: RepairR } &&
@@ -439,7 +439,7 @@ public static partial class ChangeRunnerChecks
             lock (calls) calls.Add(method.Name);
         };
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [])
-            .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+            .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:442").WaitAsync(guard.Token);
         fixture.Hooks.BeforeCall = null;
         var firstPass = calls.IndexOf(nameof(IStateStore.EndWorkPass));
         var frozen = calls.IndexOf(nameof(IStateStore.BeginFolderRemoval));
@@ -493,7 +493,7 @@ public static partial class ChangeRunnerChecks
         var hung = false;
         try
         {
-            await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).SyncWorkAsync(guard.Token)
+            await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), []).CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:496")
                 .WaitAsync(guard.Token);
         }
         catch (OperationCanceledException) when (guard.IsCancellationRequested) { hung = true; }
@@ -537,7 +537,7 @@ public static partial class ChangeRunnerChecks
         try
         {
             await LiveSyncer(fixture, RepairOpportunity(fixture), new Boundary(_ => new Lease()), [])
-                .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+                .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:540").WaitAsync(guard.Token);
         }
         catch (OperationCanceledException) when (guard.IsCancellationRequested) { hung = true; }
         Check.Require(!hung && secondRemoved.Task.IsCompleted && submits == 2 &&
@@ -591,7 +591,7 @@ public static partial class ChangeRunnerChecks
         {
             await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), [],
                     configure: context => context with { Admission = new FakeAdmission { Level = 1, WorkCapacity = 1 } })
-                .SyncWorkAsync(guard.Token).WaitAsync(guard.Token);
+                .CensusWorkAsync(guard.Token, "Executor/ChangeRunnerChecks.B212.cs:594").WaitAsync(guard.Token);
         }
         catch (OperationCanceledException) when (guard.IsCancellationRequested) { hung = true; }
         Check.Require(!hung && published.Task.IsCompleted && submits == 2 &&

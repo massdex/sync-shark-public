@@ -548,7 +548,7 @@ internal sealed class Scenario : IDisposable
             var effectsBefore = session.Log!.Effects.Values.Sum();
             var opportunities = session.Store.SelectWork(Pair.PairId, session.ExpectedGeneration, session.Scope) is null ? 0 : 1;
             session.Store.EndWorkPass(Pair.PairId);
-            session.Syncer.SyncWorkAsync(Cancellation).GetAwaiter().GetResult();
+            session.Syncer.CensusWorkAsync(Cancellation, "Scenarios/ScenarioFixture.cs:551").GetAwaiter().GetResult();
             Require(session.Log.Effects.Values.Sum() == effectsBefore,
                 "A214/A77: settling the echo emits no committed effect on either side");
             Require(Account.Calls.Count(effectRoutes.Contains) == effectCallsBefore,

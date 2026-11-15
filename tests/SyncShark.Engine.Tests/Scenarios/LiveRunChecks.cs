@@ -955,7 +955,7 @@ public static class LiveRunChecks
                     PendingWork.ByIdentity(scenario.Store, Side.Local, domain, entry.Id).Any() &&
                     scenario.LocalFiles().ContainsKey(folder) && scenario.Snapshot().Contains("D:" + folder + "/");
             };
-            session.Syncer.SyncWorkAsync(Scenario.Cancellation).GetAwaiter().GetResult();
+            session.Syncer.CensusWorkAsync(Scenario.Cancellation, "Scenarios/LiveRunChecks.cs:958").GetAwaiter().GetResult();
             scenario.Require(injected == 1 && scenario.LiveValidations >= 3 &&
                 scenario.Store.Issues(pairId, [IssueKind.Failure]).Count == 0,
                 "R4: the live replacement re-observes its row after its admission; injected=" + injected +
@@ -970,7 +970,7 @@ public static class LiveRunChecks
             scenario.InSession("replace-folder-next-opportunity", session =>
             {
                 session.Store.EndWorkPass(pairId);
-                session.Syncer.SyncWorkAsync(Scenario.Cancellation).GetAwaiter().GetResult();
+                session.Syncer.CensusWorkAsync(Scenario.Cancellation, "Scenarios/LiveRunChecks.cs:973").GetAwaiter().GetResult();
             });
         }
         scenario.Require(scenario.DropboxFiles().TryGetValue(folder, out var content) &&

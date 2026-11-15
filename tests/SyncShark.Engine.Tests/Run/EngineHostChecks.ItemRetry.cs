@@ -280,9 +280,10 @@ public static partial class EngineHostChecks
         await StepAsync(nameof(EventAfterDeadlineAttemptsOnceAsync), () => EventAfterDeadlineAttemptsOnceAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, unexpected: true)).ConfigureAwait(false);
         await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, unexpected: false)).ConfigureAwait(false);
+        await StepAsync(nameof(NewerLiveFailureStaysUnhandedAsync), () => NewerLiveFailureStaysUnhandedAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(ContendedFailureAccountingAsync), () => ContendedFailureAccountingAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(HandedStaleRearmsAsync), () => HandedStaleRearmsAsync(root)).ConfigureAwait(false);
-        foreach (var mode in new[] { "unexpected", "pause", "mixed", "configuration", "stop" })
+        foreach (var mode in new[] { "unexpected", "pause", "mixed", "configuration", "lane", "stop" })
             await StepAsync(nameof(OpportunityCancellationClassificationAsync) + mode,
                 () => OpportunityCancellationClassificationAsync(root, mode)).ConfigureAwait(false);
         foreach (var early in new[] { false, true })
@@ -536,6 +537,58 @@ public static partial class EngineHostChecks
             "the orderly opportunity closes the handed retry and notice").ConfigureAwait(false);
     }
 
+    private static async Task NewerLiveFailureStaysUnhandedAsync(string root)
+    {
+        await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "live-newer"), turn: false).ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
+        await rig.SettledIdleAsync("the newer-episode fixture is idle").ConfigureAwait(false);
+        int Continuations() { lock (rig.Rig.Wire.Calls) return rig.Rig.Wire.Calls.Count(path => path == "/2/files/list_folder/continue"); }
+        int logMark;
+        lock (rig.Logs) logMark = rig.Logs.Count;
+        rig.Host.LiveWorkFailed(rig.PairId, new IOException("synthetic"), null);
+        var first = rig.Store.ReadPrerequisiteRetry(rig.PairId)!.Value;
+        var notice = rig.Store.Issues(rig.PairId).Single(issue => issue.Path.Length == 0);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var armed = 0;
+        rig.Rig.Transport.Respond = async (request, ct) =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/2/files/list_folder/continue" && Interlocked.Exchange(ref armed, 1) == 0)
+            {
+                entered.TrySetResult();
+                await release.Task.WaitAsync(ct).ConfigureAwait(false);
+            }
+            return null;
+        };
+        var continuations = Continuations();
+        FailureRetryOwner.State second;
+        int dispatches;
+        try
+        {
+            await rig.FireAsync(first.RetryAfter - rig.Clock.GetUtcNow()).ConfigureAwait(false);
+            await entered.Task.WaitAsync(HookBound).ConfigureAwait(false);
+            rig.Host.LiveWorkFailed(rig.PairId, new IOException("synthetic"), null);
+            second = rig.Store.ReadPrerequisiteRetry(rig.PairId)!.Value;
+            Check.Require(second.Attempts == first.Attempts + 1, "a failure during recovery records a newer episode");
+            dispatches = rig.Dispatches;
+        }
+        finally { release.TrySetResult(); }
+        await rig.DispatchedOnceAsync(dispatches, "the older attempt kicks one ordinary opportunity").ConfigureAwait(false);
+        Check.Require(rig.Store.ReadPrerequisiteRetry(rig.PairId) == second &&
+            rig.Store.Issues(rig.PairId).Any(issue => issue.Id == notice.Id) && Continuations() == continuations + 1,
+            "the older attempt cannot hand or close the newer episode, and drains exactly once");
+        await rig.FireAsync(second.RetryAfter - rig.Clock.GetUtcNow()).ConfigureAwait(false);
+        await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(rig.PairId) is null && rig.AutoSyncIdle(),
+            "the newer episode recovers at its own deadline").ConfigureAwait(false);
+        await rig.IterateAsync().ConfigureAwait(false);
+        string[] logs;
+        lock (rig.Logs) logs = rig.Logs.Skip(logMark).ToArray();
+        Check.Require(Continuations() == continuations + 2 && rig.Store.Issues(rig.PairId).All(issue => issue.Id != notice.Id) &&
+            logs.Count(path => System.IO.File.ReadAllLines(path).Any(line => line.Split('\t')
+                .Contains(nameof(TextKey.StageSourceBase), StringComparer.Ordinal))) == 2,
+            "each unhanded episode drains once in its own attempt log, then the current notice closes");
+    }
+
     private static async Task ContendedFailureAccountingAsync(string root)
     {
         await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "live-contended")).ConfigureAwait(false);
@@ -586,16 +639,25 @@ public static partial class EngineHostChecks
 
     private static async Task OpportunityCancellationClassificationAsync(string root, string mode)
     {
-        await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "opportunity-cancel-" + mode), turn: false)
+        var folder = Path.Combine(root, "opportunity-cancel-" + mode);
+        await using var rig = await ItemRig.StartedAsync(folder, turn: false)
             .ConfigureAwait(false);
         await rig.SyncedAsync().ConfigureAwait(false);
         await rig.SettledIdleAsync("before cancellation classification").ConfigureAwait(false);
         var firstLog = rig.Logs.Count;
         var entered = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        rig.BeforeSelect = () =>
+        var preserved = false;
+        rig.AfterEnd = () =>
         {
-            rig.BeforeSelect = null;
+            rig.AfterEnd = null;
+            var work = rig.Store.CountWork(rig.PairId, rig.Store.ReadPairExecution(rig.PairId)!.Value.Generation,
+                rig.Store.ReadWorkWatermark());
+            preserved = work.Local + work.Dropbox > 0;
+        };
+        Action fail = () =>
+        {
+            rig.BeforeSelect = rig.BeforeBegin = null;
             const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
             CancellationToken token;
             lock (typeof(EngineHost).GetField("_gate", Private)!.GetValue(rig.Host)!)
@@ -611,18 +673,20 @@ public static partial class EngineHostChecks
             entered.TrySetResult(token);
             rig.Hold(release.Task, "the cancellation hook is released");
             if (mode == "unexpected") throw new OperationCanceledException();
-            if (mode == "configuration") throw new OperationCanceledException(new CancellationToken(true));
+            if (mode is "configuration" or "lane") throw new OperationCanceledException(new CancellationToken(true));
             throw new AggregateException(new OperationCanceledException(), mode == "mixed"
                 ? new InvalidOperationException("synthetic") : new OperationCanceledException());
         };
-        rig.Host.WakeAfterOperation(rig.PairId);
+        if (mode == "lane") rig.BeforeBegin = fail;
+        else rig.BeforeSelect = fail;
+        var content = await rig.DeliverLocalAsync("cancelled.txt").ConfigureAwait(false);
         var opportunity = await entered.Task.WaitAsync(HookBound).ConfigureAwait(false);
         Task ending = Task.CompletedTask;
         try
         {
             ending = mode switch
             {
-                "pause" or "mixed" => rig.Host.PauseAsync(rig.PairId, default),
+                "pause" or "mixed" or "lane" => rig.Host.PauseAsync(rig.PairId, default),
                 "configuration" => rig.Host.ChangeGenerationAsync(rig.Rig.Pair,
                     (_, _, _, _) => Task.FromResult(true), default),
                 "stop" => rig.Host.DisposeAsync().AsTask(),
@@ -643,13 +707,31 @@ public static partial class EngineHostChecks
                 rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
                 "only unexpected or mixed failures create pair retry debt");
         }
+        Check.Require(preserved, "the cancelled pass leaves its unexecuted work durable before any next opportunity");
         string[] logs;
         lock (rig.Logs) logs = rig.Logs.Skip(firstLog).ToArray();
         var failedLines = logs.SelectMany(path => System.IO.File.ReadAllLines(path))
             .Count(line => line.Contains("Failed\t", StringComparison.Ordinal));
         Check.Require(mode is "unexpected" or "mixed" ? failedLines > 0 : failedLines == 0,
             "requested cancellation is classified before failure logging");
-        if (mode is "pause" or "mixed") await rig.Host.ResumeAsync(rig.PairId, default).ConfigureAwait(false);
+        if (mode == "stop")
+        {
+            await rig.DisposeAsync().ConfigureAwait(false);
+            await using var reopened = await ItemRig.OpenAsync(folder, rig.Clock, rig.Rig.Wire).ConfigureAwait(false);
+            Check.Require(reopened.Store.ReadPrerequisiteRetry(reopened.PairId) is null &&
+                reopened.Store.Issues(reopened.PairId).Count == 0,
+                "a requested shutdown persisted no retry row or notice");
+        }
+        else
+        {
+            if (mode is "pause" or "mixed" or "lane") await rig.Host.ResumeAsync(rig.PairId, default).ConfigureAwait(false);
+            rig.Host.WakeAfterOperation(rig.PairId);
+            await UntilAsync(() => Uploaded(rig, "cancelled.txt", content) && rig.AutoSyncIdle(),
+                "the surviving scheduler finishes the preserved work").ConfigureAwait(false);
+            if (mode is "pause" or "configuration" or "lane")
+                Check.Require(rig.Store.ReadPrerequisiteRetry(rig.PairId) is null && rig.Store.Issues(rig.PairId).Count == 0,
+                    "resuming a requested cancellation introduces no retry or notice");
+        }
     }
 
     private static async Task HandedStaleRearmsAsync(string root)
@@ -1528,6 +1610,7 @@ public static partial class EngineHostChecks
         internal Action? BeforeRecord;
         internal Action? BeforeRefusal;
         internal Action? BeforeBegin;
+        internal Action? AfterEnd;
         internal Action? AfterRefresh;
         internal Action? AfterTemporary;
         internal Action? BeforeFinish;
@@ -1635,6 +1718,7 @@ public static partial class EngineHostChecks
                     },
                     BeforeSelectWork = () => rig.BeforeSelect?.Invoke(),
                     BeforeBeginSelection = () => rig.BeforeBegin?.Invoke(),
+                    AfterEndWorkPass = () => rig.AfterEnd?.Invoke(),
                     AfterPrerequisiteRetries = () =>
                     {
                         Interlocked.Increment(ref rig._refreshes);
@@ -1905,7 +1989,7 @@ public static partial class EngineHostChecks
 
         public async ValueTask DisposeAsync()
         {
-            BeforeSelect = BeforeBegin = AfterRefresh = BeforeFinish = AfterFinish = AfterTemporary = BeforeRecord = BeforeRefusal = null;
+            BeforeSelect = BeforeBegin = AfterEnd = AfterRefresh = BeforeFinish = AfterFinish = AfterTemporary = BeforeRecord = BeforeRefusal = null;
             FinishFailed = null;
             BeforeCommit = null;
             BeforeCapture = null;
