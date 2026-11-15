@@ -243,7 +243,6 @@ internal sealed class SelectionPass
     internal Issue? RefuseBeforeProvider(ChangeNotice notice, SyncedEntry? before)
     {
         var key = PathNames.KeyFor(notice.Side, notice.Observed?.Path ?? notice.Path);
-        if (_context.Store.UnknownMoveCovering(_context.Pair.PairId, key) is { } move) return move;
         if (_rows.Covers(key)) return null;
         _ancestors.RequireClear(notice, before, _parents);
         return null;
