@@ -1,0 +1,2394 @@
+using System.Reflection;
+using System.Runtime.InteropServices;
+using Massdex.SyncShark;
+using Massdex.SyncShark.Engine;
+using Massdex.SyncShark.Engine.Local;
+using Massdex.SyncShark.Engine.Storage;
+using Massdex.SyncShark.Engine.Tests.TestDoubles;
+using RunLog = Massdex.SyncShark.Engine.Run.RunLog;
+using EngineHost = Massdex.SyncShark.Engine.Run.EngineHost;
+
+namespace Massdex.SyncShark.Engine.Tests.Local;
+
+/// <summary>Checks for JournalSource (`--engine-checks local`), driven through the production native reader
+/// against a real NTFS dummy boundary and the production Store (`Storage.StateStore`).
+/// Cases: lifecycle rev2 J1-J14 and final-review JF1-JF3, OPTIONS-F083-rev2 acceptance 1-9, and the
+/// finite-checkpoint terminal-records case (F091.fix4). The host snapshot/refresh owner is a test double that
+/// keeps the proposed contract: immutable list under one gate, side-effect-free accessor, synchronous refresh
+/// under the same (reentrant) gate, no native I/O and no lifecycle reentry. The store is the production
+/// `Storage.StateStore` behind a forwarding double that can observe or fault one exact call, so the journal CAS,
+/// source precedence and notice rows stay the real ones. The row's single physical file owns every case, so the
+/// file is not split.</summary>
+public static class JournalSourceChecks
+{
+    // The engine's shipped journal page: the embedded defaults alone, with no user overlay.
+    private static readonly EngineSettings Settings = SettingsParser.Parse(EngineHost.DefaultsJson(), null);
+
+    public static void Run() => RunAsync().GetAwaiter().GetResult();
+
+    /// <summary>Work committed by another source after the last journal publish is inside both catch-up watermarks.
+    /// The foreign page lands right after a publish, so no later journal page can refresh a cached value.</summary>
+    public static void QuietVolumeWatermark() => QuietVolumeWatermarkAsync().GetAwaiter().GetResult();
+
+    private static async Task QuietVolumeWatermarkAsync()
+    {
+        var baseRoot = Directory.CreateTempSubdirectory("SyncSharkJournalQuiet-");
+        try
+        {
+            using var scenario = new Scenario(baseRoot.FullName, "quiet-watermark", "A");
+            var cursor = 0;
+            void ForeignPageAfterPublish() => scenario.StoreHook.After = method =>
+            {
+                if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+                scenario.StoreHook.After = null;
+                var source = scenario.Store.ReadSource("A", Side.Dropbox)!.Value;
+                var provenance = source.Provenance ?? new SourceProvenance("account", "namespace", "root", "/root",
+                    true, true, true, true, 0, source.Epoch);
+                if (source.Provenance is null)
+                    scenario.Store.AdvanceSource("A", Side.Dropbox, 0, source.Epoch, source.Revision, null, null,
+                        source.Epoch, source.Revision, provenance, "cursor", source.Obligation);
+                var current = scenario.Store.ReadSource("A", Side.Dropbox)!.Value;
+                scenario.Store.AcquireDropboxPage("A", 0, current.Epoch, current.Revision, provenance, current.Cursor,
+                    [new ChangeNotice(Side.Dropbox, ChangeKind.Changed, "foreign.txt", null, "foreign", null, false, false)],
+                    "cursor" + (++cursor).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            };
+            ForeignPageAfterPublish();
+            File.WriteAllText(Path.Combine(scenario.Root, "quiet-one.txt"), "one");
+            using var log = RunLog.Open(baseRoot.FullName, "A", "catch-up", _ => { },
+                EngineHost.LoadSettings(baseRoot.FullName).LogBufferCharacters);
+            var catchUp = await scenario.Source.CatchUpForPairAsync("A", 0, default, log);
+            using (var stream = new FileStream(log.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var reader = new StreamReader(stream))
+                Check.Require(reader.ReadToEnd().Contains(nameof(TextKey.StageJournal), StringComparison.Ordinal),
+                    "finite journal catch-up publishes its stage before returning");
+            Check.Require(scenario.StoreHook.After is null && catchUp.ThroughWorkId == scenario.Store.ReadWorkWatermark(),
+                "A live catch-up covers work another source committed after its last publish.");
+            ForeignPageAfterPublish();
+            File.WriteAllText(Path.Combine(scenario.Root, "quiet-two.txt"), "two");
+            var checkpoint = await scenario.Source.CheckpointForPairAsync("A", 0, default);
+            Check.Require(scenario.StoreHook.After is null && checkpoint.ThroughWorkId == scenario.Store.ReadWorkWatermark(),
+                "A Repair checkpoint covers work another source committed after its last publish.");
+        }
+        finally { baseRoot.Delete(recursive: true); }
+    }
+
+    private static async Task RunAsync()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var baseRoot = Directory.CreateTempSubdirectory("SyncSharkJournal-");
+        try
+        {
+            if (!NtfsUsnJournal.TryReadState(baseRoot.FullName, out _, out _, out _, out _, out _, out _, out _))
+            {
+                Console.WriteLine("SKIP JournalSource checks: the fixture volume has no readable NTFS USN journal.");
+                Check.Skip();
+                return;
+            }
+            AliasPageClassification(baseRoot.FullName);
+            await RetainedPageRaceAsync(baseRoot.FullName);
+            await FailedCatchUpResumesWithoutDebtAsync(baseRoot.FullName);
+            await ResumeStoreWorkFollowsTheIntervalAsync(baseRoot.FullName);
+            SavedLookupShapesIgnoreSavedSize(baseRoot.FullName);
+            PageResolutionCounts(baseRoot.FullName);
+            PagePublicationStatements(baseRoot.FullName);
+            await ShortResumeDoesNotConfirmAsync(baseRoot.FullName, false);
+            await ShortResumeDoesNotConfirmAsync(baseRoot.FullName, true);
+            await CancelledResumeDoesNotConfirmAsync(baseRoot.FullName);
+            await RemovedMemberResumeAsync(baseRoot.FullName, frozen: false, refuseFrozen: false);
+            await RemovedMemberResumeAsync(baseRoot.FullName, frozen: true, refuseFrozen: false);
+            await RemovedMemberResumeAsync(baseRoot.FullName, frozen: true, refuseFrozen: true);
+            await FailedResumeRebasesWithDebtAsync(baseRoot.FullName);
+            foreach (var kind in new[] { "JournalChanged", "BelowRetention", "AheadOfEnd" })
+                await FailedSourceOutsideRetentionRebasesAsync(baseRoot.FullName, kind);
+            await HealthyPagePublishesBeforeAcknowledgmentAsync(baseRoot.FullName);
+            await PairCatchUpReturnsTheCommittedAcquisitionAsync(baseRoot.FullName);
+            await FrozenLastPageDebtIsCarriedAsync(baseRoot.FullName);
+            await FrozenOlderDebtIsRetainedAsync(baseRoot.FullName);
+            await FrozenOwnDebtKeepsTheCallersTokenAsync(baseRoot.FullName);
+            await FrozenForeignSourceRevisionRefusesAsync(baseRoot.FullName);
+            await FrozenForeignMembershipAtRefreshRefusesAsync(baseRoot.FullName);
+            await ClosedMembershipAtCheckpointEntryFailsFastAsync(baseRoot.FullName);
+            await ReopenedDebtBeforeEntryIsCoveredAsync(baseRoot.FullName);
+            await UpdateWinningTheGateRefusesTheObsoleteCheckpointAsync(baseRoot.FullName);
+            await OrdinaryHistoryLossInstallsABaseAsync(baseRoot.FullName);
+            await FrozenHistoryLossRefusesWithoutABaseAsync(baseRoot.FullName);
+            await OrdinaryStalePublicationRefreshesAndReadsFromDurableAsync(baseRoot.FullName);
+            await FrozenStalePublicationRefusesWithoutRefreshAsync(baseRoot.FullName);
+            await RefreshFailureKeepsTheAcknowledgedPositionAsync(baseRoot.FullName);
+            await PublicationHoldsTheGateThroughRefreshAsync(baseRoot.FullName);
+            await FiniteCheckpointTerminalRecordsCommitBeforeAcknowledgmentAsync(baseRoot.FullName);
+            await StopThenStartAcquiresAgainAsync(baseRoot.FullName);
+            await CancellationBeforePublicationKeepsThePositionAsync(baseRoot.FullName);
+            await ClosedAndEmptyMembershipDoNotSpinAsync(baseRoot.FullName);
+            await IrrelevantProgressStillCommitsAsync(baseRoot.FullName);
+            await OwnWorkNotifiesOnlyItsPairAsync(baseRoot.FullName);
+            await FiniteRefusalWakesCurrentMembersAsync(baseRoot.FullName);
+            await OwnDownloadEchoAsync(baseRoot.FullName);
+            await DriveEvidenceMismatchRaisesOneNoticeAsync(baseRoot.FullName);
+            await FrozenHealthyOtherDebtIsAdoptedAsync(baseRoot.FullName);
+            await FrozenMiddlePageOtherDebtIsAdoptedAsync(baseRoot.FullName);
+            await DelayedSuffixIsReplayedAfterRejoinAsync(baseRoot.FullName);
+            await ObsoleteSuffixAtCheckpointEntryIsDiscardedAsync(baseRoot.FullName);
+            await StaleStopKeepsTheDurablePositionAsync(baseRoot.FullName);
+            await HistoryLossKeepsSkippedCoverageOverLostIntervalAsync(baseRoot.FullName);
+            await FrozenRemovedMembershipAtRefreshRefusesAsync(baseRoot.FullName);
+            await RemovedMemberBeforePublicationRefusesAsync(baseRoot.FullName);
+            await CancellationAfterCommitKeepsTheNewPositionAsync(baseRoot.FullName);
+            await LostAcknowledgmentRefusesWithoutReplayAsync(baseRoot.FullName);
+            await BackgroundFailureIsObservableAsync(baseRoot.FullName);
+            await UnavailablePageKeepsDiagnosticAsync(baseRoot.FullName);
+            await BusyVolumeCoverageIsFiniteAsync(baseRoot.FullName);
+            await LiveCoverageRefreshesForeignStaleFenceAsync(baseRoot.FullName);
+            await LiveEmptyCoverageRepublishesOnceAsync(baseRoot.FullName, false);
+            await LiveEmptyCoverageRepublishesOnceAsync(baseRoot.FullName, true);
+            await GenuineStoreFailureIsNotStaleNullAsync(baseRoot.FullName);
+            await GenuineFenceReadFailureIsNotStaleNullAsync(baseRoot.FullName);
+            await MappedUnreadableRecordDeliversRemainingNoticesAsync(baseRoot.FullName);
+        }
+        finally
+        {
+            baseRoot.Delete(recursive: true);
+        }
+    }
+
+    // F083 acceptance 1/7, J3 healthy pages and J14: one acknowledged page publishes its notices and position,
+    // and a page with no debt candidate performs zero host refresh reads.
+    private static async Task HealthyPagePublishesBeforeAcknowledgmentAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "healthy", "A");
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        var position = await scenario.Source.CatchUpAsync(default);
+        Check.Require(position is not null && scenario.Store.ReadJournal(scenario.VolumeKey) == position,
+            "An ordinary page acknowledges only after its notices and position are durable.");
+        Check.Require(scenario.Host.RefreshCalls == 0,
+            "A healthy page with no debt candidate performs zero refresh reads.");
+        var pending = FirstNotice(scenario, "A");
+        Check.Require(pending is not null && pending.Notice.Path == "one.txt" && pending.Notice.Side == Side.Local,
+            "The healthy page's Local notice is durable before the acknowledged position is returned.");
+        Check.Require(scenario.Source.Position == position, "The source resumes at the acknowledged position.");
+    }
+
+    // The live host's finite per-pair acquisition: a committed catch-up under the current member fence returns the
+    // exact applicability facts it attests, and every refusal is the typed stale coverage admission.
+    private static async Task PairCatchUpReturnsTheCommittedAcquisitionAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "pair-catchup", "A");
+        Check.Require(scenario.Source.Completion.IsCompleted,
+            "An idle source exposes a completed lifetime task to its host.");
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        var catchUp = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        var position = scenario.Source.Position;
+        Check.Require(catchUp.PairId == "A" && catchUp.PairGeneration == 0 && position is not null &&
+            catchUp.Checkpoint.JournalId == position.JournalId && (ulong)catchUp.Checkpoint.NextUsn == position.NextUsn,
+            "A finite catch-up captures the pair, generation and committed journal boundary it attests.");
+        Check.Require(catchUp.SourceEpoch == SourceRow(scenario, "A").Epoch,
+            "The captured acquisition names the pair's current source epoch.");
+        Check.Require(catchUp.ThroughWorkId == scenario.Store.ReadWorkWatermark(),
+            "The captured acquisition names the committed work watermark of its own page.");
+        Check.Require(FirstNotice(scenario, "A")?.Notice.Path == "one.txt",
+            "The page's work is durable before the live acquisition is returned.");
+
+        foreach (var (pairId, generation) in new[] { ("missing", 0L), ("A", 1L) })
+        {
+            try
+            {
+                await scenario.Source.CatchUpForPairAsync(pairId, generation, default);
+                throw new InvalidOperationException("An unknown pair or generation must refuse the live acquisition.");
+            }
+            catch (LiveAdmissionStaleException error)
+            {
+                Check.Require(error.Reason == LiveAdmissionStaleReason.CoverageChanged,
+                    "A refused live acquisition is a stale coverage admission: " + pairId);
+            }
+        }
+
+        using var closed = new Scenario(baseRoot, "pair-closed", "A");
+        closed.Host.Close();
+        try
+        {
+            await closed.Source.CatchUpForPairAsync("A", 0, default);
+            throw new InvalidOperationException("A closed volume must refuse the live acquisition.");
+        }
+        catch (LiveAdmissionStaleException error)
+        {
+            Check.Require(error.Reason == LiveAdmissionStaleReason.CoverageChanged,
+                "A null catch-up refuses CoverageChanged rather than claiming healthy coverage.");
+        }
+
+
+    }
+
+    // J4/JR2-01: another member's debt created by the checkpoint's own acknowledged page is carried into the
+    // private working vector, so the checkpoint succeeds while the issuer owes nothing new.
+    private static async Task FrozenLastPageDebtIsCarriedAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "frozen-last", "A", "C");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var aRevision = Revision(scenario, "A");
+        var cRevision = Revision(scenario, "C");
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var debtFile = Path.Combine(scenario.RootOf("C"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("C"));
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is not null && scenario.Store.ReadJournal(scenario.VolumeKey) == position,
+            "A checkpoint acknowledges a page whose debt belongs to another member.");
+        Check.Require(Revision(scenario, "C") == cRevision + 1 &&
+            Obligation(scenario, "C") == SourceObligation.Bootstrap,
+            "The other member's page-caused successor responsibility stays durable.");
+        Check.Require(Revision(scenario, "A") == aRevision,
+            "The repair issuer gains no responsibility from the other member's debt.");
+        Check.Require(frozen.All(member => member.Revision ==
+            (member.Pair.PairId == "A" ? aRevision : cRevision)),
+            "The caller's captured list is never rewritten by the checkpoint.");
+        Check.Require(!scenario.Store.Issues("A", [IssueKind.Failure])
+                .Any(issue => issue.Cause == TextKey.RequiredRepairRetry),
+            "The other member's debt raises no failed-Repair notice for the issuer.");
+    }
+
+    // J5/JR2-01: an older debt interval survives a later page that repeats the no new lost interval.
+    private static async Task FrozenOlderDebtIsRetainedAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "frozen-old", "A", "C");
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var debtFile = Path.Combine(scenario.RootOf("C"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("C"));
+        await scenario.Source.CatchUpAsync(default);
+        var owed = Revision(scenario, "C");
+        Check.Require(Obligation(scenario, "C") == SourceObligation.Bootstrap,
+            "The earlier page installs the other member's gap responsibility.");
+        var frozen = scenario.Host.Snapshot().ToList();
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "two.txt"), "two");
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is not null && Revision(scenario, "C") == owed &&
+            Obligation(scenario, "C") == SourceObligation.Bootstrap,
+            "A later page with the no new lost interval keeps the older responsibility without another revision.");
+        Check.Require(frozen.All(member => member.Pair.PairId != "C" || member.Revision == owed),
+            "The checkpoint's captured caller list is unchanged.");
+    }
+
+    // J6/JR2-02: the issuer's own new debt is acknowledged as a durable boundary, but the caller's captured
+    // completion token still predates it and cannot clear it.
+    private static async Task FrozenOwnDebtKeepsTheCallersTokenAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "frozen-own", "A");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var captured = Revision(scenario, "A");
+        var file = Path.Combine(scenario.Root, "one.txt");
+        File.WriteAllText(file, "one");
+        RenameRootAwayAndBack(scenario.Root);
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is not null, "The checkpoint may acknowledge a boundary that makes its own issuer's token obsolete.");
+        Check.Require(Revision(scenario, "A") == captured + 1 && Obligation(scenario, "A") is not null,
+            "The issuer's own page-caused debt is durable.");
+        Check.Require(frozen[0].Revision == captured,
+            "The captured pre-list completion token is immutable; the separate completion owner must refuse it.");
+    }
+
+    // J8/JF3 frozen part: a foreign source revision committed before the next page refuses without a page
+    // publication, refresh, retry or caller-list change.
+    private static async Task FrozenForeignSourceRevisionRefusesAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "frozen-foreign", "A", "B");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        var source = SourceRow(scenario, "B");
+        scenario.Store.AdvanceSource("B", Side.Local, 0, source.Epoch, source.Revision, source.Provenance,
+            source.Cursor, source.Epoch, source.Revision + 1, source.Provenance, source.Cursor, null);
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is null && scenario.Store.ReadJournal(scenario.VolumeKey) == journal,
+            "A foreign source-fence change refuses the frozen checkpoint with no page publication.");
+        Check.Require(scenario.Host.RefreshCalls == 0, "A frozen foreign fence change performs no refresh read.");
+        Check.Require(frozen.All(member => member.Pair.PairId != "B" || member.Revision == source.Revision),
+            "The caller's captured fences are unchanged by the refusal.");
+    }
+
+    // J8/JR2-04: a foreign membership change that wins the protected commit/refresh span is refused rather
+    // than absorbed; the already-acknowledged page stays committed.
+    private static async Task FrozenForeignMembershipAtRefreshRefusesAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "frozen-refresh", "A", "B");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        var extra = scenario.AddPair("X");
+        var foreign = scenario.Host.Snapshot().Append(extra).ToArray();
+        scenario.Host.BeforeRefresh = _ =>
+        {
+            scenario.Host.Install(foreign);
+            return true;
+        };
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var debtFile = Path.Combine(scenario.RootOf("B"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("B"));
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is null,
+            "A foreign membership change inside the protected span refuses the checkpoint.");
+        Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) != journal,
+            "The already-acknowledged page stays committed; the refusal does not pretend it rolled back.");
+        Check.Require(frozen.All(member => member.Pair.PairId != "X"),
+            "The foreign member is never adopted into the caller's captured list.");
+    }
+
+    // JF1/F083 acceptance 5: a volume fence that is closed when the checkpoint starts has no OPEN snapshot to
+    // capture and fails fast without waiting for reopen or touching Storage.
+    private static async Task ClosedMembershipAtCheckpointEntryFailsFastAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "closed", "A");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        scenario.Host.Close();
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is null && scenario.Store.ReadJournal(scenario.VolumeKey) == journal,
+            "A closed volume fence at checkpoint entry fails fast with no page publication.");
+        Check.Require(scenario.Host.RefreshCalls == 0, "A closed entry neither refreshes nor waits for reopen.");
+    }
+
+    // JF2: a member change that fully committed (and reopened) before checkpoint entry is covered by the entry
+    // vector, and that member's successor debt survives.
+    private static async Task ReopenedDebtBeforeEntryIsCoveredAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "reopened", "A", "C");
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var debtFile = Path.Combine(scenario.RootOf("C"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("C"));
+        await scenario.Source.CatchUpAsync(default);
+        var owed = Revision(scenario, "C");
+        var frozen = scenario.Host.Snapshot().ToList();
+        scenario.Host.Install(frozen);
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "two.txt"), "two");
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is not null && Revision(scenario, "C") == owed &&
+            Obligation(scenario, "C") == SourceObligation.Bootstrap,
+            "A debt committed and reopened before entry is covered, and its responsibility survives.");
+    }
+
+    // F083 acceptance 4: when a membership update wins the gate before the checkpoint publishes, the obsolete
+    // captured vector refuses and no page is written.
+    private static async Task UpdateWinningTheGateRefusesTheObsoleteCheckpointAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "update-first", "A", "B");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        scenario.Host.Install(frozen.Where(member => member.Pair.PairId != "B").ToArray());
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is null && scenario.Store.ReadJournal(scenario.VolumeKey) == journal,
+            "An update that wins the gate makes the obsolete checkpoint refuse with no page publication.");
+    }
+
+    private static async Task FiniteRefusalWakesCurrentMembersAsync(string baseRoot)
+    {
+        foreach (var restart in new[] { true, false })
+        foreach (var refused in new[] { true, false })
+        {
+            using var scenario = Scenario.WithSeparateRoots(baseRoot, "finite-wake-" + restart + "-" + refused,
+                "A", "B", "C");
+            var position = restart
+                ? new JournalPosition(scenario.Start.JournalId ^ 1UL, scenario.Start.NextUsn) : scenario.Start;
+            if (restart)
+                scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, position, Fences(scenario), []);
+            var source = new JournalSource(scenario.VolumeKey, scenario.Root, scenario.Store, position,
+                scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
+            if (!restart) await source.CatchUpAsync(default);
+            var current = scenario.Host.Snapshot().Where(member => member.Pair.PairId != "A").ToArray();
+            if (refused)
+            {
+                scenario.Host.Close();
+                for (var attempt = 0; attempt < 2; attempt++)
+                {
+                    try
+                    {
+                        await source.CatchUpForPairAsync("A", 0, default);
+                        throw new InvalidOperationException("Closed membership must refuse finite acquisition.");
+                    }
+                    catch (LiveAdmissionStaleException error)
+                    {
+                        Check.Require(error.Reason == LiveAdmissionStaleReason.CoverageChanged,
+                            "Finite refusal preserves its coverage reason.");
+                    }
+                }
+            }
+            scenario.Host.Install(current);
+            var woken = new List<string>();
+            source.WorkCommitted = id =>
+            {
+                Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) == source.Position,
+                    "Recovery wakes only after its journal boundary is durable.");
+                woken.Add(id);
+            };
+            Check.Require(await source.CatchUpAsync(default) is not null,
+                "A restarted or quiet source reaches a successful durable boundary.");
+            Check.Require(woken.SequenceEqual(restart || refused ? new[] { "B", "C" } : Array.Empty<string>()),
+                "One recovery wake reaches each current member after a refusal or a replacement base, never a removed member or a source with neither.");
+            woken.Clear();
+            Check.Require(await source.CatchUpAsync(default) is not null && woken.Count == 0,
+                "Repeated empty acquisition does not repeat the consumed recovery wake.");
+        }
+    }
+
+    // J10/F083 acceptance 2: an ordinary history loss installs one fresh base with every enabled member's
+    // bootstrap responsibility, then acquisition continues; nothing is reported as clean.
+    private static async Task OrdinaryHistoryLossInstallsABaseAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "history", "A");
+        var bogus = new JournalPosition(scenario.Start.JournalId ^ 1UL, scenario.Start.NextUsn);
+        scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, bogus, Fences(scenario), []);
+        var before = Revision(scenario, "A");
+        var source = new JournalSource(scenario.VolumeKey, scenario.Root, scenario.Store, bogus,
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
+        var position = await source.CatchUpAsync(default);
+        var now = NtfsUsnJournal.ReadCheckpoint(scenario.Root);
+        Check.Require(position is not null && position.JournalId == (ulong)now.JournalId &&
+            position.NextUsn >= (ulong)now.FirstUsn && position.NextUsn <= (ulong)now.NextUsn,
+            "History loss installs one fresh base at the journal's current identity and position.");
+        Check.Require(Revision(scenario, "A") == before + 1 &&
+            Obligation(scenario, "A") == SourceObligation.Bootstrap,
+            "A never-repaired pair's fresh base installs the bootstrap obligation for every enabled member.");
+    }
+
+    // J10/JF3 frozen part: a frozen checkpoint never installs a replacement base or resets the captured debt.
+    private static async Task FrozenHistoryLossRefusesWithoutABaseAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "history-frozen", "A");
+        var bogus = new JournalPosition(scenario.Start.JournalId ^ 1UL, scenario.Start.NextUsn);
+        scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, bogus, Fences(scenario), []);
+        var frozen = scenario.Host.Snapshot().ToList();
+        var source = new JournalSource(scenario.VolumeKey, scenario.Root, scenario.Store, bogus,
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
+        var position = await source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is null && scenario.Store.ReadJournal(scenario.VolumeKey) == bogus,
+            "A frozen history loss refuses and installs no fresh base or replacement responsibility.");
+        Check.Require(frozen[0].Revision == Revision(scenario, "A"),
+            "The refused frozen checkpoint leaves the caller's captured fences unchanged.");
+    }
+
+    // J9/F083 acceptance 3: an ordinary stale publication explicitly refreshes the current fences from the same
+    // authoritative reads and restarts from the durable position, reusing one read per member.
+    private static async Task OrdinaryStalePublicationRefreshesAndReadsFromDurableAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "stale", "A");
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        // A durable journal position is always a native record boundary; a start inside a record is rejected
+        // with ERROR_INVALID_PARAMETER, so the synthetic position comes from the journal itself.
+        var checkpoint = NtfsUsnJournal.ReadCheckpoint(scenario.Root);
+        var durable = new JournalPosition((ulong)checkpoint.JournalId, (ulong)checkpoint.NextUsn);
+        scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, durable, Fences(scenario), []);
+        var position = await scenario.Source.CatchUpAsync(default);
+        Check.Require(position is not null && scenario.Store.ReadJournal(scenario.VolumeKey) == position &&
+            position.NextUsn >= durable.NextUsn,
+            "An ordinary stale publication recovers from the authoritative durable position.");
+        Check.Require(scenario.Host.RefreshCalls == 1 && scenario.Host.RefreshReads == 1,
+            "The stale path refreshes each current member once and reuses that read for the private copy.");
+    }
+
+    // J9 frozen half: a frozen SQL-stale page returns null without a refresh, replay or guessed revision.
+    private static async Task FrozenStalePublicationRefusesWithoutRefreshAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "stale-frozen", "A");
+        var frozen = scenario.Host.Snapshot().ToList();
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        var durable = new JournalPosition(scenario.Start.JournalId, scenario.Start.NextUsn + 1UL);
+        scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, durable, Fences(scenario), []);
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is null && scenario.Store.ReadJournal(scenario.VolumeKey) == durable,
+            "A frozen SQL-stale publication refuses without replaying the old page.");
+        Check.Require(scenario.Host.RefreshCalls == 0,
+            "A frozen SQL-stale publication performs no refresh and keeps its captured fences.");
+    }
+
+    // JR2-05/rev2 line 68: a refresh failure after an earlier read succeeds installs no partial snapshot,
+    // keeps the already-committed position and returns no successful checkpoint.
+    private static async Task RefreshFailureKeepsTheAcknowledgedPositionAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "refresh-fail", "A", "B");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        scenario.Host.BeforeRefresh = _ => throw new IOException("refresh-fixture");
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var debtFile = Path.Combine(scenario.RootOf("B"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("B"));
+        try
+        {
+            await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+            throw new InvalidOperationException("A refresh failure must not return a successful checkpoint.");
+        }
+        catch (IOException)
+        {
+        }
+        Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) != journal &&
+            scenario.Store.ReadJournal(scenario.VolumeKey) == scenario.Source.Position,
+            "The acknowledged page stays durable after the later refresh failure; no rollback or replay is claimed.");
+        Check.Require(!scenario.Source.Available, "A refresh failure after commit is surfaced, never silently healthy.");
+        Check.Require(scenario.Host.Snapshot().Count == frozen.Count,
+            "A failed refresh installs no partial member snapshot.");
+    }
+
+    // F083 acceptance 5/rev2 line 65: the successful publication comparison, the Store call, the authoritative
+    // reads and the private adoption are one protected span. A competing membership update cannot enter it.
+    private static async Task PublicationHoldsTheGateThroughRefreshAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "gate", "A", "B");
+        // As in the debt case, the shared volume's unrelated traffic is published by this one source and each
+        // acknowledged page carrying the lost-interval candidate refreshes it once; count pages, not the assumed one.
+        var publications = new int[1];
+        scenario.StoreHook.After = method =>
+        {
+            if (method.Name == nameof(IStateStore.AcquireJournalPage) && scenario.StoreHook.LastPageHasDebt) Interlocked.Increment(ref publications[0]);
+        };
+        var frozen = scenario.Host.Snapshot().ToList();
+        using var insideSpan = new ManualResetEventSlim(false);
+        using var releaseSpan = new ManualResetEventSlim(false);
+        scenario.Host.BeforeRefresh = _ =>
+        {
+            insideSpan.Set();
+            releaseSpan.Wait();
+            return false;
+        };
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var debtFile = Path.Combine(scenario.RootOf("B"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("B"));
+        var checkpoint = scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        try
+        {
+            Check.Require(insideSpan.Wait(TimeSpan.FromSeconds(30)),
+                "The checkpoint reaches its protected publication/refresh span.");
+            if (Monitor.TryEnter(scenario.Host.Gate))
+            {
+                Monitor.Exit(scenario.Host.Gate);
+                throw new InvalidOperationException(
+                    "A competing membership update entered while the protected span was held.");
+            }
+        }
+        finally
+        {
+            releaseSpan.Set();
+        }
+        var position = await checkpoint;
+        Check.Require(position is not null && scenario.Host.RefreshCalls == publications[0] &&
+            scenario.Host.RefreshReads == scenario.Host.RefreshCalls,
+            "Publication wins: every acknowledged page refreshes once before a competing update can publish: pages=" +
+            publications[0] + " calls=" + scenario.Host.RefreshCalls);
+    }
+
+    // F091.fix4 (coordinator addition): a checkpoint read is finite to the boundary captured at entry. Sustained
+    // records keep arriving beyond that boundary while the checkpoint runs; the terminal finite response may itself
+    // be Complete while delivering records. Its notices must be durable before the acknowledgment, and the traffic
+    // beyond the captured boundary must remain for ordinary acquisition rather than being folded into the checkpoint.
+    private static async Task FiniteCheckpointTerminalRecordsCommitBeforeAcknowledgmentAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "finite", "A", "C");
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "early.txt"), "early");
+        var debtFile = Path.Combine(scenario.RootOf("C"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("C"));
+        var frozen = scenario.Host.Snapshot().ToList();
+        var entry = NtfsUsnJournal.ReadCheckpoint(scenario.Root);
+        var boundary = new JournalPosition((ulong)entry.JournalId, (ulong)entry.NextUsn);
+        const int burstFiles = 200;
+        using var startBurst = new ManualResetEventSlim(false);
+        var first = new int[1];
+        scenario.Host.BeforeRefresh = _ =>
+        {
+            if (Interlocked.Increment(ref first[0]) == 1) startBurst.Set();
+            return false;
+        };
+        var writer = Task.Run(() =>
+        {
+            startBurst.Wait();
+            for (var index = 0; index < burstFiles; index++)
+                File.WriteAllText(Path.Combine(scenario.RootOf("A"), "burst-" + index + ".txt"), "burst");
+        });
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        await writer;
+        Check.Require(position is not null && position.NextUsn >= boundary.NextUsn &&
+            scenario.Store.ReadJournal(scenario.VolumeKey) == position,
+            "A checkpoint acknowledges the finite boundary captured at entry while records keep arriving beyond it.");
+        Check.Require(FirstNotice(scenario, "A")?.Notice.Path == "early.txt",
+            "The terminal finite response's notices are durable before the checkpoint acknowledgment is returned.");
+        var tail = await scenario.Source.CatchUpAsync(default);
+        Check.Require(tail is not null && tail.NextUsn > position!.NextUsn,
+            "Records arriving beyond the captured boundary remain for ordinary acquisition, not the checkpoint.");
+    }
+
+    // J11 last clause: an intentional stop must not leave the source permanently unavailable; the next start
+    // actually acquires again.
+    private static async Task StopThenStartAcquiresAgainAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "stop-start", "A");
+        await scenario.Source.StartAsync(default);
+        await scenario.Source.StopAsync();
+        Check.Require(scenario.Source.Available, "An intentional cancellation leaves acquisition available.");
+        File.WriteAllText(Path.Combine(scenario.Root, "later.txt"), "later");
+        var position = await scenario.Source.CatchUpAsync(default);
+        Check.Require(position is not null && position.NextUsn > scenario.Start.NextUsn,
+            "A stopped source acquires again on the next run instead of exiting silently.");
+    }
+
+    // J10 cancellation half: a cancellation before publication preserves the old position.
+    private static async Task CancellationBeforePublicationKeepsThePositionAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "cancel", "A");
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        try
+        {
+            await scenario.Source.CatchUpAsync(cancelled.Token);
+            throw new InvalidOperationException("A cancelled acquisition cannot publish a page.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) == scenario.Start,
+            "Cancellation before publication changes nothing.");
+    }
+
+    // J13/rev2 line 49: an acquisition-closed snapshot and an open empty snapshot both return null and never
+    // spin into a retry loop.
+    private static async Task ClosedAndEmptyMembershipDoNotSpinAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "closed-empty", "A");
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        scenario.Host.Close();
+        Check.Require(await scenario.Source.CatchUpAsync(default) is null &&
+            scenario.Store.ReadJournal(scenario.VolumeKey) == journal,
+            "Closed membership returns null and publishes nothing.");
+        scenario.Host.Install([]);
+        Check.Require(await scenario.Source.CatchUpAsync(default) is null &&
+            scenario.Store.ReadJournal(scenario.VolumeKey) == journal,
+            "An open empty membership returns null instead of polling or claiming coverage.");
+    }
+
+    // F083 acceptance 7/J3: unrelated progress is still valid progress with a nonnull watermark, including zero.
+    private static async Task IrrelevantProgressStillCommitsAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "irrelevant", "A");
+        var outside = Directory.CreateTempSubdirectory("SyncSharkJournalOutside-");
+        try
+        {
+            for (var index = 0; index < 3; index++)
+                File.WriteAllText(Path.Combine(outside.FullName, "outside-" + index + ".txt"), "outside");
+            var position = await scenario.Source.CatchUpAsync(default);
+            Check.Require(position is not null && position.NextUsn > scenario.Start.NextUsn,
+                "Irrelevant progress commits a valid nonnull watermark without inventing work.");
+            Check.Require(scenario.Host.RefreshCalls == 0 && FirstNotice(scenario, "A") is null,
+                "Unrelated volume traffic produces no notice and no refresh.");
+        }
+        finally
+        {
+            outside.Delete(recursive: true);
+        }
+    }
+
+    // The host's work notification: a page with notices wakes its owning pair (a repeated wake is harmless to the
+    // host), while unrelated volume progress wakes nobody, so a change/CLOSE reaches the opportunity without polling.
+    private static async Task OwnWorkNotifiesOnlyItsPairAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "wake", "A");
+        var woken = new List<string>();
+        scenario.Source.WorkCommitted = woken.Add;
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        Check.Require(await scenario.Source.CatchUpAsync(default) is not null,
+            "The page carrying the pair's work is acknowledged.");
+        Check.Require(woken.Count > 0 && woken.All(id => id == "A"),
+            "A committed page wakes only the pair that owns its work.");
+        woken.Clear();
+        var outside = Directory.CreateTempSubdirectory("SyncSharkJournalOutside-");
+        try
+        {
+            File.WriteAllText(Path.Combine(outside.FullName, "outside.txt"), "outside");
+            Check.Require(await scenario.Source.CatchUpAsync(default) is not null,
+                "Unrelated volume progress is still acknowledged.");
+        }
+        finally
+        {
+            outside.Delete(recursive: true);
+        }
+        Check.Require(woken.Count == 0, "Unrelated volume progress wakes no pair.");
+    }
+
+    // #90b: the engine's own download is not dirty once its records are acquired, because the boundary forced on the
+    // held stage handle covers every one of them. A second writer in its own process cannot write the stage while it
+    // is written or between staging and publication, and its write after publication is dirty.
+    private static async Task OwnDownloadEchoAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "own-download", "A");
+        var (writer, _) = LocalWriterChecks.Create(scenario.Root);
+        var bytes = "own download"u8.ToArray();
+        var source = LocalWriterChecks.Source("own.bin", bytes);
+        await using var input = new WriterDuringCopy(scenario.Root, bytes);
+        // A failed check still releases the held stage, so the group cleanup reports that failure, not a locked file.
+        await using var staged = (LocalStaged)await writer.StageAsync("own.bin", input, source, default);
+        Check.Require(LocalWriterChecks.StageIsAsync(staged), "90b: close-record publication uses an overlapped stage handle");
+        Check.Require(input.Appended == false, "90b: no other process writes the stage while it is written");
+        Check.Require(!AppendsInOtherProcess(staged.StagePath),
+            "90b: no other process writes the stage between staging and publication");
+        var result = await writer.PublishAsync(staged, null, null, default);
+        await staged.DisposeAsync();
+        Check.Require(NtfsUsnJournal.TryReadCheckpoint(scenario.Root, out var checkpoint) &&
+            result.LocalPublished is { } boundary && boundary.JournalId == checkpoint!.JournalId,
+            "90b: a synchronous publication on NTFS returns its boundary in the current journal");
+        var final = result.Final!;
+        var saved = Massdex.SyncShark.Engine.Executor.SyncedEntries.From(final, source);
+        scenario.Store.Commit("A", StateChange.Empty with
+        {
+            Record = [saved], LocalPublished = (final.Id, result.LocalPublished!)
+        });
+        bool Dirty(string? recorded)
+        {
+            var generation = scenario.Store.ReadPairExecution("A")!.Value.Generation;
+            var epoch = scenario.Store.ReadSource("A", Side.Local)!.Value.Epoch;
+            return scenario.Store.ReadLocalDirty("A", generation, epoch, scenario.VolumeKey, final.Id,
+                saved.LocalKey, recorded).Dirty;
+        }
+        Check.Require(await scenario.Source.CatchUpForPairAsync("A", 0, default) is not null && Dirty(null) &&
+            !Dirty(saved.LocalKey),
+            "90b: the acquired download records are content writes, and the saved boundary explains all of them");
+        Check.Require(AppendsInOtherProcess(Path.Combine(scenario.Root, "own.bin")),
+            "the published file accepts another process's write");
+        Check.Require(await scenario.Source.CatchUpForPairAsync("A", 0, default) is not null && Dirty(saved.LocalKey),
+            "90b: another process's write after publication is dirty");
+    }
+
+    // The download content; its first read runs the second writer against the open stage, before any byte is written.
+    private sealed class WriterDuringCopy(string root, byte[] bytes) : MemoryStream(bytes)
+    {
+        public bool? Appended { get; private set; }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            Appended ??= AppendsInOtherProcess(Directory.GetFiles(root)
+                .Single(path => StageNames.IsStage(Path.GetFileName(path))));
+            return base.ReadAsync(buffer, ct);
+        }
+    }
+
+    // A second writer in its own process; true when its append reached the file.
+    // It shares everything, so only the held stage handle's own share mode can refuse it (cmd's append does not share
+    // delete, so the stage's DELETE access alone would refuse it whatever the stage's share mode).
+    private static bool AppendsInOtherProcess(string path)
+    {
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("powershell.exe",
+            "-NoProfile -NonInteractive -Command \"try { $f = [IO.File]::Open('" + path.Replace("'", "''") +
+            "', 'Open', 'Write', 'ReadWrite, Delete'); [void]$f.Seek(0, 'End'); $f.WriteByte(120); $f.Close(); exit 0 } " +
+            "catch { exit 1 }\"")
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
+        })!;
+        process.StandardOutput.ReadToEnd();
+        process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return process.ExitCode == 0;
+    }
+
+    // Compare's drive evidence: the member's current evidence is checked against the pair's saved evidence and
+    // raises one typed DriveChange notice, while matching evidence adds nothing.
+    private static async Task DriveEvidenceMismatchRaisesOneNoticeAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "drive", "A");
+        scenario.Host.Install(scenario.Snapshot().Select(member => member with
+        {
+            Pair = member.Pair with { Drive = new DriveEvidence(1, null, null) },
+            Drive = new DriveEvidence(2, null, null),
+        }).ToArray());
+        Check.Require(await scenario.Source.CatchUpForPairAsync("A", 0, default) is not null,
+            "The seeded base position is current after the evidence change.");
+        var raised = scenario.Store.Issues("A", [IssueKind.DriveChange]);
+        Check.Require(raised.Count == 1 && raised[0].Cause == TextKey.DriveChanged,
+            "A replaced drive raises exactly one typed DriveChange notice.");
+        scenario.Host.Install(scenario.Snapshot().Select(member => member with
+        {
+            Pair = member.Pair with { Drive = new DriveEvidence(2, null, null) },
+            Drive = new DriveEvidence(2, null, null),
+        }).ToArray());
+        Check.Require(await scenario.Source.CatchUpForPairAsync("A", 0, default) is not null,
+            "The seeded base position is current after the matching evidence.");
+        Check.Require(scenario.Store.Issues("A", [IssueKind.DriveChange]).Count == 1,
+            "Matching drive evidence adds no second notice.");
+    }
+
+    // J4: a HEALTHY other member's repair debt created by a root-rename record on the checkpoint's last page
+    // is adopted from the same authoritative read, so the checkpoint succeeds while the repair issuer owes
+    // nothing new. One publication proves the debt page was the terminal page.
+    private static async Task FrozenHealthyOtherDebtIsAdoptedAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "frozen-healthy", "A", "C");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var aRevision = Revision(scenario, "A");
+        var cRevision = Revision(scenario, "C");
+        var publications = new int[1];
+        scenario.StoreHook.After = method =>
+        {
+            if (method.Name == nameof(IStateStore.AcquireJournalPage)) Interlocked.Increment(ref publications[0]);
+        };
+        var file = Path.Combine(scenario.RootOf("C"), "one.txt");
+        File.WriteAllText(file, "one");
+        RenameRootAwayAndBack(scenario.RootOf("C"));
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is not null && scenario.Store.ReadJournal(scenario.VolumeKey) == position,
+            "A checkpoint acknowledges a page whose debt belongs to a healthy other member.");
+        Check.Require(publications[0] == 1,
+            "The other member's debt page is the checkpoint's last page, so no later page is published.");
+        Check.Require(Revision(scenario, "C") == cRevision + 1 &&
+            Obligation(scenario, "C") == SourceObligation.Bootstrap,
+            "The healthy other member's page-caused bootstrap responsibility stays durable.");
+        Check.Require(Revision(scenario, "A") == aRevision,
+            "The repair issuer gains no responsibility from the other member's debt.");
+        Check.Require(frozen.All(member => member.Revision == (member.Pair.PairId == "A" ? aRevision : cRevision)),
+            "The caller's captured list is never rewritten by the checkpoint.");
+        Check.Require(!scenario.Store.Issues("A", [IssueKind.Failure])
+                .Any(issue => issue.Cause == TextKey.RequiredRepairRetry),
+            "The other member's debt raises no failed-Repair notice for the issuer.");
+        Check.Require(scenario.Host.RefreshCalls == 1 && scenario.Host.RefreshReads == 1,
+            "The adopted fence comes from exactly one authoritative read of the single candidate member.");
+    }
+
+    // J5: the same healthy other-member debt on a MIDDLE checkpoint page. The remaining pages are read before the
+    // finite boundary, so the terminal acknowledgment must send the adopted r+1; exactly two publications prove
+    // the debt page was not the terminal page.
+    private static async Task FrozenMiddlePageOtherDebtIsAdoptedAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "frozen-middle", "A", "C");
+        RequireRetainedSpan(scenario);
+        // The native retained span keeps later pages uncommitted, so only the debt page and the terminal
+        // acknowledgment reach the store.
+        var aRevision = Revision(scenario, "A");
+        var cRevision = Revision(scenario, "C");
+        var publications = new int[1];
+        scenario.StoreHook.After = method =>
+        {
+            if (method.Name == nameof(IStateStore.AcquireJournalPage)) Interlocked.Increment(ref publications[0]);
+        };
+        var file = Path.Combine(scenario.RootOf("C"), "one.txt");
+        File.WriteAllText(file, "one");
+        RenameRootAwayAndBack(scenario.RootOf("C"));
+        WriteBurst(Path.Combine(scenario.Root, "outside"), "middle");
+        await scenario.Source.CheckpointForPairAsync("A", 0, default);
+        Check.Require(scenario.Source.Position is { } committed &&
+            scenario.Store.ReadJournal(scenario.VolumeKey) == committed,
+            "A checkpoint acknowledges a middle-page debt and a later page that reuses the adopted successor fence.");
+        Check.Require(publications[0] == 2,
+            "The debt page and the terminal page are both published, so the debt was not the last page.");
+        Check.Require(Revision(scenario, "C") == cRevision + 1 &&
+            Obligation(scenario, "C") == SourceObligation.Bootstrap,
+            "Each genuine page-caused successor responsibility is carried exactly once.");
+        Check.Require(Revision(scenario, "A") == aRevision,
+            "The repair issuer gains no responsibility from the other member's debt.");
+        Check.Require(!scenario.Store.Issues("A", [IssueKind.Failure])
+                .Any(issue => issue.Cause == TextKey.RequiredRepairRetry),
+            "The middle-page debt raises no failed-Repair notice for the issuer.");
+    }
+
+    // J1: two delayed irrelevant pages hold a member's record in the first page. When that member
+    // rejoins with unchanged generation/epoch/revision, the stale suffix is discarded and the ordinary path
+    // rereads both pages from P0, so the record is replayed and no old empty publication blesses the interval.
+    private static async Task DelayedSuffixIsReplayedAfterRejoinAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "delayed", "A", "B");
+        var (start, reopened, _) = await CancelDelayedSuffixAsync(scenario, haltAt: 5, withBurst: true);
+        var aRevision = Revision(scenario, "A");
+        var bRevision = Revision(scenario, "B");
+        scenario.Host.Install(reopened);
+        var position = await scenario.Source.CatchUpAsync(default);
+        Check.Require(position is not null && position.NextUsn > start.NextUsn &&
+            scenario.Store.ReadJournal(scenario.VolumeKey) == position,
+            "The ordinary path rereads both delayed pages from P0 under the rejoined membership.");
+        var notice = FirstNotice(scenario, "B");
+        Check.Require(notice is not null && notice.Notice.Path == "early.txt",
+            "The first page's not-yet-member record is replayed, never dropped by an old empty publication.");
+        Check.Require(Revision(scenario, "B") == bRevision && Obligation(scenario, "B") is null,
+            "The superseded pre-join suffix never became skipped coverage.");
+        Check.Require(Revision(scenario, "A") == aRevision, "The other member gains nothing from the replay.");
+    }
+
+    // J11 first clause: an ordinary suffix whose classification vector is obsolete when the checkpoint starts is
+    // discarded to the durable position before the frozen operation, which then catches up from P0 itself.
+    private static async Task ObsoleteSuffixAtCheckpointEntryIsDiscardedAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "obsolete-entry", "A", "B");
+        var (start, reopened, _) = await CancelDelayedSuffixAsync(scenario, haltAt: 5, withBurst: true);
+        var bRevision = Revision(scenario, "B");
+        scenario.Host.Install(reopened);
+        var position = await scenario.Source.CheckpointAfterRepairAsync(reopened, default);
+        Check.Require(position is not null && position.NextUsn > start.NextUsn &&
+            scenario.Store.ReadJournal(scenario.VolumeKey) == position,
+            "The checkpoint discards the obsolete suffix and catches up from the durable position.");
+        var notice = FirstNotice(scenario, "B");
+        Check.Require(notice is not null && notice.Notice.Path == "early.txt",
+            "The checkpoint reclassifies the discarded interval under its entry vector.");
+        Check.Require(Revision(scenario, "B") == bRevision,
+            "The obsolete suffix never became skipped coverage.");
+    }
+
+    // J11 second clause: a stop with a stale irrelevant suffix keeps the durable position and never publishes it.
+    private static async Task StaleStopKeepsTheDurablePositionAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "stale-stop", "A", "B");
+        var (start, reopened, publications) = await CancelDelayedSuffixAsync(scenario, haltAt: 2, withBurst: false);
+        var bRevision = Revision(scenario, "B");
+        scenario.Host.Install(reopened);
+        await scenario.Source.StopAsync();
+        Check.Require(scenario.Source.Position == start && scenario.Store.ReadJournal(scenario.VolumeKey) == start,
+            "A stale stop keeps the last durable position instead of blessing the obsolete suffix.");
+        Check.Require(publications[0] == 0, "The stale suffix is discarded, never published.");
+        Check.Require(Revision(scenario, "B") == bRevision,
+            "The discarded suffix's coverage is never published.");
+        Check.Require(FirstNotice(scenario, "B") is null, "The discarded suffix publishes no work.");
+    }
+
+    // J10/R-FREEZE batch6-3: a history reset preserves existing LocalSkippedCoverage for a member, which wins
+    // over the lost-interval request the fresh base makes for every enabled member.
+    private static async Task HistoryLossKeepsSkippedCoverageOverLostIntervalAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "history-gap", "A", "C");
+        var seeded = SourceRow(scenario, "C");
+        scenario.Store.AdvanceSource("C", Side.Local, 0, seeded.Epoch, seeded.Revision, seeded.Provenance,
+            seeded.Cursor, seeded.Epoch, seeded.Revision + 1, seeded.Provenance, seeded.Cursor,
+            SourceObligation.LocalSkippedCoverage);
+        scenario.Host.Install(scenario.Snapshot());
+        var cRevision = Revision(scenario, "C");
+        Check.Require(Obligation(scenario, "C") == SourceObligation.LocalSkippedCoverage,
+            "The source transition installs the member's skipped coverage.");
+        var current = scenario.Store.ReadJournal(scenario.VolumeKey)!;
+        var bogus = new JournalPosition(current.JournalId ^ 1UL, current.NextUsn);
+        Check.Require(scenario.Store.AcquireJournalPage(scenario.VolumeKey, current, bogus, Fences(scenario), [])
+            is not null, "The fixture rewrites the journal identity to force a reset.");
+        var source = new JournalSource(scenario.VolumeKey, scenario.Root, scenario.Store, bogus,
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
+        var position = await source.CatchUpAsync(default);
+        Check.Require(position is not null && position.JournalId != bogus.JournalId,
+            "History loss installs one fresh base at the journal's current identity.");
+        Check.Require(Obligation(scenario, "C") == SourceObligation.LocalSkippedCoverage &&
+            Revision(scenario, "C") == cRevision + 1,
+            "The reset's lost-interval request never downgrades the member's skipped coverage.");
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap,
+            "A healthy member gains the bootstrap obligation from a never-repaired pair's fresh base.");
+    }
+
+    // F083 acceptance 4 (remove): a member removed inside the protected commit/refresh span refuses the frozen
+    // checkpoint even though every surviving fence is unchanged; the acknowledged page stays committed.
+    private static async Task FrozenRemovedMembershipAtRefreshRefusesAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "frozen-remove", "A", "B", "C");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        var bRevision = Revision(scenario, "B");
+        var cRevision = Revision(scenario, "C");
+        scenario.Host.BeforeRefresh = _ =>
+        {
+            scenario.Host.Install(frozen.Where(member => member.Pair.PairId != "B").ToArray());
+            return true;
+        };
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var debtFile = Path.Combine(scenario.RootOf("C"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("C"));
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is null,
+            "Removing a member inside the protected span refuses the checkpoint.");
+        Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) != journal,
+            "The already-acknowledged page stays committed; the refusal does not pretend it rolled back.");
+        Check.Require(Revision(scenario, "C") == cRevision + 1 &&
+            Obligation(scenario, "C") == SourceObligation.Bootstrap,
+            "The page's own debt for the surviving member stays durable.");
+        Check.Require(Revision(scenario, "B") == bRevision,
+            "The removed member gains nothing from the refused checkpoint.");
+    }
+
+    // F083 acceptance 4 (remove): a member removed after the page was classified refuses before the page is
+    // committed; every surviving fence is unchanged, so only the complete-vector comparison can refuse.
+    private static async Task RemovedMemberBeforePublicationRefusesAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "removed", "A", "B");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        var publications = new int[1];
+        scenario.StoreHook.After = method =>
+        {
+            if (method.Name == nameof(IStateStore.AcquireJournalPage)) Interlocked.Increment(ref publications[0]);
+        };
+        var halt = new ReadHalt();
+        scenario.Host.Reading = halt.Observe;
+        // The entry check, the page start and then the classified page's vector comparison are the first three
+        // accessor calls; the removal lands at that comparison.
+        halt.Arm(3, () => scenario.Host.Install(frozen.Where(member => member.Pair.PairId != "B").ToArray()));
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        var position = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(position is null && scenario.Store.ReadJournal(scenario.VolumeKey) == journal,
+            "A removed member refuses the frozen checkpoint before any page is committed.");
+        Check.Require(publications[0] == 0, "The refused page makes no store publication.");
+        Check.Require(frozen.Any(member => member.Pair.PairId == "B"),
+            "The caller's captured list still names the removed member.");
+    }
+
+    // J10 cancellation half: a cancellation after the page's durable commit preserves the new position and
+    // cannot undo it; no replay or rollback is claimed.
+    private static async Task CancellationAfterCommitKeepsTheNewPositionAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "cancel-after", "A");
+        using var cancelled = new CancellationTokenSource();
+        scenario.StoreHook.After = method =>
+        {
+            if (method.Name == nameof(IStateStore.AcquireJournalPage)) cancelled.Cancel();
+        };
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        try
+        {
+            await scenario.Source.CatchUpAsync(cancelled.Token);
+            throw new InvalidOperationException("A post-commit cancellation must still stop acquisition.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        var position = scenario.Source.Position;
+        Check.Require(position is not null && position.NextUsn > scenario.Start.NextUsn &&
+            scenario.Store.ReadJournal(scenario.VolumeKey) == position,
+            "A cancellation after commit keeps the new durable position.");
+        Check.Require(scenario.Source.Available,
+            "An intentional cancellation does not make acquisition permanently unavailable.");
+    }
+
+    // JF3: a frozen publication commits but its reply is lost. The source proves the commit from the
+    // authoritative readback, refuses further acquisition and never replays or guesses attribution.
+    private static async Task LostAcknowledgmentRefusesWithoutReplayAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "lost-ack", "A", "C");
+        var frozen = scenario.Host.Snapshot().ToList();
+        var entry = scenario.Store.ReadJournal(scenario.VolumeKey);
+        var cRevision = Revision(scenario, "C");
+        var publications = new int[1];
+        var faultedAt = new int[1];
+        scenario.StoreHook.After = method =>
+        {
+            if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+            var count = Interlocked.Increment(ref publications[0]);
+            if (!scenario.StoreHook.LastPageHasDebt) return;
+            faultedAt[0] = count;
+            throw new IOException("lost-acknowledgment-fixture");
+        };
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var debtFile = Path.Combine(scenario.RootOf("C"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("C"));
+        try
+        {
+            await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+            throw new InvalidOperationException("A lost acknowledgment must not return a successful checkpoint.");
+        }
+        catch (IOException)
+        {
+        }
+        var position = scenario.Source.Position;
+        Check.Require(faultedAt[0] > 0 && publications[0] == faultedAt[0] && position is not null && position != entry &&
+            scenario.Store.ReadJournal(scenario.VolumeKey) == position,
+            "The committed page is proved from the authoritative readback and never replayed.");
+        Check.Require(!scenario.Source.Available,
+            "An unknown acknowledgment stops acquisition instead of guessing page attribution.");
+        Check.Require(Revision(scenario, "C") == cRevision + 1 &&
+            Obligation(scenario, "C") == SourceObligation.Bootstrap,
+            "The committed page's other-member debt remains durable.");
+        Check.Require(frozen.All(member => member.Pair.PairId != "C" || member.Revision == cRevision),
+            "The caller's captured list is never rewritten by the lost acknowledgment.");
+        var refused = await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+        Check.Require(refused is null && publications[0] == faultedAt[0],
+            "A further frozen checkpoint refuses without replaying the acknowledged page.");
+    }
+
+    private static async Task LiveEmptyCoverageRepublishesOnceAsync(string baseRoot, bool staleAgain)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "live-empty-stale-" + staleAgain,
+            "A", "B");
+        var attempts = 0;
+        scenario.StoreHook.Before = method =>
+        {
+            if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+            attempts++;
+            if (attempts > 1 && !staleAgain) return;
+            var source = scenario.Store.ReadSource("B", Side.Local)!.Value;
+            scenario.Store.AdvanceSource("B", Side.Local, 0, source.Epoch, source.Revision,
+                source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
+                source.Provenance, source.Cursor, source.Obligation);
+        };
+        try
+        {
+            var captured = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+            Check.Require(!staleAgain && captured.PairId == "A",
+                "A terminal stale publication refreshes and republishes an empty live capture.");
+        }
+        catch (LiveAdmissionStaleException)
+        {
+            Check.Require(staleAgain, "Only the second stale publication may refuse this capture.");
+        }
+        Check.Require(attempts == 2 && scenario.Host.RefreshCalls == 1,
+            "Empty live coverage attempts one refresh and one republish, never a stale retry loop.");
+        Check.Require(FirstNotice(scenario, "A") is null,
+            "Empty capture recovery invents no change records.");
+    }
+
+    private static async Task LiveCoverageRefreshesForeignStaleFenceAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "live-stale-member", "A", "B");
+        var source = scenario.Store.ReadSource("B", Side.Local)!.Value;
+        scenario.Store.AdvanceSource("B", Side.Local, 0, source.Epoch, source.Revision,
+            source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
+            source.Provenance, source.Cursor, source.Obligation);
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var captured = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(captured.PairId == "A" && scenario.Host.RefreshCalls == 1 &&
+            scenario.Host.RefreshReads == 2,
+            "Live coverage refreshes another member's stale storage fence once, without stranding its own selection.");
+        Check.Require(FirstNotice(scenario, "A")?.Notice.Path == "one.txt",
+            "The live stale-fence refresh retains the captured pair's notice.");
+    }
+
+    private static async Task BusyVolumeCoverageIsFiniteAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "busy-finite", "A");
+        using var stop = new CancellationTokenSource();
+        var publications = 0;
+        File.WriteAllText(Path.Combine(scenario.Root, "before.txt"), "before");
+        scenario.StoreHook.After = method =>
+        {
+            if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+            publications++;
+            File.WriteAllText(Path.Combine(scenario.Root, "after.txt"), publications.ToString());
+            // A diagnostic tripwire: the old head-chasing loop publishes a new page on every callback.
+            if (publications == 8) stop.Cancel();
+        };
+        var captured = await scenario.Source.CatchUpForPairAsync("A", 0, stop.Token);
+        Check.Require(publications == 1 && !stop.IsCancellationRequested,
+            "Coverage stops at its captured bound despite new records after every publication.");
+        scenario.StoreHook.After = null;
+        await scenario.Source.CatchUpAsync(default);
+        Check.Require(scenario.Store.ReadWorkWatermark() > captured.ThroughWorkId,
+            "Records beyond captured coverage are acquired afterwards, not dropped.");
+        var selected = false;
+        while (scenario.Store.SelectWork("A", 0, new PathScope(scenario.Store.Pair("A")!, scenario.Store.Pairs())) is { } selection)
+            selected |= scenario.Store.ReadWork(selection).Any(row => row.Notice.Path == "after.txt");
+        scenario.Store.EndWorkPass("A");
+        Check.Require(selected, "A change arriving after finite coverage reaches an ordinary selection.");
+    }
+
+    private static async Task UnavailablePageKeepsDiagnosticAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "unavailable-page", "A");
+        // A UNC path is rejected before native I/O, deterministically producing an unavailable page.
+        var source = new JournalSource(scenario.VolumeKey, @"\\fixture\share", scenario.Store, scenario.Start,
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
+        try
+        {
+            await source.RunAsync(default);
+            throw new InvalidOperationException("An unavailable journal page must not complete as healthy.");
+        }
+        catch (IOException error)
+        {
+            Check.Require(!source.Available && error.Message.Contains(nameof(NtfsUsnPageStatus.Unavailable),
+                StringComparison.Ordinal), "An unavailable page exposes its classified diagnostic and stopped state.");
+            Check.Require(error is JournalSourceException { Status: NtfsUsnPageStatus.Unavailable, NativeError: null },
+                "An unavailable page's failure carries its status and the page's native error.");
+        }
+        Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) == scenario.Start,
+            "An unavailable page never advances the last saved journal position.");
+        var revision = Revision(scenario, "A");
+        try
+        {
+            await source.CatchUpForPairAsync("A", 0, default);
+            throw new InvalidOperationException("An unreadable source must not confirm a resume.");
+        }
+        catch (IOException)
+        {
+            Check.Require(!source.Available && scenario.Store.ReadJournal(scenario.VolumeKey) == scenario.Start &&
+                Revision(scenario, "A") == revision,
+                "persistent source unavailability publishes nothing and adds no revision");
+        }
+        // A page read that fails at the volume handle carries the native error it was classified from.
+        var driveRoot = FreeDriveRoot()
+            ?? throw new InvalidOperationException(
+                "The native-error regression requires an unmounted drive letter.");
+        var unreadable = new JournalSource(scenario.VolumeKey, driveRoot, scenario.Store, scenario.Start,
+            scenario.Host.Gate, scenario.Host.Read, scenario.Host.Refresh, Settings.JournalPageBufferBytes);
+        try
+        {
+            await unreadable.RunAsync(default);
+            throw new InvalidOperationException("An unreadable volume must not complete as healthy.");
+        }
+        catch (IOException error)
+        {
+            Check.Require(!unreadable.Available &&
+                error is JournalSourceException { Status: NtfsUsnPageStatus.Unavailable } failed &&
+                failed.NativeError is > 0,
+                "A page read that fails at the volume handle carries its native error.");
+        }
+    }
+
+    // A drive letter that is not mounted, so opening its volume handle fails before any journal read.
+    private static string? FreeDriveRoot()
+    {
+        for (var letter = 'D'; letter <= 'Z'; letter++)
+            if (!DriveInfo.GetDrives().Any(drive => char.ToUpperInvariant(drive.Name[0]) == letter))
+                return letter + ":\\";
+        return null;
+    }
+
+    // J11 failure accounting: a background acquisition that faults after a durable commit escapes to the task's
+    // observer and leaves acquisition visibly unavailable.
+    private static async Task BackgroundFailureIsObservableAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "background-fault", "A", "C");
+        using var reached = new ManualResetEventSlim(false);
+        scenario.Host.BeforeRefresh = _ =>
+        {
+            reached.Set();
+            throw new IOException("background-fixture");
+        };
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "one.txt"), "one");
+        var debtFile = Path.Combine(scenario.RootOf("C"), "debt.txt");
+        File.WriteAllText(debtFile, "debt");
+        RenameRootAwayAndBack(scenario.RootOf("C"));
+        await scenario.Source.StartAsync(default);
+        Check.Require(reached.Wait(TimeSpan.FromSeconds(30)),
+            "Background acquisition reaches its durable page's candidate refresh.");
+        var completion = scenario.Source.Completion;
+        try
+        {
+            await completion;
+            throw new InvalidOperationException("An escaped background failure must fault the source lifetime task.");
+        }
+        catch (IOException)
+        {
+        }
+        Check.Require(completion.IsFaulted,
+            "The source lifetime task exposes the background fault to its observing host.");
+        try
+        {
+            await scenario.Source.StopAsync();
+            throw new InvalidOperationException("An escaped background failure must not be silently swallowed.");
+        }
+        catch (IOException)
+        {
+        }
+        Check.Require(!scenario.Source.Available,
+            "An escaped background durable failure leaves acquisition visibly unavailable.");
+        Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) == scenario.Source.Position,
+            "The committed page stays durable even though its refresh failed.");
+        scenario.Host.BeforeRefresh = null;
+        var failedPosition = scenario.Source.Position;
+        var failedRevision = Revision(scenario, "A");
+        try
+        {
+            await scenario.Source.CheckpointForPairAsync("A", 0, default);
+            throw new InvalidOperationException("A failed source must not replace a base after Repair has listed.");
+        }
+        catch (LiveAdmissionStaleException)
+        {
+            Check.Require(!scenario.Source.Available && scenario.Source.Position == failedPosition &&
+                Revision(scenario, "A") == failedRevision,
+                "A failed post-list checkpoint refuses without inventing a new base or completion revision.");
+        }
+        var recovered = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(scenario.Source.Available && recovered.Checkpoint.NextUsn >= (long)scenario.Start.NextUsn &&
+            Obligation(scenario, "A") is null && Revision(scenario, "A") == failedRevision,
+            "A failed source resumes from its committed position without adding Repair debt.");
+        File.WriteAllText(Path.Combine(scenario.RootOf("A"), "after-failure.txt"), "later");
+        await scenario.Source.CatchUpAsync(default);
+        Check.Require(scenario.Store.ReadWorkWatermark() > recovered.ThroughWorkId,
+            "A recovered journal publishes a later real change.");
+    }
+
+    // J9/F083 acceptance 3: a genuine store failure is not a stale null. The fault is surfaced and the durable
+    // position is unchanged; a stale fence would instead return null with no publication.
+    private static async Task GenuineStoreFailureIsNotStaleNullAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "store-fault", "A");
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        scenario.StoreHook.Before = method =>
+        {
+            if (method.Name == nameof(IStateStore.AcquireJournalPage)) throw new IOException("store-fixture");
+        };
+        try
+        {
+            await scenario.Source.CatchUpAsync(default);
+            throw new InvalidOperationException("A genuine store failure must not return a clean acquisition.");
+        }
+        catch (IOException)
+        {
+        }
+        Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) == journal,
+            "A genuine store failure changes no durable position.");
+        Check.Require(!scenario.Source.Available,
+            "A genuine store failure is surfaced, never returned as a stale null.");
+    }
+
+    // J9: a genuine source-fence read failure is not a stale null either; it propagates from the frozen
+    // checkpoint and publishes nothing.
+    private static async Task GenuineFenceReadFailureIsNotStaleNullAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "fence-fault", "A");
+        var frozen = scenario.Host.Snapshot().ToList();
+        File.WriteAllText(Path.Combine(scenario.Root, "one.txt"), "one");
+        var journal = scenario.Store.ReadJournal(scenario.VolumeKey);
+        scenario.StoreHook.Before = method =>
+        {
+            if (method.Name == nameof(IStateStore.ReadSource)) throw new IOException("read-fixture");
+        };
+        try
+        {
+            await scenario.Source.CheckpointAfterRepairAsync(frozen, default);
+            throw new InvalidOperationException("A genuine fence read failure must not return a null checkpoint.");
+        }
+        catch (IOException)
+        {
+        }
+        Check.Require(scenario.Store.ReadJournal(scenario.VolumeKey) == journal,
+            "A genuine fence read failure publishes no page.");
+    }
+
+    // J12/F098.fix2: one mapped unreadable record must not drop the page's other notices, and a NeedsRepair
+    // raised later in the same page still installs the Repair obligation while the typed item failure is
+    // reported. The member's listing is bound to a separate root where "sub" is a plain file, so only the
+    // sub/ record cannot be re-observed; every other record reads normally.
+    private static async Task MappedUnreadableRecordDeliversRemainingNoticesAsync(string baseRoot)
+    {
+        // (A) With no NeedsRepair the page stays selectable, so both neighbours of the failing record are durable.
+        using (var scenario = new Scenario(baseRoot, "failed-delivery", "A"))
+        {
+            var listingRoot = InstallUnreadableListing(scenario);
+            try
+            {
+                WriteUnreadablePage(scenario.Members[0].LocalRoot);
+                using var blocked = BlockSubListing(listingRoot);
+                Check.Require(await scenario.Source.CatchUpAsync(default) is not null,
+                    "A page with a failed item still acknowledges its other work.");
+                var published = DeliveredPaths(scenario);
+                Check.Require(published.Contains("before.txt") && published.Contains("after.txt"),
+                    "The unreadable record does not drop the notices that precede or follow it in the page.");
+                Check.Require(!published.Contains("sub/fail.txt"),
+                    "The unreadable record itself publishes no notice.");
+                Check.Require(ReportedFailure(scenario),
+                    "The mapped unreadable record still reports its typed item failure.");
+            }
+            finally { listingRoot.Delete(recursive: true); }
+        }
+
+        // (B) A root rename asks for Repair after the failing record in the same page; the obligation still lands.
+        using (var scenario = new Scenario(baseRoot, "failed-repair", "A"))
+        {
+            var listingRoot = InstallUnreadableListing(scenario);
+            try
+            {
+                var root = scenario.Members[0].LocalRoot;
+                WriteUnreadablePage(root);
+                using var blocked = BlockSubListing(listingRoot);
+                RenameRootAwayAndBack(root);
+                Check.Require(await scenario.Source.CatchUpAsync(default) is not null,
+                    "A page with a failed item still acknowledges its work.");
+                Check.Require(ReportedFailure(scenario),
+                    "The mapped unreadable record still reports its typed item failure.");
+                Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap,
+                    "A NeedsRepair raised later in the page still installs the repair obligation.");
+            }
+            finally { listingRoot.Delete(recursive: true); }
+        }
+    }
+
+    // Binds the member's listing to a separate root where "sub" is a plain file, so only the sub/ record of the
+    // page cannot be re-observed; the pair root itself keeps the real sub/ directory and its file.
+    private static DirectoryInfo InstallUnreadableListing(Scenario scenario)
+    {
+        var pair = scenario.Members[0];
+        var listingRoot = Directory.CreateTempSubdirectory("SyncSharkUsnListing-");
+        Directory.CreateDirectory(Path.Combine(pair.LocalRoot, "sub"));
+        File.WriteAllText(Path.Combine(listingRoot.FullName, "before.txt"), "before");
+        File.WriteAllText(Path.Combine(listingRoot.FullName, "after.txt"), "after");
+        File.WriteAllText(Path.Combine(listingRoot.FullName, "sub"), "not a directory");
+        var listingPair = pair with { LocalRoot = listingRoot.FullName };
+        var listing = new LocalListing(listingPair, new PathScope(listingPair, [listingPair]), (_, _, _, _) => { });
+        var paths = new UsnPaths(pair, scenario.Store, listing, NtfsIdentityPaths.ReadRootIdentity(pair.LocalRoot));
+        var source = SourceRow(scenario, "A");
+        scenario.Host.Install(new[] { new JournalSource.Member(pair, 0, source.Epoch, source.Revision, paths) });
+        return listingRoot;
+    }
+
+    // Holds the listing root's "sub" file with no sharing, so opening it as the folder of a record fails with a
+    // sharing violation: that is the one record the member cannot re-observe.
+    private static FileStream BlockSubListing(DirectoryInfo listingRoot) =>
+        File.Open(Path.Combine(listingRoot.FullName, "sub"), FileMode.Open, FileAccess.Read, FileShare.None);
+
+    private static void WriteUnreadablePage(string root)
+    {
+        File.WriteAllText(Path.Combine(root, "before.txt"), "before");
+        File.WriteAllText(Path.Combine(root, "sub", "fail.txt"), "fail");
+        File.WriteAllText(Path.Combine(root, "after.txt"), "after");
+    }
+
+    // Every acquired notice the pair may select, enumerated through the same anchor pass the engine uses.
+    private static HashSet<string> DeliveredPaths(Scenario scenario)
+    {
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        while (scenario.Store.SelectWork("A", 0, new PathScope(scenario.Store.Pair("A")!, scenario.Store.Pairs())) is { } selection)
+            foreach (var item in scenario.Store.ReadWork(selection)) paths.Add(item.Notice.Path);
+        scenario.Store.EndWorkPass("A");
+        return paths;
+    }
+
+    // The failing record reaches the issue owner as a failure for its mapped path, whatever the OS error kind.
+    private static bool ReportedFailure(Scenario scenario) =>
+        scenario.Store.Issues("A", [IssueKind.Failure]).Any(issue => issue.Path == "sub/fail.txt");
+
+    // Writes the first-page record and an irrelevant batch, installs the native retained span, and cancels the
+    // catch-up at the given host-accessor call so the interval stays uncommitted under the vector without B.
+    // The count is this test double's own; if a page sequence changes, the cancel does not happen and the
+    // publication assertion fails loudly.
+    private static async Task<(JournalPosition Start, IReadOnlyList<JournalSource.Member> Reopened, int[] Publications)>
+        CancelDelayedSuffixAsync(Scenario scenario, int haltAt, bool withBurst)
+    {
+        RequireRetainedSpan(scenario);
+        // The not-yet-joined member's own record is the first of the batch, so it falls in the first native page.
+        File.WriteAllText(Path.Combine(scenario.RootOf("B"), "early.txt"), "early");
+        var outside = Path.Combine(scenario.Root, "outside");
+        if (withBurst) WriteBurst(outside, "page");
+        else
+        {
+            Directory.CreateDirectory(outside);
+            File.WriteAllText(Path.Combine(outside, "pending.txt"), "pending");
+        }
+        var start = scenario.Source.Position!;
+        var reopened = scenario.Host.Snapshot();
+        scenario.Host.Install(reopened.Where(member => member.Pair.PairId != "B").ToArray());
+        var publications = new int[1];
+        scenario.StoreHook.After = method =>
+        {
+            if (method.Name == nameof(IStateStore.AcquireJournalPage)) Interlocked.Increment(ref publications[0]);
+        };
+        using var cancelled = new CancellationTokenSource();
+        var halt = new ReadHalt();
+        scenario.Host.Reading = halt.Observe;
+        // Compare and finite-entry validation precede the page's membership reads.
+        halt.Arm(haltAt + 2, cancelled.Cancel);
+        try
+        {
+            await scenario.Source.CatchUpForPairAsync("A", 0, cancelled.Token);
+            throw new InvalidOperationException("The cancelled acquisition must not publish the delayed suffix.");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        Check.Require(publications[0] == 0, "The delayed suffix is never published under the vector without B.");
+        return (start, reopened, publications);
+    }
+
+    // The delayed-suffix cases need the native retained span (MaximumSize - AllocationDelta) that holds
+    // irrelevant progress; without it every page commits immediately and there is no suffix to discard.
+    private static void RequireRetainedSpan(Scenario scenario) =>
+        Check.Require(
+            NtfsUsnJournal.TryReadState(scenario.Root, out _, out _, out _, out _, out var maximumSize,
+                out var allocationDelta, out _) && maximumSize - allocationDelta > RetainedSpanFloor,
+            "The fixture volume exposes a native retained span wide enough for the delayed suffix.");
+
+    // One created file yields create, write and close records of about ninety bytes and one native page holds at
+    // most one mebibyte, so this batch spans more than one native page. The floor leaves headroom above it.
+    private const int PageBurstFiles = 8000;
+    private const ulong RetainedSpanFloor = 4UL * 1024 * 1024;
+
+    private static void WriteBurst(string directory, string prefix)
+    {
+        Directory.CreateDirectory(directory);
+        for (var index = 0; index < PageBurstFiles; index++)
+            File.WriteAllText(Path.Combine(directory, prefix + index + ".txt"), "burst");
+    }
+
+    private static JournalSource.Member Member(Scenario scenario, PairConfig pair)
+    {
+        var identity = NtfsIdentityPaths.ReadRootIdentity(pair.LocalRoot);
+        var listing = new LocalListing(pair, new PathScope(pair, [pair]), (_, _, _, _) => { });
+        var paths = new UsnPaths(pair, scenario.Store, listing, identity);
+        var source = SourceRow(scenario, pair.PairId);
+        return new JournalSource.Member(pair, 0, source.Epoch, source.Revision, paths);
+    }
+
+    private static (long Epoch, SourceProvenance? Provenance, string? Cursor, SourceObligation? Obligation, long Revision)
+        SourceRow(Scenario scenario, string pairId) =>
+        scenario.Store.ReadSource(pairId, Side.Local) ?? throw new InvalidOperationException(
+            "The pair's Local source row is missing.");
+
+    private static long Revision(Scenario scenario, string pairId) => SourceRow(scenario, pairId).Revision;
+
+    private static SourceObligation? Obligation(Scenario scenario, string pairId) =>
+        SourceRow(scenario, pairId).Obligation;
+
+    private static PendingChange? FirstNotice(Scenario scenario, string pairId)
+    {
+        var selection = scenario.Store.SelectWork(pairId, 0, new PathScope(scenario.Store.Pair(pairId)!, scenario.Store.Pairs()));
+        return selection is null ? null : scenario.Store.ReadWork(selection).FirstOrDefault();
+    }
+
+    private static IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision,
+        bool LostInterval)> Fences(Scenario scenario) =>
+        scenario.Members.Select(member =>
+        {
+            var source = SourceRow(scenario, member.PairId);
+            return (member.PairId, (long)0, source.Epoch, source.Revision, false);
+        }).ToArray();
+
+    private static async Task ShortResumeDoesNotConfirmAsync(string baseRoot, bool staleAgain)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "short-resume-" + staleAgain, "A", "B");
+        RequireRetainedSpan(scenario);
+        await FailRetainedPageAsync(scenario, "first.txt", finite: true, scenario.RootOf("A"));
+        var outside = Directory.CreateDirectory(Path.Combine(scenario.Root, "outside")).FullName;
+        File.Move(Path.Combine(scenario.RootOf("A"), "first.txt"), Path.Combine(outside, "pending.txt"));
+        var lower = NtfsUsnJournal.ReadCheckpoint(scenario.Root).NextUsn;
+        var attempts = 0;
+        var readbacks = 0;
+        var refreshes = scenario.Host.RefreshCalls;
+        var reads = scenario.Host.RefreshReads;
+        scenario.StoreHook.Before = method =>
+        {
+            if (method.Name == nameof(IStateStore.ReadJournal)) readbacks++;
+            if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+            attempts++;
+            if (attempts > 1 && !staleAgain) return;
+            var source = scenario.StoreHook.Inner.ReadSource("B", Side.Local)!.Value;
+            scenario.StoreHook.Inner.AdvanceSource("B", Side.Local, 0, source.Epoch, source.Revision,
+                source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
+                source.Provenance, source.Cursor, source.Obligation);
+        };
+        LocalCatchUp? returned = null;
+        Exception? caught = null;
+        try { returned = await scenario.Source.CatchUpForPairAsync("A", 0, default); }
+        catch (Exception error) { caught = error; }
+        scenario.StoreHook.Before = null;
+        Check.Require(staleAgain ? caught is LiveAdmissionStaleException : caught is null &&
+            returned is not null && returned.Checkpoint.NextUsn < lower,
+            "a stale terminal publication either returns short or refuses, never confirms the captured end");
+        Check.Require(attempts == 2 && readbacks == 1 && scenario.Host.RefreshCalls - refreshes == 1 &&
+            scenario.Host.RefreshReads - reads == 2,
+            "short capture makes two publications, one readback and one two-member refresh");
+        // Bring the fixture's member fence current after the deliberately refused second publication.
+        if (staleAgain) scenario.Host.Refresh(scenario.Host.Snapshot(), null);
+        var revision = Revision(scenario, "A");
+        await FailRetainedPageAsync(scenario, "fresh.txt", finite: false, scenario.RootOf("A"));
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap && Revision(scenario, "A") == revision + 1,
+            "a failure after a short or refused resume still forces a replacement base");
+    }
+
+    private static async Task CancelledResumeDoesNotConfirmAsync(string baseRoot)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "cancelled-resume", "A", "B");
+        await FailRetainedPageAsync(scenario, "first.txt", finite: true, scenario.RootOf("A"));
+        var revision = Revision(scenario, "A");
+        var refreshes = scenario.Host.RefreshCalls;
+        var reads = scenario.Host.RefreshReads;
+        var (_, reopened, publications) = await CancelDelayedSuffixAsync(scenario, haltAt: 2, withBurst: false);
+        scenario.Host.Reading = null;
+        scenario.StoreHook.After = null;
+        scenario.Host.Install(reopened);
+        Check.Require(publications[0] == 0 && scenario.Host.RefreshCalls == refreshes &&
+            scenario.Host.RefreshReads == reads, "cancellation before publication performs no debt refresh reads");
+        await FailRetainedPageAsync(scenario, "fresh.txt", finite: false, scenario.RootOf("A"));
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap && Revision(scenario, "A") == revision + 1,
+            "a cancelled resume remains unconfirmed when its next source attempt fails");
+    }
+
+    private static async Task RemovedMemberResumeAsync(string baseRoot, bool frozen, bool refuseFrozen)
+    {
+        using var scenario = Scenario.WithSeparateRoots(baseRoot, "removed-resume-" + frozen + refuseFrozen, "A", "B");
+        RequireRetainedSpan(scenario);
+        await FailRetainedPageAsync(scenario, "first.txt", finite: true, scenario.RootOf("A"));
+        var outside = Directory.CreateDirectory(Path.Combine(scenario.Root, "outside")).FullName;
+        File.Move(Path.Combine(scenario.RootOf("A"), "first.txt"), Path.Combine(outside, "pending.txt"));
+        var captured = scenario.Host.Snapshot();
+        var halt = new ReadHalt();
+        scenario.Host.Reading = halt.Observe;
+        // Compare, capture entry, page entry, classification and retention precede the final publication check.
+        halt.Arm(6, () => scenario.Host.Install(captured.Where(member => member.Pair.PairId != "B").ToArray()));
+        Exception? refused = null;
+        try { await scenario.Source.CatchUpForPairAsync("A", 0, default); }
+        catch (Exception error) { refused = error; }
+        scenario.Host.Reading = null;
+        Check.Require(refused is LiveAdmissionStaleException && scenario.Source.Available &&
+            scenario.Host.Snapshot().All(member => member.Pair.PairId != "B"),
+            "membership removal before the final publication refuses the unconfirmed resume");
+        if (frozen)
+        {
+            if (refuseFrozen)
+            {
+                scenario.StoreHook.Before = method =>
+                {
+                    if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+                    scenario.StoreHook.Before = null;
+                    var source = scenario.StoreHook.Inner.ReadSource("A", Side.Local)!.Value;
+                    scenario.StoreHook.Inner.AdvanceSource("A", Side.Local, 0, source.Epoch, source.Revision,
+                        source.Provenance, source.Cursor, source.Epoch, source.Revision + 1,
+                        source.Provenance, source.Cursor, source.Obligation);
+                };
+            }
+            Exception? frozenFailure = null;
+            LocalCatchUp? checkpoint = null;
+            try { checkpoint = await scenario.Source.CheckpointForPairAsync("A", 0, default); }
+            catch (Exception error) { frozenFailure = error; }
+            Check.Require(refuseFrozen ? frozenFailure is LiveAdmissionStaleException : frozenFailure is null &&
+                checkpoint is not null && checkpoint.Checkpoint.NextUsn ==
+                    (long)scenario.Store.ReadJournal(scenario.VolumeKey)!.NextUsn,
+                "only a durably completed frozen capture confirms the pending resume");
+            scenario.StoreHook.Before = null;
+            if (refuseFrozen) scenario.Host.Refresh(scenario.Host.Snapshot(), null);
+        }
+        var revision = Revision(scenario, "A");
+        await FailRetainedPageAsync(scenario, "fresh.txt", finite: false, scenario.RootOf("A"));
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Revision(scenario, "A") == revision + (frozen && !refuseFrozen ? 0 : 1),
+            "a later failure distinguishes confirmed frozen coverage from either refusal");
+    }
+
+    private sealed class JournalProgress : IProgress<RunEvent>
+    {
+        internal long Records;
+        internal int Reports;
+        public void Report(RunEvent value)
+        {
+            if (value.StageKey != TextKey.StageJournal) return;
+            Records = value.Count ?? 0;
+            if (value.InProgress) Reports++;
+        }
+    }
+
+    private static void SeedUnrelatedSaved(Scenario scenario, int count)
+    {
+        using var probe = new CostProbe(scenario.Database);
+        probe.Execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<$count) " +
+            "INSERT INTO synced_entry(pair_id,local_path,is_folder,local_id,local_size,local_mtime,dropbox_id,dropbox_hash) " +
+            "SELECT (SELECT id FROM pair WHERE pair_id=$p),'background/'||i,0,'l'||i,1,0,'d'||i,'hash' FROM n;",
+            ("$count", count), ("$p", "A"));
+    }
+
+    private static async Task ResumeStoreWorkFollowsTheIntervalAsync(string baseRoot)
+    {
+        Dictionary<string, int>? previous = null;
+        foreach (var saved in new[] { 5_110, 20_440 })
+        {
+            using var scenario = new Scenario(baseRoot, "resume-cost-" + saved, "A");
+            SeedUnrelatedSaved(scenario, saved);
+            File.WriteAllText(Path.Combine(scenario.Root, "first.txt"), "first");
+            await FailRetainedPageAsync(scenario, "second.txt", finite: true);
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            scenario.StoreHook.Before = method => counts[method.Name] = counts.GetValueOrDefault(method.Name) + 1;
+            var progress = new JournalProgress();
+            await scenario.Source.CatchUpForPairAsync("A", 0, default, progress);
+            scenario.StoreHook.Before = null;
+            var lookups = counts.GetValueOrDefault(nameof(IStateStore.SyncedById)) +
+                counts.GetValueOrDefault(nameof(IStateStore.SyncedBindingsById));
+            var publications = counts.GetValueOrDefault(nameof(IStateStore.AcquireJournalPage));
+            Check.Require(progress.Records + 1 < 5_110,
+                "resume-cost setup needs fewer delivered records than the smallest saved history; R=" + progress.Records);
+            Check.Require(lookups <= progress.Records && publications <= progress.Records + 1,
+                "resume lookups and publications follow delivered interval records, not saved history");
+            // The confirmed finite capture ends with a Progress page, so every page invocation reports progress.
+            Check.Require(progress.Reports > 0 && progress.Reports <= progress.Records,
+                "the finite resume reports each nonempty delivered page");
+            foreach (var method in new[] { nameof(IStateStore.SyncedById), nameof(IStateStore.SyncedBindingsById),
+                nameof(IStateStore.AcquireJournalPage) }) counts.Remove(method);
+            Check.Require(previous is null || counts.Count == previous.Count &&
+                counts.All(item => previous.GetValueOrDefault(item.Key) == item.Value),
+                "all other source store calls are independent of unrelated saved history");
+            previous = counts;
+            Console.WriteLine($"B229 C1a saved={saved}; R={progress.Records}; reports={progress.Reports}; lookups={lookups}; publications={publications}");
+        }
+    }
+
+    private static void SavedLookupShapesIgnoreSavedSize(string baseRoot)
+    {
+        var previous = new Dictionary<string, StatementCost>();
+        foreach (var saved in new[] { 5_110, 20_440, 1_000_000 })
+        {
+            using var scenario = new Scenario(baseRoot, "lookup-cost-" + saved, "A");
+            SyncedEntry Binding(string path, string id) => new(PathNames.Key(path), path,
+                PathNames.DropboxKey(path), path, false, id, 1, 0, "remote-" + path, "hash");
+            scenario.Store.Commit("A", StateChange.Empty with
+            {
+                Record = [Binding("one.txt", "one"), Binding("many-one.txt", "many"),
+                    Binding("many-two.txt", "many"), Binding("many-three.txt", "many")]
+            });
+            SeedUnrelatedSaved(scenario, saved);
+            using var probe = new CostProbe(scenario.Database);
+            var one = default(StatementCost);
+            foreach (var id in new[] { "absent", "one", "many" })
+            {
+                var cost = id == "many"
+                    ? probe.Execute(StateSchema.SelectSyncedByLocalId, ("$p", "A"), ("$id", id))
+                    : probe.ExecuteFirst(StateSchema.SelectSyncedByLocalId, ("$p", "A"), ("$id", id));
+                Check.Require(cost.ProbePrepares == 1 && (!previous.TryGetValue(id, out var before) ||
+                    cost.VmSteps == before.VmSteps && cost.PathKeyCalls == before.PathKeyCalls),
+                    "saved lookup statement work stays fixed for each shape across all saved sizes: " + id);
+                if (id == "one") one = cost;
+                if (id == "many") Check.Require(cost.VmSteps > one.VmSteps, "the alias probe consumes all three bindings");
+                previous[id] = cost;
+                Console.WriteLine($"B229 C1b saved={saved}; shape={id}; {cost}");
+            }
+            Check.Require(scenario.Store.SyncedBindingsById("A", Side.Local, "many").Count() == 3 &&
+                scenario.Store.SyncedById("A", Side.Local, "absent") is null,
+                "production consumers observe the same three-binding and absent shapes after bulk seeding");
+        }
+    }
+
+    private static void PagePublicationStatements(string baseRoot)
+    {
+        var previous = new Dictionary<(int Shape, int Ordinal), StatementCost>();
+        foreach (var savedCount in new[] { 5_110, 20_440 })
+        {
+            using var scenario = Scenario.WithSeparateRoots(baseRoot, "publication-cost-" + savedCount, "A", "B");
+            SeedUnrelatedSaved(scenario, savedCount);
+            using var probe = new CostProbe(scenario.Database);
+            var shapes = new[] { (Members: 1, Notices: 1, Debt: 0), (Members: 1, Notices: 4, Debt: 0),
+                (Members: 2, Notices: 4, Debt: 1) };
+            for (var shape = 0; shape < shapes.Length; shape++)
+            {
+                var (members, notices, debt) = shapes[shape];
+                var position = scenario.Store.ReadJournal(scenario.VolumeKey)!;
+                var watermark = scenario.Store.ReadWorkWatermark();
+                var sources = scenario.Members.Take(members).Select(pair => SourceRow(scenario, pair.PairId)).ToArray();
+                var costs = new List<StatementCost>();
+                probe.Begin();
+                costs.Add(probe.ExecuteFirst(StateSchema.JournalRead, (StateSchema.ParamVolume, scenario.VolumeKey)));
+                for (var member = 0; member < members; member++)
+                {
+                    costs.Add(probe.ExecuteFirst(StateSchema.PairFence, (StateSchema.ParamPair, scenario.Members[member].PairId)));
+                    costs.Add(probe.ExecuteFirst(StateSchema.SourceFence, (StateSchema.ParamPairRow, (long)member + 1),
+                        (StateSchema.ParamSide, (int)Side.Local)));
+                }
+                costs.Add(probe.ExecuteFirst(StateSchema.WorkWatermark));
+                for (var index = 0; index < notices; index++)
+                {
+                    var member = index % members;
+                    var workId = watermark + index + 1;
+                    var notice = new ChangeNotice(Side.Local, ChangeKind.Changed, $"page-{shape}-{index}.txt",
+                        null, null, null, true, false);
+                    costs.Add(probe.Execute(StateSchema.InsertWork,
+                        (StateSchema.ParamId, workId), (StateSchema.ParamPairRow, (long)member + 1),
+                        (StateSchema.ParamGeneration, 0L), (StateSchema.ParamEpoch, sources[member].Epoch),
+                        (StateSchema.ParamSide, (int)notice.Side), (StateSchema.ParamDomain, scenario.VolumeKey),
+                        (StateSchema.ParamPath, PathNames.KeyFor(notice.Side, notice.Path)), (StateSchema.ParamOldPath, null),
+                        (StateSchema.ParamIdentity, null), (StateSchema.ParamNotice, StateEncoding.Envelope(notice)),
+                        (StateSchema.ParamBefore, StateEncoding.OptionalEnvelope<SyncedEntry>(null)),
+                        (StateSchema.ParamAcquisition, workId), (StateSchema.ParamParent, null), (StateSchema.ParamObligation, null)));
+                }
+                for (var member = 0; member < debt; member++)
+                {
+                    var source = sources[member];
+                    costs.Add(probe.Execute(StateSchema.AdvanceSource,
+                        (StateSchema.ParamNextEpoch, source.Epoch), (StateSchema.ParamProvenance, null),
+                        (StateSchema.ParamCursor, source.Cursor), (StateSchema.ParamGapReason, nameof(SourceObligation.LocalSkippedCoverage)),
+                        (StateSchema.ParamReason, nameof(SourceObligation.Bootstrap)), (StateSchema.ParamNextRevision, source.Revision + 1),
+                        (StateSchema.ParamPairRow, (long)member + 1), (StateSchema.ParamSide, (int)Side.Local),
+                        (StateSchema.ParamEpoch, source.Epoch), (StateSchema.ParamExpectedProvenance, null),
+                        (StateSchema.ParamExpectedCursor, source.Cursor), (StateSchema.ParamRevision, source.Revision),
+                        (StateSchema.ParamGeneration, 0L)));
+                }
+                costs.Add(probe.Execute(StateSchema.JournalAdvance, (StateSchema.ParamVolume, scenario.VolumeKey),
+                    (StateSchema.ParamJournal, unchecked((long)position.JournalId)),
+                    (StateSchema.ParamNext, unchecked((long)position.NextUsn + 1)),
+                    (StateSchema.ParamExpectedJournal, unchecked((long)position.JournalId)),
+                    (StateSchema.ParamExpectedNext, unchecked((long)position.NextUsn))));
+                probe.Commit();
+                var total = costs.Aggregate(default(StatementCost), (sum, cost) => sum + cost);
+                Console.WriteLine($"B229 C1d saved={savedCount}; shape={shape}; {total}");
+                Check.Require(total.ProbePrepares == 3 + 2 * members + notices + debt &&
+                    total.ChangedRows == notices + debt + 1, "publication statements and changed rows follow M, N and K");
+                for (var ordinal = 0; ordinal < costs.Count; ordinal++)
+                {
+                    var key = (shape, ordinal);
+                    var cost = costs[ordinal];
+                    Check.Require(!previous.TryGetValue(key, out var before) ||
+                        cost.VmSteps == before.VmSteps && cost.PathKeyCalls == before.PathKeyCalls,
+                        $"publication work is independent of saved size: shape={shape}, ordinal={ordinal}, before={before}, after={cost}");
+                    previous[key] = cost;
+                }
+            }
+        }
+    }
+
+    private static void PageResolutionCounts(string baseRoot)
+    {
+        foreach (var savedCount in new[] { 5_110, 20_440 })
+        foreach (var plainCount in new[] { 1, 8 })
+        {
+            using var scenario = Scenario.WithSeparateRoots(baseRoot, $"page-counts-{savedCount}-{plainCount}", "A", "B");
+            var root = scenario.RootOf("A");
+            var outside = Directory.CreateDirectory(Path.Combine(scenario.Root, "outside")).FullName;
+            ulong Identity(string path) => unchecked((ulong)WindowsDirectoryListing.List(Path.GetDirectoryName(path)!)
+                .Single(entry => entry.Name == Path.GetFileName(path)).FileId);
+            ulong Write(string path)
+            {
+                File.WriteAllText(path, "synthetic");
+                return Identity(path);
+            }
+            var records = new List<(ulong Id, uint Reason, FileAttributes Attributes)>();
+            var rootIdentity = NtfsIdentityPaths.ReadRootIdentity(root);
+            records.Add((rootIdentity.FileId, 0x80000000, FileAttributes.Directory));
+            for (var index = 0; index < plainCount; index++)
+                records.Add((Write(Path.Combine(root, "f" + index + ".txt")), 0x00000002, FileAttributes.Normal));
+            var stage = StageNames.For(Path.Combine(root, "stage-target.txt"));
+            Check.Require(StageNames.IsStage(Path.GetFileName(stage)), "the page fixture uses the stage owner's name");
+            records.Add((Write(stage), 0x00000002, FileAttributes.Normal));
+            var renamed = Write(Path.Combine(root, "r-new.txt"));
+            records.Add((renamed, 0x00002000, FileAttributes.Normal));
+            records.Add((Write(Path.Combine(outside, "unknown.txt")), 0x00000002, FileAttributes.Normal));
+            var moved = Write(Path.Combine(outside, "away.txt"));
+            records.Add((moved, 0x00002000, FileAttributes.Normal));
+            var absentPath = Path.Combine(root, "absent.txt");
+            records.Add((Write(absentPath), 0x00000002, FileAttributes.Normal));
+            File.Delete(absentPath);
+            var denied = Write(Path.Combine(root, "denied.txt"));
+            records.Add((denied, 0x00000002, FileAttributes.Normal));
+            var directory = Directory.CreateDirectory(Path.Combine(root, "new-folder")).FullName;
+            var directoryId = Identity(directory);
+            records.Add((directoryId, 0x00000100, FileAttributes.Directory));
+            records.Add((directoryId, 0x80000100, FileAttributes.Directory));
+            var aliasPath = Path.Combine(root, "a1.txt");
+            var alias = Write(aliasPath);
+            Check.Require(CreateHardLinkW(Path.Combine(root, "a2.txt"), aliasPath, IntPtr.Zero) &&
+                CreateHardLinkW(Path.Combine(outside, "a3.txt"), aliasPath, IntPtr.Zero),
+                "the page fixture has two in-root aliases and one outside-root alias");
+            records.Add((alias, 0x00010000, FileAttributes.Normal));
+            records.Add((alias, 0x00000001, FileAttributes.Normal));
+            SyncedEntry Binding(string path, ulong id) => new(PathNames.Key(path), path,
+                PathNames.DropboxKey(path), path, false, LocalIdentity.FileIdText(id), 1, 0, "remote-" + path, "hash");
+            scenario.Store.Commit("A", StateChange.Empty with
+            {
+                Record = [Binding("r-old.txt", renamed), Binding("away.txt", moved),
+                    Binding("a1.txt", alias), Binding("a-gone.txt", alias)]
+            });
+            SeedUnrelatedSaved(scenario, savedCount);
+            foreach (var pair in scenario.Members)
+            {
+                var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+                var attempts = 0;
+                var cacheSizes = new List<int>();
+                var listing = new LocalListing(pair, new PathScope(pair, [pair]), (_, _, _, _) => { });
+                var paths = new UsnPaths(pair, scenario.Store, listing, NtfsIdentityPaths.ReadRootIdentity(pair.LocalRoot));
+                var failure = new UnauthorizedAccessException("synthetic page identity failure");
+                Check.Require(LocalErrors.IsFileFailure(failure), "the fixture failure belongs to the Local error owner");
+                paths.BeforeIdentityRead = id =>
+                {
+                    attempts++;
+                    if (pair.PairId != "A") return;
+                    if (id == denied) throw failure;
+                    if (id == directoryId)
+                        cacheSizes.Add(((System.Collections.IDictionary)typeof(UsnPaths)
+                            .GetField("_resolved", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(paths)!).Count);
+                };
+                paths.BeginPage();
+                for (var index = 0; index < records.Count; index++)
+                {
+                    var record = records[index];
+                    paths.Observe(record.Id, 0, (ulong)index + 1, 0, record.Reason, record.Attributes);
+                }
+                scenario.StoreHook.Before = method => counts[method.Name] = counts.GetValueOrDefault(method.Name) + 1;
+                var notices = paths.Resolve(default).ToArray();
+                scenario.StoreHook.Before = null;
+                var local = pair.PairId == "A";
+                var evidence = $"member={pair.PairId}; saved={savedCount}; j={plainCount}; BIR={attempts}; " +
+                    string.Join(", ", counts.Select(value => value.Key + "=" + value.Value)) +
+                    $"; notices={notices.Length}; E6={string.Join(",", cacheSizes)}";
+                Console.WriteLine("B229 C1c " + evidence);
+                Check.Require(attempts == plainCount + 9 && !paths.NeedsRepair &&
+                    counts.GetValueOrDefault(nameof(IStateStore.SyncedById)) == (local ? 5 : plainCount + 9) &&
+                    counts.GetValueOrDefault(nameof(IStateStore.SyncedBindingsById)) == 1 && counts.Count == 2 &&
+                    notices.Length == (local ? plainCount + 7 : 0), "page branch work: " + evidence);
+                Check.Require(local ? cacheSizes.SequenceEqual(new[] { plainCount + 6, plainCount + 6 }) : cacheSizes.Count == 0,
+                    "each directory invalidation visits the current page cache: " + evidence);
+                Console.WriteLine($"B229 C1c derived, not counted: resolver={plainCount + (local ? 8 : 9)}; " +
+                    $"listing={(local ? plainCount + 6 : 0)}; containment={(local ? 2 * (plainCount + 2) : 0)}");
+            }
+        }
+    }
+
+    private static async Task FailRetainedPageAsync(Scenario scenario, string name, bool finite, string? root = null)
+    {
+        root ??= scenario.Root;
+        var path = Path.Combine(root, name);
+        File.WriteAllText(path, "uncommitted");
+        var id = unchecked((ulong)WindowsDirectoryListing.List(root).Single(entry => entry.Name == name).FileId);
+        var races = 0;
+        var paths = scenario.Host.Snapshot().Single(member => member.Pair.PairId == "A").Paths;
+        paths.BeforeIdentityRead = identity =>
+        {
+            if (identity == id)
+            {
+                races++;
+                throw new NtfsLinkEnumerationChangedException(identity);
+            }
+        };
+        var failed = false;
+        try
+        {
+            if (finite) await scenario.Source.CatchUpForPairAsync("A", 0, default);
+            else await scenario.Source.CatchUpAsync(default);
+        }
+        catch (IOException) { failed = true; }
+        finally { paths.BeforeIdentityRead = null; }
+        Check.Require(failed && races == 2 && !scenario.Source.Available,
+            "the real reader exhausts its one replay and exposes the failed source");
+    }
+
+    private static async Task FailedCatchUpResumesWithoutDebtAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "confirmed-resume", "A");
+        var revision = Revision(scenario, "A");
+        var obligation = Obligation(scenario, "A");
+        File.WriteAllText(Path.Combine(scenario.Root, "first.txt"), "first");
+        await FailRetainedPageAsync(scenario, "second.txt", finite: true);
+        var lower = NtfsUsnJournal.ReadCheckpoint(scenario.Root).NextUsn;
+        var resumed = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(scenario.Source.Available && Obligation(scenario, "A") == obligation &&
+            Revision(scenario, "A") == revision && resumed.Checkpoint.NextUsn >= lower &&
+            (ulong)resumed.Checkpoint.NextUsn == scenario.Store.ReadJournal(scenario.VolumeKey)!.NextUsn &&
+            FirstNotice(scenario, "A")?.Notice.Path is "first.txt" or "second.txt",
+            "a finite resume covers its captured interval durably without adding source-loss debt");
+        await FailRetainedPageAsync(scenario, "third.txt", finite: false);
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Obligation(scenario, "A") == obligation && Revision(scenario, "A") == revision,
+            "a later fresh failure proves the previous finite capture confirmed the resume");
+    }
+
+    private static async Task FailedResumeRebasesWithDebtAsync(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "failed-resume", "A");
+        var revision = Revision(scenario, "A");
+        await FailRetainedPageAsync(scenario, "first.txt", finite: true);
+        await FailRetainedPageAsync(scenario, "second.txt", finite: true);
+        Check.Require(scenario.Source.ContinuityLost, "a second failure before finite confirmation loses continuity");
+        var refreshes = scenario.Host.RefreshCalls;
+        var reads = scenario.Host.RefreshReads;
+        var rebased = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        var now = NtfsUsnJournal.ReadCheckpoint(scenario.Root);
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap &&
+            Revision(scenario, "A") == revision + 1 && FirstNotice(scenario, "A") is null &&
+            rebased.Checkpoint.NextUsn >= now.FirstUsn && rebased.Checkpoint.NextUsn <= now.NextUsn &&
+            scenario.Host.RefreshCalls - refreshes == 1 && scenario.Host.RefreshReads - reads == 1,
+            "a failed resume rebases once, refreshes its one debt member and preserves Bootstrap");
+        Check.Require(!scenario.Source.ContinuityLost, "a committed replacement base clears failed-resume state");
+        await FailRetainedPageAsync(scenario, "fresh.txt", finite: false);
+        await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Revision(scenario, "A") == revision + 1 && !scenario.Source.ContinuityLost,
+            "a fresh failure after replacement gets its own confirmed resume without extra debt");
+    }
+
+    private static async Task FailedSourceOutsideRetentionRebasesAsync(string baseRoot, string kind)
+    {
+        using var scenario = new Scenario(baseRoot, "outside-retention-" + kind, "A");
+        var revision = Revision(scenario, "A");
+        var now = NtfsUsnJournal.ReadCheckpoint(scenario.Root);
+        Check.Require(kind != "BelowRetention" || Math.Max(now.FirstUsn, now.LowestValidUsn) > 0,
+            "the below-retention fixture needs a nonzero retained start");
+        var bogus = kind switch
+        {
+            "JournalChanged" => scenario.Start with { JournalId = scenario.Start.JournalId ^ 1UL },
+            "BelowRetention" => scenario.Start with { NextUsn = 0 },
+            "AheadOfEnd" => scenario.Start with { NextUsn = checked((ulong)now.NextUsn + (1UL << 30)) },
+            _ => throw new InvalidOperationException()
+        };
+        var fault = new IOException("synthetic journal publication failure");
+        scenario.StoreHook.Before = method =>
+        {
+            if (method.Name != nameof(IStateStore.AcquireJournalPage)) return;
+            scenario.StoreHook.Before = null;
+            scenario.StoreHook.Inner.AcquireJournalPage(scenario.VolumeKey, scenario.Start, bogus, Fences(scenario), []);
+            throw fault;
+        };
+        File.WriteAllText(Path.Combine(scenario.Root, "uncommitted.txt"), "pending");
+        Exception? caught = null;
+        try { await scenario.Source.CatchUpAsync(default); }
+        catch (Exception error) { caught = error; }
+        Check.Require(ReferenceEquals(caught, fault), "the real publication exposes the armed store failure");
+        scenario.Source.Invalidate();
+        var refreshes = scenario.Host.RefreshCalls;
+        var reads = scenario.Host.RefreshReads;
+        var rebased = await scenario.Source.CatchUpForPairAsync("A", 0, default);
+        Check.Require(Obligation(scenario, "A") == SourceObligation.Bootstrap &&
+            Revision(scenario, "A") == revision + 1 && rebased.Checkpoint.JournalId == now.JournalId &&
+            scenario.Host.RefreshCalls - refreshes == 1 && scenario.Host.RefreshReads - reads == 1,
+            "an invalid saved position rebases and refreshes its one debt member: " + kind);
+    }
+
+    private static async Task RetainedPageRaceAsync(string baseRoot)
+    {
+        foreach (var finite in new[] { false, true })
+        foreach (var repeatRace in new[] { false, true })
+        {
+            using var scenario = new Scenario(baseRoot, "page-race-" + finite + repeatRace, "A");
+            var member = scenario.Host.Snapshot()[0];
+            var start = scenario.Source.Position;
+            var watermark = scenario.Store.ReadWorkWatermark();
+            File.WriteAllText(Path.Combine(scenario.Root, "first.txt"), "first");
+            File.WriteAllText(Path.Combine(scenario.Root, "second.txt"), "second");
+            var entries = WindowsDirectoryListing.List(scenario.Root).Where(entry => entry.Name is "first.txt" or "second.txt")
+                .ToDictionary(entry => entry.Name, entry => unchecked((ulong)entry.FileId));
+            var races = 0;
+            var resolutions = new Dictionary<ulong, int>();
+            member.Paths.BeforeIdentityRead = id =>
+            {
+                resolutions[id] = resolutions.GetValueOrDefault(id) + 1;
+                if (id == entries["first.txt"] && races == 0 || id == entries["second.txt"] && races == 1 && repeatRace)
+                {
+                    races++;
+                    throw new NtfsLinkEnumerationChangedException(id);
+                }
+            };
+            var failed = false;
+            try
+            {
+                var result = finite ? await scenario.Source.CheckpointAfterRepairAsync(scenario.Host.Snapshot(), default)
+                    : await scenario.Source.CatchUpAsync(default);
+                Check.Require(result is not null, "A successful fixed-page replay completes ordinary and finite capture.");
+            }
+            catch (IOException) { failed = true; }
+            Check.Require(failed == repeatRace && races == (repeatRace ? 2 : 1),
+                "A first race and a different identity's replay race exhaust exactly one page replay.");
+            Check.Require(resolutions.GetValueOrDefault(entries["first.txt"]) == 2 &&
+                resolutions.GetValueOrDefault(entries["second.txt"]) == 1,
+                "the raced identity is attempted twice and the later identity only in the replay");
+            if (repeatRace)
+                Check.Require(!scenario.Source.Available && scenario.Source.Position == start &&
+                    scenario.Store.ReadWorkWatermark() == watermark,
+                    "A failed replay publishes neither tentative page work nor a false checkpoint.");
+        }
+    }
+
+    private static void AliasPageClassification(string baseRoot)
+    {
+        using var scenario = new Scenario(baseRoot, "alias-page", "A");
+        var pair = scenario.Members[0];
+        var first = Path.Combine(pair.LocalRoot, "first.txt");
+        var second = Path.Combine(pair.LocalRoot, "second.txt");
+        File.WriteAllText(first, "synthetic");
+        Check.Require(CreateHardLinkW(second, first, IntPtr.Zero), "Alias page fixture creates a second name.");
+        var listing = new LocalListing(pair, new PathScope(pair, [pair]), (_, _, _, _) => { });
+        var entry = listing.One("first.txt")!;
+        var fileId = unchecked((ulong)long.Parse(entry.Id, System.Globalization.CultureInfo.InvariantCulture));
+        var saved = new SyncedEntry(PathNames.Key(entry.Path), entry.Path, PathNames.DropboxKey(entry.Path), entry.Path,
+            false, entry.Id, entry.Size, entry.Modified.UtcTicks, "remote", "");
+        scenario.Store.Commit(pair.PairId, StateChange.Empty with { Record = [saved] });
+        var paths = new UsnPaths(pair, scenario.Store, listing, NtfsIdentityPaths.ReadRootIdentity(pair.LocalRoot));
+        // Native USN_REASON_HARD_LINK_CHANGE followed by DATA_OVERWRITE in one classified page.
+        paths.BeginPage();
+        paths.Observe(fileId, 0, 1, 0, 0x00010000, FileAttributes.Normal);
+        paths.Observe(fileId, 0, 2, 0, 0x00000001, FileAttributes.Normal);
+        var notices = paths.Resolve(default).ToArray();
+        Check.Require(!paths.NeedsRepair && notices.Length == 2 &&
+            notices.Select(item => item.Path).ToHashSet().SetEquals(new[] { "first.txt", "second.txt" }) &&
+            notices.All(item => item.Id is null && !item.IdentityDeleted && item.LocalContentDirty),
+            "Alias page folding produces each path once with later write dirtiness and no Repair debt.");
+        var next = scenario.Start with { NextUsn = scenario.Start.NextUsn + 1 };
+        scenario.Store.AcquireJournalPage(scenario.VolumeKey, scenario.Start, next, Fences(scenario),
+            Enumerable.Range(0, 3).SelectMany(_ => notices.Select(notice => (pair.PairId, notice))));
+        var scope = new PathScope(pair, [pair]);
+        var selectedA = scenario.Store.SelectWork(pair.PairId, 0, scope);
+        var selectedB = scenario.Store.SelectWork(pair.PairId, 0, scope);
+        Check.Require(selectedA is not null && selectedB is not null &&
+            selectedA.Key != selectedB.Key && selectedA.Identity is null && selectedB.Identity is null &&
+            scenario.Store.CountWork(pair.PairId, 0, scenario.Store.ReadWorkWatermark()).Local == 2,
+            "B210-AliasIndependence: real hard-link names retain separate path-only obligations");
+        scenario.Store.EndWorkPass(pair.PairId);
+        File.Delete(first);
+        paths.BeginPage();
+        paths.Observe(fileId, 0, 3, 0, 0x00010000, FileAttributes.Normal);
+        notices = paths.Resolve(default).ToArray();
+        Check.Require(!paths.NeedsRepair && notices.Length == 2 &&
+            notices.Single(item => item.Path == "first.txt") is { Kind: ChangeKind.Deleted, Id: null, Observed: null } &&
+            notices.Single(item => item.Path == "second.txt") is { Kind: ChangeKind.Changed, Id: null },
+            "Removed aliases retain their own saved-path absence rather than following the surviving name.");
+        scenario.Store.AcquireJournalPage(scenario.VolumeKey, next, next with { NextUsn = next.NextUsn + 1 },
+            Fences(scenario), notices.Select(notice => (pair.PairId, notice)));
+        var retained = new List<PendingChange>();
+        while (scenario.Store.SelectWork(pair.PairId, 0, scope) is { } selected)
+            retained.AddRange(scenario.Store.ReadWork(selected));
+        Check.Require(retained.Count == 3 && retained.Count(item => item.Notice.Path == "first.txt") == 2 &&
+            retained.Single(item => item.Notice.Kind == ChangeKind.Deleted).Notice.Path == "first.txt" &&
+            retained.All(item => item.Notice.Id is null),
+            "B210-RenameAway: vanished alias debt and Deleted stay separate from the surviving link");
+        scenario.Store.EndWorkPass(pair.PairId);
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateHardLinkW(string newFileName, string existingFileName, IntPtr securityAttributes);
+
+    private static void RenameRootAwayAndBack(string root)
+    {
+        var moved = root + ".renamed";
+        Directory.Move(root, moved);
+        Directory.Move(moved, root);
+    }
+
+    /// <summary>One isolated pair-volume fixture on the shared native volume: a Store database outside the
+    /// classified root, the enrolled member snapshot, and one JournalSource over the production reader.</summary>
+    private sealed class Scenario : IDisposable
+    {
+        private readonly string _database;
+        internal string Database => _database;
+        private readonly bool _separateRoots;
+        public string Root { get; }
+        public string VolumeKey { get; }
+        public IStateStore Store { get; }
+        public Volume Host { get; } = new();
+        public List<PairConfig> Members { get; } = [];
+        public JournalPosition Start { get; private set; } = null!;
+        public JournalSource Source { get; private set; } = null!;
+
+        public Scenario(string baseRoot, string name, params string[] members)
+            : this(baseRoot, name, false, members)
+        {
+        }
+
+        /// <summary>A scenario whose pairs own distinct local roots, so a record belongs to exactly one member.</summary>
+        public static Scenario WithSeparateRoots(string baseRoot, string name,
+            params string[] members) => new(baseRoot, name, true, members);
+
+        private Scenario(string baseRoot, string name, bool separateRoots, string[] members)
+        {
+            _separateRoots = separateRoots;
+            Root = Path.Combine(baseRoot, name);
+            Directory.CreateDirectory(Root);
+            VolumeKey = Root;
+            _database = Path.Combine(Path.GetTempPath(), "SyncSharkJournal-" + Guid.NewGuid().ToString("N") + ".db");
+            Store = HookedStore.Wrap(Massdex.SyncShark.Engine.Storage.StateStore.Open(_database));
+            Host.Bind(pairId => SourceRow(this, pairId));
+            foreach (var id in members) AddPair(id);
+            Seed();
+        }
+
+        /// <summary>The forwarding store double that can observe or fault one exact call.</summary>
+        public HookedStore StoreHook => (HookedStore)Store;
+
+        /// <summary>The pair's local root; a distinct directory per pair when the scenario uses separate roots.</summary>
+        public string RootOf(string pairId) => Path.Combine(Root, pairId);
+
+        /// <summary>Installs one enrolled pair and clears both seeded first-run obligations so ordinary selection
+        /// can expose its acquired notices.</summary>
+        public JournalSource.Member AddPair(string id)
+        {
+            var localRoot = _separateRoots ? RootOf(id) : Root;
+            Directory.CreateDirectory(localRoot);
+            var pair = new PairConfig(id, id, localRoot, "/" + id, "account", [], [],
+                FirstRunPolicy.NewestWins, true, null);
+            Store.SavePair(pair);
+            foreach (var side in new[] { Side.Local, Side.Dropbox })
+            {
+                var seeded = Store.ReadSource(id, side)
+                    ?? throw new InvalidOperationException("SavePair must seed both source rows.");
+                Store.AdvanceSource(id, side, 0, seeded.Epoch, seeded.Revision, seeded.Provenance,
+                    seeded.Cursor, seeded.Epoch, seeded.Revision + 1, seeded.Provenance, seeded.Cursor, null);
+            }
+            var member = Member(this, pair);
+            Members.Add(pair);
+            return member;
+        }
+
+        private void Seed()
+        {
+            var checkpoint = NtfsUsnJournal.ReadCheckpoint(Root);
+            Start = new JournalPosition((ulong)checkpoint.JournalId, (ulong)checkpoint.NextUsn);
+            Store.AcquireJournalPage(VolumeKey, null, Start, Fences(this), []);
+            Host.Install(Snapshot());
+            Source = new JournalSource(VolumeKey, Root, Store, Start, Host.Gate, Host.Read, Host.Refresh, Settings.JournalPageBufferBytes);
+            // The host always supplies the item-failure reporter; this double raises the same typed Failure
+            // issue the production reporter records, so the page's other notices still publish.
+            Source.ReportItemFailureAsync = (member, failed, _) =>
+            {
+                var subject = new IssueSubject([new IssueItem(Side.Local, failed.Path, failed.LocalId!)], null);
+                Store.Commit(member.Pair.PairId, StateChange.Empty with
+                { Raise = [(IssueKind.Failure, failed.Cause, failed.Path, subject)] });
+                return Task.CompletedTask;
+            };
+        }
+
+        public IReadOnlyList<JournalSource.Member> Snapshot() =>
+            Members.Select(pair => Member(this, pair)).ToArray();
+
+        public void Dispose()
+        {
+            Store.Dispose();
+            if (File.Exists(_database)) File.Delete(_database);
+            foreach (var path in new[] { _database + "-wal", _database + "-shm" })
+                if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    /// <summary>The host's one volume gate and immutable member snapshot. The accessor is side-effect free and
+    /// called only under the gate; refresh is synchronous, reentrant and never enters native I/O or lifecycle.
+    /// The optional reading hook is test synchronisation only and never changes the snapshot it returns.</summary>
+    private sealed class Volume
+    {
+        private readonly object _gate = new();
+        private IReadOnlyList<JournalSource.Member>? _snapshot;
+        private int _refreshCalls;
+        private int _refreshReads;
+
+        public object Gate => _gate;
+
+        /// <summary>Test synchronisation around each accessor call; it observes but never edits the snapshot.</summary>
+        public Action? Reading { get; set; }
+
+        public int RefreshCalls => Volatile.Read(ref _refreshCalls);
+
+        public int RefreshReads => Volatile.Read(ref _refreshReads);
+
+        /// <summary>Optional test hook run inside the protected span. Returning true means the hook installed
+        /// its own replacement snapshot and the default authoritative refresh is skipped.</summary>
+        public Func<IReadOnlyList<string>?, bool>? BeforeRefresh { get; set; }
+
+        public IReadOnlyList<JournalSource.Member>? Read()
+        {
+            lock (_gate)
+            {
+                Reading?.Invoke();
+                return _snapshot;
+            }
+        }
+
+        public IReadOnlyList<JournalSource.Member> Snapshot()
+        {
+            lock (_gate) return _snapshot ?? throw new InvalidOperationException("The volume fence is closed.");
+        }
+
+        public void Install(IReadOnlyList<JournalSource.Member> members)
+        {
+            lock (_gate) _snapshot = members;
+        }
+
+        public void Close()
+        {
+            lock (_gate) _snapshot = null;
+        }
+
+        public void Refresh(IReadOnlyList<JournalSource.Member> expected, IReadOnlyList<string>? candidateIds)
+        {
+            lock (_gate)
+            {
+                Interlocked.Increment(ref _refreshCalls);
+                if (_snapshot is not { } installed) throw new InvalidOperationException("Refresh while closed.");
+                if (!Same(expected, installed))
+                    throw new InvalidOperationException("The expected snapshot is no longer installed.");
+                if (BeforeRefresh is { } hook && hook(candidateIds)) return;
+                var updated = new List<JournalSource.Member>(installed.Count);
+                foreach (var member in installed)
+                {
+                    if (candidateIds is not null && !candidateIds.Contains(member.Pair.PairId))
+                    {
+                        updated.Add(member);
+                        continue;
+                    }
+                    var source = SourceOf(member.Pair.PairId);
+                    Interlocked.Increment(ref _refreshReads);
+                    updated.Add(member with { Epoch = source.Epoch, Revision = source.Revision });
+                }
+                _snapshot = updated;
+            }
+        }
+
+        private Func<string, (long Epoch, SourceProvenance? Provenance, string? Cursor, SourceObligation? Obligation,
+            long Revision)>? _source;
+
+        public void Bind(Func<string, (long Epoch, SourceProvenance? Provenance, string? Cursor,
+            SourceObligation? Obligation, long Revision)> source) => _source = source;
+
+        private (long Epoch, SourceProvenance? Provenance, string? Cursor, SourceObligation? Obligation, long Revision)
+            SourceOf(string pairId) => (_source ?? throw new InvalidOperationException("The host source accessor is unbound."))(pairId);
+
+        private static bool Same(IReadOnlyList<JournalSource.Member> expected,
+            IReadOnlyList<JournalSource.Member> installed)
+        {
+            if (expected.Count != installed.Count) return false;
+            var byPair = new Dictionary<string, JournalSource.Member>(installed.Count, StringComparer.Ordinal);
+            foreach (var member in installed)
+                if (!byPair.TryAdd(member.Pair.PairId, member)) return false;
+            foreach (var member in expected)
+            {
+                if (!byPair.Remove(member.Pair.PairId, out var other)) return false;
+                if (other.Generation != member.Generation || other.Epoch != member.Epoch ||
+                    other.Revision != member.Revision || !ReferenceEquals(other.Paths, member.Paths) || !ReferenceEquals(other.Pair, member.Pair))
+                    return false;
+            }
+            return true;
+        }
+    }
+
+    /// <summary>Runs one action at a numbered host-accessor call, so a case can cancel at an exact page boundary
+    /// without a sleep. The count is this test double's own call count; if the sequence changes, the action does
+    /// not run and the case's outcome assertion fails loudly instead of passing silently.</summary>
+    private sealed class ReadHalt
+    {
+        private int _reads;
+        private int _ordinal;
+        private Action? _atHalt;
+
+        public void Arm(int ordinal, Action atHalt)
+        {
+            _atHalt = atHalt;
+            Volatile.Write(ref _ordinal, ordinal);
+        }
+
+        public void Observe()
+        {
+            if (Interlocked.Increment(ref _reads) != Volatile.Read(ref _ordinal)) return;
+            _atHalt?.Invoke();
+        }
+    }
+
+    /// <summary>Forwards every store call to the real engine database unchanged, so the journal CAS, source
+    /// precedence and notice rows stay the production ones, while letting a case observe one exact call or make
+    /// it fail. A fault before the forwarded call models a genuine failure; a fault after it models a lost reply.</summary>
+    public class HookedStore : DispatchProxy
+    {
+        private IStateStore? _inner;
+
+        /// <summary>The real store every call is forwarded to.</summary>
+        public IStateStore Inner
+        {
+            get => _inner ?? throw new InvalidOperationException("The store double is unbound.");
+            set => _inner = value;
+        }
+
+        public bool LastPageHasDebt { get; private set; }
+
+        public Action<MethodInfo>? Before { get; set; }
+        public Action<MethodInfo>? After { get; set; }
+
+        public static IStateStore Wrap(IStateStore inner)
+        {
+            var proxy = DispatchProxy.Create<IStateStore, HookedStore>();
+            ((HookedStore)(object)proxy).Inner = inner;
+            return proxy;
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            ArgumentNullException.ThrowIfNull(targetMethod);
+            if (targetMethod.Name == nameof(IStateStore.AcquireJournalPage))
+                LastPageHasDebt = ((IReadOnlyList<(string PairId, long Generation, long Epoch, long Revision,
+                    bool LostInterval)>)args![3]!).Any(member => member.LostInterval);
+            Before?.Invoke(targetMethod);
+            object? result;
+            try
+            {
+                result = targetMethod.Invoke(Inner, args);
+            }
+            catch (TargetInvocationException error)
+            {
+                throw error.InnerException ?? error;
+            }
+            After?.Invoke(targetMethod);
+            return result;
+        }
+    }
+}
