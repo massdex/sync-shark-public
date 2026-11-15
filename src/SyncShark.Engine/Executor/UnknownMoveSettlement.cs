@@ -27,6 +27,7 @@ internal sealed class UnknownMoveSettlement(ExecutorContext context, ItemSync it
         CancellationToken ct)
     {
         var held = (new SyncOutcome(ActionKind.None, NoneReason.Held, null, IssueKind.Failure, false, issue.Cause), false);
+        context.Store.CloseUnknownMove(context.Pair.PairId, context.ExpectedGeneration, issue, null);
         if (await items.Renames.ObserveUnknownMoveAsync(issue, ct) is not { } read) return held;
         var (decision, observed) = read;
         var bound = context.Store.SyncedById(context.Pair.PairId, Side.Dropbox, issue.Subject.Move!.ExpectedId);
