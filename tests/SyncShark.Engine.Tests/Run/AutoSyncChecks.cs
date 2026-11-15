@@ -151,8 +151,6 @@ public static class AutoSyncChecks
     private static void IndependentDebtCases(StateStore store, string path)
     {
         var generation = Generation(store);
-        var local = store.ReadSource(PairId, Side.Local)!.Value;
-        var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
         var episode = FailureRetryOwner.AdoptedFailed(0, Now, null, ShippedBackoff(), () => MidpointSample);
         store.RecordPrerequisiteFailure(PairId, generation, _ => episode,
             PageWaitNotice());
@@ -236,8 +234,6 @@ public static class AutoSyncChecks
             Refuses<SqliteException>(() =>
                 store.RecordPrerequisitePageWait(PairId, generation, operation, PageWaitNotice()),
                 "page-wait notice write");
-            var localValue = local!.Value;
-            var remoteValue = remote!.Value;
             Refuses<SqliteException>(() =>
                 store.RecordPrerequisiteFailure(PairId, generation, _ => FailureRetryOwner.AdoptedFailed(0, Now, null, ShippedBackoff(), () => MidpointSample),
                     PageWaitNotice()), "durable notice write");

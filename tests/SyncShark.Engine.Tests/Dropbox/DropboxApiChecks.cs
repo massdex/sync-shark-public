@@ -1574,8 +1574,6 @@ public static class DropboxApiChecks
             "Sealing, cancellation and disable close only the exact page wait, not pair state.");
 
         store.SavePair(pair);
-        var local = store.ReadSource(pair.PairId, Side.Local)!.Value;
-        var remote = store.ReadSource(pair.PairId, Side.Dropbox)!.Value;
         var debt = new Massdex.SyncShark.V2.FailureRetryOwner.State(OneUnit, DateTimeOffset.UnixEpoch.AddSeconds(OneUnit));
         store.RecordPrerequisiteFailure(pair.PairId, 0, _ => debt,
             notice);

@@ -1474,6 +1474,9 @@ internal static class LoggingRepairChecks
         await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(pairId) is null && wire.HeldLongpolls > polls &&
             (!finite || wire.Snapshot().Any(item => item.Path == "child.txt" && Encoding.UTF8.GetString(item.Bytes) == "pending")));
         await SettleAsync();
+        Console.WriteLine($"Live recovery finite={finite}: C={Calls("/2/files/list_folder/continue") - continuations}, " +
+            $"L={wire.HeldLongpolls - polls}, U={Calls("/2/files/upload") - uploads}, " +
+            $"noticeOpen={rig.Store.Issues(pairId).Any(issue => issue.Id == notice.Id)}, status={rig.Host.Status().Status}");
         Check.Require(Calls("/2/files/list_folder/continue") == continuations + 2 &&
             Calls("/2/files/upload") == uploads + (finite ? 1 : 0) &&
             (finite ? wire.HeldLongpolls - polls is >= 1 and <= 2 : wire.HeldLongpolls == polls + 1) &&

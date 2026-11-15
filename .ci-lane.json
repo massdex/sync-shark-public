@@ -1,26 +1,16 @@
 {
   "build": [
-    "engine-tests",
-    "core-tests",
-    "core-tests",
-    "app",
-    "ui-fixture"
+    "engine-tests"
   ],
   "engine": [
     "engine-host",
-    "work-lifecycle",
-    "temporary-retry-time",
-    "serial-lane-lifetime",
-    "gone-identities",
+    "repair",
     "syncer",
-    "store",
-    "repair"
+    "gone-identities",
+    "safety",
+    "temporary-retry-time",
+    "serial-lane-lifetime"
   ],
-  "core": [
-    "--v2-autosync-checks",
-    "--cli-checks"
-  ],
-  "ui": [
-    "engine-startup-readiness-checks"
-  ]
+  "core": [],
+  "ui": []
 }

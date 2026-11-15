@@ -7535,7 +7535,8 @@ public static partial class ChangeRunnerChecks
                 if (cancelHeld)
                 {
                     cancel.Cancel();
-                    await ThrowsAsync<OperationCanceledException>(() => run);
+                    Check.Require(await run == (false, false),
+                        "Requested opportunity cancellation ends normally without draining durable work.");
                     Check.Require(Volatile.Read(ref active) == 0 && Volatile.Read(ref rounds) == 1,
                         "I: cancellation joins all coverage waiters before ending the pass");
                     Check.Require(fixture.Inner.SelectWork(PairId, Generation, context.Scope) is not null,
@@ -7616,7 +7617,8 @@ public static partial class ChangeRunnerChecks
         const int arrivals = 3;
         var rounds = 0;
         var remaining = arrivals;
-        var store = Massdex.SyncShark.Engine.Tests.Local.JournalSourceChecks.HookedStore.Wrap(fixture.Inner);
+        var counters = new StoreCounters(fixture.Inner);
+        var store = Massdex.SyncShark.Engine.Tests.Local.JournalSourceChecks.HookedStore.Wrap(counters);
         ((Massdex.SyncShark.Engine.Tests.Local.JournalSourceChecks.HookedStore)store).Before = method =>
         {
             if (method.Name != nameof(IStateStore.EndWorkPass)) return;
@@ -7632,6 +7634,7 @@ public static partial class ChangeRunnerChecks
         // Pass and effect counts stay unchanged; arrivals can now span orderly opportunities.
         var calls = await UntilDrainedAsync(new Syncer(context, new SyncPorts(new RecoveryBoundary(), boundary,
             RefusingExecutionBoundary.Instance, 1)), guard.Token, "Executor/ChangeRunnerChecks.cs:7626").WaitAsync(guard.Token);
+        Console.WriteLine($"Sustained arrivals: commands={counters.Commands}");
         Check.Require(calls == 3, "Only post-floor arrival progress yields; the final opportunity drains.");
         Check.Require(rounds == arrivals + 2,
             "Sustained arrivals remain reachable across yields; one empty pass ends the drain.");
@@ -11020,6 +11023,8 @@ public static partial class ChangeRunnerChecks
         var commands = counters.Commands;
         await syncer.CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.cs:11021");
         Console.WriteLine($"Held scope {mode}: first commands={commands}, parked commands={counters.Commands - commands}");
+        Check.Require(commands == 25 && counters.Commands - commands == 7,
+            "The held refusal parks in 25 store calls; its next parked opportunity uses seven without re-admission.");
         Check.Require(boundary.Calls == calls && events.All(item => item.Error is not LiveAdmissionStaleException),
             "Without a holder event, a parked folder makes no new admission and reports no refusal.");
         if (mode == "item-acquired")

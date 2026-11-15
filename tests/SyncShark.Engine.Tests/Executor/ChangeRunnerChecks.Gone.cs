@@ -890,6 +890,8 @@ public static partial class ChangeRunnerChecks
         TrustEchoSources(fixture);
         var selection = Seed(fixture, new ChangeNotice(Side.Local, ChangeKind.Changed, Churn, null, LocalId,
             LocalEntry(Churn, LocalId), true, false));
+        var counters = new StoreCounters(fixture.Inner);
+        fixture.Hooks.Inner = counters;
         var added = false;
         bool? transferred = null;
         var dirty = false;
@@ -911,6 +913,7 @@ public static partial class ChangeRunnerChecks
         };
         var events = new List<RunEvent>();
         await LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events).CensusWorkAsync(default, "ADDED/Executor/ChangeRunnerChecks.Gone.cs:913");
+        Console.WriteLine($"Superseded replacement={replacement}: first commands={counters.Commands}");
         var refused = events.Count(item => item.Error is LiveAdmissionStaleException);
         var queued = fixture.Inner.CountWork(PairId, Generation, fixture.Inner.ReadWorkWatermark());
         if (!replacement)
