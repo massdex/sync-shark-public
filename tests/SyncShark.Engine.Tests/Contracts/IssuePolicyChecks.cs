@@ -10,6 +10,7 @@ public static class IssuePolicyChecks
     {
         HoldingPolicy();
         LocalAccessRetryCause();
+        RetryNoticeCauses();
         PublicCategories();
         AbsentLiveEpisodes();
         RetainedByOwner();
@@ -260,6 +261,14 @@ public static class IssuePolicyChecks
             Check.Require(IssuePolicy.PublicKind(kind, cause) ==
                 (kind == IssueKind.Failure && cause == TextKey.FailLocalInUse ? IssueKind.Info : kind),
                 "PublicKind: " + kind + "/" + cause);
+    }
+
+    private static void RetryNoticeCauses()
+    {
+        foreach (var cause in Enum.GetValues<TextKey>())
+            Check.Require(IssuePolicy.IsRetryNoticeCause(cause) ==
+                (cause is TextKey.RequiredRepairRetry or TextKey.RequiredRepairRetryNoSpace),
+                "IsRetryNoticeCause: " + cause);
     }
 
     private static void LocalAccessRetryCause()

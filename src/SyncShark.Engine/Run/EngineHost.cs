@@ -86,7 +86,7 @@ internal sealed class EngineHost : IAsyncDisposable
             {
                 if (_stopping || _sourceFailure is not null || _closed.Contains(pairId) ||
                     Store.ReadPairExecution(pairId) is not { } current) return;
-                RecordPrerequisiteFailure(pairId, current.Generation, providerWait: null);
+                RecordPrerequisiteFailure(pairId, current.Generation, providerWait: null, failure: error);
                 _liveRetries[pairId] = (current.Generation, null);
             }
             _monitor.RearmPrerequisiteWait();
@@ -1436,7 +1436,7 @@ internal sealed class EngineHost : IAsyncDisposable
                         reason = pending.SourceFailed ? TextKey.WaitSourceRetry :
                             summary?.Superseded == true ? TextKey.WaitSupersededRetry : null;
                         wait = RecordPrerequisiteFailure(pairId, pending.Generation, Remaining(pending.ItemTurn),
-                            reason is not null).Wait;
+                            reason is not null, failure: error).Wait;
                     }
                     finally
                     {
@@ -1463,13 +1463,14 @@ internal sealed class EngineHost : IAsyncDisposable
 
     // Callers hold _gate. The store reads the current row in its write transaction; retry policy stays here.
     private (FailureRetryOwner.State Next, TimeSpan Wait) RecordPrerequisiteFailure(string pairId, long generation,
-        TimeSpan? providerWait, bool withoutNotice = false, IEnumerable<(Side Side, string Key)>? itemKeys = null)
+        TimeSpan? providerWait, bool withoutNotice = false, IEnumerable<(Side Side, string Key)>? itemKeys = null,
+        Exception? failure = null)
     {
         var now = _time.GetUtcNow();
         var (expected, next) = Store.RecordPrerequisiteFailure(pairId, generation,
             stored => FailureRetryOwner.AdoptedFailed(stored?.Attempts ?? 0, now, providerWait,
                 _settings.Backoff, Random.Shared.NextDouble),
-            withoutNotice ? StateChange.Empty : RetryNotice());
+            withoutNotice ? StateChange.Empty : RetryNotice(failure));
         // Every host row write keeps the entry true: item keys continue or start it; any other write retires it.
         if (itemKeys is null) _itemWaits.Remove(pairId);
         else RecordItemKeys(pairId, itemKeys, expected, next);
@@ -1575,9 +1576,10 @@ internal sealed class EngineHost : IAsyncDisposable
         }
     }
 
-    private static StateChange RetryNotice() => StateChange.Empty with
+    private static StateChange RetryNotice(Exception? failure = null) => StateChange.Empty with
     {
-        Raise = [(IssueKind.Failure, TextKey.RequiredRepairRetry, string.Empty, new IssueSubject([], null))]
+        Raise = [(IssueKind.Failure, ResourceFailures.Find(failure) is null ?
+            TextKey.RequiredRepairRetry : TextKey.RequiredRepairRetryNoSpace, string.Empty, new IssueSubject([], null))]
     };
 
     internal IItemAttempts ItemAttemptsFor(object registration)

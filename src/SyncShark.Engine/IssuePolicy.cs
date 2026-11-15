@@ -245,6 +245,10 @@ public static class IssuePolicy
     public static bool IsLocalAccessRetryCause(TextKey cause) =>
         cause is TextKey.FailLocalInUse or TextKey.FailLocalInUseOrAccessDenied;
 
+    /// <summary>The pair-root retry notice's causes; one notice names its current failure class.</summary>
+    public static bool IsRetryNoticeCause(TextKey cause) =>
+        cause is TextKey.RequiredRepairRetry or TextKey.RequiredRepairRetryNoSpace;
+
     /// <summary>Stored Failures whose public label is informational; retry and closure still use stored kinds.</summary>
     public static IReadOnlyList<TextKey> FailureInfoCauses { get; } =
         Array.AsReadOnly(new[] { TextKey.FailLocalInUse });

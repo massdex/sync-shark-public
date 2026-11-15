@@ -462,4 +462,5 @@ public enum TextKey
     RecycleUnchecked,
     LanesSerial,
     LanesParallel,
+    RequiredRepairRetryNoSpace,
 }

@@ -2032,6 +2032,64 @@ public static class StateStoreChecks
                 "failure accounting returns the replaced and committed states");
         }
 
+        foreach (var initial in new[] { TextKey.RequiredRepairRetry, TextKey.RequiredRepairRetryNoSpace })
+            Case("retry cause refresh " + initial, (store, _, generation) =>
+            {
+                Finish(store, generation);
+                long? noticeId = null;
+                var state = first;
+                foreach (var cause in new[] { initial, TextKey.RequiredRepairRetryNoSpace, TextKey.RequiredRepairRetry })
+                {
+                    store.RecordPrerequisiteFailure(PairId, generation, _ => state,
+                        Raise(cause, string.Empty, new IssueSubject([], null)));
+                    var notice = store.Issues(PairId).Single();
+                    noticeId ??= notice.Id;
+                    Check.Require(notice.Id == noticeId && notice.Cause == cause &&
+                        store.RetryNoticeProtected(PairId, notice.Id) && store.ReadItemRetry(PairId) is null,
+                        "a retry family refresh retains its exact protected notice");
+                    state = state with { Attempts = state.Attempts + 1 };
+                }
+                // Close the out-of-space member, not just the original generic cause.
+                store.RecordPrerequisiteFailure(PairId, generation, _ => state,
+                    Raise(TextKey.RequiredRepairRetryNoSpace, string.Empty, new IssueSubject([], null)));
+                var local = store.ReadSource(PairId, Side.Local)!.Value;
+                var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
+                store.CompleteRecomposition(PairId, generation, local.Epoch, remote.Epoch,
+                    local.Revision, remote.Revision, state);
+                Check.Require(store.Issues(PairId).Count == 0 && store.ReadPrerequisiteRetry(PairId) is null,
+                    "completion closes the current retry cause and episode together");
+            });
+        foreach (var adopt in new[] { false, true })
+            Case("page retry cause " + adopt, (store, _, generation) =>
+            {
+                Finish(store, generation);
+                var creator = new object();
+                var page = store.RecordPrerequisitePageWait(PairId, generation, creator, failure);
+                var noSpace = Raise(TextKey.RequiredRepairRetryNoSpace, string.Empty, new IssueSubject([], null));
+                if (adopt) store.RecordPrerequisiteFailure(PairId, generation, _ => first, noSpace);
+                else
+                {
+                    var joiner = new object();
+                    var joined = store.RecordPrerequisitePageWait(PairId, generation, joiner, noSpace);
+                    Check.Require(joined.Id == page.Id && joined.Cause == TextKey.RequiredRepairRetryNoSpace,
+                        "an overlapping wait refreshes the same page-owned notice");
+                    store.CompletePrerequisitePageWait(PairId, generation, joiner, joined);
+                }
+                store.CompletePrerequisitePageWait(PairId, generation, creator, page);
+                Check.Require(adopt
+                    ? store.Issues(PairId).Single() is { Cause: TextKey.RequiredRepairRetryNoSpace } kept &&
+                        kept.Id == page.Id && store.ReadPrerequisiteRetry(PairId) == first
+                    : store.Issues(PairId).Count == 0 && store.ReadPrerequisiteRetry(PairId) is null,
+                    "page completion uses the current cause and respects failure adoption");
+            });
+        Case("retry cause validation", (store, _, generation) =>
+        {
+            var invalid = Raise(TextKey.FailChanged, string.Empty, new IssueSubject([], null));
+            Refuses<ArgumentException>(() => store.RecordPrerequisiteFailure(PairId, generation, _ => first, invalid));
+            Refuses<ArgumentException>(() => store.RecordPrerequisitePageWait(PairId, generation, new object(), invalid));
+            Check.Require(store.ReadPrerequisiteRetry(PairId) is null && store.Issues(PairId).Count == 0,
+                "unrelated causes cannot acquire retry notice ownership");
+        });
         Case("temporary", (store, _, generation) =>
         {
             Finish(store, generation);

@@ -66,7 +66,7 @@ public static class IssueTable
         var invalid = kind == IssueKind.Failure &&
             StateStore.ReadInvalidFolderJob(connection, transaction, pair, path);
         var protectedIncoming = kind == IssueKind.Failure &&
-            (cause == TextKey.RequiredRepairRetry || IssuePolicy.IsLocalAccessRetryCause(cause) ||
+            (IssuePolicy.IsRetryNoticeCause(cause) || IssuePolicy.IsLocalAccessRetryCause(cause) ||
              subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None);
         if (invalid && !protectedIncoming)
         {
@@ -77,7 +77,7 @@ public static class IssueTable
         }
         // Reporting the failed attempt refreshes the same notice; nothing else re-causes a row its owner still holds.
         if (existing is not null &&
-            (existing.Cause, cause) is not (TextKey.RequiredRepairRetry, TextKey.RequiredRepairRetry) &&
+            !(IssuePolicy.IsRetryNoticeCause(existing.Cause) && IssuePolicy.IsRetryNoticeCause(cause)) &&
             existing.Cause != TextKey.FailDropboxDeleteJobInvalid &&
             (incoming != TextKey.FailRecycledLate && HoldsResponsibility(connection, transaction, pair, existing) ||
              IssuePolicy.UnknownMove(existing.Kind, existing.Subject)))
@@ -508,31 +508,31 @@ public static class IssueTable
         return keys;
     }
 
-    /// <summary>The pair's root RequiredRepairRetry notice, or null when the root holds none. Callers pass the pair
+    /// <summary>The pair's root retry-family notice, or null when the root holds none. Callers pass the pair
     /// row they already resolved.</summary>
     internal static Issue? RetryNotice(SqliteConnection connection, SqliteTransaction? transaction, long pair) =>
         ReadOne(connection, transaction, StateSchema.SelectRootIssueByKind, (StateSchema.ParamPairRow, pair),
             (StateSchema.ParamKind, (int)IssueKind.Failure)) is
-            { Cause: TextKey.RequiredRepairRetry } notice ? notice : null;
+            { } notice && IssuePolicy.IsRetryNoticeCause(notice.Cause) ? notice : null;
 
     /// <summary>Completion's close of the exact retry notice and its members; refused while source debt or durable
     /// retry responsibility remains. Returns the affected issue count.</summary>
     internal static int CloseRetryNotice(SqliteConnection connection, SqliteTransaction transaction, long pair,
-        long issueId)
+        Issue notice)
     {
-        return CloseRetryProjection(connection, transaction, pair, issueId, StateSchema.CloseRetryNotice,
-            RetryNoticeArguments(pair, issueId));
+        return CloseRetryProjection(connection, transaction, pair, notice.Id, StateSchema.CloseRetryNotice,
+            RetryNoticeArguments(pair, notice));
     }
 
     /// <summary>The generation transition's close of the old retry notice, compared against the captured fences and
     /// the stored episode verbatim. Returns the affected issue count.</summary>
     internal static int CloseSupersededRetryNotice(SqliteConnection connection, SqliteTransaction transaction,
-        long pair, long issueId, long generation, long localEpoch, long localRevision, long dropboxEpoch,
+        long pair, Issue notice, long generation, long localEpoch, long localRevision, long dropboxEpoch,
         long dropboxRevision, V2.FailureRetryOwner.State expected)
     {
-        return CloseRetryProjection(connection, transaction, pair, issueId, StateSchema.CloseSupersededRetryNotice,
+        return CloseRetryProjection(connection, transaction, pair, notice.Id, StateSchema.CloseSupersededRetryNotice,
         [
-            .. RetryNoticeArguments(pair, issueId), (StateSchema.ParamGeneration, generation),
+            .. RetryNoticeArguments(pair, notice), (StateSchema.ParamGeneration, generation),
             (StateSchema.ParamLocalEpoch, localEpoch), (StateSchema.ParamLocalRevision, localRevision),
             (StateSchema.ParamDropboxEpoch, dropboxEpoch), (StateSchema.ParamDropboxRevision, dropboxRevision),
             (StateSchema.ParamExpectedAttempts, expected.Attempts),
@@ -546,8 +546,9 @@ public static class IssueTable
     internal static bool ClosePageWaitNotice(SqliteConnection connection, SqliteTransaction transaction,
         string pairId, long pair, long expectedGeneration, long issueId, bool pageOnly)
     {
+        if (RetryNotice(connection, transaction, pair) is not { } notice || notice.Id != issueId) return false;
         return CloseRetryProjection(connection, transaction, pair, issueId, StateSchema.ClosePageWaitNotice,
-            [.. RetryNoticeArguments(pair, issueId), (StateSchema.ParamGeneration, expectedGeneration),
+            [.. RetryNoticeArguments(pair, notice), (StateSchema.ParamGeneration, expectedGeneration),
                 (StateSchema.ParamPageOnly, pageOnly)]) != 0;
     }
 
@@ -718,7 +719,7 @@ public static class IssueTable
         issue.Subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None;
 
     private static bool MayHoldResponsibility(Issue issue) => issue.Kind == IssueKind.Failure &&
-        (issue.Cause is TextKey.RequiredRepairRetry or TextKey.FailDropboxDeleteJobInvalid or TextKey.FailRecycledLate
+        (IssuePolicy.IsRetryNoticeCause(issue.Cause) || issue.Cause is TextKey.FailDropboxDeleteJobInvalid or TextKey.FailRecycledLate
             or TextKey.FailDuplicateFolderBinding || IssuePolicy.IsLocalAccessRetryCause(issue.Cause));
 
     // Live retry debt or an in-use lifecycle. First-run work is not here: it may change cause, only not close.
@@ -737,10 +738,10 @@ public static class IssueTable
                 (StateSchema.ParamPairRow, pair), (StateSchema.ParamIssue, issue.Id));
             return (long)held.ExecuteScalar()! != 0;
         }
-        if (issue.Cause == TextKey.RequiredRepairRetry)
+        if (IssuePolicy.IsRetryNoticeCause(issue.Cause))
         {
             using var protection = StorageCommand.Create(connection, transaction, StateSchema.RetryNoticeProtected,
-                RetryNoticeArguments(pair, issue.Id));
+                RetryNoticeArguments(pair, issue));
             return (long)protection.ExecuteScalar()! != 0;
         }
         using var command = StorageCommand.Create(connection, transaction, StateSchema.ReadItemEpisode,
@@ -913,11 +914,11 @@ public static class IssueTable
     private static void DetachMembers(SqliteConnection connection, SqliteTransaction transaction, long issueId) =>
         Execute(connection, transaction, StateSchema.DetachIssueMembers, (StateSchema.ParamIssue, issueId));
 
-    private static (string Name, object? Value)[] RetryNoticeArguments(long pair, long issueId) =>
+    private static (string Name, object? Value)[] RetryNoticeArguments(long pair, Issue notice) =>
     [
-        (StateSchema.ParamPairRow, pair), (StateSchema.ParamIssue, issueId),
+        (StateSchema.ParamPairRow, pair), (StateSchema.ParamIssue, notice.Id),
         (StateSchema.ParamKind, (int)IssueKind.Failure),
-        (StateSchema.ParamRetryCause, TextKey.RequiredRepairRetry.ToString())
+        (StateSchema.ParamRetryCause, notice.Cause.ToString())
     ];
 
     private static (string Name, object? Value)[] ItemLifecycle(long pair, ItemRetryToken token) =>

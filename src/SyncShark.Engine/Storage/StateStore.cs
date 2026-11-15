@@ -1469,7 +1469,7 @@ public sealed partial class StateStore : IStateStore
         var retry = ReadRetry(transaction, pair);
         var notice = retry is null ? null : IssueTable.RetryNotice(_connection, transaction, pair);
         if (notice is not null)
-            RequireOne(IssueTable.CloseSupersededRetryNotice(_connection, transaction, pair, notice.Id,
+            RequireOne(IssueTable.CloseSupersededRetryNotice(_connection, transaction, pair, notice,
                 expectedGeneration, local.Epoch, local.Revision, dropbox.Epoch, dropbox.Revision, retry!.Value));
         if (expectedIssue is not null && !IssueTable.CloseExact(_connection, transaction, expected.PairId, expectedIssue))
             throw StaleIssue(expectedIssue.Id);
@@ -1554,7 +1554,7 @@ public sealed partial class StateStore : IStateStore
                         (StateSchema.ParamKeepRetry, itemOnly is not null)));
                     _changes.FinishObligation(transaction, pairId, Side.Local, expectedGeneration, localEpoch, localRevision);
                     _changes.FinishObligation(transaction, pairId, Side.Dropbox, expectedGeneration, dropboxEpoch, dropboxRevision);
-                    if (notice is not null) RequireOne(IssueTable.CloseRetryNotice(_connection, transaction, pair, notice.Id));
+                    if (notice is not null) RequireOne(IssueTable.CloseRetryNotice(_connection, transaction, pair, notice));
                     _changes.RetireCoveredWork(transaction, pairId, pair, expectedGeneration,
                         localEpoch, dropboxEpoch, scan.ThroughWorkId);
                     // The kept wait ends here when this Repair left none of the pair's work pending; the completion
@@ -2034,7 +2034,7 @@ public sealed partial class StateStore : IStateStore
         var notice = IssueTable.RetryNotice(_connection, transaction, pair);
         RequireOne(ClearRetry(transaction, pair, expectedGeneration, localEpoch, dropboxEpoch, localRevision,
             dropboxRevision, expected));
-        if (notice is not null) RequireOne(IssueTable.CloseRetryNotice(_connection, transaction, pair, notice.Id));
+        if (notice is not null) RequireOne(IssueTable.CloseRetryNotice(_connection, transaction, pair, notice));
         transaction.Commit();
         _closureKeys?.Remove(pairId);
     });
@@ -2114,7 +2114,7 @@ public sealed partial class StateStore : IStateStore
         RequireIssueOnly(change);
         if (allowEmpty && change.Raise.Count == 0 && change.Close.Count == 0 && change.FirstRunAcknowledged.Count == 0) return;
         if (change.Raise.Count != 1 || change.Close.Count != 0 || change.FirstRunAcknowledged.Count != 0 ||
-            change.Raise[0].Kind != IssueKind.Failure || change.Raise[0].Cause != TextKey.RequiredRepairRetry ||
+            change.Raise[0].Kind != IssueKind.Failure || !IssuePolicy.IsRetryNoticeCause(change.Raise[0].Cause) ||
             change.Raise[0].Path != string.Empty)
             throw new ArgumentException(null, nameof(change));
     }

@@ -3464,13 +3464,13 @@ public sealed class InMemoryStateStore : IStateStore
         if (allowEmpty && change.Raise.Count == 0 && change.Close.Count == 0 && change.FirstRunAcknowledged.Count == 0) return;
         if (change.Raise.Count != 1 || change.Close.Count != 0 || change.FirstRunAcknowledged.Count != 0 ||
             change.Raise[0].Kind != IssueKind.Failure ||
-            change.Raise[0].Cause != TextKey.RequiredRepairRetry || change.Raise[0].Path != string.Empty)
+            !IssuePolicy.IsRetryNoticeCause(change.Raise[0].Cause) || change.Raise[0].Path != string.Empty)
             throw new ArgumentException(null, nameof(change));
     }
 
     private Issue? RetryNotice(string pairId) =>
         IssueRows(pairId).FirstOrDefault(issue => issue.Kind == IssueKind.Failure &&
-            issue.Cause == TextKey.RequiredRepairRetry && issue.Path.Length == 0);
+            IssuePolicy.IsRetryNoticeCause(issue.Cause) && issue.Path.Length == 0);
 
     private void RequireIssue(string pairId, Issue exact)
     {
@@ -3510,7 +3510,7 @@ public sealed class InMemoryStateStore : IStateStore
     {
         var issues = IssueRows(pairId);
         if (issues.RemoveAll(issue => issue.Id == issueId && issue.Kind == IssueKind.Failure &&
-                issue.Cause == TextKey.RequiredRepairRetry && issue.Path.Length == 0) == 0) return;
+                IssuePolicy.IsRetryNoticeCause(issue.Cause) && issue.Path.Length == 0) == 0) return;
         _items.Remove(issueId);
         if (HasInvalidFolderJob(pairId, string.Empty))
             ReconcileInvalidFolderJob(pairId, string.Empty, null, issues, DateTimeOffset.UtcNow);
@@ -4218,7 +4218,7 @@ public sealed class InMemoryStateStore : IStateStore
         }
         var invalid = kind == IssueKind.Failure && HasInvalidFolderJob(pairId, path);
         var protectedIncoming = kind == IssueKind.Failure &&
-            (cause == TextKey.RequiredRepairRetry || IssuePolicy.IsLocalAccessRetryCause(cause) ||
+            (IssuePolicy.IsRetryNoticeCause(cause) || IssuePolicy.IsLocalAccessRetryCause(cause) ||
              subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None);
         if (invalid && !protectedIncoming)
         {
@@ -4227,7 +4227,7 @@ public sealed class InMemoryStateStore : IStateStore
         }
         // Reporting the failed attempt refreshes the same notice; nothing else re-causes a row its owner still holds.
         if (existing is not null &&
-            (existing.Cause, cause) is not (TextKey.RequiredRepairRetry, TextKey.RequiredRepairRetry) &&
+            !(IssuePolicy.IsRetryNoticeCause(existing.Cause) && IssuePolicy.IsRetryNoticeCause(cause)) &&
             existing.Cause != TextKey.FailDropboxDeleteJobInvalid &&
             (incoming != TextKey.FailRecycledLate && HoldsResponsibility(pairId, existing) ||
              IssuePolicy.UnknownMove(existing.Kind, existing.Subject)))
@@ -4286,7 +4286,7 @@ public sealed class InMemoryStateStore : IStateStore
         issue.Subject.FirstRunDeletion != IssueSubject.FirstRunDeletionKind.None;
 
     private static bool MayHoldResponsibility(Issue issue) => issue.Kind == IssueKind.Failure &&
-        (issue.Cause is TextKey.RequiredRepairRetry or TextKey.FailDropboxDeleteJobInvalid or TextKey.FailRecycledLate ||
+        (IssuePolicy.IsRetryNoticeCause(issue.Cause) || issue.Cause is TextKey.FailDropboxDeleteJobInvalid or TextKey.FailRecycledLate ||
          IssuePolicy.IsLocalAccessRetryCause(issue.Cause));
 
     private bool HoldsResponsibility(string pairId, Issue issue)
@@ -4295,12 +4295,12 @@ public sealed class InMemoryStateStore : IStateStore
         // A late-recycled warning has no automatic resolution; only the user ends it.
         if (issue.Cause == TextKey.FailRecycledLate) return !issue.Dismissed;
         if (issue.Cause == TextKey.FailDropboxDeleteJobInvalid) return HasInvalidFolderJob(pairId, issue.Path);
-        if (issue.Cause == TextKey.RequiredRepairRetry) return RetryNoticeDebt(pairId, issue);
+        if (IssuePolicy.IsRetryNoticeCause(issue.Cause)) return RetryNoticeDebt(pairId, issue);
         return _items.ContainsKey(issue.Id) && _items[issue.Id] is not null;
     }
 
     private bool RetryNoticeDebt(string pairId, Issue issue) =>
-        issue is { Kind: IssueKind.Failure, Cause: TextKey.RequiredRepairRetry } && issue.Path.Length == 0 &&
+        issue.Kind == IssueKind.Failure && IssuePolicy.IsRetryNoticeCause(issue.Cause) && issue.Path.Length == 0 &&
         (Sources(pairId).Any(source => source.Obligation is not null) || _retries.ContainsKey(pairId));
 
     private bool DeleteIssue(List<Issue> issues, string pairId, Issue issue)

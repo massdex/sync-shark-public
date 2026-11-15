@@ -317,7 +317,7 @@ public sealed class EngineOperations(string productRoot, Action<string> progress
                 return new ResolveSummary(resolved ? SyncOutcome.InSync :
                     new SyncOutcome(ActionKind.None, NoneReason.Held, null, IssueKind.Failure, false), resolved, repair);
             }
-            if (choice == ResolutionChoice.Retry && issue is { Cause: TextKey.RequiredRepairRetry } &&
+            if (choice == ResolutionChoice.Retry && issue is not null && IssuePolicy.IsRetryNoticeCause(issue.Cause) &&
                 issue.Subject.Items.Count == 0)
             {
                 var repair = host.Store.ReadPrerequisiteRetry(pairId) is not null
