@@ -7972,8 +7972,10 @@ public static partial class ChangeRunnerChecks
                     "A stays closed; exactly the non-proven residual parks once under B through admission.");
                 Check.Require(bindings.All(saved => fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId) == saved),
                     "The replacement holder keeps descendants at Source until its own responsibility settles.");
-                await syncer.ResolveAsync(replacement!, ResolutionChoice.Retry, null, null, default);
-                await UntilDrainedAsync(syncer, default);
+                // Each explicit resolution opens a new session; transient rename holds do not cross requests.
+                var retry = new Syncer(context, observedPorts);
+                await retry.ResolveAsync(replacement!, ResolutionChoice.Retry, null, null, default);
+                await UntilDrainedAsync(new Syncer(context, observedPorts), default);
                 Check.Require(byId == 2 && closes == 2 && fixture.Inner.IssueById(PairId, replacement!.Id) is null &&
                     bindings.All(saved => fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId)?.DropboxPath ==
                         "Destination" + saved.DropboxPath["Source".Length..]),
@@ -8170,8 +8172,8 @@ public static partial class ChangeRunnerChecks
         static void CheckClose(bool real, string scenario)
         {
             using var fixture = new Fixture(realStore: real);
-            var local = LocalEntry("Source/Child", LocalId);
-            var remote = RemoteEntry(local.Path, DropboxId);
+            var local = LocalEntry("Source/Child", LocalId) with { IsFolder = scenario == "discovery" };
+            var remote = RemoteEntry(local.Path, DropboxId) with { IsFolder = local.IsFolder };
             var before = SyncedEntries.From(local, remote);
             var moved = remote with { Path = "Destination/Child" };
             var notice = new ChangeNotice(Side.Dropbox, ChangeKind.Changed, moved.Path, null,
@@ -8202,6 +8204,11 @@ public static partial class ChangeRunnerChecks
                 "The fixture parks one registration and retires only its parent.");
             Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count == 1,
                 "The parked registration remains durable before exact closure.");
+            if (scenario == "discovery")
+            {
+                var parked = PendingAt(fixture, notice.Side, notice.Path).Single();
+                fixture.Inner.RequireDiscovery(parked, fixture.Inner.ReadWork(parked).Single().WorkId);
+            }
             Issue? replacement = null;
             var retained = StoredWorkCount(fixture);
             if (scenario == "generation") AdvanceGeneration(fixture);
