@@ -3,7 +3,11 @@
     "engine-tests"
   ],
   "engine": [
-    "move-notice-probe"
+    "unknown-move-live",
+    "unknown-move-repair",
+    "completion-containment",
+    "completion-containment-cost",
+    "resolutions"
   ],
   "core": [],
   "ui": []

@@ -12,6 +12,12 @@ actually landed.
 
 ## [Unreleased]
 
+### Fixed
+- A Dropbox move whose result could not be confirmed now says its outcome is unknown rather than claiming Dropbox refused it.
+
+### Compatibility
+- Rolling back from 0.3.90 always requires restoring the pre-0.3.90 store backup. Older builds cannot read the new persisted unknown-move failure cause; settling notices first is not a rollback procedure.
+
 ## [0.3.89] - 2026-11-14
 
 ### Changed

@@ -42,6 +42,7 @@
   "RecycleUnavailable": "Did not delete {Path}: the Recycle Bin is not available for it.",
   "RecycleFailed": "Could not move {Path} to the Recycle Bin. {Message}",
   "DropboxRefused": "Dropbox refused the change to {Path}. {Message}",
+  "FailDropboxOutcomeUnknown": "Sync Shark couldn't confirm whether the change to {Path} was applied. It will check again on the next change; Retry checks now.",
   "ReadLocalFailed": "Could not read {Path} on this PC. {Message}",
   "LocalNameInvalid": "Could not use {Path} on this PC: Windows does not allow that name. {Message}",
   "ReadDropboxFailed": "Could not read {Path} in Dropbox. {Message}",

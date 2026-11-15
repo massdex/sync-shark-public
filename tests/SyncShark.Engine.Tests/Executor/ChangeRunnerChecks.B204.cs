@@ -951,8 +951,8 @@ public static partial class ChangeRunnerChecks
         return sql;
     }
 
-    // sqlite3_trace expands bound values, so a traced statement is identified by the template prefix before its
-    // first parameter. The longest matching expected template wins.
+    // sqlite3_trace expands values; all literal segments must match because distinct queries can share a prefix.
+    // Among matching templates the longest prefix wins.
     private static string AuthoredIdentity(string sql, string[] expected)
     {
         var text = sql.TrimStart();
@@ -965,6 +965,10 @@ public static partial class ChangeRunnerChecks
         {
             var prefix = ParameterPrefix(candidate);
             if (prefix.Length < 8 || prefix.Length <= width || !text.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            var literals = System.Text.RegularExpressions.Regex.Split(candidate, @"\$[A-Za-z_][A-Za-z0-9_]*");
+            var template = @"\A" + string.Join(".*?", literals.Select(System.Text.RegularExpressions.Regex.Escape)) + @"\z";
+            if (!System.Text.RegularExpressions.Regex.IsMatch(text, template,
+                    System.Text.RegularExpressions.RegexOptions.Singleline)) continue;
             width = prefix.Length;
             match = candidate;
         }

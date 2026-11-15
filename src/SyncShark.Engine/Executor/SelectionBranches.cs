@@ -6,7 +6,7 @@ namespace Massdex.SyncShark.Engine.Executor;
 internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext _context)
 {
     internal async IAsyncEnumerable<(PendingChange Work, ItemFailedException? Failure, ChangeNotice? Original,
-        (string Path, Entry? Entry)? FreshPrimary, bool Excluded, bool Gone)> ReadBranchesAsync(
+        (string Path, Entry? Entry)? FreshPrimary, bool Excluded, bool Gone, Issue? Parked)> ReadBranchesAsync(
         WorkSelection selection, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         await foreach (var branch in EnumerateBranchesAsync(selection, ct).ConfigureAwait(false))
@@ -82,7 +82,7 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
     }
 
     private async IAsyncEnumerable<(PendingChange Work, ItemFailedException? Failure, ChangeNotice? Original,
-        (string Path, Entry? Entry)? FreshPrimary, bool Excluded, bool Gone)> EnumerateBranchesAsync(
+        (string Path, Entry? Entry)? FreshPrimary, bool Excluded, bool Gone, Issue? Parked)> EnumerateBranchesAsync(
         WorkSelection selection,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
@@ -98,7 +98,11 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
             _pass.Progress(_pass.ActiveRow.Value, false);
             // Refuse the primary branch before its own observation; a walked child is checked in the loop below.
             var primaryKey = PathNames.KeyFor(notice.Side, notice.Path);
-            _pass.RefuseBeforeProvider(notice, work.Before);
+            if (_pass.RefuseBeforeProvider(notice, work.Before) is { } move)
+            {
+                yield return (work, null, work.Notice, null, false, false, move);
+                continue;
+            }
             var saved = work.Before;
             var first = !_pass.Visited.ContainsKey(primaryKey);
             var probe = await ProbeAsync(selection, work, identities, ct).ConfigureAwait(false);
@@ -140,7 +144,7 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
             catch (ItemFailedException error) { readFailure = error; }
             if (gone)
             {
-                yield return (work, null, null, null, false, true);
+                yield return (work, null, null, null, false, true, null);
                 continue;
             }
             // One scope answer for this first observation, from the fresh primary only: it gates the batch and walk
@@ -157,7 +161,7 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
             if (batch && !work.DiscoveryRequired) _context.Store.RequireDiscovery(selection, work.WorkId);
             yield return (work with { Notice = notice, Before = saved }, readFailure, work.Notice,
                 first && !notice.IdentityDeleted && readFailure is null
-                    ? (notice.Path, current) : null, excluded, false);
+                    ? (notice.Path, current) : null, excluded, false, null);
             if (readFailure is not null) continue;
             var oldPath = notice.OldPath ?? saved?.PathOn(notice.Side) ?? leftBehind;
             if (oldPath is not null && !string.Equals(oldPath, notice.Path, StringComparison.Ordinal))
@@ -166,7 +170,7 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
                     Notice = notice with { Path = oldPath, OldPath = null, Id = null, Observed = null,
                         IdentityDeleted = false, LocalContentDirty = false },
                     Before = notice.Id is null ? saved : _context.Store.SyncedById(selection.PairId, notice.Side, notice.Id)
-                }, null, notice, null, false, false);
+                }, null, notice, null, false, false, null);
             if (!first || current is not { IsFolder: true } || notice.IdentityDeleted ||
                 excluded && !releaseUnreadable) continue;
             // After the first Repair a folder's contents come from one add-only batch (D-1105-22), not this walk.
@@ -185,7 +189,7 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
                 }
                 catch (ItemFailedException error) { batchFailure = error; }
                 // As a failed walk: the folder keeps one retained failure and its selection retries.
-                if (batchFailure is not null) yield return (work with { Notice = notice }, batchFailure, null, null, false, false);
+                if (batchFailure is not null) yield return (work with { Notice = notice }, batchFailure, null, null, false, false, null);
                 continue;
             }
             // Only a Local walk of a plain folder can prove access; a skipped folder or a Dropbox notice proves nothing.
@@ -195,7 +199,7 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
             if (recorded.Count == 0)
             {
                 await foreach (var branch in ListAsync(work, current.Path, options, ct).ConfigureAwait(false))
-                    yield return (branch.Work, branch.Failure, null, null, false, false);
+                    yield return (branch.Work, branch.Failure, null, null, false, false, null);
                 continue;
             }
             var unreadable = new SelectionUnreadable(recorded);
@@ -206,7 +210,7 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
             }, ct).ConfigureAwait(false))
             {
                 failed |= branch.Failure is not null;
-                yield return (branch.Work, branch.Failure, null, null, false, false);
+                yield return (branch.Work, branch.Failure, null, null, false, false, null);
             }
             if (failed) continue;
             var released = unreadable.Release(_context.Store, selection.PairId, selection.PairGeneration, ct);
@@ -221,15 +225,15 @@ internal readonly struct SelectionBranches(SelectionPass _pass, ExecutorContext 
                 if (failure is not null)
                 {
                     yield return (work with { Notice = work.Notice with { Side = Side.Local, Path = path,
-                        Observed = null, Id = unreadable[key].Id }, Before = null }, failure, null, null, false, false);
+                        Observed = null, Id = unreadable[key].Id }, Before = null }, failure, null, null, false, false, null);
                     continue;
                 }
                 if (entry is null) continue;
                 var root = work with { Notice = ChildNotice(Side.Local, path, entry), Before = null };
-                yield return (root, null, null, null, false, false);
+                yield return (root, null, null, null, false, false, null);
                 if (!entry.IsFolder) continue;
                 await foreach (var branch in ListAsync(root, path, options, ct).ConfigureAwait(false))
-                    yield return (branch.Work, branch.Failure, null, null, false, false);
+                    yield return (branch.Work, branch.Failure, null, null, false, false, null);
             }
         }
     }

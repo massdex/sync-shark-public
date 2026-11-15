@@ -942,6 +942,19 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         return inner.HeldByOtherIssue(pairId, row, selectedIssueId);
     }
 
+    public void CloseUnknownMove(string pairId, long expectedGeneration, Issue expected,
+        Func<ChangeNotice, SyncedEntry?, bool, bool>? echoes)
+    {
+        Command();
+        inner.CloseUnknownMove(pairId, expectedGeneration, expected, echoes);
+    }
+
+    public Issue? UnknownMoveCovering(string pairId, string key)
+    {
+        Command();
+        return inner.UnknownMoveCovering(pairId, key);
+    }
+
     public Issue? HoldingIssue(string pairId, Row row)
     {
         Command();

@@ -293,6 +293,10 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
     public virtual bool SetIssueIgnored(string pairId, Issue expected, bool ignored) => Inner.SetIssueIgnored(pairId, expected, ignored);
 
     public virtual Issue? IssueById(string pairId, long id) => Inner.IssueById(pairId, id);
+    public virtual void CloseUnknownMove(string pairId, long expectedGeneration, Issue expected,
+        Func<ChangeNotice, SyncedEntry?, bool, bool>? echoes) =>
+        Inner.CloseUnknownMove(pairId, expectedGeneration, expected, echoes);
+    public virtual Issue? UnknownMoveCovering(string pairId, string key) => Inner.UnknownMoveCovering(pairId, key);
     public virtual IssueKind? HeldKind(string pairId, Row row, IReadOnlySet<long>? exceptIssues) =>
         Inner.HeldKind(pairId, row, exceptIssues);
     public virtual bool HeldCovers(string pairId, string key, IReadOnlySet<long>? exceptIssues) =>

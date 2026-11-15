@@ -53,7 +53,6 @@ public static class CheckRegistry
 
     public static IReadOnlyDictionary<string, IReadOnlyList<Action>> All { get; } = new Dictionary<string, IReadOnlyList<Action>>
     {
-        ["move-notice-probe"] = [Executor.ChangeRunnerChecks.MoveNoticeBaseProbe],
         ["literals"] = [Layout.LiteralsChecks.Run, Layout.OwnershipChecks.Run],
         ["dependencies"] = [Layout.DependencyChecks.Run],
         ["strings"] = [Layout.StringsChecks.Run],
@@ -103,6 +102,7 @@ public static class CheckRegistry
         ["renames"] = [Planner.RenamesChecks.Run],
         ["folder-deletes"] = [Planner.FolderDeletesChecks.Run, Executor.RecoveryChecks.Run, Executor.FolderDeleteRunnerChecks.SharedMountRemoval],
         ["resolutions"] = [Planner.ResolutionsChecks.Run, Executor.UnknownMoveCheckChecks.Run],
+        ["unknown-move-live"] = [Executor.ChangeRunnerChecks.UnknownMoveAutomatic, Executor.ChangeRunnerChecks.UnknownMoveClose],
         ["exclusions"] = [Planner.ExclusionsChecks.Run, Executor.ExclusionRunnerChecks.Run],
         ["released-history"] = [Executor.ChangeRunnerChecks.ReleasedHistory],
         ["excluded-admission"] = [Executor.ChangeRunnerChecks.RunExcludedAdmission],

@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
+using Massdex.SyncShark.Engine.Storage;
 using Massdex.SyncShark.Engine.Dropbox;
 using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Local;
@@ -38,6 +39,8 @@ public static partial class ChangeRunnerChecks
     public static void ReleasedHistory() => ReleasedHistoryAsync().GetAwaiter().GetResult();
 
     public static void Run() => RunAsync().GetAwaiter().GetResult();
+
+    public static void UnknownMoveAutomatic() => UnknownMoveAutomaticAsync().GetAwaiter().GetResult();
 
     public static void RunContainment() => ContainmentAsync().GetAwaiter().GetResult();
 
@@ -5432,6 +5435,10 @@ public static partial class ChangeRunnerChecks
     private static async Task RunAsync()
     {
         var failures = new List<Exception>();
+        try { await UnknownMoveAutomaticAsync(); }
+        catch (Exception error) { failures.Add(error); }
+        try { UnknownMoveClose(); }
+        catch (Exception error) { failures.Add(error); }
         try { await PathOnlyLiveReadsAsync(); }
         catch (Exception error) { failures.Add(error); }
         try { await OlderEpisodeConvergenceAsync(); }
@@ -7640,6 +7647,604 @@ public static partial class ChangeRunnerChecks
         for (var index = 0; index <= arrivals; index++)
             Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key("Arrival" + index)) is not null,
                 "N7/N8: every finite arrival remains reachable and commits");
+    }
+
+    private static async Task UnknownMoveAutomaticAsync()
+    {
+        var failures = new List<Exception>();
+        var endpointCounts = new Dictionary<(bool Real, int Children), int>();
+        var editedCounts = new Dictionary<(bool Real, string Scenario, int Children), int>();
+        var closeCounts = new Dictionary<int, int>();
+        foreach (var real in new[] { false, true })
+        foreach (var scenario in new[] { "adopt", "ambiguous", "ignored", "same-key", "same-key-edit", "replacement", "generation", "clash", "remote-edit", "local-edit", "cancel", "restore", "source", "arrivals-adopt", "arrivals-ambiguous" })
+        // Doubling the three-child subtree adds exactly six proven registrations, not another per-child read.
+        foreach (var children in scenario is "adopt" or "remote-edit" or "local-edit" ? new[] { 3, 6 } : new[] { 3 })
+        {
+            try { await CheckAsync(real, scenario, children); }
+            catch (Exception error) { failures.Add(new InvalidOperationException(
+                "Unknown move automatic real=" + real + " scenario=" + scenario + " children=" + children, error)); }
+        }
+        foreach (var real in new[] { false, true })
+        foreach (var entrance in new[] { "primary", "old-path", "walked", "local", "older-holder" })
+        {
+            try { await UnknownMoveEntranceAsync(real, entrance); }
+            catch (Exception error) { failures.Add(new InvalidOperationException(
+                "Unknown move entrance real=" + real + " entrance=" + entrance, error)); }
+        }
+        if (failures.Count != 0) throw new AggregateException(failures);
+        foreach (var real in new[] { false, true }) Check.Require(endpointCounts[(real, 3)] == endpointCounts[(real, 6)],
+            "Doubling the child count adds no endpoint or child read.");
+        foreach (var real in new[] { false, true })
+        foreach (var scenario in new[] { "remote-edit", "local-edit" })
+            Check.Require(editedCounts[(real, scenario, 3)] == editedCounts[(real, scenario, 6)],
+                "Doubling the subtree adds no read beyond the genuine edit's observation and freshness check.");
+        Check.Require(closeCounts[6] - closeCounts[3] == 6,
+            "Doubling three children adds only their six proven-row deletes to the close.");
+
+        async Task CheckAsync(bool real, string scenario, int children)
+        {
+            using var fixture = new Fixture(realStore: real);
+            var overlapping = scenario is "same-key" or "same-key-edit";
+            var bindings = new List<SyncedEntry>();
+            var notices = new List<ChangeNotice>();
+            for (var index = 0; index <= children; index++)
+            {
+                var suffix = index == 0 ? "" : "/Child" + index;
+                var local = index == 0 ? FolderEntry("Source", LocalId) : LocalEntry("Source" + suffix, LocalId + index);
+                var remote = index == 0 ? FolderEntry("Source", DropboxId) : RemoteEntry("Source" + suffix, DropboxId + index);
+                bindings.Add(SyncedEntries.From(local, remote));
+                var moved = remote with { Path = "Destination" + suffix };
+                var edited = scenario is ("remote-edit" or "same-key-edit") && index == 1;
+                if (edited) moved = moved with { Revision = "rev-2", ContentHash = DropboxContentHash.Compute(new byte[] { 2 }) };
+                var localNow = scenario == "clash" ? local : local with { Path = moved.Path };
+                var localEdit = scenario == "local-edit" && index == 1;
+                if (localEdit) localNow = localNow with { Size = 2, Modified = Stamp.AddSeconds(5) };
+                fixture.Local.Seed(localNow, index == 0 ? null : localEdit ? [2, 2] : [1]);
+                var observed = scenario == "source" ? remote : moved;
+                if (scenario != "source" || index != 1)
+                {
+                    fixture.Dropbox.Seed(observed, index == 0 ? null : edited ? [2] : [1]);
+                    notices.Add(new ChangeNotice(Side.Dropbox, ChangeKind.Changed, observed.Path, null, observed.Id, observed, false, false));
+                }
+                if (scenario != "source" || index == 1)
+                    notices.Add(new ChangeNotice(Side.Dropbox, ChangeKind.Deleted, remote.Path, null, null, null, false, false));
+            }
+            if (scenario == "clash") fixture.Local.Seed(FolderEntry("Destination", OccupantId), null);
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = bindings });
+            var arrivals = scenario is "arrivals-adopt" or "arrivals-ambiguous";
+            var first = RemoteEntry("Arrival0", "arrival-remote");
+            var later = RemoteEntry("Arrival1", "later-remote");
+            if (arrivals)
+            {
+                fixture.Dropbox.Seed(first, [1]);
+                fixture.Dropbox.Seed(later, [1]);
+            }
+            var (through, epoch, domain) = AcquireRemotePage(fixture, arrivals
+                ? [new ChangeNotice(Side.Dropbox, ChangeKind.Changed, first.Path, null, first.Id, first, false, false)]
+                : notices.ToArray());
+            if (scenario == "local-edit") Selected(fixture, "Destination/Child1", fixture.Local.FindById(LocalId + 1)!);
+            SourceFixture.AcquireJournal(fixture.Inner, fixture.Pair);
+            ClearObligations(fixture);
+            var move = new IssueSubject.UnknownMove(DropboxId, "Source", "Destination", null, true);
+            var subject = new IssueSubject([new IssueItem(Side.Local, scenario == "clash" ? "Source" : "Destination", LocalId),
+                new IssueItem(Side.Dropbox, "Source", DropboxId)], Side.Dropbox) { Move = move };
+            fixture.Inner.Commit(PairId, StateChange.Empty with
+                { Raise = [(IssueKind.Failure, TextKey.DropboxRefused, "Source", subject)] });
+            var issue = fixture.Inner.Issues(PairId).Single();
+            if (scenario == "ignored")
+            {
+                Check.Require(fixture.Inner.SetIssueIgnored(PairId, issue, true), "The exact move can be ignored.");
+                issue = fixture.Inner.IssueById(PairId, issue.Id)!;
+            }
+            if (scenario == "restore") fixture.Local.FailNext("Destination",
+                new LiveAdmissionStaleException(LiveAdmissionStaleReason.SelectionChanged));
+            var byId = 0;
+            var ambiguous = scenario is "ambiguous" or "arrivals-ambiguous";
+            using var cancellation = new CancellationTokenSource();
+            var cancelRead = scenario == "cancel";
+            var paths = new List<(string Path, bool Closed)>();
+            var closed = false;
+            var remoteCalls = new CountingSide(new HookedSide(fixture.Dropbox,
+                beforeRead: path => paths.Add((path, closed))));
+            fixture.DropboxView = new IdentitySide(remoteCalls, (id, ct) =>
+            {
+                ct.ThrowIfCancellationRequested();
+                byId++;
+                if (cancelRead)
+                {
+                    cancellation.Cancel();
+                    ct.ThrowIfCancellationRequested();
+                }
+                var entry = fixture.Dropbox.FindById(id)!;
+                if (ambiguous) entry = entry with { Path = "Elsewhere" };
+                return Task.FromResult<(IdentityLocation Location, bool InScope)?>(
+                    (new IdentityLocation("1", entry.Path, entry), true));
+            });
+            var opportunity = new WorkSelection(PairId, Generation, epoch, Side.Dropbox, domain,
+                DropboxId, PathNames.DropboxKey("Destination"), 1, through);
+            var events = new List<RunEvent>();
+            var boundary = new Boundary(_ => new Lease())
+                { Capture = (chosen, _, _) => Task.FromResult(Coverage(chosen)) };
+            var context = fixture.Context(opportunity) with { Events = events.Add };
+            var batches = 0;
+            var ports = new SyncPorts(new RecoveryBoundary(), boundary, new AdmittedSelection(), 0);
+            var observedPorts = ports with { RunBatchAsync = (work, side, scope, retries, settles, ct) =>
+            {
+                batches++;
+                return SyncJobs.RunBatchAsync(context, ports, work, scope, ct, side, retries, settles);
+            } };
+            var syncer = new Syncer(context, observedPorts);
+            var sql = new List<string>();
+            var attachments = new List<List<string>>();
+            var connection = real ? StoreConnection(fixture) : null;
+            Issue? replacement = null;
+            var retained = 0L;
+            var closes = 0;
+            var rounds = 0;
+            var parkedReplacement = 0;
+            fixture.Hooks.BeforeCallWith = (method, _) =>
+            {
+                if (method.Name == nameof(IStateStore.EndWorkPass) && ++rounds == 1 && arrivals)
+                    AcquireRemotePage(fixture, [.. notices, new ChangeNotice(Side.Dropbox, ChangeKind.Changed,
+                        later.Path, null, later.Id, later, false, false)]);
+                if (method.Name == nameof(IStateStore.AttachIssueWork) && connection is not null)
+                {
+                    attachments.Add([]);
+                    StartTrace(connection, attachments[^1]);
+                }
+                if (method.Name != nameof(IStateStore.CloseUnknownMove)) return;
+                Check.Require(++closes <= (scenario == "restore" || overlapping ? 2 : 1),
+                    "One responsibility reaches exact close only once per opportunity.");
+                if (scenario == "source") retained = StoredWorkCount(fixture);
+                if (scenario == "generation")
+                {
+                    retained = StoredWorkCount(fixture);
+                    Check.Require(retained == notices.Count, "All echo registrations exist before the generation changes.");
+                    AdvanceGeneration(fixture);
+                }
+                if (closes == 1 && (overlapping || scenario == "replacement"))
+                {
+                    if (scenario == "replacement") fixture.Inner.Commit(PairId, StateChange.Empty with
+                        { Close = [(issue.Path, new[] { issue.Kind })] });
+                    fixture.Inner.Commit(PairId, StateChange.Empty with
+                        { Raise = [(IssueKind.Failure, issue.Cause, overlapping ? "SOURCE" : issue.Path, subject)] });
+                    replacement = fixture.Inner.Issues(PairId).Single(candidate => candidate.Id != issue.Id);
+                    Check.Require(!overlapping || fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true,
+                        "The same-key replacement is raised while the original snapshot still matches.");
+                }
+                if (connection is not null) StartTrace(connection, sql);
+            };
+            fixture.Hooks.AfterCall = (method, arguments, result) =>
+            {
+                if (method == nameof(IStateStore.AttachIssueWork))
+                {
+                    if (connection is not null) StopTrace(connection);
+                    if (replacement is not null && arguments.OfType<Issue>().Any(item => item.Matches(replacement)))
+                    {
+                        Check.Require(result is true, "The residual registration attaches to the still-open replacement holder.");
+                        parkedReplacement++;
+                    }
+                }
+                if (method != nameof(IStateStore.CloseUnknownMove)) return;
+                if (scenario == "source") Check.Require(retained > 0 && StoredWorkCount(fixture) == retained,
+                    "Replanning preserves every retained registration through the exact-close transaction.");
+                closed = true;
+                if (connection is not null) StopTrace(connection);
+                if (scenario == "restore" && closes == 1) AcquireRemotePage(fixture, notices[0]);
+            };
+            try
+            {
+                if (cancelRead)
+                {
+                    var canceled = false;
+                    try { await UntilDrainedAsync(syncer, cancellation.Token); }
+                    catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { canceled = true; }
+                    Check.Require(canceled && byId == 1 && closes == 0 && paths.Count == 0 &&
+                        fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true &&
+                        fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Dropbox == notices.Count,
+                        "Cancellation at the by-id read preserves the move and all parked registrations before any close.");
+                    fixture.RestartStore();
+                    connection = real ? StoreConnection(fixture) : null;
+                    cancelRead = false;
+                    AcquireRemotePage(fixture, notices[0]);
+                    syncer = new Syncer(context, observedPorts);
+                }
+                if (arrivals)
+                {
+                    var result = await syncer.SyncWorkAsync(default);
+                    Check.Require(byId == 1 && (ambiguous ? result.Revisit && !result.Drained && rounds == 2 : result.Drained && rounds == 3),
+                        "A successful automatic close suppresses the arrival-only yield; an ambiguous attempt does not; byId=" + byId +
+                        " rounds=" + rounds + " result=" + result);
+                    if (ambiguous) Check.Require(await UntilDrainedAsync(syncer, default) == 1 && byId == 1,
+                        "The ordinary arrival-only yield drains in the second opportunity without retrying the held move.");
+                }
+                else if (scenario == "restore") await syncer.SyncWorkAsync(default);
+                else await UntilDrainedAsync(syncer, default);
+                if (scenario == "restore")
+                {
+                    var restored = fixture.Inner.Issues(PairId).Single(item => item.Subject.Move == move);
+                    Check.Require(restored.Id != issue.Id && byId == 1 && closes == 1 && paths.Count == 0,
+                        "A restored responsibility and a same-opportunity event do not spend a second by-id attempt.");
+                    AcquireRemotePage(fixture, notices[0]);
+                    await UntilDrainedAsync(syncer, default);
+                    Check.Require(fixture.Inner.IssueById(PairId, restored.Id) is null && closes == 2,
+                        "A new opportunity spends one fresh attempt and closes the restored responsibility.");
+                }
+            }
+            finally { if (connection is not null) StopTrace(connection); }
+            Console.WriteLine("Unknown move paths real=" + real + " scenario=" + scenario + " children=" + children +
+                ": " + string.Join(",", paths.Select(read => read.Path + (read.Closed ? ":after-close" : ":before-close"))));
+            if (arrivals)
+            {
+                Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Dropbox, PathNames.DropboxKey(first.Path)) is not null &&
+                    fixture.Inner.SyncedByKey(PairId, Side.Dropbox, PathNames.DropboxKey(later.Path)) is not null &&
+                    events.All(item => item.Kind != RunEventKind.Failed), "Both independent arrivals complete without hidden failure.");
+                Check.Require(ambiguous ? fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true :
+                    fixture.Inner.IssueById(PairId, issue.Id) is null && bindings.All(saved =>
+                        fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId)?.DropboxPath ==
+                            "Destination" + saved.DropboxPath["Source".Length..]),
+                    "The arrival yield leaves ambiguity held, while a decisive close rebases every descendant.");
+                return;
+            }
+            if (scenario == "source")
+            {
+                Check.Require(byId == 1 && closes == 1 && paths.All(read => read.Closed) && remoteCalls.Moves == 1 &&
+                    fixture.Inner.IssueById(PairId, issue.Id) is null,
+                    "An identity still at the source replans once through ordinary rename, never before its exact close.");
+                Check.Require(fixture.Local.FindById(LocalId + 1)?.Path == "Destination/Child1" &&
+                    fixture.Inner.SyncedById(PairId, Side.Dropbox, DropboxId + 1)?.DropboxPath == "Destination/Child1" &&
+                    fixture.Dropbox.FindById(DropboxId + 1) is null &&
+                    fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Dropbox == 0 &&
+                    !fixture.Inner.Issues(PairId).Any(),
+                    "The existing Id-null source deletion cannot relocate across ordinary rebase; the Local counterpart and binding remain, not an echo-retirement loss.");
+                Check.Require(events.All(item => item.Kind != RunEventKind.Failed),
+                    "Source replan has no hidden failure: " + string.Join(";", events.Where(item => item.Error is not null).Select(item => item.Error)));
+                return;
+            }
+            var expectedEndpoints = scenario is "ambiguous" or "replacement" or "generation" ? 0 : 2;
+            var expectedEdits = scenario is "remote-edit" or "local-edit" ? 2 : 0;
+            Check.Require(byId == (scenario is "cancel" or "restore" ? 2 : 1) && paths.All(read => read.Closed &&
+                    (read.Path is "Source" or "Destination" || expectedEdits == 2 && read.Path == "Destination/Child1")) &&
+                paths.Count(read => read.Path == "Destination/Child1") == expectedEdits &&
+                remoteCalls.Reads == expectedEndpoints + expectedEdits && remoteCalls.Moves == 0 && remoteCalls.Listings == 0 && batches == 0,
+                "One opportunity uses one by-id read, zero echo-child reads, observation plus freshness for a genuine edit and rename endpoint freshness reads; byId=" + byId +
+                " reads=" + remoteCalls.Reads + " moves=" + remoteCalls.Moves + " listings=" + remoteCalls.Listings + " batches=" + batches);
+            if (scenario == "adopt")
+            {
+                Check.Require(paths.Select(read => read.Path).Order().SequenceEqual(new[] { "Destination", "Source" }),
+                    "The two path reads are exactly the source and destination roots, never children.");
+                endpointCounts[(real, children)] = remoteCalls.Reads;
+            }
+            Check.Require(events.All(item => item.Kind != RunEventKind.Failed),
+                "Parking and settlement report no hidden failure: " + string.Join(";", events.Where(item => item.Error is not null).Select(item => item.Error)));
+            if (replacement is not null) Check.Require(
+                fixture.Inner.IssueById(PairId, replacement.Id)?.Matches(replacement) == true,
+                "Exact close cannot consume a replacement, even with identical endpoint identity.");
+            if (scenario is "replacement" or "generation")
+            {
+                Check.Require(scenario != "generation" || fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true,
+                    "A generation refusal leaves the exact move open.");
+                if (scenario == "generation") Check.Require(StoredWorkCount(fixture) == retained,
+                    "A generation refusal retains every old-generation registration, even though it is no longer selectable.");
+                foreach (var saved in bindings) Check.Require(
+                    fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId) == saved,
+                    "A refused close cannot rename saved bindings.");
+                if (scenario == "replacement") Check.Require(
+                    notices.Sum(notice => PendingAt(fixture, Side.Dropbox, notice.Path).Count) == notices.Count,
+                    "A replacement refusal cannot retire any of the parked registrations.");
+                return;
+            }
+            if (ambiguous)
+            {
+                Check.Require(fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true &&
+                    fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Dropbox == notices.Count,
+                    "Ambiguous observation retains the exact move and every attached registration.");
+                await UntilDrainedAsync(syncer, default);
+                Check.Require(byId == 1 && remoteCalls.Reads == 0, "No event means no automatic re-observation.");
+                ambiguous = false;
+                await syncer.ResolveAsync(issue, ResolutionChoice.Retry, null, null, default);
+                Check.Require(byId == 2, "Retry checks the move now.");
+            }
+            Check.Require(fixture.Inner.IssueById(PairId, issue.Id) is null &&
+                fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Dropbox == (scenario == "same-key-edit" ? 1 : 0),
+                "Adoption closes the move and retires only proven echoes, leaving the genuine edit under its holder.");
+            if (scenario == "remote-edit")
+            {
+                editedCounts[(real, scenario, children)] = remoteCalls.Reads;
+                var current = fixture.Inner.SyncedById(PairId, Side.Dropbox, DropboxId + 1)!;
+                var local = fixture.Local.FindById(current.LocalId)!;
+                Check.Require(await fixture.Local.ContentHashAsync(local, default) == DropboxContentHash.Compute(new byte[] { 2 }),
+                    "The genuine edit survives echo retirement and is downloaded once.");
+                return;
+            }
+            if (scenario == "local-edit")
+            {
+                editedCounts[(real, scenario, children)] = remoteCalls.Reads;
+                Check.Require(fixture.Dropbox.FindById(DropboxId + 1)?.ContentHash == DropboxContentHash.Compute(new byte[] { 2, 2 }) &&
+                    fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Local == 0,
+                    "Local work survives echo retirement and uploads its genuine edit.");
+                return;
+            }
+            if (overlapping)
+            {
+                Check.Require(fixture.Inner.Issues(PairId).Single().Matches(replacement!) &&
+                    parkedReplacement == (scenario == "same-key-edit" ? 1 : 0),
+                    "A stays closed; exactly the non-proven residual parks once under B through admission.");
+                Check.Require(bindings.All(saved => fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId) == saved),
+                    "The replacement holder keeps descendants at Source until its own responsibility settles.");
+                await syncer.ResolveAsync(replacement!, ResolutionChoice.Retry, null, null, default);
+                await UntilDrainedAsync(syncer, default);
+                Check.Require(byId == 2 && closes == 2 && fixture.Inner.IssueById(PairId, replacement!.Id) is null &&
+                    bindings.All(saved => fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId)?.DropboxPath ==
+                        "Destination" + saved.DropboxPath["Source".Length..]),
+                    "Settling the replacement releases and rebases every saved descendant; byId=" + byId + " closes=" + closes +
+                    " issues=" + string.Join(";", fixture.Inner.Issues(PairId).Select(item => item.Kind + " " + item.Path)) +
+                    " bindings=" + string.Join(";", bindings.Select(saved =>
+                        fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId)?.DropboxPath)));
+                Check.Require(!fixture.Inner.Issues(PairId).Any() &&
+                    fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Dropbox == 0 &&
+                    events.All(item => item.Kind != RunEventKind.Failed),
+                    "Settling B drains residual work without restoring A or raising a new failure.");
+                foreach (var saved in bindings)
+                    Check.Require(fixture.Local.FindById(saved.LocalId) is not null && fixture.Dropbox.FindById(saved.DropboxId) is not null,
+                        "Both sides keep every original identity while the held rebase transfers to B.");
+                if (scenario == "same-key-edit") Check.Require(
+                    await fixture.Local.ContentHashAsync(fixture.Local.FindById(LocalId + 1)!, default) ==
+                        DropboxContentHash.Compute(new byte[] { 2 }),
+                    "The residual genuine edit applies after B rebases the saved descendants.");
+                return;
+            }
+            if (scenario == "clash")
+            {
+                var clash = fixture.Inner.Issues(PairId).Single(item => item.Kind == IssueKind.NameClash);
+                var refused = false;
+                try { await syncer.ResolveAsync(clash, ResolutionChoice.RenameIncoming, "Renamed", null, default); }
+                catch (LiveAdmissionStaleException error) when (error.Reason == LiveAdmissionStaleReason.FootprintChanged)
+                { refused = true; }
+                Check.Require(refused && fixture.Inner.IssueById(PairId, clash.Id)?.Matches(clash) == true &&
+                    fixture.Inner.IssueById(PairId, issue.Id) is null &&
+                    fixture.Inner.CountWork(PairId, Generation, long.MaxValue).Dropbox == 0,
+                    "The existing moved-folder freshness refusal leaves the clash selectable without resurrecting retired echoes or the move failure.");
+                foreach (var saved in bindings)
+                    Check.Require(fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId) == saved &&
+                        fixture.Local.FindById(saved.LocalId)?.Path == saved.LocalPath &&
+                        fixture.Dropbox.FindById(saved.DropboxId)?.Path == "Destination" + saved.DropboxPath["Source".Length..],
+                        "The unresolved clash preserves every identity and saved binding after echo retirement.");
+                Check.Require(fixture.Local.FindById(OccupantId)?.Path == "Destination" &&
+                    fixture.Inner.Issues(PairId, [IssueKind.Failure, IssueKind.NameClash, IssueKind.Tie]).Single().Matches(clash),
+                    "The existing occupant survives and the same clash remains the only visible responsibility.");
+                return;
+            }
+            foreach (var saved in bindings)
+                Check.Require(fixture.Inner.SyncedById(PairId, Side.Dropbox, saved.DropboxId)?.DropboxPath ==
+                    "Destination" + saved.DropboxPath["Source".Length..], "Adoption rebases every saved descendant.");
+            if (real && scenario is not ("ambiguous" or "cancel" or "restore"))
+            {
+                string[] expected = [StateSchema.PairFence, StateSchema.SelectIssueById, StateSchema.PairFence,
+                    StateSchema.SourceFence, StateSchema.IssueRegistrations,
+                    .. Enumerable.Repeat(StateSchema.DeleteWork, notices.Count), StateSchema.SelectIssueByPathKeyKind,
+                    StateSchema.PairFence, StateSchema.HasInvalidFolderJob, StateSchema.ReadIssueMembers,
+                    StateSchema.ReadItemEpisode, StateSchema.CloseIssueExact, StateSchema.SelectIssueFact];
+                var normalized = NormalizedTraced(sql, expected.Distinct().ToArray()).Where(statement => statement != TransactionBegin &&
+                    statement != TransactionCommit && statement != TransactionRollback).ToList();
+                Check.Require(normalized.SequenceEqual(expected),
+                    "The exact-close trace is 11 + R plus one issue-facts publication read, with only proven-row deletes growing; observed=" + normalized.Count +
+                    " sequence=" + string.Join(";", normalized));
+                string[] attachExpected = [StateSchema.PairFence, StateSchema.SourceFence, StateSchema.ValidateIssue,
+                    StateSchema.Anchor, StateSchema.WorkWatermark, StateSchema.Registration,
+                    StateSchema.RegistrationByParent, StateSchema.InsertWork, StateSchema.WorkIssue, StateSchema.InsertIssueMember];
+                Check.Require(attachments.Count == notices.Count, "Each primary branch attaches exactly once.");
+                foreach (var trace in attachments)
+                {
+                    var attach = NormalizedTraced(trace, attachExpected).Where(statement => statement != TransactionBegin &&
+                        statement != TransactionCommit && statement != TransactionRollback).ToList();
+                    Check.Require(attach.SequenceEqual(attachExpected),
+                        "Each primary park has exactly the ten-statement attachment sequence; observed=" + attach.Count);
+                }
+                if (scenario == "adopt") closeCounts[children] = normalized.Count;
+                Console.WriteLine("Unknown move adopt children=" + children + " registrations=" + notices.Count +
+                    " close-statements=" + normalized.Count + " by-id=" + byId + " path-reads=" + remoteCalls.Reads);
+            }
+        }
+    }
+
+    private static async Task UnknownMoveEntranceAsync(bool real, string entrance)
+    {
+        using var fixture = new Fixture(realStore: real);
+        var local = LocalEntry("Source/Child", LocalId);
+        var remote = RemoteEntry(local.Path, DropboxId);
+        var saved = SyncedEntries.From(local, remote);
+        var movedLocal = local with { Path = "Destination/Child" };
+        var movedRemote = remote with { Path = movedLocal.Path };
+        fixture.Local.Seed(movedLocal, [1]);
+        fixture.Dropbox.Seed(movedRemote, [1]);
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [saved] });
+        WorkSelection selection;
+        if (entrance == "walked")
+        {
+            var parentLocal = FolderEntry("Destination", "parent-local");
+            var parentRemote = FolderEntry("Destination", "parent-remote");
+            fixture.Local.Seed(parentLocal, null);
+            fixture.Dropbox.Seed(parentRemote, null);
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(parentLocal, parentRemote)] });
+            fixture.Hooks.RepairDone = false;
+            selection = Selected(fixture, parentLocal.Path, parentLocal);
+        }
+        else if (entrance == "old-path")
+        {
+            var outsideLocal = LocalEntry("Outside", "outside-local");
+            var outsideRemote = RemoteEntry("Outside", "outside-remote");
+            fixture.Local.Seed(outsideLocal, [1]);
+            fixture.Dropbox.Seed(outsideRemote, [1]);
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [SyncedEntries.From(outsideLocal, outsideRemote)] });
+            selection = SeedRemote(fixture, outsideRemote, new ChangeNotice(Side.Dropbox, ChangeKind.Changed,
+                outsideRemote.Path, remote.Path, outsideRemote.Id, outsideRemote, false, false));
+        }
+        else selection = entrance == "local" ? Selected(fixture, movedLocal.Path, movedLocal) : SeedRemote(fixture, movedRemote);
+        SourceFixture.AcquireJournal(fixture.Inner, fixture.Pair);
+        ClearObligations(fixture);
+        Issue? older = null;
+        if (entrance == "older-holder")
+        {
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Raise = [(IssueKind.NameClash, TextKey.ClashNameTaken,
+                movedRemote.Path, new IssueSubject([new IssueItem(Side.Dropbox, movedRemote.Path, movedRemote.Id)], Side.Dropbox))] });
+            older = fixture.Inner.Issues(PairId).Single();
+        }
+        var move = new IssueSubject.UnknownMove(DropboxId, remote.Path, movedRemote.Path, null, false);
+        var subject = new IssueSubject([new IssueItem(Side.Local, movedLocal.Path, local.Id),
+            new IssueItem(Side.Dropbox, remote.Path, remote.Id)], Side.Dropbox) { Move = move };
+        fixture.Inner.Commit(PairId, StateChange.Empty with { Raise = [(IssueKind.Failure, TextKey.DropboxRefused, remote.Path, subject)] });
+        var issue = fixture.Inner.Issues(PairId).Single(item => item.Kind == IssueKind.Failure);
+        var byId = 0;
+        var reads = new List<string>();
+        fixture.DropboxView = new IdentitySide(new HookedSide(fixture.Dropbox, beforeRead: reads.Add), (_, _) =>
+        {
+            byId++;
+            var elsewhere = movedRemote with { Path = "Elsewhere" };
+            return Task.FromResult<(IdentityLocation Location, bool InScope)?>((new IdentityLocation("1", elsewhere.Path, elsewhere), true));
+        });
+        var traces = new List<List<string>>();
+        var connection = real ? StoreConnection(fixture) : null;
+        var attachments = 0;
+        fixture.Hooks.BeforeCallWith = (method, _) =>
+        {
+            if (method.Name != nameof(IStateStore.AttachIssueWork)) return;
+            attachments++;
+            if (connection is not null) { traces.Add([]); StartTrace(connection, traces[^1]); }
+        };
+        fixture.Hooks.AfterCall = (method, _, _) =>
+        {
+            if (method == nameof(IStateStore.AttachIssueWork) && connection is not null) StopTrace(connection);
+        };
+        var events = new List<RunEvent>();
+        var syncer = LiveSyncer(fixture, selection, new Boundary(_ => new Lease()), events);
+        try { await UntilDrainedAsync(syncer, default); }
+        finally { if (connection is not null) StopTrace(connection); }
+        Check.Require(byId == 1 && !reads.Any(path => path == remote.Path || path == movedRemote.Path) && attachments == 1 &&
+            fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true && StoredWorkCount(fixture) == 1 &&
+            events.All(item => item.Kind != RunEventKind.Failed),
+            "Each entrance parks exactly one durable branch before any covered path read; entrance=" + entrance +
+                " by-id=" + byId + " attachments=" + attachments + " reads=" + string.Join(",", reads));
+        if (older is not null) Check.Require(fixture.Inner.IssueById(PairId, older.Id)?.Matches(older) == true,
+            "An older overlapping holder cannot conceal or consume the unknown-move responsibility.");
+        string[] expected = [StateSchema.PairFence, StateSchema.SourceFence, StateSchema.ValidateIssue,
+            StateSchema.Anchor, StateSchema.WorkWatermark, StateSchema.Registration, StateSchema.RegistrationByParent,
+            StateSchema.InsertWork, StateSchema.WorkIssue, StateSchema.InsertIssueMember];
+        foreach (var trace in traces)
+        {
+            var actual = NormalizedTraced(trace, expected).Where(statement => statement != TransactionBegin &&
+                statement != TransactionCommit && statement != TransactionRollback);
+            Check.Require(actual.SequenceEqual(expected), "Every entrance uses the same exact ten-statement attachment.");
+        }
+    }
+
+    private static long StoredWorkCount(Fixture fixture)
+    {
+        // Current-generation queue APIs deliberately hide stale rows; this witness checks retained custody instead.
+        if (fixture.Inner is InMemoryStateStore memory)
+            return ((System.Collections.ICollection)typeof(InMemoryStateStore)
+                .GetField("_work", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(memory)!).Count;
+        using var command = StoreConnection(fixture).CreateCommand();
+        command.CommandText = "SELECT count(*) FROM change_work;";
+        return (long)command.ExecuteScalar()!;
+    }
+
+    public static void UnknownMoveClose()
+    {
+        string[] lookups = [StateSchema.SelectIssueById, StateSchema.SelectIssueByPathKeyKind];
+        foreach (var lookup in lookups)
+            Check.Require(AuthoredIdentity(System.Text.RegularExpressions.Regex.Replace(lookup,
+                @"\$[A-Za-z_][A-Za-z0-9_]*", "1"), lookups) == lookup,
+                "Exact SQL templates distinguish issue lookups that share their first parameter prefix.");
+        var failures = new List<Exception>();
+        foreach (var real in new[] { false, true })
+        foreach (var scenario in new[] { "deleted-echo", "changed-echo", "edit", "new", "old-path", "local",
+            "destination-delete", "before-null", "discovery", "kind", "wrong-path", "no-proof", "generation", "epoch", "replacement", "same-key" })
+        {
+            try { CheckClose(real, scenario); }
+            catch (Exception error) { failures.Add(new InvalidOperationException(
+                "Unknown move close real=" + real + " scenario=" + scenario, error)); }
+        }
+        if (failures.Count != 0) throw new AggregateException(failures);
+
+        static void CheckClose(bool real, string scenario)
+        {
+            using var fixture = new Fixture(realStore: real);
+            var local = LocalEntry("Source/Child", LocalId);
+            var remote = RemoteEntry(local.Path, DropboxId);
+            var before = SyncedEntries.From(local, remote);
+            var moved = remote with { Path = "Destination/Child" };
+            var notice = new ChangeNotice(Side.Dropbox, ChangeKind.Changed, moved.Path, null,
+                moved.Id, moved, false, false);
+            notice = scenario switch
+            {
+                "deleted-echo" => notice with { Kind = ChangeKind.Deleted, Path = remote.Path, Observed = null },
+                "destination-delete" => notice with { Kind = ChangeKind.Deleted, Observed = null },
+                "edit" => notice with { Observed = moved with { ContentHash = DropboxContentHash.Compute(new byte[] { 2 }) } },
+                "new" => notice with { Id = OccupantId, Observed = moved with { Id = OccupantId } },
+                "kind" => notice with { Observed = moved with { IsFolder = true } },
+                "wrong-path" => notice with { Path = "Elsewhere/Child", Observed = moved with { Path = "Elsewhere/Child" } },
+                "old-path" => notice with { OldPath = remote.Path },
+                "local" => notice with { Side = Side.Local, Id = local.Id, Observed = local with { Path = moved.Path } },
+                _ => notice
+            };
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [before] });
+            var selection = notice.Side == Side.Local ? Seed(fixture, notice) :
+                SeedRemote(fixture, moved with { Path = notice.Path, Id = notice.Id! }, notice);
+            var move = new IssueSubject.UnknownMove("folder-remote", "Source", "Destination", null, true);
+            var subject = new IssueSubject([new IssueItem(Side.Dropbox, move.Source, move.ExpectedId)], Side.Dropbox)
+                { Move = move };
+            fixture.Inner.Commit(PairId, StateChange.Empty with
+                { Raise = [(IssueKind.Failure, TextKey.DropboxRefused, move.Source, subject)] });
+            var issue = fixture.Inner.Issues(PairId).Single();
+            Check.Require(fixture.Inner.AttachIssueWork(selection, issue,
+                    [(notice, scenario == "discovery", scenario is "new" or "before-null" ? null : before)]) && fixture.Inner.CompleteWork(selection, null),
+                "The fixture parks one registration and retires only its parent.");
+            Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count == 1,
+                "The parked registration remains durable before exact closure.");
+            Issue? replacement = null;
+            var retained = StoredWorkCount(fixture);
+            if (scenario == "generation") AdvanceGeneration(fixture);
+            if (scenario == "epoch")
+            {
+                var source = fixture.Inner.ReadSource(PairId, Side.Dropbox)!.Value;
+                var next = source.Provenance! with { SourceEpoch = source.Epoch + 1 };
+                fixture.Inner.AdvanceSource(PairId, Side.Dropbox, Generation, source.Epoch, source.Revision,
+                    source.Provenance, source.Cursor, next.SourceEpoch, source.Revision + 1, next,
+                    source.Cursor, source.Obligation);
+            }
+            if (scenario is "replacement" or "same-key")
+            {
+                if (scenario == "replacement") fixture.Inner.Commit(PairId, StateChange.Empty with
+                    { Close = [(issue.Path, new[] { issue.Kind })] });
+                fixture.Inner.Commit(PairId, StateChange.Empty with
+                    { Raise = [(IssueKind.Failure, issue.Cause, scenario == "same-key" ? "SOURCE" : issue.Path, subject)] });
+                replacement = fixture.Inner.Issues(PairId).Single(candidate => candidate.Id != issue.Id);
+            }
+            var proofs = 0;
+            bool Echo(ChangeNotice item, SyncedEntry? saved, bool bound)
+            {
+                proofs++;
+                return SelectionObservation.SettlesDropboxEcho(item, saved, bound);
+            }
+            Exception? refused = null;
+            try { fixture.Store.CloseUnknownMove(PairId, Generation, issue, scenario == "no-proof" ? null : Echo); }
+            catch (Exception error) when (error is EngineRequestException or LiveAdmissionStaleException) { refused = error; }
+            var stale = scenario is "generation" or "replacement";
+            Check.Require(stale ? refused is not null && proofs == 0 : refused is null,
+                "Generation and exact-id fences precede every echo proof or write.");
+            Check.Require(scenario == "generation" ? fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true :
+                fixture.Inner.IssueById(PairId, issue.Id) is null,
+                "Only a current exact responsibility is closed.");
+            if (replacement is not null) Check.Require(
+                fixture.Inner.IssueById(PairId, replacement.Id)?.Matches(replacement) == true,
+                "A same-key or same-endpoint replacement survives the exact close.");
+            if (scenario is "generation" or "epoch") Check.Require(StoredWorkCount(fixture) == retained && proofs == 0,
+                "A generation refusal or stale source epoch preserves raw durable work without admitting an echo proof.");
+            else Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count ==
+                (scenario is "deleted-echo" or "changed-echo" or "same-key" ? 0 : 1),
+                "Only proven source deletes and unchanged destination entries retire; unrelated work stays durable.");
+        }
     }
 
     internal static async Task ConcurrentRefusalRedispatchAsync()
