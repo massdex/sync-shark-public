@@ -3216,7 +3216,7 @@ public static class FolderDeleteRunnerChecks
         // A Local plan reads Local evidence, which a real host only allows after its journal boundary is acquired.
         if (deletingSide == Side.Local) SourceFixture.AcquireJournal(fixture.RawStore, fixture.Pair);
         using var plan = await new FolderPlanBuilder(fixture.Context).BuildAsync(row, deletingSide,
-            new HashSet<string>(StringComparer.Ordinal), live: false, CancellationToken.None);
+            new HashSet<string>(StringComparer.Ordinal), live: false, null, authority, CancellationToken.None);
         return fixture.Store.BeginFolderRemoval(fixture.Pair.PairId, plan, authority, pageSize, CancellationToken.None);
     }
 

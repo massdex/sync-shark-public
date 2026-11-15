@@ -439,6 +439,8 @@ public static class FolderDeletesChecks
                 "nested ownership protects present children before removal rules: " + side + "/" + skip);
             Check.Require(FolderDeletes.Classify(row, side, facts with { Restored = true }, localContentDirty: false) == FolderVerdict.Survives,
                 "restoration protects present children before removal rules: " + side + "/" + skip);
+            Check.Require(FolderDeletes.Classify(row, side, facts with { MovedOut = true }, localContentDirty: false) == FolderVerdict.Survives,
+                "moved-out identity protects present children before removal rules: " + side + "/" + skip);
         }
         foreach (var side in Enum.GetValues<Side>())
         foreach (var saved in new SyncedEntry?[] { null, record })
@@ -454,6 +456,8 @@ public static class FolderDeletesChecks
                 "nested ownership protects an absent child: " + side);
             Check.Require(FolderDeletes.Classify(row, side, facts with { Restored = true }, localContentDirty: false) == FolderVerdict.Survives,
                 "restoration protects an absent child: " + side);
+            Check.Require(FolderDeletes.Classify(row, side, facts with { MovedOut = true }, localContentDirty: false) == FolderVerdict.Survives,
+                "moved-out identity protects an absent child: " + side);
         }
     }
 
@@ -485,10 +489,12 @@ public static class FolderDeletesChecks
             foreach (var present in flags)
             foreach (var restored in flags)
             foreach (var unreadable in flags)
+            foreach (var movedOut in flags)
             {
-                var expected = (verdict, present, restored, unreadable) == (FolderVerdict.Survives, true, false, false);
-                if (FolderDeletes.FollowUp(verdict, present, restored, unreadable) != expected)
-                    Check.Require(false, "survivor follow-up matrix: " + verdict + "/" + present + "/" + restored + "/" + unreadable);
+                var expected = (verdict, present, restored, unreadable, movedOut) == (FolderVerdict.Survives, true, false, false, false);
+                var facts = new FolderChildFacts(false, true, false, restored, unreadable, MovedOut: movedOut);
+                if (FolderDeletes.FollowUp(verdict, present, facts) != expected)
+                    Check.Require(false, "survivor follow-up matrix: " + verdict + "/" + present + "/" + restored + "/" + unreadable + "/" + movedOut);
             }
         }
     }

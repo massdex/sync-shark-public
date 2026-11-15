@@ -3,6 +3,7 @@
     "engine-tests"
   ],
   "engine": [
+    "local-split",
     "folder-deletes",
     "syncer"
   ],

@@ -37,7 +37,7 @@ public static class FolderDeletes
     {
         var entry = childRow.EntryOn(deletingFrom);
         if (facts.Unreadable || IssuePolicy.ProtectsSubtree(entry?.Skip) || facts.HoldsNestedRoot || facts.Restored ||
-            facts.KeepsMount)
+            facts.KeepsMount || facts.MovedOut)
             return FolderVerdict.Survives;
         // Ignored, ordinarily skipped and out-of-scope children are Removed before the saved-content check (6.5).
         if (!facts.InScope || entry is null || entry.Skip is not null) return FolderVerdict.Removed;
@@ -103,7 +103,8 @@ public static class FolderDeletes
     public static bool SelectBranch(FolderVerdict verdict, bool hasSurvivorAtOrBelow, bool hasSelectedAncestor) =>
         verdict == FolderVerdict.Removed && !hasSurvivorAtOrBelow && !hasSelectedAncestor;
 
-    /// <summary>Survivor follow-ups must not repeat a restore or observe unreadable content.</summary>
-    public static bool FollowUp(FolderVerdict verdict, bool present, bool restored, bool unreadable) =>
-        verdict == FolderVerdict.Survives && present && !restored && !unreadable;
+    /// <summary>Survivor follow-ups must not repeat a restore, observe unreadable content or pre-empt a moved-out
+    /// child's own rename.</summary>
+    public static bool FollowUp(FolderVerdict verdict, bool present, FolderChildFacts facts) =>
+        verdict == FolderVerdict.Survives && present && !facts.Restored && !facts.Unreadable && !facts.MovedOut;
 }

@@ -1903,7 +1903,12 @@ public static partial class EngineHostChecks
                 if (survivor)
                 {
                     var gone = (await session.Dropbox.ReadOneAsync(path + "/Gone", token))!;
-                    records.Add(SyncedEntries.From(gone with { Id = "local-gone" }, gone));
+                    // A real LocalSide requires a retired native id, not a fabricated non-numeric identity.
+                    var retiredPath = Directory.CreateDirectory(Path.Combine(root, Path.GetRandomFileName())).FullName;
+                    var retiredId = unchecked((long)WindowsDirectoryListing.ReadIdentity(retiredPath).FileId)
+                        .ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    Directory.Delete(retiredPath);
+                    records.Add(SyncedEntries.From(gone with { Id = retiredId }, gone));
                 }
                 store.Commit(pair.PairId, StateChange.Empty with { Record = records });
                 var row = new Row(PathNames.DropboxKey(path), null, entry, saved, [], null,

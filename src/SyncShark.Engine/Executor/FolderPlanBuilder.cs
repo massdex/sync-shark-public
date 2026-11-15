@@ -132,11 +132,19 @@ public sealed class FolderPlanBuilder
         var isUnreadable = side == Side.Local
             ? unreadable(key)
             : synced is not null ? unreadable(synced.LocalKey) : selectedReplacement && unreadable(key);
+        // A replacement identity is new content even when its bytes match the displaced binding.
+        var classifiedSaved = live && entry is not null && synced is not null && entry.Id != synced.IdOn(side)
+            ? null : synced;
         var facts = new FolderChildFacts(
             selectedReplacement || !live && synced is null && _context.ScanId != Guid.Empty && _context.Store.InScan(_context.Pair.PairId, _context.ScanId, side, key),
             inScope, nested, restored.Contains(synced?.LocalKey ?? key) || temporary is not null &&
                 FolderSync.TemporaryThisRun(synced, entry is null ? null : (side, entry), temporary), isUnreadable,
             FolderDeletes.KeepsMount(entry, authority));
+        // Keep split-move children for their own rename. Only Local can answer without a provider call per child.
+        if (side == Side.Dropbox && inScope && !nested && !facts.Restored && !facts.Unreadable &&
+            FolderIdentity.Checks(authority) &&
+            await FolderIdentity.KeptElsewhereAsync(_context, classifiedSaved, side, ct).ConfigureAwait(false))
+            facts = facts with { MovedOut = true };
         string? localHash = null;
         var dirty = false;
         if (side == Side.Local && inScope && !nested && !facts.Restored && !facts.Unreadable
@@ -149,12 +157,9 @@ public sealed class FolderPlanBuilder
                 localHash = (await _context.Evidence.HashAsync(_context.Local, entry, synced, before, ct).ConfigureAwait(false)).Hash;
             }
         }
-        // A replacement identity is new content even when its bytes match the displaced binding.
-        var classifiedSaved = live && entry is not null && synced is not null && entry.Id != synced.IdOn(side)
-            ? null : synced;
         var row = Row.ForOneSide(side, synced?.LocalKey ?? key, entry, classifiedSaved, [], localHash, folder.Context);
         var verdict = FolderDeletes.Classify(row, side, facts, dirty);
         return (new FolderChild(entry, synced, verdict),
-            FolderDeletes.FollowUp(verdict, entry is not null, facts.Restored, facts.Unreadable));
+            FolderDeletes.FollowUp(verdict, entry is not null, facts));
     }
 }

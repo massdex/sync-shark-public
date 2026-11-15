@@ -84,8 +84,10 @@ public static class FolderPlanBuilderChecks
             };
             using var store = StateStore.Open(Path.Combine(directory, Path.GetRandomFileName()));
             var counted = new StoreCounters(store);
-            var context = Context(pair, [pair], counted);
-            var source = context.For(side);
+            var local = new FakeSide(Side.Local);
+            var dropbox = new FakeSide(Side.Dropbox);
+            var context = Context(pair, [pair], counted, IdentitySide.Truthful(local, local), dropbox);
+            var source = side == Side.Local ? local : dropbox;
             var parent = await source.EnsureFolderAsync("Parent", CancellationToken.None);
             var path = test.Name == "ignored" ? "Parent/child.ignored" : "Parent/" + test.Name;
             var entry = test.Name is "flipped" or "skipped-folder"
@@ -416,8 +418,10 @@ public static class FolderPlanBuilderChecks
     {
         var pair = Pair();
         using var store = StateStore.Open(Path.Combine(directory, Path.GetRandomFileName()));
-        var context = Context(pair, [pair], store);
-        var source = (FakeSide)context.For(side);
+        var local = new FakeSide(Side.Local);
+        var dropbox = new FakeSide(Side.Dropbox);
+        var context = Context(pair, [pair], store, IdentitySide.Truthful(local, local), dropbox);
+        var source = side == Side.Local ? local : dropbox;
         var parent = await source.EnsureFolderAsync("Parent", CancellationToken.None);
         var child = await FileAsync(source, "Parent/child");
         var saved = new[] { await SavedAsync(source, parent), await SavedAsync(source, child) };
@@ -451,8 +455,10 @@ public static class FolderPlanBuilderChecks
         var pair = Pair();
         var database = Path.Combine(directory, Path.GetRandomFileName());
         using var store = StateStore.Open(database);
-        var context = Context(pair, [pair], store);
-        var source = (FakeSide)context.For(side);
+        var local = new FakeSide(Side.Local);
+        var dropbox = new FakeSide(Side.Dropbox);
+        var context = Context(pair, [pair], store, IdentitySide.Truthful(local, local), dropbox);
+        var source = side == Side.Local ? local : dropbox;
         var parent = await source.EnsureFolderAsync("Parent", CancellationToken.None);
         await FileAsync(source, "Parent/child");
         await ScanAsync(store, pair.PairId, side, []);
@@ -491,9 +497,10 @@ public static class FolderPlanBuilderChecks
         var pair = Pair();
         using var store = StateStore.Open(Path.Combine(directory, Path.GetRandomFileName()));
         var countedStore = new StoreCounters(store);
-        var local = new CountingSide(new FakeSide(Side.Local));
+        var localFake = new FakeSide(Side.Local);
+        var local = new CountingSide(localFake);
         var dropbox = new CountingSide(new FakeSide(Side.Dropbox));
-        var context = Context(pair, [pair], countedStore, local, dropbox);
+        var context = Context(pair, [pair], countedStore, IdentitySide.Truthful(local, localFake), dropbox);
         var source = context.For(side);
         var parent = await source.EnsureFolderAsync("Parent", CancellationToken.None);
         var branch = await source.EnsureFolderAsync("Parent/Unreadable", CancellationToken.None);
@@ -539,9 +546,10 @@ public static class FolderPlanBuilderChecks
         var pair = Pair();
         using var store = StateStore.Open(Path.Combine(directory, Path.GetRandomFileName()));
         var counted = new StoreCounters(store);
-        var local = new CountingSide(new FakeSide(Side.Local));
+        var localFake = new FakeSide(Side.Local);
+        var local = new CountingSide(localFake);
         var dropbox = new CountingSide(new FakeSide(Side.Dropbox));
-        var context = Context(pair, [pair], counted, local, dropbox);
+        var context = Context(pair, [pair], counted, IdentitySide.Truthful(local, localFake), dropbox);
         var parent = await context.For(side).EnsureFolderAsync("Parent", default);
         var saved = (await SavedAsync(context.For(side), parent)) with
         {
@@ -637,8 +645,9 @@ public static class FolderPlanBuilderChecks
             plan.Survivors(CancellationToken.None).Single().OnDeletingSide?.Path == "Parent/fresh" &&
             plan.Branches(CancellationToken.None).Single().OnDeletingSide == savedChild,
             "The saved child is removable while the fresh unsaved child survives");
-        Check.Require(counted.Commands == 2 + UnreadableAsks,
-            $"One plan open plus one scan probe for the single unsaved child ({counted.Commands} store commands)");
+        // Plan open, the unsaved child's scan probe and the saved child's indexed identity-binding probe.
+        Check.Require(counted.Commands == 3 + UnreadableAsks,
+            $"One plan open, one scan probe and one identity-binding probe ({counted.Commands} store commands)");
     }
 
     private static void Measured()
@@ -766,7 +775,8 @@ public static class FolderPlanBuilderChecks
         var pair = Pair();
         using var store = StateStore.Open(Path.Combine(directory, Path.GetRandomFileName()));
         var counted = new CountingSide(new FakeSide(Side.Dropbox));
-        var context = Context(pair, [pair], store, new FakeSide(Side.Local), counted);
+        var local = new FakeSide(Side.Local);
+        var context = Context(pair, [pair], store, IdentitySide.Truthful(local, local), counted);
         var source = context.For(Side.Dropbox);
         var parent = await source.EnsureFolderAsync("Parent", CancellationToken.None);
         var changed = await FileAsync(source, "Parent/changed");
@@ -788,9 +798,10 @@ public static class FolderPlanBuilderChecks
         var pair = Pair();
         using var store = StateStore.Open(Path.Combine(directory, Path.GetRandomFileName()));
         var countedStore = new StoreCounters(store);
-        var local = new CountingSide(new FakeSide(Side.Local));
+        var localFake = new FakeSide(Side.Local);
+        var local = new CountingSide(localFake);
         var dropbox = new CountingSide(new FakeSide(Side.Dropbox));
-        var context = Context(pair, [pair], countedStore, local, dropbox);
+        var context = Context(pair, [pair], countedStore, IdentitySide.Truthful(local, localFake), dropbox);
         var source = context.For(side);
         var parent = await source.EnsureFolderAsync("Parent", CancellationToken.None);
         var target = partial
@@ -900,8 +911,11 @@ public static class FolderPlanBuilderChecks
     private static PairConfig Pair() => new("pair", "Pair A", Path.Combine(Path.GetTempPath(), "engine-folder-plan"),
         "/PairRoot", "connection", [], [], FirstRunPolicy.NewestWins, true, null);
 
-    private static ExecutorContext Context(PairConfig pair, IReadOnlyList<PairConfig> pairs, IStateStore store) =>
-        Context(pair, pairs, store, new FakeSide(Side.Local), new FakeSide(Side.Dropbox));
+    private static ExecutorContext Context(PairConfig pair, IReadOnlyList<PairConfig> pairs, IStateStore store)
+    {
+        var local = new FakeSide(Side.Local);
+        return Context(pair, pairs, store, IdentitySide.Truthful(local, local), new FakeSide(Side.Dropbox));
+    }
 
     private static ExecutorContext Context(PairConfig pair, IReadOnlyList<PairConfig> pairs, IStateStore store,
         ISide local, ISide dropbox)

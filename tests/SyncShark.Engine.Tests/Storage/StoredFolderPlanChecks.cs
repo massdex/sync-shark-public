@@ -1236,7 +1236,7 @@ public static class StoredFolderPlanChecks
         SourceFixture.AcquireJournal(store, pair);
         var settings = new EngineSettings("", "", "", "", "", RecycleFallback.Fail, default,
             FirstRunPolicy.NewestWins, default, "", LogBufferCharacters, ScanTestSettings.BatchRows) { JournalPageBufferBytes = ScanTestSettings.JournalPageBufferBytes, LogReadBufferBytes = ScanTestSettings.LogReadBufferBytes };
-        var context = new ExecutorContext(local, dropbox, new FakeRecovery(), store, pair, new PathScope(pair, [pair]),
+        var context = new ExecutorContext(IdentitySide.Truthful(local, local), dropbox, new FakeRecovery(), store, pair, new PathScope(pair, [pair]),
             settings, new ReplaceTurn(), new FakeAdmission(), true, _ => { },
             ReserveDownloadAsync: (_, _, _, _) => throw new NotSupportedException(),
             Time: TimeProvider.System,
