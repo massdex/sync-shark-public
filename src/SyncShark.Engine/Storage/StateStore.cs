@@ -784,6 +784,12 @@ public sealed partial class StateStore : IStateStore
         Func<ChangeNotice, SyncedEntry?, bool, bool>? echoes) => Write(() =>
     {
         var retired = 0;
+        if (echoes is not null)
+        {
+            using var premature = _connection.BeginTransaction();
+            retired = _changes.RetireMoveEchoes(premature, pairId, expected, echoes);
+            premature.Commit();
+        }
         using (var transaction = _connection.BeginTransaction())
         {
             RequireGeneration(transaction, pairId, expectedGeneration);
@@ -791,7 +797,6 @@ public sealed partial class StateStore : IStateStore
                 !IssuePolicy.UnknownMove(expected.Kind, expected.Subject))
                 throw StaleIssue(expected.Id);
             // Keep associations available for proof, and roll retirement back if the exact close refuses.
-            if (echoes is not null) retired = _changes.RetireMoveEchoes(transaction, pairId, expected, echoes);
             if (!IssueTable.Close(_connection, transaction, pairId, expected.Path, [expected.Kind],
                     only: issue => issue.Id == expected.Id)) throw new InvalidDataException();
             transaction.Commit();
