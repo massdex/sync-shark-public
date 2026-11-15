@@ -120309,6 +120309,13 @@
       "hash": "e7d002927023~ee11f9fe5979~aa40e676801a~d00bdb140ff4~12e49acd69e8~6e13",
       "family": "openai",
       "reason": "This feature-freeze diagnostic correction changes only Unavailable's exception construction to preserve already-classified status and native-error evidence. Invalidation, public IOException compatibility, message construction, acquisition, publication, checkpoint ordering and host recovery behavior are unchanged, and no job is added. JournalSource still has the seven jobs recorded in this section; the class, file, CaptureFiniteAsync and ReadPageAsync split findings remain valid and open. Their behavior-preserving extraction is separate from this diagnostic behavior change under section 7.1. The journal-source structural lane retains ownership, with publication and candidate adoption first, and the recorded destination, clearing trigger and current-source review requirements remain in force."
+    },
+    {
+      "path": "src/SyncShark.Engine/Dropbox/DropboxErrors.cs",
+      "hash": "10862272b239~4c71e5cb891d~7670d35d5918~81ffb5014337~d02c24902849~2349",
+      "family": "anthropic",
+      "source_revision": "6edc497e9",
+      "reason": "Jobs unchanged: this diagnostic correction only extends ProviderCause, inside the existing provider-refusal construction and classification job, to read a tagless error's nested reason tag through the same SafeProviderTag filter. It changes log/cause text only; classification, waits, retries and limiter behavior are unchanged and no job is added. The recorded open split of the write-failure disposition and its decoration (Disposition, NoUsableReply, Contention, WithProviderWait, WithMove, Copy) remains valid and is still owned by the structural refactor lane; closure requires that lane's extraction and a fresh cross-family verdict. Writer record: an independent cross-family review of this delta is still pending."
     }
   ]
 }
