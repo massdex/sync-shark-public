@@ -1,0 +1,11 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "carried-folders",
+    "failure-episodes"
+  ],
+  "core": [],
+  "ui": []
+}
