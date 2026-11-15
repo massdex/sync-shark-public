@@ -235,7 +235,7 @@ public sealed class Syncer
             // Alone refusals are not competition; any refused remainder lane of a serial-started pass is.
             var competed = (serial || lanes > 1) && Volatile.Read(ref refused) > refusedAlone;
             // Progress only on arrivals, with no older refusal or completed continuation, yields to the opportunity boundary.
-            yielded = !settledMove && retired && !competed && !Volatile.Read(ref completed) && Volatile.Read(ref progressed) &&
+            yielded = retired && !competed && !Volatile.Read(ref completed) && Volatile.Read(ref progressed) &&
                 Volatile.Read(ref progress0) == 0 && Volatile.Read(ref refused0) == 0;
             repeat = settledMove || !yielded && (competed || retired || Volatile.Read(ref completed));
             serialOnly = !retired && (serialOnly || serial && competed);
