@@ -1,0 +1,16 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "dropbox",
+    "repair",
+    "zero-wait-retries",
+    "failure-episodes"
+  ],
+  "core": [
+    "--v2-run-checks"
+  ],
+  "ui": []
+}
