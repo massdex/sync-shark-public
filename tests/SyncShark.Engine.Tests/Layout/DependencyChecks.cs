@@ -431,9 +431,10 @@ public static class DependencyChecks
             TopLevelName(source) == owner.Type.Name && file == owner.File);
 
     private static bool OwnerFor(TypeId source, string? method, params Owner[] owners) =>
-        owners.Any(owner => (owner.Methods is null ||
-                method is not null && Array.IndexOf(owner.Methods, method) >= 0) &&
-            OwnedBy(source, owner));
+        owners.Any(owner => owner.Methods is null ? OwnedBy(source, owner) :
+            method is not null && Array.IndexOf(owner.Methods, method) >= 0 &&
+            source.Namespace == owner.Type.Namespace && TopLevelName(source) == owner.Type.Name &&
+            FileOf(Show(TopLevel(source)) + "::" + method) == owner.File);
 
     private static bool InDropbox(TypeId source) => ModuleOf(source.Namespace) == Dropbox;
 
@@ -898,6 +899,19 @@ public static class DependencyChecks
     {
         var store = StateStoreFileOwner.Type;
         var plan = ScratchDeleteOwners[1].Type;
+        foreach (var (second, allowed) in new[]
+        {
+            ("void Other() {}", true),
+            ("void OpenFolderPlan(int count) {}", false)
+        })
+        {
+            var declarations = LiteralsChecks.MapFiles([
+                (Engine + "Storage/StateStore.cs", "namespace Massdex.SyncShark.Engine.Storage; partial class StateStore { void OpenFolderPlan() {} void ResetScan() {} }"),
+                (Engine + "Storage/Other.cs", "namespace Massdex.SyncShark.Engine.Storage; partial class StateStore { " + second + " }")]);
+            WithFiles(name => declarations.GetValueOrDefault(name), () =>
+                Check.Require(CheckFileSystem(UsesOf(typeof(StoreScratchDeleteFixture)), store, Storage).Any() != allowed,
+                    "scratch file: an exact method resolves across partial files, but split method declarations fail closed"));
+        }
         var cases = new (Type Fixture, TypeId Source, string File)[]
         {
             (typeof(ScanExistsFixture), store, "Storage/StateStore.cs"),

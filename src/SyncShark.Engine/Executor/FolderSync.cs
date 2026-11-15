@@ -161,6 +161,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             FolderRemovalRoute.PlannedReplacement => PlannedReplacementJustified(observed, folder, deletingFrom),
             FolderRemovalRoute.Vacate => observed.EntryOn(deletingFrom) == folder.EntryOn(deletingFrom),
             FolderRemovalRoute.Repair => RepairJustified(observed, folder, deletingFrom),
+            FolderRemovalRoute.SplitCleanup => FolderDeletes.PlanJustified(observed.EntryOn(deletingFrom),
+                observed.EntryOn(absent), false),
             _ => FolderDeletes.PlanJustified(observed.EntryOn(deletingFrom), observed.EntryOn(absent),
                 request.Exclusion is not null || request.Route == FolderRemovalRoute.Chosen || restored)
         };
@@ -183,7 +185,8 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
     private static FolderRemovalAuthority AuthorityOf(FolderRemovalRoute route, Exclusion? exclusion) =>
         exclusion is not null ? FolderRemovalAuthority.Excluded : route switch
         {
-            FolderRemovalRoute.Ordinary or FolderRemovalRoute.PlannedReplacement => FolderRemovalAuthority.Inferred,
+            FolderRemovalRoute.Ordinary or FolderRemovalRoute.PlannedReplacement or FolderRemovalRoute.SplitCleanup =>
+                FolderRemovalAuthority.Inferred,
             FolderRemovalRoute.SelectedReplacement or FolderRemovalRoute.Chosen => FolderRemovalAuthority.Chosen,
             FolderRemovalRoute.Vacate => FolderRemovalAuthority.Vacate,
             FolderRemovalRoute.Repair => FolderRemovalAuthority.Repair,
@@ -208,7 +211,7 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
             // An expected root continues only its own operation; another identity's is never run here.
             if (found is not null && found.RootEntry.Id != request.ExpectedRootId)
                 return (null, FolderRemovalCheck.ForeignOperation, observed);
-            if (found is not null && Supersedes(found, observed)) superseded = found;
+            if (found is not null && Supersedes(found, observed, request.Route)) superseded = found;
             else
             {
                 request.Captured?.Dispose();
@@ -247,14 +250,14 @@ internal sealed class FolderSync(ExecutorContext _context, Parents _parents, Act
         return (operationId, FolderRemovalCheck.Passed, observed);
     }
 
-    // The unfinished-operation rule's one exception: an unsent inferred operation that recorded its counterpart absent where this request observed it
-    // present is superseded by this request's plan once that plan is accepted.
-    private bool Supersedes(FolderRemovalState found, Row observed)
+    // Split cleanup needs its own empty-plan acceptance; other routes supersede only a contradicted counterpart premise.
+    // Neither may discard a possibly-sent operation, and retirement waits for acceptance in FreezePlan.
+    private bool Supersedes(FolderRemovalState found, Row observed, FolderRemovalRoute route)
     {
         var other = PathNames.Other(found.DeletingSide);
         return found is { Authority: FolderRemovalAuthority.Inferred, SourceEvidence: null } &&
-            observed.EntryOn(other) is { } present &&
-            PathNames.KeyFor(other, present.Path) == PathNames.KeyFor(other, found.CounterpartPath) &&
+            (route == FolderRemovalRoute.SplitCleanup || observed.EntryOn(other) is { } present &&
+                PathNames.KeyFor(other, present.Path) == PathNames.KeyFor(other, found.CounterpartPath)) &&
             FolderRetirement.For(Recovery.Members(_context.Store, _context.Pair.PairId, found.OperationId,
                 _context.Settings.StoragePageSize)) == FolderRetirementDisposition.NoEffect;
     }

@@ -65,7 +65,21 @@ public static class StateSchema
           PRIMARY KEY(pair_id, source_id)) STRICT;
         CREATE INDEX folder_move_root ON folder_move(pair_id, root_id);
         """;
-    internal const string FolderMoveColumns = "source_id, root_id, parent_id, source_path, destination_path, destination_id, phase, launch, job_id, generation";
+    private const string MoveColumnSeparator = ", ";
+    private const string MoveSourceIdColumn = "source_id";
+    private const string MoveRootIdColumn = "root_id";
+    private const string MoveParentIdColumn = "parent_id";
+    private const string MoveSourcePathColumn = "source_path";
+    private const string MoveDestinationPathColumn = "destination_path";
+    private const string MoveDestinationIdColumn = "destination_id";
+    private const string MovePhaseColumn = "phase";
+    private const string MoveLaunchColumn = "launch";
+    private const string MoveJobIdColumn = "job_id";
+    private const string MoveGenerationColumn = "generation";
+    internal const string FolderMoveColumns = MoveSourceIdColumn + MoveColumnSeparator + MoveRootIdColumn + MoveColumnSeparator +
+        MoveParentIdColumn + MoveColumnSeparator + MoveSourcePathColumn + MoveColumnSeparator + MoveDestinationPathColumn +
+        MoveColumnSeparator + MoveDestinationIdColumn + MoveColumnSeparator + MovePhaseColumn + MoveColumnSeparator +
+        MoveLaunchColumn + MoveColumnSeparator + MoveJobIdColumn + MoveColumnSeparator + MoveGenerationColumn;
     private const string FolderMoveSelect = "SELECT " + FolderMoveColumns + " FROM folder_move";
     internal const string FolderMovesRead = FolderMoveSelect + " INDEXED BY folder_move_root WHERE pair_id=" + PairRow + " AND root_id=$root ORDER BY source_id;";
     internal const string FolderMoveRootRead = FolderMoveSelect + " WHERE pair_id=" + PairRow + " AND source_id>$after AND parent_id IS NULL ORDER BY source_id LIMIT 1;";
@@ -84,23 +98,24 @@ public static class StateSchema
     internal const string ParamMoveDestinationPath = "$destinationPath";
     internal const string ParamMoveDestinationId = "$destinationId";
     internal const string ParamMoveLaunch = "$launch";
-    private static readonly string[] FolderMoveColumnNames = FolderMoveColumns.Split(", ");
-    internal static readonly int MoveSourceId = Array.IndexOf(FolderMoveColumnNames, "source_id");
-    internal static readonly int MoveRootId = Array.IndexOf(FolderMoveColumnNames, "root_id");
-    internal static readonly int MoveParentId = Array.IndexOf(FolderMoveColumnNames, "parent_id");
-    internal static readonly int MoveSourcePath = Array.IndexOf(FolderMoveColumnNames, "source_path");
-    internal static readonly int MoveDestinationPath = Array.IndexOf(FolderMoveColumnNames, "destination_path");
-    internal static readonly int MoveDestinationId = Array.IndexOf(FolderMoveColumnNames, "destination_id");
-    internal static readonly int MovePhase = Array.IndexOf(FolderMoveColumnNames, "phase");
-    internal static readonly int MoveLaunch = Array.IndexOf(FolderMoveColumnNames, "launch");
-    internal static readonly int MoveJobId = Array.IndexOf(FolderMoveColumnNames, "job_id");
-    internal static readonly int MoveGeneration = Array.IndexOf(FolderMoveColumnNames, "generation");
+    private static readonly string[] FolderMoveColumnNames = FolderMoveColumns.Split(MoveColumnSeparator);
+    internal static readonly int MoveSourceId = Array.IndexOf(FolderMoveColumnNames, MoveSourceIdColumn);
+    internal static readonly int MoveRootId = Array.IndexOf(FolderMoveColumnNames, MoveRootIdColumn);
+    internal static readonly int MoveParentId = Array.IndexOf(FolderMoveColumnNames, MoveParentIdColumn);
+    internal static readonly int MoveSourcePath = Array.IndexOf(FolderMoveColumnNames, MoveSourcePathColumn);
+    internal static readonly int MoveDestinationPath = Array.IndexOf(FolderMoveColumnNames, MoveDestinationPathColumn);
+    internal static readonly int MoveDestinationId = Array.IndexOf(FolderMoveColumnNames, MoveDestinationIdColumn);
+    internal static readonly int MovePhase = Array.IndexOf(FolderMoveColumnNames, MovePhaseColumn);
+    internal static readonly int MoveLaunch = Array.IndexOf(FolderMoveColumnNames, MoveLaunchColumn);
+    internal static readonly int MoveJobId = Array.IndexOf(FolderMoveColumnNames, MoveJobIdColumn);
+    internal static readonly int MoveGeneration = Array.IndexOf(FolderMoveColumnNames, MoveGenerationColumn);
 
     private const string MovePendingFence = " WHERE pair_id=$pair AND pair_generation=$generation AND side=$side AND domain=$domain AND ";
-    internal static readonly string FolderMovePendingWork = "SELECT EXISTS(" +
-        string.Join(" UNION ALL ", new[] { (Index: "work_path", Column: "path_key"), (Index: "work_old_path", Column: "old_path_key") }
-            .SelectMany(path => new[] { path.Column + "=$k", path.Column + ">=$k||'/' AND " + path.Column + "<$k||'0'" }
-                .Select(range => "SELECT 1 FROM change_work INDEXED BY " + path.Index + MovePendingFence + range))) + ");";
+    private const string MovePendingCurrent = "SELECT 1 FROM change_work INDEXED BY work_path" + MovePendingFence;
+    private const string MovePendingOld = "SELECT 1 FROM change_work INDEXED BY work_old_path" + MovePendingFence;
+    internal const string FolderMovePendingWork = "SELECT EXISTS(" + MovePendingCurrent + "path_key=$k UNION ALL " +
+        MovePendingCurrent + "path_key>=$k||'/' AND path_key<$k||'0' UNION ALL " + MovePendingOld +
+        "old_path_key=$k UNION ALL " + MovePendingOld + "old_path_key>=$k||'/' AND old_path_key<$k||'0');";
     internal const string FolderMovePendingIssue = "SELECT EXISTS(SELECT 1 FROM issue INDEXED BY issue_path_key WHERE pair_id=$pair AND " +
         KeyOf + "path)>=$k||'/' AND " + KeyOf + "path)<$k||'0' AND (dismissed=0 OR item_retry_episode IS NOT NULL));";
 

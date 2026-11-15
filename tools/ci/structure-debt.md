@@ -67,9 +67,11 @@ Line ranges describe this correction; named units remain the identity if subsequ
 | `tools/public-mirror/Test-LaneExport.ps1` | Actual helper-stage loading and assertions 1-19; phase-duration contracts 20-23; stage loading 24-26; queue/publication contracts 27-343; full-selection contract 344-354; identifier-policy fixture setup 356-433 and cases 435-632; selection/provenance fixture driver and cases 634-741; result 742-744. | One fixture file runs the helper's actual stages. The cases share stage-slicing and repository setup; splitting them would duplicate that setup rather than separate production policy. Queue, merge and selection decisions remain owned by the helper and LaneSelection.ps1, not copied into fixture implementations. |
 | `tests/SyncShark.Engine.Tests/Layout/LiteralsChecks.cs` | Fence entry 19-70; message-catalog policy 72-332; enforcement fixtures 334-514; literal rules and ownership 515-719 (shared string permission 556-573; literal-kind predicate 575-576); coordinates 721-725; repository/type-to-file inventory 727-774; fence source selection 776-789. | SPLIT-PENDING: message-catalog policy and the shared type-to-file inventory are separable from literal enforcement. Required passing/failing fixtures stay with their rules. O3 extracts an existing permission branch and adds producer assertions, not a new policy job; the broader split is retained for structural work. Owner: refactor stream A, structure refactor step 5 (inventory integration lane). Destination: dedicated message-catalog and type-file inventory owners beside this file, with DependencyChecks, OwnershipChecks and SettingsParserChecks calling the inventory owner. Trigger: the next structural edit to LiteralsChecks, with this obligation checked at tooling integration even if no later edit occurs. Clear after both jobs are extracted, all callers reuse their owners, enforcement fixtures pass and cross-family review confirms the split. |
 
+The split-folder integration also extends the existing type-file inventory to resolve exact methods in partial types. Its current jobs are literal enforcement and fixtures (19-725), repository/type-and-method inventory (727-791), and source selection (793-806). The inventory extraction above remains open: this correction preserves one parser and the existing dependency consumers, and does not attempt a separate ownership-tooling refactor. The new partial-method passing/failing fixtures exercise that attribution without granting type-wide permissions.
+
 ## src/SyncShark.Engine/Storage/StateStore.cs
 
-Split-folder delta: schema admission and migration remain in the existing schema lifetime. The new partial shares the connection lock, write queue and publication owner; it does not discharge the existing class extraction. Retain every open row under its existing structural clearing condition.
+Split-folder delta: schema admission and migration remain in the existing schema lifetime. The new partial shares the connection lock, write queue and publication owner; relabel-only changes now bypass the ordinary no-op shortcut. Neither change discharges the existing class extraction. Retain every open row under its existing structural clearing condition.
 
 B-222 disposition: StateStore class-size and file-size - reason recorded; the growth extends existing retry, closing and persistence jobs (EndAbsentEpisode, CloseIdentityAbsent, CommitClosure, the HeldFolderMembers reader and the ResponsibilityRetained split), not a new workflow; split destination REFACTOR-PLAN-2, no row deleted. StateStore.SettleFolderRemovalItems - accepted as one atomic transition; do not split validation from commit. StateStore.SettleItemAttempt - pre-existing at lane base, not B-222; CompleteItemAttempt reads as improved only because SettleItemAttempt carries its old key.
 
@@ -77,7 +79,7 @@ Category-change split clearing condition (class-size and file-size rows, and the
 
 Current inventory: class :8-4185 (4178), file 4185. SettleEchoes :1759-1761 is ordered queue forwarding, not a new job. Long-member ranges below are current; embedded release histories in the class/file rows are historical, not current coordinates. Existing split verdicts remain.
 
-<!-- spec-source: ba5e7b9bf023~4bf3b57e5ff9~eb3d929ecaa9~2ff37c5bc403~f2bb373e6825~dd20 -->
+<!-- spec-source: 482584c8f61a~533830087bea~9e5ba162d09e~3038cc192315~fcbfd78a8fed~59ad -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -474,9 +476,11 @@ Split-folder delta: ordered launch JSON and the folder-row projection stay in th
 
 ## src/SyncShark.Engine/Executor/FolderSync.cs
 
+Split-cleanup delta: the checked removal owner adds the route's justification and Inferred authority, and narrowly extends its existing unsent supersede decision. Retirement still follows plan acceptance; possibly-sent and other-authority operations retain their existing custody. The class/file split obligations remain because this change adds no separate job and moving the full folder lifecycle is outside the split-move change. Source receipt refreshed; reviewer verdicts remain independently owned.
+
 Current temporary-wait change: RunLiveFolderPlanAsync :482-532 forwards the reporting turn's wait through its existing callback. No new job or line growth; the class/file and RemoveVacatedAsync split obligations remain with the folder structural lane.
 
-<!-- spec-source: ceac99f005af~72fae46cf6e3~30e9fca0193b~52613555b63b~acaa38fa0a05~dda4 -->
+<!-- spec-source: 9209a7109178~14a902cdff96~a035499316a9~23094a7b97c9~af5bc0451b7b~c03c -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|
@@ -882,7 +886,7 @@ Current merged delta: ranges above are descriptive, not a new semantic verdict. 
 
 ## src/SyncShark.Engine/Storage/StateSchema.cs
 
-Split-folder delta: the table, indexed custody probes and structure-derived row ordinals remain declarations in the SQL catalogue. The pending-work query is composed once from its two existing index/column shapes, with no execution policy. Current-content confirmation of the catalogue reason remains required.
+Split-folder delta: the table, indexed custody probes and structure-derived row ordinals remain declarations in the SQL catalogue. Pending-work SQL is constant composition of the existing current/old-path index shapes; named column tokens drive both the select list and its initialization-time ordinals. No execution policy is added. Current-content confirmation of the catalogue reason remains required.
 
 B-222 disposition: StateSchema class-size and file-size catalogue rows - accepted; declarative SQL only (held-member statement :940, the episode-query access directives :1027 and :1041, and the saved-binding ordinal :1281); no execution or transaction policy added.
 
@@ -890,7 +894,7 @@ Current catalogue: class :6-1532 (1527), file 1532; B-214 adds only declarations
 
 Category-change scope: Public page, count and keyset statements reuse one bound SQL expression. The catalogue still contains declarations only, without execution or transaction policy, so arbitrary catalogue splitting does not separate a runtime job. Absence-retirement scope changes the index access directives of PairItemEpisodes and ReadIssueRetryViews and adds HeldFolderMembers with its saved-binding column ordinal; these are declarations, not execution or transaction policy. The existing catalogue reason remains subject to content-bound review.
 
-<!-- spec-source: 28df67fe4030~5f7d6107676e~001244ab4859~9ed6a614de6c~165e3325cdde~6964 -->
+<!-- spec-source: 22f91b6f85e1~fc24e690a440~d75da309ac63~0f49ce2b5a91~d2f5eebabe73~04b3 -->
 
 | Line | Check | Unit | Action | Finding |
 |---|---|---|---|---|

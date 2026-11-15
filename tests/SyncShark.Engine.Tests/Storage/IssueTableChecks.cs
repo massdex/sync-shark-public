@@ -562,10 +562,11 @@ public static class IssueTableChecks
             Raise(writer, "pair-a", IssueKind.Failure, TextKey.FailLocalInUseOrAccessDenied, "ambiguous.txt");
             Raise(writer, "pair-a", IssueKind.Info, TextKey.InfoDropboxHistoryUnchecked, "ordinary-info.txt");
             var infoPage = IssueTable.OpenPage(reader, "pair-a", "connection-a", null, [IssueKind.Info], 1, 0);
-            var secondInfo = IssueTable.OpenPage(reader, "pair-a", null, null, [IssueKind.Info], 1, 1);
+            var lastInfo = IssueTable.OpenPage(reader, "pair-a", null, null, [IssueKind.Info], 1,
+                IssuePolicy.FailureInfoCauses.Count);
             Check.Require(infoPage.Total == IssuePolicy.FailureInfoCauses.Count + 1 &&
                 infoPage.Page.Single().Issue.Kind == IssueKind.Failure &&
-                secondInfo.Page.Single().Issue.Path == "ordinary-info.txt",
+                lastInfo.Page.Single().Issue.Path == "ordinary-info.txt",
                 "public categories and counts precede offset and limit while rows retain stored Failure");
             var countOnly = IssueTable.OpenPage(reader, "pair-a", null, null, [IssueKind.Info], 0, 0);
             var infoSnapshot = IssueTable.PageSnapshot(reader, [IssueKind.Info], 1);

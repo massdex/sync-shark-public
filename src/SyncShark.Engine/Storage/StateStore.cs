@@ -546,7 +546,7 @@ public sealed partial class StateStore : IStateStore
             var (pairId, change, selection, raised, settled) = state;
             if (change.Record.Count == 0 && change.StaleBindings.Count == 0 && change.ForgetBothSubtrees.Count == 0 && change.Renames.Count == 0 && change.FirstRunAcknowledged.Count == 0 &&
                 change.ForgetSelf.Count == 0 && change.ForgetSubtrees.Count == 0 && change.Raise.Count == 0 &&
-                change.Release is null && change.SettleRepair is null && change.HoldRepair is null &&
+                change.Release is null && change.SettleRepair is null && change.HoldRepair is null && change.SplitRelabel is null &&
                 !store.NeedsClosure(pairId, change.Close)) return;
             if (change.Renames.Count != 0) store.AttachScan(pairId, create: false);
             var scans = store.ActiveScanPartitions(pairId);

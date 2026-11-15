@@ -64,7 +64,7 @@ public sealed record StateChange(
             (before.LocalPath != rename.After.LocalPath || before.DropboxPath != rename.After.DropboxPath)) &&
         Record.Count + ForgetSelf.Count + ForgetSubtrees.Count + Raise.Count + Close.Count + FirstRunAcknowledged.Count +
         StaleBindings.Count + ForgetBothSubtrees.Count == 0 && LocalPublished is null && CloseScope is null &&
-        Release is null && SettleRepair is null && HoldRepair is null;
+        Release is null && SettleRepair is null && HoldRepair is null && SplitRelabel is null;
 
     /// <summary>A change that records, forgets and closes nothing.</summary>
     public static StateChange Empty { get; } = new([], [], [], [], [], [], []);

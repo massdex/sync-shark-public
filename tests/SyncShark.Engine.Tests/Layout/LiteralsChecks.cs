@@ -743,8 +743,8 @@ public static class LiteralsChecks
 
     private static readonly Lazy<IReadOnlyDictionary<string, string?>> TypeFiles = new(BuildTypeFiles);
 
-    /// <summary>The repo-relative file declaring the exact engine type, or null when no single engine file declares
-    /// it (a counterfeit or partial declaration elsewhere receives no ownership exemption).</summary>
+    /// <summary>The repo-relative file declaring the exact engine type or type::method, or null when its
+    /// declarations span files. Method-specific ownership can resolve a partial type without exempting other parts.</summary>
     internal static string? DeclaredIn(string fullName) =>
         TypeFiles.Value.TryGetValue(fullName, out var file) ? file : null;
 
@@ -752,8 +752,8 @@ public static class LiteralsChecks
         MapFiles(EngineFiles(FindRepoRoot()).Select(path => (
             Path.GetRelativePath(FindRepoRoot(), path).Replace('\\', '/'), File.ReadAllText(path))));
 
-    /// <summary>Maps each top-level type to the one file declaring it; a second (partial) declaration makes the
-    /// answer ambiguous (null), so it can never satisfy an ownership exemption.</summary>
+    /// <summary>Maps top-level types and their methods to exact declaration files; declarations spanning files
+    /// remain ambiguous, including overloads of a method split between files.</summary>
     internal static IReadOnlyDictionary<string, string?> MapFiles(IEnumerable<(string Relative, string Source)> files)
     {
         var map = new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -766,11 +766,28 @@ public static class LiteralsChecks
             {
                 if (type.Parent is not (BaseNamespaceDeclarationSyntax or CompilationUnitSyntax)) continue;
                 var name = string.IsNullOrEmpty(ns) ? type.Identifier.ValueText : ns + "." + type.Identifier.ValueText;
-                if (!map.TryGetValue(name, out var declared)) map[name] = relative;
-                else if (declared != relative) map[name] = null;
+                Add(name, relative);
+                if (type is not TypeDeclarationSyntax declaration) continue;
+                foreach (var member in declaration.Members)
+                {
+                    var method = member switch
+                    {
+                        MethodDeclarationSyntax named => named.Identifier.ValueText,
+                        ConstructorDeclarationSyntax constructor => constructor.Modifiers.Any(SyntaxKind.StaticKeyword)
+                            ? ".cctor" : ".ctor",
+                        _ => null
+                    };
+                    if (method is not null) Add(name + "::" + method, relative);
+                }
             }
         }
         return map;
+
+        void Add(string name, string relative)
+        {
+            if (!map.TryGetValue(name, out var declared)) map[name] = relative;
+            else if (declared != relative) map[name] = null;
+        }
     }
 
     private static IEnumerable<string> ScannedFiles(string root)

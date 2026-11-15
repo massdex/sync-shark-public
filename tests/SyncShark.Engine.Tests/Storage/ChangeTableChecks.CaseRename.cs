@@ -88,6 +88,7 @@ public static partial class ChangeTableChecks
             (rename with { FirstRunAcknowledged = [localItem] }, "a first-run acknowledgement"),
             (rename with { Raise = [(IssueKind.Failure, TextKey.FailLocalInUse, File, held.Token.Subject)] }, "a raise"),
             (rename with { Record = [saved] }, "a content record"),
+            (rename with { SplitRelabel = "split-source-id" }, "a split-folder relabel"),
             (StateChange.Empty with { Renames = [new RenameApplied(saved, saved with
                 { LocalPath = Renamed, LocalKey = PathNames.Key(Renamed) }, null, null, null)] }, "a move that is not case-only"),
             (StateChange.Empty with { Renames = [new RenameApplied(saved, saved with { LocalPath = Renamed }, null, null, null)] },
