@@ -1,0 +1,10 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "no-effect-closure"
+  ],
+  "core": [],
+  "ui": []
+}
