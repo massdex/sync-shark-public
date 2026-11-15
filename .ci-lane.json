@@ -1,0 +1,12 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "no-effect-closure",
+    "local-split",
+    "safety"
+  ],
+  "core": [],
+  "ui": []
+}
