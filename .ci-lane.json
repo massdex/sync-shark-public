@@ -1,0 +1,21 @@
+{
+  "build": [
+    "engine-tests",
+    "core-tests"
+  ],
+  "engine": [
+    "user-moves",
+    "carried-folders",
+    "zero-wait-retries",
+    "failure-episodes",
+    "dropbox",
+    "limiter",
+    "syncer",
+    "repair",
+    "unknown-move-live"
+  ],
+  "core": [
+    "--v2-run-checks"
+  ],
+  "ui": []
+}
