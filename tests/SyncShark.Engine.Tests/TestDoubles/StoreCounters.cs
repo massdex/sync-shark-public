@@ -607,14 +607,11 @@ internal sealed class StoreCounters(IStateStore inner) : IStateStore
         return inner.ReadPrerequisiteRetries(afterTicks, afterPairRow, pageSize);
     }
 
-    public void RecordPrerequisiteFailure(string pairId, long expectedGeneration,
-        long localEpoch, long dropboxEpoch, long localRevision, long dropboxRevision,
-        Massdex.SyncShark.V2.FailureRetryOwner.State? expected,
-        Massdex.SyncShark.V2.FailureRetryOwner.State next, StateChange failureNotice)
+    public (Massdex.SyncShark.V2.FailureRetryOwner.State? Previous, Massdex.SyncShark.V2.FailureRetryOwner.State Next) RecordPrerequisiteFailure(string pairId, long expectedGeneration,
+            Func<Massdex.SyncShark.V2.FailureRetryOwner.State?, Massdex.SyncShark.V2.FailureRetryOwner.State> advance, StateChange failureNotice)
     {
         Command();
-        inner.RecordPrerequisiteFailure(pairId, expectedGeneration, localEpoch, dropboxEpoch,
-            localRevision, dropboxRevision, expected, next, failureNotice);
+        return inner.RecordPrerequisiteFailure(pairId, expectedGeneration, advance, failureNotice);
     }
 
     public void CompleteRecomposition(string pairId, long expectedGeneration, long localEpoch, long dropboxEpoch,

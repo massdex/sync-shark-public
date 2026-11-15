@@ -124,13 +124,7 @@ public static partial class EngineHostChecks
         await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "disable"));
         await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "restart"));
         await StepAsync(nameof(FolderPollLifecycleAsync), () => FolderPollLifecycleAsync(root, "stop"));
-        try
-        {
-            await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: true)).ConfigureAwait(false);
-            throw new Exception("background storage failure was lost at shutdown");
-        }
-        catch (AggregateException error) when (error.InnerExceptions.Count == 1 &&
-            error.InnerException is InvalidDataException) { }
+        await StepAsync(nameof(StartupReceiptsAsync), () => StartupReceiptsAsync(root, fail: true, jobs: false, opportunity: true)).ConfigureAwait(false);
     }
 
     // RC05-T2/T8: the host loads the authority's saved preferences before it reports ready.
@@ -505,8 +499,8 @@ public static partial class EngineHostChecks
         store.SavePair(Pair(PairId));
         var local = store.ReadSource(PairId, Side.Local) ?? throw new InvalidOperationException();
         var remote = store.ReadSource(PairId, Side.Dropbox) ?? throw new InvalidOperationException();
-        store.RecordPrerequisiteFailure(PairId, 0, local.Epoch, remote.Epoch, local.Revision, remote.Revision,
-            null, new FailureRetryOwner.State(1, DateTimeOffset.UtcNow.AddMinutes(1)), RetryNotice());
+        store.RecordPrerequisiteFailure(PairId, 0, _ => new FailureRetryOwner.State(1, DateTimeOffset.UtcNow.AddMinutes(1)),
+            RetryNotice());
         Check.Require(RetryNotices(store, PairId) == 1, "the independently protected failed-Repair notice is recorded");
         await using var host = Compose(instance.StateAuthority, store);
         var survived = await WithPrerequisiteListingAsync(host, PairId, async (listing, ct) =>
@@ -615,9 +609,9 @@ public static partial class EngineHostChecks
         var local = store.ReadSource(id, Side.Local)!.Value;
         var remote = store.ReadSource(id, Side.Dropbox)!.Value;
         if (hasRetry)
-            store.RecordPrerequisiteFailure(id, generation, local.Epoch, remote.Epoch, local.Revision,
-                remote.Revision, null, FailureRetryOwner.AdoptedFailed(0, DateTimeOffset.UnixEpoch, null,
-                    Settings.Backoff, static () => 0.5), RetryNotice());
+            store.RecordPrerequisiteFailure(id, generation, _ => FailureRetryOwner.AdoptedFailed(0, DateTimeOffset.UnixEpoch, null,
+                    Settings.Backoff, static () => 0.5),
+                RetryNotice());
         else store.Commit(id, prerequisite ? RetryNotice() : StateChange.Empty with
         {
             Raise = [(IssueKind.Failure, TextKey.FailLocalInUse, "file.txt",
@@ -882,8 +876,8 @@ public static partial class EngineHostChecks
         var local = store.ReadSource(pair.PairId, Side.Local)!.Value;
         var remote = store.ReadSource(pair.PairId, Side.Dropbox)!.Value;
         var selected = new FailureRetryOwner.State(1, clock.GetUtcNow().AddSeconds(-1));
-        store.RecordPrerequisiteFailure(pair.PairId, generation, local.Epoch, remote.Epoch,
-            local.Revision, remote.Revision, null, selected, StateChange.Empty);
+        store.RecordPrerequisiteFailure(pair.PairId, generation, _ => selected,
+            StateChange.Empty);
         var configuration = (SemaphoreSlim)typeof(EngineHost).GetField("_configuration",
             BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(host)!;
         await configuration.WaitAsync();
@@ -962,9 +956,8 @@ public static partial class EngineHostChecks
             var generation = store.ReadPairExecution(id)!.Value.Generation;
             var local = store.ReadSource(id, Side.Local)!.Value;
             var remote = store.ReadSource(id, Side.Dropbox)!.Value;
-            store.RecordPrerequisiteFailure(id, generation, local.Epoch, remote.Epoch,
-                local.Revision, remote.Revision, null,
-                new FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(++ordinal)), StateChange.Empty);
+            store.RecordPrerequisiteFailure(id, generation, _ => new FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(++ordinal)),
+                StateChange.Empty);
         }
         Check.Require(host.Status().Status == AutoStatus.Waiting,
             "waiting observation pages beyond disabled, paused and decision-held earlier retry rows");
@@ -998,13 +991,11 @@ public static partial class EngineHostChecks
     {
         internal bool Fail = true;
         internal readonly IOException Failure = new("synthetic retry accounting failure");
-        public override void RecordPrerequisiteFailure(string pairId, long expectedGeneration, long localEpoch,
-            long dropboxEpoch, long localRevision, long dropboxRevision, FailureRetryOwner.State? expected,
-            FailureRetryOwner.State next, StateChange failureNotice)
+        public override (FailureRetryOwner.State? Previous, FailureRetryOwner.State Next) RecordPrerequisiteFailure(string pairId, long expectedGeneration,
+            Func<FailureRetryOwner.State?, FailureRetryOwner.State> advance, StateChange failureNotice)
         {
             if (Fail) throw Failure;
-            base.RecordPrerequisiteFailure(pairId, expectedGeneration, localEpoch, dropboxEpoch,
-                localRevision, dropboxRevision, expected, next, failureNotice);
+            return base.RecordPrerequisiteFailure(pairId, expectedGeneration, advance, failureNotice);
         }
     }
 
@@ -1557,8 +1548,8 @@ public static partial class EngineHostChecks
         var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
         // The failed attempt's deadline already honours a provider wait: the floor that nothing may shorten.
         var floored = new FailureRetryOwner.State(1, DateTimeOffset.UtcNow.AddMinutes(10));
-        store.RecordPrerequisiteFailure(PairId, generation, local.Epoch, remote.Epoch, local.Revision, remote.Revision,
-            null, floored, RetryNotice());
+        store.RecordPrerequisiteFailure(PairId, generation, _ => floored,
+            RetryNotice());
         await using var host = Compose(instance.StateAuthority, store);
         static Task<bool> Admitted(object registration, PairConfig pair, long generation, CancellationToken ct) =>
             Task.FromResult(true);
@@ -1691,10 +1682,12 @@ public static partial class EngineHostChecks
                 if (fail)
                 {
                     await store.Entered.Task;
-                    try { await auto.StopAsync(); }
-                    catch (InvalidDataException error) when (ReferenceEquals(error, store.Failure)) { }
-                    Check.Require(host.Status().Status == AutoStatus.Held && store.Passes == 1,
-                        "Storage failure in an opportunity reaches BackgroundFailed, rather than a provider refusal.");
+                    await UntilAsync(() => inner.ReadPrerequisiteRetry(pair.PairId)?.Attempts == 1);
+                    Check.Require(host.Status().Status != AutoStatus.Held,
+                        "An opportunity failure records its pair's retry instead of stopping the host.");
+                    auto.Kick(pair.PairId);
+                    await UntilAsync(() => store.Passes == 2 && inner.ReadPrerequisiteRetry(pair.PairId)?.Attempts == 2);
+                    await auto.StopAsync();
                     return;
                 }
                 await store.Selections.Task;
@@ -1709,11 +1702,7 @@ public static partial class EngineHostChecks
                     $"A later opportunity retries the persistent job but not the terminal receipt " +
                     $"(passes={store.Passes}, reads={handler.Reads}, selects={store.SelectCalls}).");
             }
-            finally
-            {
-                try { await auto.StopAsync(); }
-                catch (InvalidDataException error) when (fail && ReferenceEquals(error, store.Failure)) { }
-            }
+            finally { await auto.StopAsync(); }
             Check.Require(inner.FolderSubmission(good!).Phase == FolderSubmission.SubmissionPhase.Terminal &&
                 inner.FolderSubmission(bad!).Phase == FolderSubmission.SubmissionPhase.Accepted,
                 "A bad observation does not fail AutoSync or invent completion.");

@@ -2000,16 +2000,21 @@ public sealed partial class StateStore : IStateStore
     }
 
     /// <inheritdoc />
-    public void RecordPrerequisiteFailure(string pairId, long expectedGeneration,
-        long localEpoch, long dropboxEpoch, long localRevision, long dropboxRevision,
-        Massdex.SyncShark.V2.FailureRetryOwner.State? expected,
-        Massdex.SyncShark.V2.FailureRetryOwner.State next, StateChange failureNotice) => Write(() =>
+    public (Massdex.SyncShark.V2.FailureRetryOwner.State? Previous, Massdex.SyncShark.V2.FailureRetryOwner.State Next)
+        RecordPrerequisiteFailure(string pairId, long expectedGeneration,
+            Func<Massdex.SyncShark.V2.FailureRetryOwner.State?, Massdex.SyncShark.V2.FailureRetryOwner.State> advance,
+            StateChange failureNotice) => Ordered(() =>
     {
+        ArgumentNullException.ThrowIfNull(advance);
         RequireRetryNotice(failureNotice, allowEmpty: true);
         using var transaction = _connection.BeginTransaction();
         var pair = RequireGeneration(transaction, pairId, expectedGeneration);
-        RequireOne(RecordRetry(transaction, pair, expectedGeneration, localEpoch, dropboxEpoch, localRevision,
-            dropboxRevision, expected, next));
+        // Read and advance under the one writer: no concurrent completion can land between these reads and the write.
+        var (local, dropbox) = _changes.ReadRetryFences(transaction, pair);
+        var previous = ReadRetry(transaction, pair);
+        var next = advance(previous);
+        RequireOne(RecordRetry(transaction, pair, expectedGeneration, local.Epoch, dropbox.Epoch, local.Revision,
+            dropbox.Revision, previous, next));
         StateCommitter.Commit(_connection, transaction, _changes, pairId, failureNotice, DateTimeOffset.UtcNow,
             narrowRecordUpdates: true, raised: null, scans: ActiveScanPartitions(pairId, transaction));
         var adopted = IssueTable.RetryNotice(_connection, transaction, pair);
@@ -2017,6 +2022,7 @@ public sealed partial class StateStore : IStateStore
         // A prerequisite failure adopts the root notice as genuine debt: no page wait may close it beside the row.
         if (adopted is not null) _pageCreatedNotices.Remove(adopted.Id);
         UpdateClosures(pairId, failureNotice);
+        return (previous, next);
     });
 
     /// <inheritdoc />

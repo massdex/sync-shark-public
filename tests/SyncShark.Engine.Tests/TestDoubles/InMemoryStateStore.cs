@@ -1706,25 +1706,24 @@ public sealed class InMemoryStateStore : IStateStore
                 .Take(pageSize).ToList();
     }
 
-    public void RecordPrerequisiteFailure(string pairId, long expectedGeneration,
-        long localEpoch, long dropboxEpoch, long localRevision, long dropboxRevision,
-        Massdex.SyncShark.V2.FailureRetryOwner.State? expected,
-        Massdex.SyncShark.V2.FailureRetryOwner.State next, StateChange failureNotice)
+    public (Massdex.SyncShark.V2.FailureRetryOwner.State? Previous, Massdex.SyncShark.V2.FailureRetryOwner.State Next)
+        RecordPrerequisiteFailure(string pairId, long expectedGeneration,
+            Func<Massdex.SyncShark.V2.FailureRetryOwner.State?, Massdex.SyncShark.V2.FailureRetryOwner.State> advance,
+            StateChange failureNotice)
     {
+        ArgumentNullException.ThrowIfNull(advance);
         lock (_gate)
         {
             RequireRetryNotice(failureNotice, allowEmpty: true);
             RequireGeneration(pairId, expectedGeneration);
-            var local = RequireSource(pairId, Side.Local);
-            var dropbox = RequireSource(pairId, Side.Dropbox);
-            if (local.Epoch != localEpoch || local.Revision != localRevision ||
-                dropbox.Epoch != dropboxEpoch || dropbox.Revision != dropboxRevision ||
-                _retries.GetValueOrDefault(pairId) != expected && _retries.ContainsKey(pairId) ||
-                !_retries.ContainsKey(pairId) && expected is not null)
-                throw new InvalidOperationException();
+            RequireSource(pairId, Side.Local);
+            RequireSource(pairId, Side.Dropbox);
+            Massdex.SyncShark.V2.FailureRetryOwner.State? previous = _retries.TryGetValue(pairId, out var stored) ? stored : null;
+            var next = advance(previous);
             ApplyAtomic(pairId, failureNotice);
             _retries[pairId] = next;
             if (RetryNotice(pairId) is { } adopted) _pageCreatedNotices.Remove(adopted.Id);
+            return (previous, next);
         }
     }
 

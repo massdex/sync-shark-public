@@ -209,12 +209,14 @@ public partial interface IStateStore : IDisposable
     Massdex.SyncShark.V2.FailureRetryOwner.State? ReadPrerequisiteRetry(string pairId, Issue? expected = null);
     IEnumerable<(long PairRow, string PairId, long Generation, Massdex.SyncShark.V2.FailureRetryOwner.State State)>
         ReadPrerequisiteRetries(long? afterTicks, long? afterPairRow, int pageSize);
-    /// <summary>Records one unsuccessful prerequisite attempt and its notice under exact fences, without creating source debt.
-    /// In-flight listing-page failures never advance this durable episode.</summary>
-    void RecordPrerequisiteFailure(string pairId, long expectedGeneration,
-        long localEpoch, long dropboxEpoch, long localRevision, long dropboxRevision,
-        Massdex.SyncShark.V2.FailureRetryOwner.State? expected,
-        Massdex.SyncShark.V2.FailureRetryOwner.State next, StateChange failureNotice);
+    /// <summary>Records one unsuccessful prerequisite attempt and its notice at the current source fences and retry
+    /// state, read in the writing transaction. The pure advance computes the next state from the stored one.
+    /// In-flight listing-page failures never advance this episode. Returns the replaced and committed states.
+    /// A changed generation or missing source throws LiveAdmissionStaleException; storage failures throw.</summary>
+    (Massdex.SyncShark.V2.FailureRetryOwner.State? Previous, Massdex.SyncShark.V2.FailureRetryOwner.State Next)
+        RecordPrerequisiteFailure(string pairId, long expectedGeneration,
+            Func<Massdex.SyncShark.V2.FailureRetryOwner.State?, Massdex.SyncShark.V2.FailureRetryOwner.State> advance,
+            StateChange failureNotice);
     /// <summary>Clears exact recomposition retry state after healthy source checks, without recording a Repair.</summary>
     void CompleteRecomposition(string pairId, long expectedGeneration, long localEpoch, long dropboxEpoch,
         long localRevision, long dropboxRevision, Massdex.SyncShark.V2.FailureRetryOwner.State expected);

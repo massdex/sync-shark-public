@@ -37,7 +37,10 @@ internal sealed class EngineHost : IAsyncDisposable
     // pair's retry row updates or removes its entry in the same locked step; nothing else sets a row.
     private readonly Dictionary<string, ItemWait> _itemWaits = new(StringComparer.Ordinal);
     private readonly Dictionary<string, CancellationTokenSource> _feedStops = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, Task> _feeds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (Task Source, Task Observed)> _feeds = new(StringComparer.Ordinal);
+    // The generation and exact episode recovered by a live attempt; null means it has not been handed back yet.
+    private readonly Dictionary<string, (long Generation, FailureRetryOwner.State? Handed)> _liveRetries =
+        new(StringComparer.Ordinal);
     private readonly EngineExternals _externals;
     private readonly PilotStateAuthority _authority;
     private readonly EngineSettings _settings;
@@ -73,12 +76,40 @@ internal sealed class EngineHost : IAsyncDisposable
 
     internal CancellationToken Stopping => _stop.Token;
 
-    private async Task ObserveSourceAsync(Task source, CancellationToken cancellation)
+    // Live failures belong to one pair; only an inability to persist their accounting stops the host.
+    internal void LiveWorkFailed(string pairId, Exception error, RunLog? log)
+    {
+        try
+        {
+            log?.Failed(error);
+            lock (_gate)
+            {
+                if (_stopping || _sourceFailure is not null || _closed.Contains(pairId) ||
+                    Store.ReadPairExecution(pairId) is not { } current) return;
+                RecordPrerequisiteFailure(pairId, current.Generation, providerWait: null);
+                _liveRetries[pairId] = (current.Generation, null);
+            }
+            _monitor.RearmPrerequisiteWait();
+        }
+        catch (LiveAdmissionStaleException) { }
+        catch (Exception unrecorded) { BackgroundFailed(unrecorded); }
+    }
+
+    private async Task ObserveSourceAsync(string pairId, Task source, CancellationToken cancellation)
     {
         try { await source.ConfigureAwait(false); }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
         catch (LiveAdmissionStaleException) when (cancellation.IsCancellationRequested) { }
-        catch (Exception error) { BackgroundFailed(error); }
+        catch (Exception error)
+        {
+            // Unlike an opportunity, a feed has no run log: each failure episode owns one.
+            try
+            {
+                using var log = _openLog(pairId);
+                LiveWorkFailed(pairId, error, log);
+            }
+            catch (Exception unrecorded) { BackgroundFailed(unrecorded); }
+        }
     }
 
     // Acquisition and supervision outlive the caller, so the whole start runs without its context, such as Repair's.
@@ -139,7 +170,7 @@ internal sealed class EngineHost : IAsyncDisposable
                 try
                 {
                     affected[index] = (member.PairId, generation,
-                        RecordPrerequisiteFailure(member.PairId, generation, providerWait: null, withoutNotice: true));
+                        RecordPrerequisiteFailure(member.PairId, generation, providerWait: null, withoutNotice: true).Wait);
                 }
                 catch (Exception failure) { (accounting ??= []).Add(failure); }
             }
@@ -383,6 +414,7 @@ internal sealed class EngineHost : IAsyncDisposable
                 finally { lock (_gate) ((Registration)registration).Log = null; }
             }, ct, prerequisite).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception error) { log?.Failed(error); throw; }
     }
 
@@ -806,6 +838,8 @@ internal sealed class EngineHost : IAsyncDisposable
                 if (_stopping) throw Stale();
                 if (_sourceRetries.TryGetValue(id, out var sourceGeneration) && current?.Generation != sourceGeneration)
                     _sourceRetries.Remove(id);
+                if (_liveRetries.TryGetValue(id, out var live) && current?.Generation != live.Generation)
+                    _liveRetries.Remove(id);
                 _resources.Remove(id, out old);
                 if (replacement is not null) _resources.Add(id, replacement);
             }
@@ -903,7 +937,7 @@ internal sealed class EngineHost : IAsyncDisposable
                 await cancellation.CancelAsync().ConfigureAwait(false);
                 if (_feeds.Remove(id, out var feed))
                 {
-                    try { await feed.ConfigureAwait(false); }
+                    try { await feed.Observed.ConfigureAwait(false); }
                     catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
                 }
                 cancellation.Dispose();
@@ -932,7 +966,8 @@ internal sealed class EngineHost : IAsyncDisposable
         if (_feeds.ContainsKey(pairId) || _stopping) return;
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
         _feedStops.Add(pairId, cancellation);
-        _feeds.Add(pairId, ObserveSourceAsync(RunFeedAsync(), cancellation.Token));
+        var source = RunFeedAsync();
+        _feeds.Add(pairId, (source, ObserveSourceAsync(pairId, source, cancellation.Token)));
         async Task RunFeedAsync()
         {
             await Task.Yield();
@@ -948,8 +983,24 @@ internal sealed class EngineHost : IAsyncDisposable
         }
     }
 
+    // Join the ended feed's accounting before replacing its lifetime under the configuration semaphore.
+    private async Task RestartEndedFeedAsync(string pairId, CancellationToken ct)
+    {
+        await _configuration.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (!_feeds.TryGetValue(pairId, out var ended) || !ended.Source.IsCompleted) return;
+            await ended.Observed.WaitAsync(ct).ConfigureAwait(false);
+            if (_stopping) return;
+            _feeds.Remove(pairId);
+            if (_feedStops.Remove(pairId, out var stop)) stop.Dispose();
+            if (Store.ReadPairExecution(pairId) is { Pair.Enabled: true }) StartFeed(pairId);
+        }
+        finally { _configuration.Release(); }
+    }
+
     internal async Task EnsureSourceBasesAsync(string pairId, CancellationToken ct, RunLog? log = null,
-        bool prerequisite = false)
+        bool prerequisite = false, bool drain = false)
     {
         await AcquireAsync(pairId, async (registration, pair, generation, token) =>
         {
@@ -965,7 +1016,8 @@ internal sealed class EngineHost : IAsyncDisposable
             try
             {
                 log?.Event(RunEvent.Stage(TextKey.StageSourceBase));
-                await resources.Feed.EnsureSourceBaseAsync(token).ConfigureAwait(false);
+                if (drain) await resources.Feed.CatchUpAsync(token).ConfigureAwait(false);
+                else await resources.Feed.EnsureSourceBaseAsync(token).ConfigureAwait(false);
                 log?.Event(RunEvent.Stage(TextKey.StageSourceBase, ended: true, count: RunLog.CompletedOperation));
                 if (pair.Roots is null) throw new EngineRequestException(TextKey.RootUnbound);
                 await CatchUpLocalAsync(pairId, generation, token, log, prerequisite).ConfigureAwait(false);
@@ -1198,6 +1250,9 @@ internal sealed class EngineHost : IAsyncDisposable
         RunLog? ownedLog = null;
         RunLog? log = startupLog;
         CancellationTokenRegistration stop = default;
+        var live = false;
+        var handed = false;
+        FailureRetryOwner.State? admitted = null;
         try
         {
             lock (_gate)
@@ -1217,20 +1272,24 @@ internal sealed class EngineHost : IAsyncDisposable
                 var retry = expected is null ? Store.ReadPrerequisiteRetry(pairId) : reviewedRetry;
                 if (schedule is { } selected &&
                     (selected.Generation != current.Value.Generation || selected.State != retry)) return null;
-                if (retry is not null && ItemRetry(pairId) is not null) itemOnly = true;
+                live = _liveRetries.TryGetValue(pairId, out var marker);
+                // An already recovered row belongs to AutoSync, not another source drain.
+                handed = live && retry is { } row && marker.Handed == row && !Store.Obligated(pairId);
+                if (handed || retry is not null && ItemRetry(pairId) is not null) itemOnly = true;
                 else
                 {
-                    if (!Store.Obligated(pairId) && retry is null &&
+                    if (!Store.Obligated(pairId) && retry is null && !live &&
                         !SourceRecoveryPending(pairId, current.Value.Generation) && !LocalSourceStopped(current.Value.Pair)) return null;
                     attempt = new Prerequisite(current.Value.Pair, current.Value.Generation);
                     generation = current.Value.Generation;
+                    admitted = retry;
                     _prerequisites.Add(pairId, attempt);
                 }
             }
             if (itemOnly)
             {
                 // A due wake hands the retained work to ordinary dispatch; an event wake admits nothing and leaves the wait armed.
-                if (schedule is not null) _auto.Kick(pairId);
+                if (schedule is not null || handed) _auto.Kick(pairId);
                 return null;
             }
             // Registered after the attempt exists so an already-cancelled caller still classifies it.
@@ -1242,15 +1301,18 @@ internal sealed class EngineHost : IAsyncDisposable
             log ??= ownedLog;
             await RecomposeCurrentAsync(pairId, ct, log).ConfigureAwait(false);
             if (expected is not null) Store.ReadPrerequisiteRetry(pairId, expected);
-            await EnsureSourceBasesAsync(pairId, ct, log, prerequisite: true).ConfigureAwait(false);
+            await EnsureSourceBasesAsync(pairId, ct, log, prerequisite: true, drain: live).ConfigureAwait(false);
+            if (live) await RestartEndedFeedAsync(pairId, ct).ConfigureAwait(false);
             if (!Store.Obligated(pairId))
             {
-                var local = Store.ReadSource(pairId, Side.Local) ?? throw Stale();
-                var dropbox = Store.ReadSource(pairId, Side.Dropbox) ?? throw Stale();
-                var retry = Store.ReadPrerequisiteRetry(pairId, expected);
-                if (retry is not null)
-                    Store.CompleteRecomposition(pairId, generation, local.Epoch, dropbox.Epoch,
-                        local.Revision, dropbox.Revision, retry.Value);
+                lock (_gate)
+                {
+                    var retry = Store.ReadPrerequisiteRetry(pairId, expected);
+                    if (!_liveRetries.ContainsKey(pairId)) { if (retry is { } state) ClearPairRetry(pairId, generation, state); }
+                    else if (retry is null) _liveRetries.Remove(pairId);
+                    // A newer failure remains unhanded for its own recovering attempt.
+                    else _liveRetries[pairId] = (generation, retry == admitted ? retry : null);
+                }
                 return null;
             }
             summary = await DispatchSessionAsync(pairId, () => log,
@@ -1359,7 +1421,7 @@ internal sealed class EngineHost : IAsyncDisposable
                         // A completed Repair committed its own FinishRepair; debt that landed after it is a new event
                         // for the owed Repair, not a failure of this one (engine.md 819, RQ-179).
                         succeeded = error is null && (summary is { Completed: true } ||
-                            !Store.Obligated(pairId) && Store.ReadPrerequisiteRetry(pairId) is null);
+                            !Store.Obligated(pairId) && (Store.ReadPrerequisiteRetry(pairId) is null || _liveRetries.ContainsKey(pairId)));
                         if (!pending.SourceFailed &&
                             (succeeded || error is EngineRequestException { Key: TextKey.ResolveStale }))
                         {
@@ -1368,13 +1430,13 @@ internal sealed class EngineHost : IAsyncDisposable
                             // printed as a wait (retry is output, not a notice).
                             if (pending.ItemTurn is { } turn)
                                 (wait, reason) = (RecordPrerequisiteFailure(pairId, pending.Generation, Remaining(turn),
-                                    withoutNotice: true, itemKeys: pending.Retained ?? []), TextKey.WaitItemRetry);
+                                    withoutNotice: true, itemKeys: pending.Retained ?? []).Wait, TextKey.WaitItemRetry);
                             return;
                         }
                         reason = pending.SourceFailed ? TextKey.WaitSourceRetry :
                             summary?.Superseded == true ? TextKey.WaitSupersededRetry : null;
                         wait = RecordPrerequisiteFailure(pairId, pending.Generation, Remaining(pending.ItemTurn),
-                            reason is not null);
+                            reason is not null).Wait;
                     }
                     finally
                     {
@@ -1399,22 +1461,54 @@ internal sealed class EngineHost : IAsyncDisposable
     private TimeSpan? Remaining((TimeSpan? Wait, long? Started)? turn) =>
         turn is { } held ? FailureRetryOwner.RemainingProviderObservation(held.Wait, held.Started, _time) : null;
 
-    // Callers hold _gate.
-    private TimeSpan RecordPrerequisiteFailure(string pairId, long generation, TimeSpan? providerWait,
-        bool withoutNotice = false, IEnumerable<(Side Side, string Key)>? itemKeys = null)
+    // Callers hold _gate. The store reads the current row in its write transaction; retry policy stays here.
+    private (FailureRetryOwner.State Next, TimeSpan Wait) RecordPrerequisiteFailure(string pairId, long generation,
+        TimeSpan? providerWait, bool withoutNotice = false, IEnumerable<(Side Side, string Key)>? itemKeys = null)
     {
-        var local = Store.ReadSource(pairId, Side.Local) ?? throw Stale();
-        var dropbox = Store.ReadSource(pairId, Side.Dropbox) ?? throw Stale();
-        var expected = Store.ReadPrerequisiteRetry(pairId);
         var now = _time.GetUtcNow();
-        var next = FailureRetryOwner.AdoptedFailed(expected?.Attempts ?? 0, now, providerWait,
-            _settings.Backoff, Random.Shared.NextDouble);
-        Store.RecordPrerequisiteFailure(pairId, generation, local.Epoch, dropbox.Epoch,
-            local.Revision, dropbox.Revision, expected, next, withoutNotice ? StateChange.Empty : RetryNotice());
+        var (expected, next) = Store.RecordPrerequisiteFailure(pairId, generation,
+            stored => FailureRetryOwner.AdoptedFailed(stored?.Attempts ?? 0, now, providerWait,
+                _settings.Backoff, Random.Shared.NextDouble),
+            withoutNotice ? StateChange.Empty : RetryNotice());
         // Every host row write keeps the entry true: item keys continue or start it; any other write retires it.
         if (itemKeys is null) _itemWaits.Remove(pairId);
         else RecordItemKeys(pairId, itemKeys, expected, next);
-        return next.RetryAfter - now;
+        return (next, next.RetryAfter - now);
+    }
+
+    // Callers hold _gate; the retry row and its notice close together at fresh source fences.
+    private void ClearPairRetry(string pairId, long generation, FailureRetryOwner.State retry)
+    {
+        var local = Store.ReadSource(pairId, Side.Local) ?? throw Stale();
+        var dropbox = Store.ReadSource(pairId, Side.Dropbox) ?? throw Stale();
+        Store.CompleteRecomposition(pairId, generation, local.Epoch, dropbox.Epoch, local.Revision, dropbox.Revision, retry);
+    }
+
+    internal void CompleteLiveRetry(object registration, string pairId, long generation)
+    {
+        lock (_gate)
+        {
+            if (!_liveRetries.TryGetValue(pairId, out var marker) || marker.Handed is not { } handed ||
+                marker.Generation != generation || !TryHoldGeneration(registration)) return;
+            var row = Store.ReadPrerequisiteRetry(pairId);
+            if (row is not null && (row != handed || Store.Obligated(pairId))) return;
+            if (row is { } state) ClearPairRetry(pairId, generation, state);
+            _liveRetries.Remove(pairId);
+        }
+    }
+
+    // An admitted stale end keeps its handed row reachable through the existing retry schedule, without a notice.
+    internal void LiveRetryUnfinished(object registration, string pairId, long generation)
+    {
+        lock (_gate)
+        {
+            if (!_liveRetries.TryGetValue(pairId, out var marker) || marker.Handed is not { } handed ||
+                marker.Generation != generation || !TryHoldGeneration(registration) ||
+                Store.ReadPrerequisiteRetry(pairId) != handed) return;
+            _liveRetries[pairId] = (generation,
+                RecordPrerequisiteFailure(pairId, generation, providerWait: null, withoutNotice: true).Next);
+        }
+        _monitor.RearmPrerequisiteWait();
     }
 
     private void ReportPrerequisiteWait(string pairId, TextKey reason, TimeSpan wait, RunLog? log)

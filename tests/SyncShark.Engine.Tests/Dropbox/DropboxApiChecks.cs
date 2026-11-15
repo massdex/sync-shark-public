@@ -1577,8 +1577,8 @@ public static class DropboxApiChecks
         var local = store.ReadSource(pair.PairId, Side.Local)!.Value;
         var remote = store.ReadSource(pair.PairId, Side.Dropbox)!.Value;
         var debt = new Massdex.SyncShark.V2.FailureRetryOwner.State(OneUnit, DateTimeOffset.UnixEpoch.AddSeconds(OneUnit));
-        store.RecordPrerequisiteFailure(pair.PairId, 0, local.Epoch, remote.Epoch,
-            local.Revision, remote.Revision, before, debt, notice);
+        store.RecordPrerequisiteFailure(pair.PairId, 0, _ => debt,
+            notice);
         var protectedNotice = store.RecordPrerequisitePageWait(pair.PairId, 0, operation, notice);
         store.CompletePrerequisitePageWait(pair.PairId, 0, operation, protectedNotice);
         Check.Require(store.ReadPrerequisiteRetry(pair.PairId) == debt &&

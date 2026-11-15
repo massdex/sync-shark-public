@@ -278,8 +278,10 @@ public static partial class EngineHostChecks
         await StepAsync(nameof(ItemWaitWallClockStepAsync), () => ItemWaitWallClockStepAsync(root, forward: false)).ConfigureAwait(false);
         await StepAsync(nameof(ItemWaitWallClockStepAsync), () => ItemWaitWallClockStepAsync(root, forward: true)).ConfigureAwait(false);
         await StepAsync(nameof(EventAfterDeadlineAttemptsOnceAsync), () => EventAfterDeadlineAttemptsOnceAsync(root)).ConfigureAwait(false);
-        await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, fatal: true)).ConfigureAwait(false);
-        await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, fatal: false)).ConfigureAwait(false);
+        await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, unexpected: true)).ConfigureAwait(false);
+        await StepAsync(nameof(DueDispatchFailureAsync), () => DueDispatchFailureAsync(root, unexpected: false)).ConfigureAwait(false);
+        await StepAsync(nameof(ContendedFailureAccountingAsync), () => ContendedFailureAccountingAsync(root)).ConfigureAwait(false);
+        await StepAsync(nameof(HandedStaleRearmsAsync), () => HandedStaleRearmsAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(PausedDueDispatchKeepsRowAsync), () => PausedDueDispatchKeepsRowAsync(root)).ConfigureAwait(false);
         await StepAsync(nameof(RepairWithoutTurnReleasesRowAsync), () => RepairWithoutTurnReleasesRowAsync(root)).ConfigureAwait(false);
         // N-161 before C2-C5: their settles after a Repair turn also cross its window, so N-161 owns that protection.
@@ -458,59 +460,126 @@ public static partial class EngineHostChecks
         finally { selected.TrySetResult(); }
     }
 
-    // A6 (fatal) and A9 (EngineRequestException): an unexpected failure of the due dispatch stops the host with the
-    // row unchanged, and the restarted host attempts it once at startup; a refused request keeps the host running
-    // and the next event attempts the work once.
-    private static async Task DueDispatchFailureAsync(string root, bool fatal)
+    // Supersedes the item-retry A6 host-fatal expectation: unexpected live failures are pair-scoped.
+    // A9's refused request still leaves the item wait to the next event.
+    private static async Task DueDispatchFailureAsync(string root, bool unexpected)
     {
-        var folder = Path.Combine(root, fatal ? "item-due-fatal" : "item-due-refused");
-        var rig = await ItemRig.StartedAsync(folder).ConfigureAwait(false);
-        var row = rig.Store.ReadItemRetry(rig.PairId);
+        await using var rig = await ItemRig.StartedAsync(Path.Combine(root,
+            unexpected ? "item-due-failure" : "item-due-refused")).ConfigureAwait(false);
+        var row = rig.Store.ReadItemRetry(rig.PairId)!.Value;
         var thrown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Exception failure = fatal ? new InvalidOperationException("synthetic due-dispatch failure") :
-            new EngineRequestException(TextKey.ResolveStale);
         rig.BeforeSelect = () =>
         {
             rig.BeforeSelect = null;
             thrown.TrySetResult();
-            throw failure;
+            if (unexpected) throw new InvalidOperationException("synthetic due-dispatch failure");
+            throw new EngineRequestException(TextKey.ResolveStale);
         };
-        Exception? checkFailure = null;
+        await rig.FireAsync(rig.FirstWait).ConfigureAwait(false);
+        await thrown.Task.WaitAsync(HookBound).ConfigureAwait(false);
+        if (!unexpected)
+        {
+            Check.Require(rig.Store.ReadPrerequisiteRetry(rig.PairId) == row && rig.Attempts == 0,
+                "A9 a refused due dispatch leaves the row unchanged");
+            rig.Host.WakeAfterOperation(rig.PairId);
+            await rig.AttemptedOnceAsync("A9 the next event dispatches the retained work once").ConfigureAwait(false);
+            Check.Require(rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
+                "A9 a refused request is not fatal: the host keeps running");
+            return;
+        }
+        await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(rig.PairId)?.Attempts == row.Attempts + 1 &&
+            rig.AutoSyncIdle(), "live failure accounting completes").ConfigureAwait(false);
+        var retry = rig.Store.ReadPrerequisiteRetry(rig.PairId)!.Value;
+        var notice = rig.Store.Issues(rig.PairId).Single(issue => issue.Path.Length == 0);
+        Check.Require(rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
+            "an unexpected opportunity failure keeps the host running");
+        string[] logs;
+        lock (rig.Logs) logs = rig.Logs.ToArray();
+        var lines = logs.SelectMany(System.IO.File.ReadAllLines).ToArray();
+        Check.Require(lines.Count(line => line.Contains("Failed\tInvalidOperationException", StringComparison.Ordinal)) == 1 &&
+            !lines.Any(line => line.Contains("synthetic", StringComparison.Ordinal)),
+            "the existing opportunity log records the failure once without its message");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var continuations = rig.Rig.Wire.Calls.Count(path => path == "/2/files/list_folder/continue");
+        var armed = 0;
+        rig.Rig.Transport.Respond = (request, _) =>
+        {
+            if (request.RequestUri!.AbsolutePath == "/2/files/list_folder/continue" && Interlocked.Exchange(ref armed, 1) == 0)
+                rig.BeforeSelect = () =>
+                {
+                    rig.BeforeSelect = null;
+                    entered.TrySetResult();
+                    rig.Hold(release.Task, "hold the recovered live opportunity");
+                };
+            return Task.FromResult<HttpResponseMessage?>(null);
+        };
         try
         {
-            await rig.FireAsync(rig.FirstWait).ConfigureAwait(false);
-            await thrown.Task.WaitAsync(HookBound).ConfigureAwait(false);
-            Check.Require(rig.Store.ReadPrerequisiteRetry(rig.PairId) == row && rig.Attempts == 0,
-                "A6, A9 a due dispatch that ends before any turn leaves the row unchanged");
-            if (!fatal)
-            {
-                rig.Host.WakeAfterOperation(rig.PairId);
-                await rig.AttemptedOnceAsync("A9 the next event dispatches the retained work once").ConfigureAwait(false);
-                Check.Require(rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
-                    "A9 a refused request is not fatal: the host keeps running");
-                return;
-            }
-            await UntilAsync(() => rig.Host.Status().Status == AutoStatus.Held).ConfigureAwait(false);
-            Check.Require(rig.Store.ReadPrerequisiteRetry(rig.PairId) == row,
-                "A6 an unexpected failure stops the host and leaves the row unchanged");
+            await rig.FireAsync(retry.RetryAfter - rig.Clock.GetUtcNow()).ConfigureAwait(false);
+            await entered.Task.WaitAsync(HookBound).ConfigureAwait(false);
+            Check.Require(rig.Store.ReadPrerequisiteRetry(rig.PairId) == retry &&
+                rig.Store.Issues(rig.PairId).Any(issue => issue.Id == notice.Id) &&
+                rig.Rig.Wire.Calls.Count(path => path == "/2/files/list_folder/continue") == continuations + 1,
+                "the attempt drains once and hands back its exact row without clearing the notice");
         }
-        catch (Exception error)
+        finally { release.TrySetResult(); }
+        await rig.AttemptedOnceAsync("recovered work runs without restarting the host").ConfigureAwait(false);
+        await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(rig.PairId) is null &&
+            rig.Store.Issues(rig.PairId).All(issue => issue.Id != notice.Id),
+            "the orderly opportunity closes the handed retry and notice").ConfigureAwait(false);
+    }
+
+    private static async Task ContendedFailureAccountingAsync(string root)
+    {
+        await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "live-contended")).ConfigureAwait(false);
+        var wait = rig.Store.ReadItemRetry(rig.PairId)!.Value;
+        var generation = rig.Store.ReadPairExecution(rig.PairId)!.Value.Generation;
+        var records = 0;
+        rig.BeforeRecord = () =>
         {
-            checkFailure = error;
-            throw;
-        }
-        finally
+            Interlocked.Increment(ref records);
+            rig.BeforeRecord = null;
+            Check.Require(rig.Store.CompleteItemRetry(rig.PairId, generation, wait), "the concurrent completion commits first");
+        };
+        rig.Host.LiveWorkFailed(rig.PairId, new IOException("synthetic"), null);
+        Check.Require(records == 1 && rig.Store.ReadPrerequisiteRetry(rig.PairId)?.Attempts == 1 &&
+            rig.Store.Issues(rig.PairId).Count(issue => issue.Path.Length == 0) == 1 &&
+            rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
+            "one transaction advances the now-absent row without a host-side retry");
+    }
+
+    private static async Task HandedStaleRearmsAsync(string root)
+    {
+        await using var rig = await ItemRig.StartedAsync(Path.Combine(root, "live-stale"), turn: false).ConfigureAwait(false);
+        await rig.SyncedAsync().ConfigureAwait(false);
+        await rig.SettledIdleAsync("before the live failure").ConfigureAwait(false);
+        rig.Host.LiveWorkFailed(rig.PairId, new IOException("synthetic"), null);
+        var first = rig.Store.ReadPrerequisiteRetry(rig.PairId)!.Value;
+        var notice = rig.Store.Issues(rig.PairId).Single(issue => issue.Path.Length == 0);
+        var continuations = rig.Rig.Wire.Calls.Count(path => path == "/2/files/list_folder/continue");
+        rig.BeforeSelect = () =>
         {
-            // A failed check is the reported failure; a cleanup error it caused must not replace it.
-            try { await rig.DisposeAsync().ConfigureAwait(false); }
-            catch (Exception) when (checkFailure is not null) { }
-            catch (AggregateException error) when (fatal &&
-                error.InnerExceptions.All(inner => ReferenceEquals(inner, failure))) { }
-        }
-        await using var restarted = await ItemRig.OpenAsync(folder, rig.Clock, rig.Rig.Wire).ConfigureAwait(false);
-        await restarted.StartAsync().ConfigureAwait(false);
-        await restarted.AttemptedOnceAsync("A6 after restart the past-due row is attempted once at startup")
-            .ConfigureAwait(false);
+            rig.BeforeSelect = null;
+            throw new LiveAdmissionStaleException(LiveAdmissionStaleReason.CoverageChanged);
+        };
+        await rig.FireAsync(first.RetryAfter - rig.Clock.GetUtcNow()).ConfigureAwait(false);
+        await UntilAsync(() => rig.Store.ReadPrerequisiteRetry(rig.PairId)?.Attempts == first.Attempts + 1 &&
+            rig.AutoSyncIdle(), "the stale opportunity accounts and becomes idle without an external wake").ConfigureAwait(false);
+        var rearmed = rig.Store.ReadPrerequisiteRetry(rig.PairId)!.Value;
+        Check.Require(rearmed.RetryAfter > rig.Clock.GetUtcNow() &&
+            rig.Store.Issues(rig.PairId).Single(issue => issue.Path.Length == 0) == notice &&
+            rig.Rig.Wire.Calls.Count(path => path == "/2/files/list_folder/continue") == continuations + 1 &&
+            rig.Host.Status().Status is not (AutoStatus.Held or AutoStatus.Off),
+            "stale re-arm advances only the row and preserves its notice after one drain");
+        var mark = rig.Dispatches;
+        await rig.FireAsync(rearmed.RetryAfter - rig.Clock.GetUtcNow()).ConfigureAwait(false);
+        await UntilAsync(() => rig.Dispatches == mark + 1 && rig.AutoSyncIdle() &&
+            rig.Store.ReadPrerequisiteRetry(rig.PairId) is null,
+            "the second deadline dispatches the handed work and closes its row").ConfigureAwait(false);
+        Check.Require(rig.Store.Issues(rig.PairId).All(issue => issue.Id != notice.Id) &&
+            rig.Rig.Wire.Calls.Count(path => path == "/2/files/list_folder/continue") == continuations + 1,
+            "a handed wake does not drain the source again");
     }
 
     // B4: a pause during the due dispatch leaves the admitted row unchanged. The lane is held before its admission
@@ -1353,6 +1422,8 @@ public static partial class EngineHostChecks
         internal Monitor Monitor { get; }
         internal RepairChecks.ComposedRig Rig { get; private set; } = null!;
         internal Action? BeforeSelect;
+        internal Action? BeforeRecord;
+        internal Action? BeforeRefusal;
         internal Action? BeforeBegin;
         internal Action? AfterRefresh;
         internal Action? AfterTemporary;
@@ -1444,7 +1515,12 @@ public static partial class EngineHostChecks
                 mode: EngineHost.Mode.Persistent, wire: wire,
                 decorate: store => new HookStore(memory ? InMemory(store) : store)
                 {
-                    OnReadLiveRefusal = () => Interlocked.Increment(ref rig._opportunities),
+                    BeforeRecordPrerequisiteFailure = () => rig.BeforeRecord?.Invoke(),
+                    OnReadLiveRefusal = () =>
+                    {
+                        rig.BeforeRefusal?.Invoke();
+                        Interlocked.Increment(ref rig._opportunities);
+                    },
                     OnFolderJobProgress = () =>
                     {
                         Interlocked.Increment(ref rig._dispatches);
@@ -1591,8 +1667,8 @@ public static partial class EngineHostChecks
             if (!notice) return;
             var local = Store.ReadSource(PairId, Side.Local)!.Value;
             var dropbox = Store.ReadSource(PairId, Side.Dropbox)!.Value;
-            Store.RecordPrerequisiteFailure(PairId, generation, local.Epoch, dropbox.Epoch, local.Revision,
-                dropbox.Revision, null, new FailureRetryOwner.State(1, Clock.GetUtcNow() + Far), RetryNotice());
+            Store.RecordPrerequisiteFailure(PairId, generation, _ => new FailureRetryOwner.State(1, Clock.GetUtcNow() + Far),
+                RetryNotice());
         }
 
         // Starts the owed prerequisite Repair through Monitor's event wake and holds it just before FinishRepair (after
@@ -1722,7 +1798,7 @@ public static partial class EngineHostChecks
 
         public async ValueTask DisposeAsync()
         {
-            BeforeSelect = BeforeBegin = AfterRefresh = BeforeFinish = AfterFinish = AfterTemporary = null;
+            BeforeSelect = BeforeBegin = AfterRefresh = BeforeFinish = AfterFinish = AfterTemporary = BeforeRecord = BeforeRefusal = null;
             FinishFailed = null;
             BeforeCommit = null;
             BeforeCapture = null;

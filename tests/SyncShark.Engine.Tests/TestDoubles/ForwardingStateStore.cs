@@ -68,9 +68,8 @@ public class ForwardingStateStore(IStateStore inner) : IStateStore
         IReadOnlyList<IssueKind>? kinds, int pageSize) => Inner.OpenIssueSnapshot(kinds, pageSize);
     public virtual IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null) =>
         Inner.OpenIssuesUnder(pairId, scopeKey, kinds);
-    public virtual void RecordPrerequisiteFailure(string pairId, long expectedGeneration, long localEpoch,
-        long dropboxEpoch, long localRevision, long dropboxRevision, FailureRetryOwner.State? expected,
-        FailureRetryOwner.State next, StateChange failureNotice) =>
+    public virtual (FailureRetryOwner.State? Previous, FailureRetryOwner.State Next) RecordPrerequisiteFailure(string pairId, long expectedGeneration,
+            Func<FailureRetryOwner.State?, FailureRetryOwner.State> advance, StateChange failureNotice) =>
         Inner.RecordPrerequisiteFailure(pairId, expectedGeneration, localEpoch, dropboxEpoch, localRevision,
             dropboxRevision, expected, next, failureNotice);
     public virtual void CompleteRecomposition(string pairId, long expectedGeneration, long localEpoch, long dropboxEpoch,

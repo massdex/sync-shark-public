@@ -263,8 +263,8 @@ public static class ScanPassChecks
         var generation = store.ReadPairExecution(pairId)!.Value.Generation;
         var local = store.ReadSource(pairId, Side.Local)!.Value;
         var remote = store.ReadSource(pairId, Side.Dropbox)!.Value;
-        store.RecordPrerequisiteFailure(pairId, generation, local.Epoch, remote.Epoch, local.Revision, remote.Revision,
-            null, new Massdex.SyncShark.V2.FailureRetryOwner.State(1, DateTimeOffset.UnixEpoch), StateChange.Empty with
+        store.RecordPrerequisiteFailure(pairId, generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(1, DateTimeOffset.UnixEpoch),
+            StateChange.Empty with
             {
                 Raise = [(IssueKind.Failure, TextKey.RequiredRepairRetry, string.Empty, new IssueSubject([], null))]
             });

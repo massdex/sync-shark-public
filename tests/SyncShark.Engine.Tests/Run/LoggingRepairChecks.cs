@@ -1725,15 +1725,14 @@ internal static class LoggingRepairChecks
             if (afterCommit) AtFinish?.Invoke();
             return completed;
         }
-        public override void RecordPrerequisiteFailure(string pairId, long expectedGeneration, long localEpoch,
-            long dropboxEpoch, long localRevision, long dropboxRevision, FailureRetryOwner.State? expected,
-            FailureRetryOwner.State next, StateChange failureNotice)
+        public override (FailureRetryOwner.State? Previous, FailureRetryOwner.State Next) RecordPrerequisiteFailure(string pairId, long expectedGeneration,
+            Func<FailureRetryOwner.State?, FailureRetryOwner.State> advance, StateChange failureNotice)
         {
             if (AccountingFailure is { } failure && (!FailFirstOnly || Interlocked.Exchange(ref _failed, 1) == 0))
                 throw failure;
-            base.RecordPrerequisiteFailure(pairId, expectedGeneration, localEpoch, dropboxEpoch,
-                localRevision, dropboxRevision, expected, next, failureNotice);
+            var committed = base.RecordPrerequisiteFailure(pairId, expectedGeneration, advance, failureNotice);
             Accountings++;
+            return committed;
         }
     }
 
@@ -1771,9 +1770,8 @@ internal static class LoggingRepairChecks
         var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
         var local = rig.Store.ReadSource(pairId, Side.Local)!.Value;
         var remote = rig.Store.ReadSource(pairId, Side.Dropbox)!.Value;
-        rig.Store.RecordPrerequisiteFailure(pairId, generation, local.Epoch, remote.Epoch,
-            local.Revision, remote.Revision, null,
-            new Massdex.SyncShark.V2.FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(1)), StateChange.Empty);
+        rig.Store.RecordPrerequisiteFailure(pairId, generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(1)),
+            StateChange.Empty);
         using (var completed = rig.Log(folder, "completed"))
             completed.Complete(new RepairSummary(completed.RunId, clock.GetUtcNow(), clock.GetUtcNow(),
                 true, false, null, false, new Dictionary<string, int>(), new Dictionary<string, int>(), completed.Path, false));
@@ -1849,9 +1847,8 @@ internal static class LoggingRepairChecks
             var generation = rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation;
             var local = rig.Store.ReadSource(rig.Pair.PairId, Side.Local)!.Value;
             var remote = rig.Store.ReadSource(rig.Pair.PairId, Side.Dropbox)!.Value;
-            rig.Store.RecordPrerequisiteFailure(rig.Pair.PairId, generation, local.Epoch, remote.Epoch,
-                local.Revision, remote.Revision, null,
-                new FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(1)), StateChange.Empty);
+            rig.Store.RecordPrerequisiteFailure(rig.Pair.PairId, generation, _ => new FailureRetryOwner.State(1, clock.GetUtcNow().AddHours(1)),
+                StateChange.Empty);
             using var subscription = new CancellationTokenSource();
             await using var status = host.SubscribeStatusAsync(subscription.Token).GetAsyncEnumerator();
             Check.Require(await status.MoveNextAsync(), "the publication has a real status subscriber");
@@ -1916,8 +1913,8 @@ internal static class LoggingRepairChecks
             var generation = rig.Store.ReadPairExecution(rig.Pair.PairId)!.Value.Generation;
             var local = rig.Store.ReadSource(rig.Pair.PairId, Side.Local)!.Value;
             var remote = rig.Store.ReadSource(rig.Pair.PairId, Side.Dropbox)!.Value;
-            rig.Store.RecordPrerequisiteFailure(rig.Pair.PairId, generation, local.Epoch, remote.Epoch,
-                local.Revision, remote.Revision, null, new FailureRetryOwner.State(1, DateTimeOffset.UtcNow.AddHours(1)), StateChange.Empty);
+            rig.Store.RecordPrerequisiteFailure(rig.Pair.PairId, generation, _ => new FailureRetryOwner.State(1, DateTimeOffset.UtcNow.AddHours(1)),
+                StateChange.Empty);
             using var subscription = new CancellationTokenSource();
             await using var status = host.SubscribeStatusAsync(subscription.Token).GetAsyncEnumerator();
             Check.Require(await status.MoveNextAsync(), "the cost probe has a status subscriber");

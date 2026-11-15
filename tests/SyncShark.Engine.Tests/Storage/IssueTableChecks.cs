@@ -98,8 +98,7 @@ public static class IssueTableChecks
         var execution = store.ReadPairExecution(ContractPair)!.Value;
         var local = store.ReadSource(ContractPair, Side.Local)!.Value;
         var remote = store.ReadSource(ContractPair, Side.Dropbox)!.Value;
-        store.RecordPrerequisiteFailure(ContractPair, execution.Generation, local.Epoch, remote.Epoch,
-            local.Revision, remote.Revision, null, new Massdex.SyncShark.V2.FailureRetryOwner.State(0, Now),
+        store.RecordPrerequisiteFailure(ContractPair, execution.Generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(0, Now),
             StateChange.Empty with { Raise = [(IssueKind.Failure, TextKey.RequiredRepairRetry, "", new IssueSubject([], null))] });
         var held = store.Issues(ContractPair).Single(issue => issue.Path.Length == 0);
         var retained = Settle("held row", "", TextKey.PublishFailed, new IssueSubject([], null), false);
@@ -1167,9 +1166,8 @@ public static class IssueTableChecks
                 Raise = [(IssueKind.Failure, TextKey.RequiredRepairRetry, string.Empty, new IssueSubject([], null))]
             };
             if (independentDebt)
-                store.RecordPrerequisiteFailure(ContractPair, generation, local.Epoch, remote.Epoch,
-                    local.Revision, remote.Revision, null,
-                    new Massdex.SyncShark.V2.FailureRetryOwner.State(0, Now), change);
+                store.RecordPrerequisiteFailure(ContractPair, generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(0, Now),
+                    change);
             var retry = store.ReadPrerequisiteRetry(ContractPair);
             var operation = new object();
             var notice = store.RecordPrerequisitePageWait(ContractPair, generation, operation, change);
@@ -1321,17 +1319,16 @@ public static class IssueTableChecks
         {
             RejectContract<SqliteException>(() => store.RecordPrerequisitePageWait(ContractPair,
                 execution.Generation, operation, noticeChange));
-            RejectContract<SqliteException>(() => store.RecordPrerequisiteFailure(ContractPair,
-                execution.Generation, local.Epoch, remote.Epoch, local.Revision, remote.Revision, null,
-                new Massdex.SyncShark.V2.FailureRetryOwner.State(0, Now), noticeChange));
+            RejectContract<SqliteException>(() => store.RecordPrerequisiteFailure(ContractPair, execution.Generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(0, Now),
+                noticeChange));
         }
         finally { MutateFixture(path, "DROP TRIGGER reject_notice;"); }
         Check.Require(store.Issues(ContractPair).Count == 0 && store.ReadPrerequisiteRetry(ContractPair) is null &&
             store.ReadSource(ContractPair, Side.Local) == local && store.ReadSource(ContractPair, Side.Dropbox) == remote,
             ContractAssertion);
         var state = new Massdex.SyncShark.V2.FailureRetryOwner.State(0, Now);
-        store.RecordPrerequisiteFailure(ContractPair, execution.Generation, local.Epoch, remote.Epoch,
-            local.Revision, remote.Revision, null, state, noticeChange);
+        store.RecordPrerequisiteFailure(ContractPair, execution.Generation, _ => state,
+            noticeChange);
         var original = store.Issues(ContractPair).Single();
         store.Commit(ContractPair, StateChange.Empty with
         {
@@ -1356,9 +1353,8 @@ public static class IssueTableChecks
             store.ReadPairExecution(ContractPair)!.Value.Generation == execution.Generation + 1 &&
             store.ReadSource(ContractPair, Side.Local)!.Value.Obligation is not null &&
             store.ReadSource(ContractPair, Side.Dropbox)!.Value.Obligation is not null, ContractAssertion);
-        RejectContract<LiveAdmissionStaleException>(() => store.RecordPrerequisiteFailure(ContractPair,
-            execution.Generation, local.Epoch, remote.Epoch, local.Revision, remote.Revision,
-            state, state, noticeChange));
+        RejectContract<LiveAdmissionStaleException>(() => store.RecordPrerequisiteFailure(ContractPair, execution.Generation, _ => state,
+            noticeChange));
         using var reopened = StateStore.OpenReadOnly(path)!;
         Check.Require(reopened.ReadPrerequisiteRetry(ContractPair) == state &&
             reopened.Issues(ContractPair).Single().Cause == TextKey.RequiredRepairRetry, ContractAssertion);

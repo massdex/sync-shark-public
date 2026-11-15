@@ -1276,8 +1276,8 @@ public static partial class ChangeTableChecks
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
         var episode = new Massdex.SyncShark.V2.FailureRetryOwner.State(1, DateTimeOffset.UnixEpoch.AddSeconds(1));
-        store.RecordPrerequisiteFailure(PairId, generation, local.Epoch, remote.Epoch, local.Revision, remote.Revision,
-            null, episode, StateChange.Empty with
+        store.RecordPrerequisiteFailure(PairId, generation, _ => episode,
+            StateChange.Empty with
             {
                 Raise = [(IssueKind.Failure, TextKey.RequiredRepairRetry, string.Empty, new IssueSubject([], null))]
             });

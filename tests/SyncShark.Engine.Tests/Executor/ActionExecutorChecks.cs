@@ -2623,10 +2623,8 @@ public static class ActionExecutorChecks
         public long ReadWorkWatermark() => throw new NotSupportedException();
         public (long Local, long Dropbox) CountWork(string pairId, long expectedGeneration, long through) =>
             throw new NotSupportedException();
-        public void RecordPrerequisiteFailure(string pairId, long expectedGeneration,
-            long localEpoch, long dropboxEpoch, long localRevision, long dropboxRevision,
-            Massdex.SyncShark.V2.FailureRetryOwner.State? expected,
-            Massdex.SyncShark.V2.FailureRetryOwner.State next, StateChange failureNotice) => throw new NotSupportedException();
+        public (Massdex.SyncShark.V2.FailureRetryOwner.State? Previous, Massdex.SyncShark.V2.FailureRetryOwner.State Next) RecordPrerequisiteFailure(string pairId, long expectedGeneration,
+            Func<Massdex.SyncShark.V2.FailureRetryOwner.State?, Massdex.SyncShark.V2.FailureRetryOwner.State> advance, StateChange failureNotice) => throw new NotSupportedException();
         public void CompleteRecomposition(string pairId, long expectedGeneration, long localEpoch, long dropboxEpoch,
             long localRevision, long dropboxRevision, Massdex.SyncShark.V2.FailureRetryOwner.State expected) =>
             throw new NotSupportedException();

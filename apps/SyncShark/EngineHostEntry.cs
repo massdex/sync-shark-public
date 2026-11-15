@@ -110,6 +110,7 @@ internal static class EngineHostEntry
             // One clear attempt per acquired host lifetime; a failed write leaves the host healthy and logged.
             // A host past admission is no longer in a terminal startup refusal, so its retained notice is cleared too.
             AutoSyncProcess.ClearStartupNotices(productRoot);
+            AutoSyncLog.HostStarted(productRoot, typeof(EngineHostEntry).Assembly.GetName().Version);
             return await RunOwnedAsync(productRoot, authority.StateAuthority, admission, readiness, ct).ConfigureAwait(false);
         }
         catch (EngineStartupRefusedException refusal)

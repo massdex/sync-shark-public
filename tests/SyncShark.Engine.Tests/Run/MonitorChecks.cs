@@ -350,9 +350,8 @@ public static class MonitorChecks
         var execution = rig.Store.ReadPairExecution(pairId) ?? throw new InvalidOperationException();
         var local = rig.Store.ReadSource(pairId, Side.Local) ?? throw new InvalidOperationException();
         var dropbox = rig.Store.ReadSource(pairId, Side.Dropbox) ?? throw new InvalidOperationException();
-        rig.Store.RecordPrerequisiteFailure(pairId, execution.Generation, local.Epoch, dropbox.Epoch,
-            local.Revision, dropbox.Revision, rig.Store.ReadPrerequisiteRetry(pairId),
-            new FailureRetryOwner.State(attempts, retryAfter), RetryChange());
+        rig.Store.RecordPrerequisiteFailure(pairId, execution.Generation, _ => new FailureRetryOwner.State(attempts, retryAfter),
+            RetryChange());
     }
 
     private static StateChange RetryChange() => StateChange.Empty with

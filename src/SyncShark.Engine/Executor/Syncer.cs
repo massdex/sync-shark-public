@@ -224,7 +224,13 @@ public sealed class Syncer
                 }
                 catch (Exception error) { failure = error; }
                 failure = await tasks.JoinAsync(failure, failure is not null and not LiveAdmissionStaleException,
-                    joined => _context.Events(RunEvent.Failed(joined)));
+                    joined =>
+                    {
+                        if (joined is not OperationCanceledException || !ct.IsCancellationRequested)
+                            _context.Events(RunEvent.Failed(joined));
+                    });
+                // The join may substitute a lane token; a requested opportunity stop still ends normally at its owner.
+                if (failure is OperationCanceledException && ct.IsCancellationRequested) ct.ThrowIfCancellationRequested();
                 if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             }
             finally { retired = _context.Store.EndWorkPass(pairId); }

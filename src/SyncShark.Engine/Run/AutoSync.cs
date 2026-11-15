@@ -18,7 +18,6 @@ internal sealed class AutoSync
     private CancellationTokenSource? _stop;
     private Task? _loop;
     private volatile PauseSnapshot _pause = new(false, new HashSet<string>(StringComparer.Ordinal));
-    private Exception? _failure;
 
     internal AutoSync(IStateStore store, Func<string, RunLog?> openLog, EngineHost host)
     {
@@ -66,7 +65,6 @@ internal sealed class AutoSync
                 List<RunLog> closed = [];
                 lock (_gate)
                 {
-                    if (_failure is { } failure) throw failure;
                     foreach (var (id, wake) in _pending.ToArray())
                     {
                         if (_active.ContainsKey(id)) continue;
@@ -118,14 +116,10 @@ internal sealed class AutoSync
         }
         var yielded = false;
         try { yielded = await OpportunityAsync(pairId, wake, Open, ct).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested || IsPaused(pairId)) { }
+        catch (Exception error) when (Cancelled(error) && (ct.IsCancellationRequested || IsPaused(pairId))) { }
         catch (LiveAdmissionStaleException) { }
         catch (EngineRequestException) { }
-        catch (Exception error)
-        {
-            lock (_gate) _failure ??= error;
-            _host.BackgroundFailed(error);
-        }
+        catch (Exception error) { _host.LiveWorkFailed(pairId, error, log); }
         finally
         {
             carried?.Log.Dispose();
@@ -179,6 +173,7 @@ internal sealed class AutoSync
                     // Only a drain under the still-admitted generation clears the exact wait; a yield leaves it due.
                     if (drained && admitted is { } due && _host.TryHoldGeneration(session.Registration))
                         _store.CompleteItemRetry(pairId, generation, due);
+                    _host.CompleteLiveRetry(session.Registration, pairId, generation);
                     yielded = !drained;
                     // A yield or a released cleanup blocker asks for one coalesced revisit.
                     if (revisit) Kick(pairId);
@@ -186,13 +181,23 @@ internal sealed class AutoSync
                 _host.ScheduleFolderPoll(pairId, _store.HasFolderJobProgress(pairId, token),
                     () => Kick(pairId, receiptsOnly: true));
             }
-            catch (OperationCanceledException) when (token.IsCancellationRequested && !ct.IsCancellationRequested)
+            catch (Exception error) when (Cancelled(error) && token.IsCancellationRequested)
             {
                 yielded = false;
+            }
+            catch (LiveAdmissionStaleException)
+            {
+                _host.LiveRetryUnfinished(session.Registration, pairId, generation);
+                throw;
             }
             return yielded && !token.IsCancellationRequested;
         }, ct, startupLog: log).ConfigureAwait(false);
     }
+
+    // Classify the exception separately from whether the opportunity's own token requested the stop.
+    private static bool Cancelled(Exception error) => error is OperationCanceledException ||
+        error is AggregateException aggregate &&
+        aggregate.Flatten().InnerExceptions.All(inner => inner is OperationCanceledException);
 
     internal bool IsGloballyPaused => _pause.Global;
 

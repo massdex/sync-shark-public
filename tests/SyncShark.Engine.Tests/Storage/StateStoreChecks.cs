@@ -1949,10 +1949,10 @@ public static class StateStoreChecks
                 nameof(PageWaitCases));
         }
         var episode = new Massdex.SyncShark.V2.FailureRetryOwner.State(Single, DateTimeOffset.UnixEpoch.AddTicks(Single));
-        RollbackAt(path, "INSERT ON issue", () => store.RecordPrerequisiteFailure(PairId, generation,
-            local.Epoch, remote.Epoch, local.Revision, remote.Revision, null, episode, failure));
-        store.RecordPrerequisiteFailure(PairId, generation, local.Epoch, remote.Epoch,
-            local.Revision, remote.Revision, null, episode, failure);
+        RollbackAt(path, "INSERT ON issue", () => store.RecordPrerequisiteFailure(PairId, generation, _ => episode,
+            failure));
+        store.RecordPrerequisiteFailure(PairId, generation, _ => episode,
+            failure);
         var owner = new object();
         var protectedNotice = store.RecordPrerequisitePageWait(PairId, generation, owner, failure);
         store.CompletePrerequisitePageWait(PairId, generation, owner, protectedNotice);
@@ -1961,16 +1961,18 @@ public static class StateStoreChecks
         store.Commit(PairId, StateChange.Empty with { Close = [(string.Empty, IssueClosure.AfterEffect)] });
         store.Commit(PairId, Raise(TextKey.FailChanged, string.Empty, new IssueSubject([], null)));
         Check.Require(store.Issues(PairId).Single().Cause == TextKey.RequiredRepairRetry, nameof(PageWaitCases));
-        Refuses<InvalidOperationException>(() => store.RecordPrerequisiteFailure(PairId, generation,
-            local.Epoch, remote.Epoch, local.Revision, remote.Revision, null, episode, failure));
+        var advanced = store.RecordPrerequisiteFailure(PairId, generation,
+            stored => stored!.Value with { Attempts = stored.Value.Attempts + 1 }, failure);
+        Check.Require(advanced.Previous == episode && store.Issues(PairId).Single().Cause == TextKey.RequiredRepairRetry,
+            nameof(PageWaitCases));
         var pair = store.Pair(PairId)!;
         RollbackAt(path, "UPDATE ON source_state", () =>
             store.SavePairDecision(pair, generation, pair with { Enabled = false }, null, false, null));
         store.SavePairDecision(pair, generation, pair with { Enabled = false }, null, false, null);
-        Check.Require(store.ReadPrerequisiteRetry(PairId) == episode &&
+        Check.Require(store.ReadPrerequisiteRetry(PairId) == advanced.Next &&
             store.Issues(PairId).Single().Cause == TextKey.RequiredRepairRetry, nameof(PageWaitCases));
         using var reopened = StateStore.OpenReadOnly(path)!;
-        Check.Require(reopened.ReadPrerequisiteRetry(PairId) == episode, nameof(PageWaitCases));
+        Check.Require(reopened.ReadPrerequisiteRetry(PairId) == advanced.Next, nameof(PageWaitCases));
         return Task.CompletedTask;
     }
 
@@ -2021,10 +2023,13 @@ public static class StateStoreChecks
         void Fail(IStateStore store, long generation, Massdex.SyncShark.V2.FailureRetryOwner.State? expected,
             Massdex.SyncShark.V2.FailureRetryOwner.State next)
         {
-            var local = store.ReadSource(PairId, Side.Local)!.Value;
-            var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
-            store.RecordPrerequisiteFailure(PairId, generation, local.Epoch, remote.Epoch, local.Revision,
-                remote.Revision, expected, next, failure);
+            var committed = store.RecordPrerequisiteFailure(PairId, generation, stored =>
+            {
+                Check.Require(stored == expected, "advance receives the stored state, including an absent row");
+                return next;
+            }, failure);
+            Check.Require(committed.Previous == expected && committed.Next == next,
+                "failure accounting returns the replaced and committed states");
         }
 
         Case("temporary", (store, _, generation) =>

@@ -165,10 +165,17 @@ internal static class AutoSyncSupervisorChecks
             AutoSyncLog.HostStarted(root, new Version(1, 2, 3, 4));
             try { throw new IOException("synthetic private file content Parent/Child.txt"); }
             catch (Exception error) { AutoSyncLog.Failure(root, error); }
+            AutoSyncLog.Failure(root, new IOException("synthetic private Parent/Child.txt",
+                new AggregateException(new InvalidDataException("synthetic one"), new UnauthorizedAccessException("synthetic two"))));
+            AutoSyncLog.Failure(root, new AggregateException(new IOException("synthetic three")
+                { HResult = unchecked((int)0x80070070) }));
             AutoSyncLog.HostShutdown(root, "autosync-stop-requested");
             var log = File.ReadAllText(AutoSyncLog.FilePath(root));
             Require(!log.Contains("synthetic private") && !log.Contains("Parent/Child"),
                 "exception messages never enter lifecycle evidence");
+            Require(log.Contains("inner=System.AggregateException") && log.Contains("inner=System.IO.InvalidDataException") &&
+                log.Contains("inner=System.UnauthorizedAccessException") && log.Contains("inner=System.IO.IOException hresult=80070070") &&
+                !log.Contains("synthetic"), "all aggregate branches retain identity without messages");
             Require(log.Contains("type=System.IO.IOException") && log.Contains("hresult=") &&
                 log.Contains("method=PrivateDetailsAreOmitted") && log.Contains("host start version=1.2.3.4") &&
                 log.Contains("host shutdown: stop requested"), "typed lifecycle metadata remains available");

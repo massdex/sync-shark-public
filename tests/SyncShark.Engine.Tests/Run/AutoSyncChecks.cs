@@ -154,8 +154,8 @@ public static class AutoSyncChecks
         var local = store.ReadSource(PairId, Side.Local)!.Value;
         var remote = store.ReadSource(PairId, Side.Dropbox)!.Value;
         var episode = FailureRetryOwner.AdoptedFailed(0, Now, null, ShippedBackoff(), () => MidpointSample);
-        store.RecordPrerequisiteFailure(PairId, generation, local.Epoch, remote.Epoch, local.Revision,
-            remote.Revision, null, episode, PageWaitNotice());
+        store.RecordPrerequisiteFailure(PairId, generation, _ => episode,
+            PageWaitNotice());
 
         var operation = new object();
         var notice = store.RecordPrerequisitePageWait(PairId, generation, operation, PageWaitNotice());
@@ -199,23 +199,21 @@ public static class AutoSyncChecks
             "a running page retry is not next-Repair durable scheduling");
 
         var first = FailureRetryOwner.AdoptedFailed(0, Now, null, backoff, () => MidpointSample);
-        store.RecordPrerequisiteFailure(PairId, generation, local.Epoch, remote.Epoch, local.Revision,
-            remote.Revision, null, first, PageWaitNotice());
+        store.RecordPrerequisiteFailure(PairId, generation, _ => first,
+            PageWaitNotice());
         Require(store.ReadPrerequisiteRetry(PairId) == first && first.Attempts == 1 && Only(store, pageNotice),
             "the first actually unsuccessful Repair records its episode once on the one notice");
 
-        Refuses<InvalidOperationException>(() =>
-            store.RecordPrerequisiteFailure(PairId, generation, local.Epoch, remote.Epoch, local.Revision,
-                remote.Revision, null, first, PageWaitNotice()),
-            "duplicate failed attempt");
-        Require(store.ReadPrerequisiteRetry(PairId) == first && Only(store, pageNotice) &&
+        var second = FailureRetryOwner.AdoptedFailed(first.Attempts, Now.AddMinutes(1), null, backoff, () => MidpointSample);
+        var committed = store.RecordPrerequisiteFailure(PairId, generation, stored =>
+        {
+            Require(stored == first, "the write advances the currently stored episode");
+            return second;
+        }, PageWaitNotice());
+        Require(committed.Previous == first && committed.Next == second && Only(store, pageNotice) &&
             store.ReadSource(PairId, Side.Local)!.Value == local &&
             store.ReadSource(PairId, Side.Dropbox)!.Value == remote,
-            "a duplicate failure writes nothing and leaves source obligations unchanged");
-
-        var second = FailureRetryOwner.AdoptedFailed(first.Attempts, Now.AddMinutes(1), null, backoff, () => MidpointSample);
-        store.RecordPrerequisiteFailure(PairId, generation, local.Epoch, remote.Epoch, local.Revision,
-            remote.Revision, first, second, PageWaitNotice());
+            "advancing the episode preserves the one notice and source obligations");
         Require(store.ReadPrerequisiteRetry(PairId) == second && second.Attempts == first.Attempts + 1,
             "each actual unsuccessful Repair advances the shared owner's stage once");
 
@@ -241,9 +239,8 @@ public static class AutoSyncChecks
             var localValue = local!.Value;
             var remoteValue = remote!.Value;
             Refuses<SqliteException>(() =>
-                store.RecordPrerequisiteFailure(PairId, generation, localValue.Epoch, remoteValue.Epoch,
-                    localValue.Revision, remoteValue.Revision, null,
-                    FailureRetryOwner.AdoptedFailed(0, Now, null, ShippedBackoff(), () => MidpointSample), PageWaitNotice()), "durable notice write");
+                store.RecordPrerequisiteFailure(PairId, generation, _ => FailureRetryOwner.AdoptedFailed(0, Now, null, ShippedBackoff(), () => MidpointSample),
+                    PageWaitNotice()), "durable notice write");
         }
         finally
         {

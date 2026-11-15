@@ -54,11 +54,18 @@ public static class AutoSyncLog
         Append(productRoot, string.Format(CultureInfo.InvariantCulture,
             MessageCatalog.Default.Message("autosync-host-start"), version));
 
-    /// <summary>Records exception identity only, without message, data, inner exceptions or source paths.</summary>
-    public static void Failure(string productRoot, Exception error) =>
-        Append(productRoot, string.Format(CultureInfo.InvariantCulture,
+    /// <summary>Records exception identities through every aggregate branch, without messages, data or source paths;
+    /// the existing line bound truncates the rest.</summary>
+    public static void Failure(string productRoot, Exception error)
+    {
+        var line = new StringBuilder(string.Format(CultureInfo.InvariantCulture,
             MessageCatalog.Default.Message("autosync-lifecycle-failure"),
             error.GetType().FullName, error.HResult, error.TargetSite?.Name));
+        foreach (var (inner, _) in SyncActivityText.ExceptionChain(error).Skip(1))
+            line.AppendFormat(CultureInfo.InvariantCulture, MessageCatalog.Default.Message("autosync-lifecycle-inner"),
+                inner.GetType().FullName, inner.HResult);
+        Append(productRoot, line.ToString());
+    }
 
     /// <summary>Records only the typed admission reason and metadata location, never arbitrary exception text.</summary>
     public static void StartupRefused(string productRoot, EngineStartupRefusedException refusal) =>

@@ -41,7 +41,7 @@ public static class SyncActivityText
         return methods.Length == 0 ? "" : " [application: " + string.Join(" <- ", methods) + "]";
     }
 
-    private static IEnumerable<(Exception Error, bool PrivateDetail)> ExceptionChain(Exception error)
+    internal static IEnumerable<(Exception Error, bool PrivateDetail)> ExceptionChain(Exception error)
     {
         var seen = new HashSet<Exception>(ReferenceEqualityComparer.Instance);
         var pending = new Stack<(Exception Error, bool PrivateDetail)>();

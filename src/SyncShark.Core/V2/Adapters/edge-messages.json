@@ -96,6 +96,7 @@
     "startup-admission-log": "startup refused reason={0} location={1}",
     "autosync-host-start": "host start version={0}",
     "autosync-lifecycle-failure": "lifecycle failure type={0} hresult={1:X8} method={2}",
+    "autosync-lifecycle-inner": " inner={0} hresult={1:X8}",
     "autosync-stop-requested": "stop requested",
     "autosync-listener-ended": "listener ended without a stop request",
     "autosync-owner-attached": "attached to existing owner",

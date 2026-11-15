@@ -3181,8 +3181,8 @@ public static partial class ChangeRunnerChecks
         var local = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
         var remoteSource = fixture.Inner.ReadSource(PairId, Side.Dropbox)!.Value;
         var episode = new Massdex.SyncShark.V2.FailureRetryOwner.State(1, Stamp.AddMinutes(5));
-        fixture.Inner.RecordPrerequisiteFailure(PairId, Generation, local.Epoch, remoteSource.Epoch, local.Revision,
-            remoteSource.Revision, null, episode, StateChange.Empty with
+        fixture.Inner.RecordPrerequisiteFailure(PairId, Generation, _ => episode,
+            StateChange.Empty with
             {
                 Raise = [(IssueKind.Failure, TextKey.RequiredRepairRetry, string.Empty, new IssueSubject([], null))]
             });
@@ -3287,8 +3287,7 @@ public static partial class ChangeRunnerChecks
                     fixture.Inner.RecordPrerequisitePageWait(PairId, Generation, new object(), RequiredRepairNotice);
                     break;
                 case "failed":
-                    fixture.Inner.RecordPrerequisiteFailure(PairId, Generation, local.Epoch, remote.Epoch, local.Revision,
-                        remote.Revision, null, new Massdex.SyncShark.V2.FailureRetryOwner.State(1, Stamp.AddMinutes(5)),
+                    fixture.Inner.RecordPrerequisiteFailure(PairId, Generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(1, Stamp.AddMinutes(5)),
                         RequiredRepairNotice);
                     break;
                 case "completed":
@@ -3337,8 +3336,7 @@ public static partial class ChangeRunnerChecks
             OweLocal(fixture, SourceObligation.NormalRepair);
             var local = fixture.Inner.ReadSource(PairId, Side.Local)!.Value;
             var remote = fixture.Inner.ReadSource(PairId, Side.Dropbox)!.Value;
-            fixture.Inner.RecordPrerequisiteFailure(PairId, Generation, local.Epoch, remote.Epoch, local.Revision,
-                remote.Revision, null, new Massdex.SyncShark.V2.FailureRetryOwner.State(1, Stamp.AddMinutes(5)),
+            fixture.Inner.RecordPrerequisiteFailure(PairId, Generation, _ => new Massdex.SyncShark.V2.FailureRetryOwner.State(1, Stamp.AddMinutes(5)),
                 RequiredRepairNotice);
             var fresh = RemoteEntry("Fresh", "fresh-remote");
             fixture.Dropbox.Seed(fresh, [5]);

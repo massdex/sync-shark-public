@@ -6,6 +6,15 @@ namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 /// <summary>Delegates a store, counting scanned rows and offering narrow hooks to one scan-pass case.</summary>
 internal sealed class HookStore(IStateStore inner) : ForwardingStateStore(inner)
 {
+    public Action? BeforeRecordPrerequisiteFailure { get; init; }
+    public override (FailureRetryOwner.State? Previous, FailureRetryOwner.State Next) RecordPrerequisiteFailure(
+        string pairId, long expectedGeneration, Func<FailureRetryOwner.State?, FailureRetryOwner.State> advance,
+        StateChange failureNotice)
+    {
+        BeforeRecordPrerequisiteFailure?.Invoke();
+        return base.RecordPrerequisiteFailure(pairId, expectedGeneration, advance, failureNotice);
+    }
+
     public Action? BeforeMarkRepairLogFailed { get; init; }
     public override void MarkRepairLogFailed(string pairId, string runId)
     {
