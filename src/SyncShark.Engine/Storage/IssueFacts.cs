@@ -95,6 +95,23 @@ internal sealed class IssueFacts(string pairId, long pairRow)
         return null;
     }
 
+    public Issue? UnknownMoveCovering(string key)
+    {
+        if (_heldIdentities.Count == 0) return null;
+        if (MoveAt(key) is { } own) return own;
+        foreach (var ancestor in PathNames.Ancestors(key))
+            if (MoveAt(ancestor) is { } issue) return issue;
+        return null;
+    }
+
+    private Issue? MoveAt(string key)
+    {
+        if (_held.TryGetValue(key, out var holds))
+            foreach (var issue in holds.Values)
+                if (IssuePolicy.UnknownMove(issue.Kind, issue.Subject)) return issue;
+        return null;
+    }
+
     /// <summary>The hold covering the key or, for a whole subtree, the first found under it. The descendant walk visits
     /// held keys only, so it grows with notices, never with the pair.</summary>
     internal Issue? Overlapping(string key, bool includesDescendants, long? selectedIssue)

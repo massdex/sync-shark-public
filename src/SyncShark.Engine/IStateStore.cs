@@ -358,6 +358,11 @@ public partial interface IStateStore : IDisposable
     /// Includes dismissed rows; empty scope equals Issues. Item-less operational notices use their issue path.</summary>
     IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null);
     Issue? IssueById(string pairId, long id);
+    /// <summary>Closes exactly this unknown move at the expected generation; an adopted bound move also retires
+    /// its proven Dropbox echo registrations in the same transaction.</summary>
+    void CloseUnknownMove(string pairId, long expectedGeneration, Issue expected,
+        Func<ChangeNotice, SyncedEntry?, bool, bool>? echoes);
+    Issue? UnknownMoveCovering(string pairId, string key);
     IssueKind? HeldKind(string pairId, Row row, IReadOnlySet<long>? exceptIssues);
     bool HeldCovers(string pairId, string key, IReadOnlySet<long>? exceptIssues);
     /// <summary>Whether another holding issue covers the row's policy keys or its Dropbox removal path.</summary>

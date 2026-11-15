@@ -5432,6 +5432,8 @@ public static partial class ChangeRunnerChecks
     private static async Task RunAsync()
     {
         var failures = new List<Exception>();
+        try { UnknownMoveClose(); }
+        catch (Exception error) { failures.Add(error); }
         try { await PathOnlyLiveReadsAsync(); }
         catch (Exception error) { failures.Add(error); }
         try { await OlderEpisodeConvergenceAsync(); }
@@ -7640,6 +7642,85 @@ public static partial class ChangeRunnerChecks
         for (var index = 0; index <= arrivals; index++)
             Check.Require(fixture.Inner.SyncedByKey(PairId, Side.Local, PathNames.Key("Arrival" + index)) is not null,
                 "N7/N8: every finite arrival remains reachable and commits");
+    }
+
+    private static void UnknownMoveClose()
+    {
+        var failures = new List<Exception>();
+        foreach (var real in new[] { false, true })
+        foreach (var scenario in new[] { "deleted-echo", "changed-echo", "edit", "new", "old-path", "local",
+            "destination-delete", "no-proof", "generation", "replacement", "same-key" })
+        {
+            try { CheckClose(real, scenario); }
+            catch (Exception error) { failures.Add(new InvalidOperationException(
+                "Unknown move close real=" + real + " scenario=" + scenario, error)); }
+        }
+        if (failures.Count != 0) throw new AggregateException(failures);
+
+        static void CheckClose(bool real, string scenario)
+        {
+            using var fixture = new Fixture(realStore: real);
+            var local = LocalEntry("Source/Child", LocalId);
+            var remote = RemoteEntry(local.Path, DropboxId);
+            var before = SyncedEntries.From(local, remote);
+            var moved = remote with { Path = "Destination/Child" };
+            var notice = new ChangeNotice(Side.Dropbox, ChangeKind.Changed, moved.Path, null,
+                moved.Id, moved, false, false);
+            notice = scenario switch
+            {
+                "deleted-echo" => notice with { Kind = ChangeKind.Deleted, Path = remote.Path, Observed = null },
+                "destination-delete" => notice with { Kind = ChangeKind.Deleted, Observed = null },
+                "edit" => notice with { Observed = moved with { ContentHash = DropboxContentHash.Compute(new byte[] { 2 }) } },
+                "new" => notice with { Id = OccupantId, Observed = moved with { Id = OccupantId } },
+                "old-path" => notice with { OldPath = remote.Path },
+                "local" => notice with { Side = Side.Local, Id = local.Id, Observed = local with { Path = moved.Path } },
+                _ => notice
+            };
+            fixture.Inner.Commit(PairId, StateChange.Empty with { Record = [before] });
+            var selection = notice.Side == Side.Local ? Seed(fixture, notice) : SeedRemote(fixture, moved, notice);
+            var move = new IssueSubject.UnknownMove("folder-remote", "Source", "Destination", null, true);
+            var subject = new IssueSubject([new IssueItem(Side.Dropbox, move.Source, move.ExpectedId)], Side.Dropbox)
+                { Move = move };
+            fixture.Inner.Commit(PairId, StateChange.Empty with
+                { Raise = [(IssueKind.Failure, TextKey.DropboxRefused, move.Source, subject)] });
+            var issue = fixture.Inner.Issues(PairId).Single();
+            Check.Require(fixture.Inner.AttachIssueWork(selection, issue,
+                    [(notice, false, scenario == "new" ? null : before)]) && fixture.Inner.CompleteWork(selection),
+                "The fixture parks one registration and retires only its parent.");
+            Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count == 1,
+                "The parked registration remains durable before exact closure.");
+            Issue? replacement = null;
+            if (scenario == "generation") AdvanceGeneration(fixture);
+            if (scenario is "replacement" or "same-key")
+            {
+                if (scenario == "replacement") fixture.Inner.Commit(PairId, StateChange.Empty with
+                    { Close = [(issue.Path, new[] { issue.Kind })] });
+                fixture.Inner.Commit(PairId, StateChange.Empty with
+                    { Raise = [(IssueKind.Failure, issue.Cause, scenario == "same-key" ? "SOURCE" : issue.Path, subject)] });
+                replacement = fixture.Inner.Issues(PairId).Single(candidate => candidate.Id != issue.Id);
+            }
+            var proofs = 0;
+            bool Echo(ChangeNotice item, SyncedEntry? saved, bool bound)
+            {
+                proofs++;
+                return SelectionObservation.SettlesDropboxEcho(item, saved, bound);
+            }
+            Exception? refused = null;
+            try { fixture.Store.CloseUnknownMove(PairId, Generation, issue, scenario == "no-proof" ? null : Echo); }
+            catch (Exception error) when (error is EngineRequestException or LiveAdmissionStaleException) { refused = error; }
+            var stale = scenario is "generation" or "replacement";
+            Check.Require(stale ? refused is not null && proofs == 0 : refused is null,
+                "Generation and exact-id fences precede every echo proof or write.");
+            Check.Require(scenario == "generation" ? fixture.Inner.IssueById(PairId, issue.Id)?.Matches(issue) == true :
+                fixture.Inner.IssueById(PairId, issue.Id) is null,
+                "Only a current exact responsibility is closed.");
+            if (replacement is not null) Check.Require(
+                fixture.Inner.IssueById(PairId, replacement.Id)?.Matches(replacement) == true,
+                "A same-key or same-endpoint replacement survives the exact close.");
+            if (scenario != "generation") Check.Require(PendingAt(fixture, notice.Side, notice.Path).Count ==
+                (scenario is "deleted-echo" or "changed-echo" or "same-key" ? 0 : 1),
+                "Only proven source deletes and unchanged destination entries retire; unrelated work stays durable.");
+        }
     }
 
     internal static async Task ConcurrentRefusalRedispatchAsync()

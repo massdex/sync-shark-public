@@ -461,6 +461,43 @@ internal sealed partial class ChangeTable
         return retired;
     }
 
+    /// <summary>Retires only registrations the adopted move proves are echoes, inside its exact-close transaction.</summary>
+    internal int RetireMoveEchoes(SqliteTransaction transaction, string pairId, Issue move,
+        Func<ChangeNotice, SyncedEntry?, bool, bool> settles)
+    {
+        if (ReadPair(transaction, pairId) is not { } pair || ReadSourceRow(transaction, pair.Row, Side.Dropbox) is not
+                { } source || Domain(Roots(pair), Side.Dropbox) is not { } domain) return 0;
+        // Finish the reader before deleting; each deletion cascades its issue association.
+        var proven = Rows(transaction, StateSchema.IssueRegistrations, (StateSchema.ParamIssue, move.Id),
+                (StateSchema.ParamSide, (int)Side.Dropbox), (StateSchema.ParamPairRow, pair.Row),
+                (StateSchema.ParamGeneration, pair.Generation), (StateSchema.ParamEpoch, source.Epoch),
+                (StateSchema.ParamDomain, domain))
+            .Where(row => ProvesMoveEcho(StateEncoding.DecodeEnvelope<ChangeNotice>(row.Notice!)!, row.Key,
+                row.Before is null ? null : StateEncoding.DecodeEnvelope<SyncedEntry>(row.Before), move.Subject.Move!, settles))
+            .Select(row => row.WorkId).ToList();
+        var retired = 0;
+        foreach (var work in proven)
+            retired += Run(transaction, StateSchema.DeleteWork, (StateSchema.ParamPairRow, pair.Row), (StateSchema.ParamWork, work));
+        return retired;
+    }
+
+    internal static bool ProvesMoveEcho(ChangeNotice notice, string key, SyncedEntry? before,
+        IssueSubject.UnknownMove move, Func<ChangeNotice, SyncedEntry?, bool, bool> settles)
+    {
+        var source = PathNames.DropboxKey(move.Source);
+        return notice.Kind == ChangeKind.Deleted
+            ? PathNames.IsSelfOrUnderKey(key, source) && settles(notice, before, false)
+            : before is not null && PathNames.IsSelfOrUnderKey(before.DropboxKey, source) &&
+              settles(notice, Moved(before, move), false);
+    }
+
+    private static SyncedEntry Moved(SyncedEntry before, IssueSubject.UnknownMove move)
+    {
+        var path = PathNames.RelativeUnderDropboxRoot(move.Source, before.DropboxPath) is { } below
+            ? PathNames.Child(move.Destination, below) : move.Destination;
+        return before with { DropboxPath = path, DropboxKey = PathNames.DropboxKey(path) };
+    }
+
     // One custody transaction: validate the contiguous segment, transfer its debt, then delete those exact sources.
     // Both walks share the same fenced key and bounds; only the committed count reaches pass accounting.
     private long CoalescePathWork(string pairId, PairRow pair, WorkRow candidate, Pass pass, ref long? observedThrough)
@@ -1358,7 +1395,7 @@ internal sealed partial class ChangeTable
         return workId - firstWorkId;
     }
 
-    private void AccountAttachment(string pairId, long added)
+    internal void AccountAttachment(string pairId, long added)
     {
         if (!_passes.TryGetValue(pairId, out var pass)) return;
         pass.NetRetired -= added;

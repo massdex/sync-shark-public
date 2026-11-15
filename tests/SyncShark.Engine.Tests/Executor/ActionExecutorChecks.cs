@@ -2833,6 +2833,11 @@ public static class ActionExecutorChecks
         public IEnumerable<Issue> OpenIssuesUnder(string pairId, string scopeKey, IReadOnlyList<IssueKind>? kinds = null) =>
             throw new NotSupportedException();
         public Issue? IssueById(string pairId, long id) => throw new NotSupportedException();
+        public void CloseUnknownMove(string pairId, long expectedGeneration, Issue expected,
+            Func<ChangeNotice, SyncedEntry?, bool, bool>? echoes) =>
+            (inner ?? throw new NotSupportedException()).CloseUnknownMove(pairId, expectedGeneration, expected, echoes);
+        public Issue? UnknownMoveCovering(string pairId, string key) =>
+            (inner ?? throw new NotSupportedException()).UnknownMoveCovering(pairId, key);
         public IssueKind? HeldKind(string pairId, Row row, IReadOnlySet<long>? exceptIssues) =>
             throw new NotSupportedException();
         public bool HeldCovers(string pairId, string key, IReadOnlySet<long>? exceptIssues) =>
