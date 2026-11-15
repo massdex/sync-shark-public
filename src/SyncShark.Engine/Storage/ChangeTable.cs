@@ -486,7 +486,7 @@ internal sealed partial class ChangeTable
     {
         var source = PathNames.DropboxKey(move.Source);
         return notice.Kind == ChangeKind.Deleted
-            ? PathNames.IsSelfOrUnderKey(key, source) && settles(notice, before, false)
+            ? PathNames.IsSelfOrUnderKey(key, source) && settles(notice, before, true)
             : before is not null && PathNames.IsSelfOrUnderKey(before.DropboxKey, source) &&
               settles(notice, Moved(before, move), false);
     }
