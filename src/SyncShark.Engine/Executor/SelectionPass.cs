@@ -150,7 +150,7 @@ internal sealed class SelectionPass
                 Visited.Add(key, default);
             }
             // The primary was checked by its enumerator; old paths and walked children are checked here.
-            var move = parked ?? (walkFailure is null && key != selection.Key ? RefuseBeforeProvider(notice, work.Before) : null);
+            var move = parked;
             if (move is not null)
             {
                 var heldRow = Row.ForOneSide(notice.Side, key, notice.Observed, work.Before, [], null, RowContext.Neutral);
