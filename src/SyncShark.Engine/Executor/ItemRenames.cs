@@ -74,13 +74,6 @@ internal readonly struct ItemRenames(ExecutorContext _context, Parents _parents,
                 }
             }
             if (outcome.Succeeded() || outcome.Raised is not null) return (outcome, false);
-            if (outcome.None == NoneReason.Held)
-            {
-                var holder = _context.Store.UnknownMoveCovering(_context.Pair.PairId, PathNames.DropboxKey(observed.Path)) ??
-                    _context.Store.UnknownMoveCovering(_context.Pair.PairId, PathNames.DropboxKey(move.Source));
-                // Only a move of the same item can inherit this held rebase.
-                if (holder is not null && holder.Subject.Move!.ExpectedId == move.ExpectedId) return (outcome, false);
-            }
         }
         catch
         {
