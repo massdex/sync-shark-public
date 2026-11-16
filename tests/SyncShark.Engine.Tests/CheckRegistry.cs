@@ -168,6 +168,7 @@ public static class CheckRegistry
         ["projection-cost"] = [Storage.ChangeTableChecks.SelectionProjectionCosts, Storage.ChangeTableChecks.ReplacedRetirementCosts, Storage.ChangeTableChecks.B198MemberCostProbe,
             Executor.ChangeRunnerChecks.VanishedWaitCosts, Executor.ChangeRunnerChecks.RunB179Costs],
         ["issue-category-cost"] = [Run.IssueCategoryCostChecks.Run],
+        ["held-footprint-cost"] = [Executor.RenameRunnerChecks.HeldFootprintCost],
         ["speed"] = [Run.CallBudgetChecks.RunSpeed],
         ["storage-history"] = [Storage.DeletedHistoryChecks.Run],
         ["history-restore-speed"] = [Storage.DeletedHistoryChecks.RunRestoreSpeed],

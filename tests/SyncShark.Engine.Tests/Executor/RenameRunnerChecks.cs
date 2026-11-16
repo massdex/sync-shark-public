@@ -2553,6 +2553,68 @@ public static class RenameRunnerChecks
         }
     }
 
+    /// <summary>Non-gating measure of the held-footprint step that RunCoreAsync runs on a Hold or Notice: the
+    /// baseline line (before the decided-footprint hold) against the candidate's HeldFootprint, each consuming
+    /// the same lazy footprint into a fresh hold set the way RowContexts.HoldRenamePaths does. Its input is the
+    /// rename group (4 paths per candidate, one or two candidates), never the folder's children, so the sizes are
+    /// 1 and 2 candidates. Samples alternate ABBA; it prints per-op wall time (median, p90, max) and allocated bytes.</summary>
+    public static void HeldFootprintCost()
+    {
+        const int Samples = 41, Warmup = 5, Iterations = 2000;
+        static IEnumerable<(Side Side, string Path, bool Destination)> Paths(int candidates, string home)
+        {
+            for (var i = 0; i < candidates; i++)
+            {
+                yield return (Side.Local, "Projects/Area/Old Folder " + i, false);
+                yield return (Side.Dropbox, "Projects/Area/Old Folder " + i, false);
+                yield return (Side.Local, home + "/New Folder " + i, false);
+                yield return (Side.Dropbox, home + "/New Folder " + i, true);
+            }
+        }
+        static void Hold(IEnumerable<(Side Side, string Path)> paths, object gate)
+        {
+            var holds = new PrefixSet();
+            lock (gate)
+                foreach (var path in paths) holds.Add(PathNames.KeyFor(path.Side, path.Path));
+        }
+        var invariant = System.Globalization.CultureInfo.InvariantCulture;
+        foreach (var candidates in new[] { 1, 2 })
+        foreach (var relocated in new[] { false, true })
+        {
+            var gate = new object();
+            // RunUnrecordedAsync's decided footprint is its own array: equal for an ordinary hold, moved for a relocated one.
+            var decided = Paths(candidates, relocated ? "Projects/Moved/Home" : "Projects/Area").ToArray();
+            Action baseline = () => Hold(Paths(candidates, "Projects/Area").Select(path => (path.Side, path.Path)), gate);
+            Action candidate = () => Hold(RenameRunner.HeldFootprint(Paths(candidates, "Projects/Area").ToArray(), decided)
+                .Select(path => (path.Side, path.Path)), gate);
+            var ns = new[] { new List<double>(), new List<double>() };
+            var bytes = new[] { new List<double>(), new List<double>() };
+            for (var sample = 0; sample < Warmup + Samples; sample++)
+            for (var slot = 0; slot < 2; slot++)
+            {
+                var which = (sample + slot) % 2;
+                var run = which == 0 ? baseline : candidate;
+                var allocated = GC.GetAllocatedBytesForCurrentThread();
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                for (var i = 0; i < Iterations; i++) run();
+                var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+                var used = GC.GetAllocatedBytesForCurrentThread() - allocated;
+                if (sample < Warmup) continue;
+                ns[which].Add(elapsed.TotalNanoseconds / Iterations);
+                bytes[which].Add((double)used / Iterations);
+            }
+            string Line(int which)
+            {
+                var sorted = ns[which].Order().ToArray();
+                return FormattableString.Invariant(
+                    $"ns-median={sorted[Samples / 2]:F1} ns-p90={sorted[Samples * 9 / 10]:F1} ns-max={sorted[^1]:F1} bytes-median={bytes[which].Order().ElementAt(Samples / 2):F1}");
+            }
+            Console.WriteLine(string.Create(invariant,
+                $"held-footprint-cost candidates={candidates} paths={4 * candidates} shape={(relocated ? "relocated" : "ordinary")} samples={Samples} iterations={Iterations} baseline {Line(0)} candidate {Line(1)}"));
+            Check.Require(ns[0].Count == Samples && ns[1].Count == Samples, "held-footprint-cost: every sample was taken");
+        }
+    }
+
     // A folder under a mapped parent (Local a_b, Dropbox a:b) is listed at a stale path and relocated by a fresh identity
     // read to a_b/Home, whose Dropbox destination is the mapped a:b/Home. Unreadable there, it holds with no issue, so
     // only the home it was decided at keeps a later file moved into a_b/Home from refusing into a Failure or writing

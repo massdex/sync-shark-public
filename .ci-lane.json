@@ -3,6 +3,7 @@
     "engine-tests"
   ],
   "engine": [
+    "held-footprint-cost",
     "syncer",
     "repair",
     "repair-held",
