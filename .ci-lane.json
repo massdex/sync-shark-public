@@ -1,0 +1,17 @@
+{
+  "build": [
+    "engine-tests"
+  ],
+  "engine": [
+    "work-lifecycle",
+    "repair-claims",
+    "store",
+    "repair",
+    "storage-history",
+    "literals",
+    "dependencies",
+    "strings"
+  ],
+  "core": [],
+  "ui": []
+}
