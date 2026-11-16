@@ -219,7 +219,8 @@ public static partial class CallBudgetChecks
                             }
                         });
                         await syncer.SyncWorkAsync(ct);
-                        var moves = rig.Wire.Calls.Count(route => route.EndsWith("/move_v2", StringComparison.Ordinal));
+                        var moves = rig.Wire.Calls.Count(route => route.EndsWith("/move_v2", StringComparison.Ordinal) ||
+                            route.EndsWith("/move_batch_v2", StringComparison.Ordinal));
                         Console.WriteLine($"B214 move origin={origin} children={children} remoteMoves={moves} localMoves={local.Moves} " +
                             $"new={Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "New"))} old={Directory.Exists(Path.Combine(rig.Pair.LocalRoot, "Old"))} " +
                             $"queue={rig.Store.CountWork(pairId, generation, rig.Store.ReadWorkWatermark())} " +

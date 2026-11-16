@@ -1,19 +1,22 @@
 namespace Massdex.SyncShark.Engine.Dropbox;
 
-/// <summary>Sends concurrent plain moves through move_batch_v2: many parallel single moves into one namespace draw
-/// too_many_write_operations, and Dropbox's remedy is batching. Moves are grouped by source parent, destination
-/// parent and cancellation token. A group sends what is queued whenever none of its batches is in flight, so a lone
-/// move goes as a batch of one and there is no fill wait. Each caller awaits its own member, so a queue holds at most
-/// the moves its callers' admission lets run at once; a batch holds at most the provider bound.</summary>
+/// <summary>Sends concurrent moves through move_batch_v2: many parallel single moves into one namespace draw
+/// too_many_write_operations, and Dropbox's remedy is batching. Moves are grouped by source and destination parent,
+/// whichever pass sent them. A group sends what is queued whenever none of its batches is in flight, so a lone move
+/// goes as a batch of one and there is no fill wait. Each caller awaits its own member, so a queue holds at most the
+/// moves its callers' admission lets run at once; a batch holds at most the provider bound. A caller's cancellation
+/// ends its own wait, as it ends a single move's request: an unsent member leaves the queue, and a batch request
+/// stops only when every member's caller has stopped.</summary>
 internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, EngineSettings settings, TimeProvider time)
 {
     // A key is present exactly while its group drains; its queue holds the members waiting for the next batch.
-    private readonly Dictionary<(string From, string To, CancellationToken Token), Queue<Pending>> _groups = new();
+    private readonly Dictionary<(string From, string To), Queue<Pending>> _groups = new();
 
-    private sealed class Pending(Entry expected, string newPath)
+    private sealed class Pending(Entry expected, string newPath, CancellationToken token)
     {
         internal Entry Expected { get; } = expected;
         internal string NewPath { get; } = newPath;
+        internal CancellationToken Token { get; } = token;
         internal TaskCompletionSource<Entry> Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal IssueSubject.UnknownMove Move => new(Expected.Id, Expected.Path, NewPath, null, Expected.IsFolder);
     }
@@ -22,8 +25,8 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
     internal Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var member = new Pending(expected, newPath);
-        var key = (PathNames.Key(PathNames.Parent(expected.Path)), PathNames.Key(PathNames.Parent(newPath)), ct);
+        var member = new Pending(expected, newPath, ct);
+        var key = (PathNames.Key(PathNames.Parent(expected.Path)), PathNames.Key(PathNames.Parent(newPath)));
         bool start;
         lock (_groups)
         {
@@ -32,11 +35,11 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
             queue!.Enqueue(member);
         }
         if (start) _ = DrainAsync(key);
-        return member.Done.Task;
+        return member.Done.Task.WaitAsync(ct);
     }
 
     // One drain per group; SendAsync settles every member it takes, so this task never faults.
-    private async Task DrainAsync((string From, string To, CancellationToken Token) key)
+    private async Task DrainAsync((string From, string To) key)
     {
         while (true)
         {
@@ -49,16 +52,29 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
                     _groups.Remove(key);
                     return;
                 }
-                batch = new Pending[Math.Min(queue.Count, DropboxApiLimits.BatchMaxEntries)];
-                for (var index = 0; index < batch.Length; index++) batch[index] = queue.Dequeue();
+                var taken = new List<Pending>(Math.Min(queue.Count, DropboxApiLimits.BatchMaxEntries));
+                while (queue.Count != 0 && taken.Count < DropboxApiLimits.BatchMaxEntries)
+                    if (queue.Dequeue() is { Token.IsCancellationRequested: false } member) taken.Add(member);
+                batch = taken.ToArray();
             }
-            await SendAsync(key, batch).ConfigureAwait(false);
+            if (batch.Length != 0) await SendAsync(key, batch).ConfigureAwait(false);
         }
     }
 
-    private async Task SendAsync((string From, string To, CancellationToken Token) key, Pending[] batch)
+    private async Task SendAsync((string From, string To) key, Pending[] batch)
     {
-        if (await SubmitAsync(batch, key.Token).ConfigureAwait(false) is not { } results) return;
+        IReadOnlyList<FolderMemberResult>? results;
+        using (var stop = new CancellationTokenSource())
+        {
+            var waiting = batch.Length;
+            var registrations = batch.Select(member => member.Token.Register(() =>
+            {
+                if (Interlocked.Decrement(ref waiting) == 0) stop.Cancel();
+            })).ToArray();
+            try { results = await SubmitAsync(batch, stop.Token).ConfigureAwait(false); }
+            finally { foreach (var registration in registrations) registration.Dispose(); }
+        }
+        if (results is null) return;
         for (var ordinal = 0; ordinal < batch.Length; ordinal++)
         {
             var member = batch[ordinal];

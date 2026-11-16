@@ -208,11 +208,14 @@ public static partial class DropboxWriterChecks
                 Raw: Complete(Success("A")), Release: release.Task));
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "B", "C"), new { },
                 Raw: Complete(Success("B"), Success("C"))));
-            var moves = new[] { "A", "B", "C" }.Select(name => fixture.Side.MoveAsync(Sibling(name), "Destination/" + name, default)).ToArray();
+            // Each caller has its own pass token, as Repair and AutoSync do; the group is shared anyway.
+            using var other = new CancellationTokenSource();
+            var moves = new[] { ("A", default(CancellationToken)), ("B", other.Token), ("C", default(CancellationToken)) }
+                .Select(move => fixture.Side.MoveAsync(Sibling(move.Item1), "Destination/" + move.Item1, move.Item2)).ToArray();
             release.SetResult();
             var moved = await Task.WhenAll(moves);
             Check.Require(moved.Select(entry => entry.Path).SequenceEqual(["Destination/A", "Destination/B", "Destination/C"]),
-                "A lone move goes as a batch of one; siblings queued behind it share the next batch and each gets its own entry.");
+                "A lone move goes as a batch of one; siblings from any pass queued behind it share the next batch, each with its own entry.");
             fixture.Done();
         }
 
@@ -259,12 +262,70 @@ public static partial class DropboxWriterChecks
 
         using (var fixture = new Fixture())
         {
-            fixture.Handler.Steps.Enqueue(MoveStep("/Parent/Child", "/Parent/Other", true));
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, _ => { }, new { },
+                Raw: Complete("{\".tag\":\"failure\",\"failure\":" + Relocation("{\".tag\":\"too_many_files\"}") + "}")));
             fixture.Handler.Steps.Enqueue(MoveStep("/Parent/Child", "/Parent/child" + fixture.Settings.CaseRenameSuffix, false));
             fixture.Handler.Steps.Enqueue(MoveStep("/Parent/child" + fixture.Settings.CaseRenameSuffix, "/Parent/child", false));
-            await fixture.Side.MoveAsync(Source() with { IsFolder = true }, "Other", default);
+            Exception? oversized = null;
+            try { await fixture.Side.MoveAsync(Sibling("A") with { IsFolder = true }, "Destination/A", default); }
+            catch (Exception error) { oversized = error; }
             await fixture.Side.MoveAsync(Source(), "child", default);
-            Check.Require(fixture.Handler.Requests == 3, "A folder move and a case-only rename keep their single moves.");
+            Check.Require(oversized is ItemFailedException
+                    { Cause: TextKey.FailDropboxTooManyFiles, Disposition: FailureDisposition.Permanent, Move: null } &&
+                fixture.Handler.Requests == 3,
+                "A folder member's too_many_files is the single move's refusal, so the in-parts fallback runs; a case-only rename keeps its single hops.");
+            fixture.Done();
+        }
+
+        await SideMoveCancellationAsync();
+    }
+
+    // A caller's cancellation ends its own wait, as it ends a single move's request; the batch goes on for the rest.
+    private static async Task SideMoveCancellationAsync()
+    {
+        using (var fixture = new Fixture())
+        {
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var polling = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
+                Raw: Complete(Success("A")), Release: release.Task));
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "B", "C"), new { },
+                Raw: "{\".tag\":\"async_job_id\",\"async_job_id\":\"job\"}"));
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatchCheck, _ => polling.TrySetResult(),
+                new Dictionary<string, object> { [".tag"] = "in_progress" }, Release: release.Task));
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatchCheck, _ => { }, new { },
+                Raw: Complete(Success("B"), Success("C"))));
+            using var cancel = new CancellationTokenSource();
+            var first = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
+            var cancelled = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", cancel.Token);
+            var kept = fixture.Side.MoveAsync(Sibling("C"), "Destination/C", default);
+            release.SetResult();
+            await first;
+            await polling.Task;
+            cancel.Cancel();
+            Exception? stopped = null;
+            try { await cancelled; }
+            catch (Exception error) { stopped = error; }
+            Check.Require(stopped is OperationCanceledException && (await kept).Path == "Destination/C",
+                "After acceptance a cancelled caller stops as a cancelled single move does; its sibling still gets its receipt.");
+            fixture.Done();
+        }
+
+        using (var fixture = new Fixture())
+        {
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
+                Raw: Complete(Success("A")), Release: release.Task));
+            using var cancel = new CancellationTokenSource();
+            var first = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
+            var unsent = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", cancel.Token);
+            cancel.Cancel();
+            release.SetResult();
+            Exception? stopped = null;
+            try { await unsent; }
+            catch (Exception error) { stopped = error; }
+            Check.Require(stopped is OperationCanceledException && (await first).Path == "Destination/A",
+                "A cancelled member that was not sent leaves the queue and is never sent.");
             fixture.Done();
         }
     }
