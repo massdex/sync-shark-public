@@ -2810,6 +2810,8 @@ public static partial class EngineHostChecks
         // The owner moves into a home Dropbox refuses, and a stray file moves under that home.
         Directory.Move(Path.Combine(local, "Old", "Child"), Path.Combine(local, "New", "Child"));
         System.IO.File.Move(Path.Combine(local, "Other", "s.txt"), Path.Combine(local, "New", "Child", "s.txt"));
+        // A no-permission Failure is a stored hold (IssuePolicy.Holds) only with the provider's error_summary.
+        rig.Rig.Wire.MoveRefusalSummary = true;
         rig.Rig.Wire.NameWriteErrors[Home] = DropboxProtocol.NoWritePermission;
         var finishing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2831,9 +2833,8 @@ public static partial class EngineHostChecks
         {
             await finishing.Task.WaitAsync(HookBound).ConfigureAwait(false);
             var failed = rig.Store.Issues(rig.PairId);
-            // The wire fake sends no error_summary, so the refusal's cause is the generic DropboxRefused.
             Check.Require(failed.Count == 1 && failed[0].Kind == IssueKind.Failure &&
-                failed[0].Cause == TextKey.DropboxRefused && failed[0].Path == Home && HomeWrites() == 1,
+                failed[0].Cause == TextKey.FailDropboxNoPermission && failed[0].Path == Home && HomeWrites() == 1,
                 "owner handoff: the Repair's one write under the home is the refused owner move; " + State());
             RequireOldTree("at the rename stage");
 
