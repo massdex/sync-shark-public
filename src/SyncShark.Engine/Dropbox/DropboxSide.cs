@@ -86,10 +86,10 @@ public sealed partial class DropboxSide : IIdentitySide, IFolderMoveSide
         CancellationToken ct) => _writer.ReadMoveBatchAsync(jobId, expectedCount, attempt, ct);
     /// <summary>Returns the classified removal; folder effects require the selected folder operation.</summary>
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct) => _writer.DeleteAsync(expected, selection, ct);
-    /// <summary>Moves expected to newPath, which must be free. A move joins its folder's batch; a case-only rename
-    /// takes its two hops alone. A folder under in-parts custody never reaches here (FolderMoveRunner holds it).</summary>
+    /// <summary>Moves expected to newPath, which must be free. A plain file move joins its folder's batch; a folder
+    /// move and a case-only rename keep the single call, so a folder's too_many_files reaches the in-parts fallback.</summary>
     public Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct) =>
-        PathNames.CaseOnly(expected.Path, newPath)
+        expected.IsFolder || PathNames.CaseOnly(expected.Path, newPath)
             ? _writer.MoveAsync(expected, newPath, ct) : _moves.MoveAsync(expected, newPath, ct);
 
     /// <summary>Reads the configured root's current account, namespace and folder identity without listing children.</summary>

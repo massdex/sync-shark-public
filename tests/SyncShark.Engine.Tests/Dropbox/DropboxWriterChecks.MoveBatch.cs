@@ -262,73 +262,121 @@ public static partial class DropboxWriterChecks
 
         using (var fixture = new Fixture())
         {
-            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, _ => { }, new { },
-                Raw: Complete("{\".tag\":\"failure\",\"failure\":" + Relocation("{\".tag\":\"too_many_files\"}") + "}")));
+            fixture.Handler.Steps.Enqueue(MoveStep("/Parent/Child", "/Parent/Other", true));
             fixture.Handler.Steps.Enqueue(MoveStep("/Parent/Child", "/Parent/child" + fixture.Settings.CaseRenameSuffix, false));
             fixture.Handler.Steps.Enqueue(MoveStep("/Parent/child" + fixture.Settings.CaseRenameSuffix, "/Parent/child", false));
-            Exception? oversized = null;
-            try { await fixture.Side.MoveAsync(Sibling("A") with { IsFolder = true }, "Destination/A", default); }
-            catch (Exception error) { oversized = error; }
+            await fixture.Side.MoveAsync(Source() with { IsFolder = true }, "Other", default);
             await fixture.Side.MoveAsync(Source(), "child", default);
-            Check.Require(oversized is ItemFailedException
-                    { Cause: TextKey.FailDropboxTooManyFiles, Disposition: FailureDisposition.Permanent, Move: null } &&
-                fixture.Handler.Requests == 3,
-                "A folder member's too_many_files is the single move's refusal, so the in-parts fallback runs; a case-only rename keeps its single hops.");
+            Check.Require(fixture.Handler.Requests == 3,
+                "A folder move keeps the single call (its too_many_files reaches the in-parts fallback) and a case-only rename keeps its two hops.");
             fixture.Done();
         }
 
         await SideMoveCancellationAsync();
     }
 
-    // A caller's cancellation ends its own wait, as it ends a single move's request; the batch goes on for the rest.
+    // A queued member leaves on cancellation; a member taken into a batch waits for that request's accounting and is
+    // cancelled only when no effect is proven, so its caller keeps its locks while the move can still happen.
     private static async Task SideMoveCancellationAsync()
     {
         using (var fixture = new Fixture())
         {
-            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var poll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var polling = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
-                Raw: Complete(Success("A")), Release: release.Task));
+                Raw: Complete(Success("A")), Release: first.Task));
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "B", "C"), new { },
-                Raw: "{\".tag\":\"async_job_id\",\"async_job_id\":\"job\"}"));
+                Raw: AcceptedJob));
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatchCheck, _ => polling.TrySetResult(),
-                new Dictionary<string, object> { [".tag"] = "in_progress" }, Release: release.Task));
+                new Dictionary<string, object> { [".tag"] = "in_progress" }, Release: poll.Task));
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatchCheck, _ => { }, new { },
                 Raw: Complete(Success("B"), Success("C"))));
             using var cancel = new CancellationTokenSource();
-            var first = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
-            var cancelled = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", cancel.Token);
-            var kept = fixture.Side.MoveAsync(Sibling("C"), "Destination/C", default);
-            release.SetResult();
-            await first;
+            var a = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
+            var b = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", cancel.Token);
+            var c = fixture.Side.MoveAsync(Sibling("C"), "Destination/C", default);
+            first.SetResult();
+            await a;
             await polling.Task;
             cancel.Cancel();
-            Exception? stopped = null;
-            try { await cancelled; }
-            catch (Exception error) { stopped = error; }
-            Check.Require(stopped is OperationCanceledException && (await kept).Path == "Destination/C",
-                "After acceptance a cancelled caller stops as a cancelled single move does; its sibling still gets its receipt.");
+            var waited = !b.IsCompleted;
+            poll.SetResult();
+            Check.Require(waited && (await b).Path == "Destination/B" && (await c).Path == "Destination/C",
+                "A caller cancelled after acceptance waits for the job's accounting and gets the move it made.");
             fixture.Done();
         }
 
         using (var fixture = new Fixture())
         {
-            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
-                Raw: Complete(Success("A")), Release: release.Task));
+                Raw: Complete(Success("A")), Release: first.Task));
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "B", "C"), new { },
+                Raw: AcceptedJob));
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatchCheck, _ => { }, Error("other/"),
+                HttpStatusCode.Conflict));
             using var cancel = new CancellationTokenSource();
-            var first = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
+            var a = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
+            var b = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", cancel.Token);
+            var c = fixture.Side.MoveAsync(Sibling("C"), "Destination/C", default);
+            first.SetResult();
+            await a;
+            cancel.Cancel();
+            foreach (var (move, name) in new[] { (b, "B"), (c, "C") })
+            {
+                Exception? failed = null;
+                try { await move; }
+                catch (Exception error) { failed = error; }
+                Check.Require(failed is ItemFailedException { Disposition: FailureDisposition.UnknownEffect } unknown &&
+                    unknown.Move == new IssueSubject.UnknownMove("id:" + name, "Child/" + name, "Destination/" + name, null, false),
+                    "A failed check of an accepted job leaves every member, cancelled or surviving, with its unknown move.");
+            }
+            fixture.Done();
+        }
+
+        using (var fixture = new Fixture())
+        {
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
+                Raw: Complete("{\".tag\":\"failure\",\"failure\":{\".tag\":\"too_many_write_operations\"}}")));
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
+                Raw: Complete("{\".tag\":\"failure\",\"failure\":" +
+                    Relocation("{\".tag\":\"to\",\"to\":{\".tag\":\"conflict\",\"conflict\":{\".tag\":\"file\"}}}") + "}")));
+            using var cancel = new CancellationTokenSource();
+            var moving = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", cancel.Token);
+            // The throttle's account pause holds the resend in request admission on the fixture clock.
+            Check.Require(SpinWait.SpinUntil(() => fixture.Time.HasArmedTimer && fixture.Handler.Steps.Count == 1, AdmissionBound),
+                "The throttled member's resend waits in request admission.");
+            cancel.Cancel();
+            var waited = !moving.IsCompleted;
+            fixture.Time.Advance(fixture.Waits[^1].Wait);
+            Exception? stopped = null;
+            try { await moving; }
+            catch (Exception error) { stopped = error; }
+            Check.Require(waited && stopped is OperationCanceledException,
+                "A caller cancelled during request admission waits for the request; with no effect proven it is cancelled.");
+            fixture.Done();
+        }
+
+        using (var fixture = new Fixture())
+        {
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
+                Raw: Complete(Success("A")), Release: first.Task));
+            using var cancel = new CancellationTokenSource();
+            var a = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
             var unsent = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", cancel.Token);
             cancel.Cancel();
-            release.SetResult();
-            Exception? stopped = null;
-            try { await unsent; }
-            catch (Exception error) { stopped = error; }
-            Check.Require(stopped is OperationCanceledException && (await first).Path == "Destination/A",
-                "A cancelled member that was not sent leaves the queue and is never sent.");
+            var left = unsent.IsCanceled;
+            first.SetResult();
+            Check.Require(left && (await a).Path == "Destination/A",
+                "A cancelled member that was only queued leaves the queue at once and is never sent.");
             fixture.Done();
         }
     }
+
+    private const string AcceptedJob = "{\".tag\":\"async_job_id\",\"async_job_id\":\"job\"}";
+    private static readonly TimeSpan AdmissionBound = TimeSpan.FromSeconds(30);
 
     private static Entry Sibling(string name) => Source() with { Path = "Child/" + name, Id = "id:" + name };
 

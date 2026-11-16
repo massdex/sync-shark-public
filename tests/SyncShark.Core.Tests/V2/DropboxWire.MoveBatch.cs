@@ -10,9 +10,17 @@ internal sealed partial class DropboxWire
     /// too_many_files; an undocumented tag leaves the member's effect unknown. Nothing moves.</summary>
     public Dictionary<string, string> MoveBatchRefusals { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>Each move batch's entry count, in arrival order.</summary>
+    public List<int> MoveBatchSizes { get; } = [];
+
+    /// <summary>When set, every move batch waits for it before answering.</summary>
+    public Task? HoldMoveBatch { get; set; }
+
     private async Task<HttpResponseMessage> MoveBatchAsync(HttpRequestMessage request, CancellationToken token)
     {
         using var document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(token));
+        lock (MoveBatchSizes) MoveBatchSizes.Add(document.RootElement.GetProperty("entries").GetArrayLength());
+        if (HoldMoveBatch is { } hold) await hold.WaitAsync(token);
         var results = new List<object>();
         foreach (var entry in document.RootElement.GetProperty("entries").EnumerateArray())
         {

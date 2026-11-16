@@ -29,7 +29,15 @@ internal sealed class IdentitySide(ISide inner,
         inner.PublishAsync(staged, expected, selection, ct);
     public Task<Entry> EnsureFolderAsync(string path, CancellationToken ct) => inner.EnsureFolderAsync(path, ct);
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct) => inner.DeleteAsync(expected, selection, ct);
-    public Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct) => inner.MoveAsync(expected, newPath, ct);
+    /// <summary>Runs after each move has been handed to the inner side, before its outcome.</summary>
+    public Action? Moving { get; init; }
+
+    public Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct)
+    {
+        var moved = inner.MoveAsync(expected, newPath, ct);
+        Moving?.Invoke();
+        return moved;
+    }
     public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct) =>
         ((IFolderMoveSide)inner).CreateFolderExclusiveAsync(path, ct);
     public Task<FolderSubmitResult> SubmitMoveBatchAsync(IReadOnlyList<(string From, string To)> members,

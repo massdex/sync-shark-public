@@ -1,9 +1,12 @@
+using Massdex.SyncShark.Engine.Executor;
+using Massdex.SyncShark.Engine.Local;
 using Massdex.SyncShark.Engine.Run;
+using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Run;
 
 /// <summary>Repair and AutoSync Dropbox moves share the side's batch collector (`--engine-checks move-batch`): each
-/// member is saved, refused, held for settlement by identity or split in parts exactly as a single move would be.</summary>
+/// member is saved, refused or held for settlement by identity exactly as a single move would be.</summary>
 public static class MoveBatchChecks
 {
     private static readonly DateTimeOffset BaseTime = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
@@ -17,17 +20,29 @@ public static class MoveBatchChecks
             "An AutoSync file rename moves its Dropbox counterpart through the shared move batch, not move_v2.");
     }).GetAwaiter().GetResult();
 
+    // The first submission is held until every sibling has reached the side, so the rest must share one request.
     public static void SiblingsSaved() => WithRigAsync(
         [.. Siblings.Select(name => "Old/" + name), "New/keep.txt"], async (rig, folder) =>
     {
+        var reached = 0;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Wire.HoldMoveBatch = gate.Task;
+        // A bound, not a pause: if the moves never overlap, the size assertion below reports it instead of hanging.
+        using var bound = new CancellationTokenSource(SiblingBound);
+        using var expire = bound.Token.Register(() => gate.TrySetResult());
         await SyncAfterAsync(rig, folder, () =>
         {
             foreach (var name in Siblings) Move(rig, "Old/" + name, "New/" + name);
-        }, null);
+        }, null, dropbox => new IdentitySide(dropbox, ((IIdentitySide)dropbox).ReadByIdAsync)
+        {
+            Moving = () => { if (Interlocked.Increment(ref reached) == Siblings.Length) gate.TrySetResult(); }
+        });
+        Check.Require(rig.Wire.MoveBatchSizes.SequenceEqual([1, Siblings.Length - 1]) && !rig.Wire.Calls.Contains(SingleMove),
+            "Siblings queued behind a held submission go out together in one multi-entry request; sizes=" +
+            string.Join(",", rig.Wire.MoveBatchSizes));
         Check.Require(Siblings.All(name => rig.Store.SyncedByKey(rig.Pair.PairId, Side.Local,
                 PathNames.Key("New/" + name)) is { DropboxPath: var saved } && saved == "New/" + name) &&
-            rig.Store.Issues(rig.Pair.PairId).Count == 0 && rig.Wire.Calls.Contains(MoveBatch) &&
-            !rig.Wire.Calls.Contains(SingleMove),
+            rig.Store.Issues(rig.Pair.PairId).Count == 0,
             "Every batched sibling's moved Dropbox location is saved in its binding, with no notice.");
     }).GetAwaiter().GetResult();
 
@@ -50,28 +65,16 @@ public static class MoveBatchChecks
             "An Unknown batch member stores the unknown move for settlement by identity.");
     }).GetAwaiter().GetResult();
 
-    public static void FolderInParts() => WithRigAsync(["Old/a.txt", "Old/b.txt"], async (rig, folder) =>
-    {
-        var id = rig.Store.SyncedByKey(rig.Pair.PairId, Side.Local, PathNames.Key("Old"))!.DropboxId!;
-        rig.Wire.MoveBatchRefusals["New"] = "too_many_files";
-        await SyncAfterAsync(rig, folder,
-            () => Directory.Move(Path.Combine(rig.Pair.LocalRoot, "Old"), Path.Combine(rig.Pair.LocalRoot, "New")), null);
-        Check.Require(rig.Wire.Calls.Contains(MoveBatch) && (rig.Store.FolderMoves(rig.Pair.PairId, id).Count != 0 ||
-                rig.Store.Issues(rig.Pair.PairId).Any(issue => issue.Cause == TextKey.FailMoveInParts) ||
-                rig.Wire.Calls.Contains(CreateFolder)),
-            "A folder member refused with too_many_files takes the single move's in-parts fallback.");
-    }).GetAwaiter().GetResult();
-
     private const string MoveBatch = "/2/files/move_batch_v2";
     private const string SingleMove = "/2/files/move_v2";
-    private const string CreateFolder = "/2/files/create_folder_v2";
+    private static readonly TimeSpan SiblingBound = TimeSpan.FromMinutes(1);
 
     private static void Move(RepairChecks.ComposedRig rig, string from, string to) =>
         File.Move(Path.Combine(rig.Pair.LocalRoot, from), Path.Combine(rig.Pair.LocalRoot, to));
 
     // One local change, caught up from the journal and synced by the same selection AutoSync runs.
     private static async Task<Entry?> SyncAfterAsync(RepairChecks.ComposedRig rig, string folder, Action change,
-        string? read)
+        string? read, Func<ISide, ISide>? dropbox = null)
     {
         var pairId = rig.Pair.PairId;
         var generation = rig.Store.ReadPairExecution(pairId)!.Value.Generation;
@@ -81,9 +84,28 @@ public static class MoveBatchChecks
             change();
             await rig.Host.CatchUpLocalAsync(pairId, generation, ct);
             rig.Wire.Calls.Clear();
-            await session.Syncer.SyncWorkAsync(ct);
+            await SyncerFor(session, log, dropbox).SyncWorkAsync(ct);
             return read is null ? null : await session.Context.Dropbox.ReadOneAsync(read, ct);
         }, default);
+    }
+
+    // The session's own syncer, or the same composition over a wrapped Dropbox side (as the B214 budget check builds it).
+    private static Syncer SyncerFor(PairSession session, RunLog log, Func<ISide, ISide>? dropbox)
+    {
+        if (dropbox is null) return session.Syncer;
+        var context = session.Context with { Dropbox = dropbox(session.Context.Dropbox) };
+        var ports = new SyncPorts(new RecoveryExecutionBoundary(() => session),
+            new LiveExecutionBoundary(_ => session), PairSafety.SelectedBoundaryFor(session), LocalSide.HashSlots);
+        return new Syncer(context, ports with
+        {
+            RunBatchAsync = async (selection, batchSide, scope, retries, settles, token) =>
+            {
+                await PairSafety.CheckRootsAsync(session, token);
+                await FolderBatch.RunAsync(context, ports, session.PrerequisiteDropbox, log, selection, batchSide, scope,
+                    retries, settles, next => PairSafety.CheckRootsAsync(session, next), session.Scans,
+                    () => session.Host.TryHoldGeneration(session.Registration), token);
+            }
+        });
     }
 
     // A synced baseline of the given files (and their folders) on both sides.
@@ -93,7 +115,8 @@ public static class MoveBatchChecks
         Directory.CreateDirectory(folder);
         try
         {
-            await using var rig = await RepairChecks.ComposeRigAsync(folder, level: 1);
+            // One admission permit per sibling, so the sibling moves can be in flight together.
+            await using var rig = await RepairChecks.ComposeRigAsync(folder, level: Siblings.Length);
             foreach (var parent in files.Select(PathNames.Parent).Where(parent => parent.Length != 0).Distinct())
             {
                 Directory.CreateDirectory(Path.Combine(rig.Pair.LocalRoot, parent));

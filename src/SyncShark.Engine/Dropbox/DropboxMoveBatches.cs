@@ -1,16 +1,17 @@
 namespace Massdex.SyncShark.Engine.Dropbox;
 
-/// <summary>Sends concurrent moves through move_batch_v2: many parallel single moves into one namespace draw
+/// <summary>Sends concurrent plain file moves through move_batch_v2: many parallel single moves into one namespace draw
 /// too_many_write_operations, and Dropbox's remedy is batching. Moves are grouped by source and destination parent,
 /// whichever pass sent them. A group sends what is queued whenever none of its batches is in flight, so a lone move
 /// goes as a batch of one and there is no fill wait. Each caller awaits its own member, so a queue holds at most the
-/// moves its callers' admission lets run at once; a batch holds at most the provider bound. A caller's cancellation
-/// ends its own wait, as it ends a single move's request: an unsent member leaves the queue, and a batch request
-/// stops only when every member's caller has stopped.</summary>
+/// moves its callers' admission lets run at once; a batch holds at most the provider bound. A cancelled caller whose
+/// member is still queued leaves the queue; once taken into a batch the member waits until that request is accounted
+/// for, so its caller keeps its locks while the move can still happen, and is cancelled only when no effect is
+/// proven.</summary>
 internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, EngineSettings settings, TimeProvider time)
 {
     // A key is present exactly while its group drains; its queue holds the members waiting for the next batch.
-    private readonly Dictionary<(string From, string To), Queue<Pending>> _groups = new();
+    private readonly Dictionary<(string From, string To), LinkedList<Pending>> _groups = new();
 
     private sealed class Pending(Entry expected, string newPath, CancellationToken token)
     {
@@ -18,6 +19,8 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
         internal string NewPath { get; } = newPath;
         internal CancellationToken Token { get; } = token;
         internal TaskCompletionSource<Entry> Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal LinkedListNode<Pending>? Node { get; set; }
+        internal CancellationTokenRegistration Registration { get; set; }
         internal IssueSubject.UnknownMove Move => new(Expected.Id, Expected.Path, NewPath, null, Expected.IsFolder);
     }
 
@@ -31,11 +34,28 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
         lock (_groups)
         {
             start = !_groups.TryGetValue(key, out var queue);
-            if (start) _groups[key] = queue = new Queue<Pending>();
-            queue!.Enqueue(member);
+            if (start) _groups[key] = queue = new LinkedList<Pending>();
+            member.Node = queue!.AddLast(member);
+            member.Registration = ct.Register(Cancel, member);
         }
         if (start) _ = DrainAsync(key);
-        return member.Done.Task.WaitAsync(ct);
+        return member.Done.Task;
+    }
+
+    // Only a member still queued leaves on cancellation; a member in a batch waits for that request's accounting.
+    private void Cancel(object? state)
+    {
+        var member = (Pending)state!;
+        var removed = false;
+        lock (_groups)
+        {
+            if (member.Node?.List is { } queue)
+            {
+                queue.Remove(member.Node);
+                removed = true;
+            }
+        }
+        if (removed) member.Done.TrySetCanceled(member.Token);
     }
 
     // One drain per group; SendAsync settles every member it takes, so this task never faults.
@@ -52,46 +72,48 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
                     _groups.Remove(key);
                     return;
                 }
-                var taken = new List<Pending>(Math.Min(queue.Count, DropboxApiLimits.BatchMaxEntries));
-                while (queue.Count != 0 && taken.Count < DropboxApiLimits.BatchMaxEntries)
-                    if (queue.Dequeue() is { Token.IsCancellationRequested: false } member) taken.Add(member);
-                batch = taken.ToArray();
+                batch = new Pending[Math.Min(queue.Count, DropboxApiLimits.BatchMaxEntries)];
+                for (var index = 0; index < batch.Length; index++)
+                {
+                    batch[index] = queue.First!.Value;
+                    queue.RemoveFirst();
+                }
             }
-            if (batch.Length != 0) await SendAsync(key, batch).ConfigureAwait(false);
+            await SendAsync(key, batch).ConfigureAwait(false);
         }
     }
 
+    // The request is not cancelled by its callers: its accounting decides each member's outcome.
     private async Task SendAsync((string From, string To) key, Pending[] batch)
     {
-        IReadOnlyList<FolderMemberResult>? results;
-        using (var stop = new CancellationTokenSource())
-        {
-            var waiting = batch.Length;
-            var registrations = batch.Select(member => member.Token.Register(() =>
-            {
-                if (Interlocked.Decrement(ref waiting) == 0) stop.Cancel();
-            })).ToArray();
-            try { results = await SubmitAsync(batch, stop.Token).ConfigureAwait(false); }
-            finally { foreach (var registration in registrations) registration.Dispose(); }
-        }
-        if (results is null) return;
+        if (await SubmitAsync(batch, CancellationToken.None).ConfigureAwait(false) is not { } results) return;
         for (var ordinal = 0; ordinal < batch.Length; ordinal++)
         {
             var member = batch[ordinal];
             switch (results[ordinal])
             {
                 case FolderMemberResult.Receipt receipt:
+                    member.Registration.Dispose();
                     member.Done.TrySetResult(DropboxListing.Respelled(receipt.Entry, member.NewPath));
                     break;
-                case FolderMemberResult.KnownNoEffect { WriteThrottled: true }:
+                case FolderMemberResult.KnownNoEffect { WriteThrottled: true } when !member.Token.IsCancellationRequested:
                     // Not committed; the writer reported the throttle, and the member goes in this group's next batch.
-                    lock (_groups) _groups[key].Enqueue(member);
+                    lock (_groups) member.Node = _groups[key].AddLast(member);
                     break;
                 case var result:
-                    member.Done.TrySetException(Failure(member, result));
+                    Fail(member, Failure(member, result));
                     break;
             }
         }
+    }
+
+    // A cancelled caller is cancelled only when its move proved no effect; an unknown effect keeps its intended move.
+    private static void Fail(Pending member, Exception error)
+    {
+        member.Registration.Dispose();
+        if (member.Token.IsCancellationRequested && error is not ItemFailedException { Move: not null })
+            member.Done.TrySetCanceled(member.Token);
+        else member.Done.TrySetException(error);
     }
 
     // The batch's member results, or null when the request's own outcome already settled every member.
@@ -111,16 +133,16 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
                     accepted = true;
                     return await JoinAsync(job.JobId, batch.Length, ct).ConfigureAwait(false);
                 case FolderSubmitResult.KnownNoEffect refused:
-                    foreach (var member in batch) member.Done.TrySetException(NotSent(member, refused.Cause, attempt));
+                    foreach (var member in batch) Fail(member, NotSent(member, refused.Cause, attempt));
                     return null;
                 default:
-                    foreach (var member in batch) member.Done.TrySetException(Unknown(member));
+                    foreach (var member in batch) Fail(member, Unknown(member));
                     return null;
             }
         }
         catch (Exception error)
         {
-            foreach (var member in batch) member.Done.TrySetException(RequestFailure(member, error, attempt, accepted, ct));
+            foreach (var member in batch) Fail(member, RequestFailure(member, error, attempt, accepted, ct));
             return null;
         }
     }
@@ -162,7 +184,6 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
     private static Exception RequestFailure(Pending member, Exception error, RequestAttempt attempt, bool accepted,
         CancellationToken ct)
     {
-        if (error is OperationCanceledException && ct.IsCancellationRequested) return error;
         if (accepted) return Unknown(member);
         var mapped = error is HttpRequestException http
             ? DropboxErrors.Map(DropboxProtocol.MoveBatch, http, false, member.NewPath, attempt).Error
