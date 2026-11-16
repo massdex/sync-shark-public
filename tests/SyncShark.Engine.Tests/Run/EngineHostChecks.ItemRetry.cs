@@ -2831,8 +2831,9 @@ public static partial class EngineHostChecks
         {
             await finishing.Task.WaitAsync(HookBound).ConfigureAwait(false);
             var failed = rig.Store.Issues(rig.PairId);
+            // The wire fake sends no error_summary, so the refusal's cause is the generic DropboxRefused.
             Check.Require(failed.Count == 1 && failed[0].Kind == IssueKind.Failure &&
-                failed[0].Cause == TextKey.FailDropboxNoPermission && failed[0].Path == Home && HomeWrites() == 1,
+                failed[0].Cause == TextKey.DropboxRefused && failed[0].Path == Home && HomeWrites() == 1,
                 "owner handoff: the Repair's one write under the home is the refused owner move; " + State());
             RequireOldTree("at the rename stage");
 
