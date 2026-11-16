@@ -368,6 +368,45 @@ public static partial class DropboxWriterChecks
             fixture.Done();
         }
 
+        // Every caller cancels while its effect is uncertain: a held check of an accepted job, or a dispatched
+        // submission whose reply has not arrived. Each keeps its own unknown move rather than a cancellation.
+        foreach (var held in new[] { DropboxProtocol.MoveBatchCheck, DropboxProtocol.MoveBatch })
+        {
+            using var fixture = new Fixture();
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var never = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
+                Raw: Complete(Success("A")), Release: first.Task));
+            fixture.Handler.Steps.Enqueue(held == DropboxProtocol.MoveBatch
+                ? new Step(DropboxProtocol.MoveBatch, arg => { Members(arg, "B", "C"); entered.TrySetResult(); }, new { },
+                    Raw: AcceptedJob, Release: never.Task)
+                : new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "B", "C"), new { }, Raw: AcceptedJob));
+            if (held == DropboxProtocol.MoveBatchCheck)
+                fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatchCheck, _ => entered.TrySetResult(),
+                    new Dictionary<string, object> { [".tag"] = "in_progress" }, Release: never.Task));
+            using var cancelB = new CancellationTokenSource();
+            using var cancelC = new CancellationTokenSource();
+            var a = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
+            var b = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", cancelB.Token);
+            var c = fixture.Side.MoveAsync(Sibling("C"), "Destination/C", cancelC.Token);
+            first.SetResult();
+            await a;
+            await entered.Task;
+            cancelB.Cancel();
+            cancelC.Cancel();
+            foreach (var (move, name) in new[] { (b, "B"), (c, "C") })
+            {
+                Exception? failed = null;
+                try { await move; }
+                catch (Exception error) { failed = error; }
+                Check.Require(failed is ItemFailedException { Disposition: FailureDisposition.UnknownEffect } unknown &&
+                    unknown.Move == new IssueSubject.UnknownMove("id:" + name, "Child/" + name, "Destination/" + name, null, false),
+                    "With every caller cancelled while held in " + held + ", each member keeps its own unknown move: " + failed);
+            }
+            fixture.Done();
+        }
+
         using (var fixture = new Fixture())
         {
             var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
