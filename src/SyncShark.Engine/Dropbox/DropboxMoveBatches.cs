@@ -7,7 +7,7 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// moves its callers' admission lets run at once; a batch holds at most the provider bound. A cancelled caller whose
 /// member is still queued leaves the queue; once taken into a batch the member waits until that request is accounted
 /// for, so its caller keeps its locks while the move can still happen, and is cancelled only when no effect is
-/// proven.</summary>
+/// proven. The request itself stops once every member's caller has stopped.</summary>
 internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, EngineSettings settings, TimeProvider time)
 {
     // A key is present exactly while its group drains; its queue holds the members waiting for the next batch.
@@ -83,10 +83,9 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
         }
     }
 
-    // The request is not cancelled by its callers: its accounting decides each member's outcome.
     private async Task SendAsync((string From, string To) key, Pending[] batch)
     {
-        if (await SubmitAsync(batch, CancellationToken.None).ConfigureAwait(false) is not { } results) return;
+        if (await SubmitWhileLiveAsync(batch).ConfigureAwait(false) is not { } results) return;
         for (var ordinal = 0; ordinal < batch.Length; ordinal++)
         {
             var member = batch[ordinal];
@@ -96,15 +95,38 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
                     member.Registration.Dispose();
                     member.Done.TrySetResult(DropboxListing.Respelled(receipt.Entry, member.NewPath));
                     break;
-                case FolderMemberResult.KnownNoEffect { WriteThrottled: true } when !member.Token.IsCancellationRequested:
-                    // Not committed; the writer reported the throttle, and the member goes in this group's next batch.
-                    lock (_groups) member.Node = _groups[key].AddLast(member);
+                case FolderMemberResult.KnownNoEffect { WriteThrottled: true } throttled:
+                    // Not committed; the writer reported the throttle, and a live member goes in the group's next batch.
+                    // The cancellation check shares the queue lock with Cancel, so a cancelled member is never re-sent.
+                    var requeued = false;
+                    lock (_groups)
+                    {
+                        if (!member.Token.IsCancellationRequested)
+                        {
+                            member.Node = _groups[key].AddLast(member);
+                            requeued = true;
+                        }
+                    }
+                    if (!requeued) Fail(member, Failure(member, throttled));
                     break;
                 case var result:
                     Fail(member, Failure(member, result));
                     break;
             }
         }
+    }
+
+    // The request runs while any member's caller is live; once all have stopped it stops like a single move's retry.
+    private async Task<IReadOnlyList<FolderMemberResult>?> SubmitWhileLiveAsync(Pending[] batch)
+    {
+        using var stop = new CancellationTokenSource();
+        var live = batch.Length;
+        var registrations = batch.Select(member => member.Token.Register(() =>
+        {
+            if (Interlocked.Decrement(ref live) == 0) stop.Cancel();
+        })).ToArray();
+        try { return await SubmitAsync(batch, stop.Token).ConfigureAwait(false); }
+        finally { foreach (var registration in registrations) registration.Dispose(); }
     }
 
     // A cancelled caller is cancelled only when its move proved no effect; an unknown effect keeps its intended move.
@@ -184,6 +206,9 @@ internal sealed class DropboxMoveBatches(DropboxWriter writer, PairConfig pair, 
     private static Exception RequestFailure(Pending member, Exception error, RequestAttempt attempt, bool accepted,
         CancellationToken ct)
     {
+        // Every caller stopped: proven-no-effect members are cancelled, an accepted or uncertain write stays unknown.
+        if (error is OperationCanceledException && ct.IsCancellationRequested)
+            return accepted || attempt.Completion is not { NoEffectProven: true } ? Unknown(member) : error;
         if (accepted) return Unknown(member);
         var mapped = error is HttpRequestException http
             ? DropboxErrors.Map(DropboxProtocol.MoveBatch, http, false, member.NewPath, attempt).Error

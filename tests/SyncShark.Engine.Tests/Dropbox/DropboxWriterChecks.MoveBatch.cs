@@ -314,36 +314,73 @@ public static partial class DropboxWriterChecks
                 Raw: Complete(Success("A")), Release: first.Task));
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "B", "C"), new { },
                 Raw: AcceptedJob));
-            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatchCheck, _ => { }, Error("other/"),
-                HttpStatusCode.Conflict));
+            var checking = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var check = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatchCheck, _ => checking.TrySetResult(), Error("other/"),
+                HttpStatusCode.Conflict, Release: check.Task));
             using var cancel = new CancellationTokenSource();
             var a = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
             var b = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", cancel.Token);
             var c = fixture.Side.MoveAsync(Sibling("C"), "Destination/C", default);
             first.SetResult();
             await a;
+            await checking.Task;
             cancel.Cancel();
+            var waited = !b.IsCompleted && !c.IsCompleted;
+            check.SetResult();
             foreach (var (move, name) in new[] { (b, "B"), (c, "C") })
             {
                 Exception? failed = null;
                 try { await move; }
                 catch (Exception error) { failed = error; }
-                Check.Require(failed is ItemFailedException { Disposition: FailureDisposition.UnknownEffect } unknown &&
+                Check.Require(waited && failed is ItemFailedException { Disposition: FailureDisposition.UnknownEffect } unknown &&
                     unknown.Move == new IssueSubject.UnknownMove("id:" + name, "Child/" + name, "Destination/" + name, null, false),
-                    "A failed check of an accepted job leaves every member, cancelled or surviving, with its unknown move.");
+                    "A caller cancelled while its accepted job's check is held waits, and a failed check leaves the cancelled and the surviving member each its unknown move.");
             }
             fixture.Done();
         }
 
         using (var fixture = new Fixture())
         {
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
-                Raw: Complete("{\".tag\":\"failure\",\"failure\":{\".tag\":\"too_many_write_operations\"}}")));
+                Raw: Complete(Success("A")), Release: first.Task));
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "B", "C"),
+                Error("too_many_requests/"), HttpStatusCode.TooManyRequests));
+            using var cancelB = new CancellationTokenSource();
+            using var cancelC = new CancellationTokenSource();
+            var a = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", default);
+            var b = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", cancelB.Token);
+            var c = fixture.Side.MoveAsync(Sibling("C"), "Destination/C", cancelC.Token);
+            first.SetResult();
+            await a;
+            // The no-effect 429 puts the request in its retry wait on the fixture clock, which never advances here.
+            Check.Require(SpinWait.SpinUntil(() => fixture.Time.HasArmedTimer && fixture.Handler.Steps.Count == 0, AdmissionBound),
+                "The rate-limited batch waits to retry.");
+            cancelB.Cancel();
+            var kept = !b.IsCompleted;
+            cancelC.Cancel();
+            Exception? stoppedB = null, stoppedC = null;
+            try { await b; } catch (Exception error) { stoppedB = error; }
+            try { await c; } catch (Exception error) { stoppedC = error; }
+            Check.Require(kept && stoppedB is OperationCanceledException && stoppedC is OperationCanceledException,
+                "A retrying request runs while one caller is live and stops once all have cancelled; with no effect proven each is cancelled.");
+            fixture.Done();
+        }
+
+        using (var fixture = new Fixture())
+        {
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "A"), new { },
-                Raw: Complete("{\".tag\":\"failure\",\"failure\":" +
+                Raw: Complete("{\".tag\":\"failure\",\"failure\":{\".tag\":\"too_many_write_operations\"}}"), Release: first.Task));
+            // B queued behind the held first request; the throttled A rejoins after it.
+            fixture.Handler.Steps.Enqueue(new Step(DropboxProtocol.MoveBatch, arg => Members(arg, "B", "A"), new { },
+                Raw: Complete(Success("B"), "{\".tag\":\"failure\",\"failure\":" +
                     Relocation("{\".tag\":\"to\",\"to\":{\".tag\":\"conflict\",\"conflict\":{\".tag\":\"file\"}}}") + "}")));
             using var cancel = new CancellationTokenSource();
             var moving = fixture.Side.MoveAsync(Sibling("A"), "Destination/A", cancel.Token);
+            var live = fixture.Side.MoveAsync(Sibling("B"), "Destination/B", default);
+            first.SetResult();
             // The throttle's account pause holds the resend in request admission on the fixture clock.
             Check.Require(SpinWait.SpinUntil(() => fixture.Time.HasArmedTimer && fixture.Handler.Steps.Count == 1, AdmissionBound),
                 "The throttled member's resend waits in request admission.");
@@ -353,7 +390,7 @@ public static partial class DropboxWriterChecks
             Exception? stopped = null;
             try { await moving; }
             catch (Exception error) { stopped = error; }
-            Check.Require(waited && stopped is OperationCanceledException,
+            Check.Require(waited && stopped is OperationCanceledException && (await live).Path == "Destination/B",
                 "A caller cancelled during request admission waits for the request; with no effect proven it is cancelled.");
             fixture.Done();
         }
