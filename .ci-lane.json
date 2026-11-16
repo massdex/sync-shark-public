@@ -3,8 +3,17 @@
     "engine-tests"
   ],
   "engine": [
-    "a",
-    "b"
+    "dropbox",
+    "move-batch",
+    "resolutions",
+    "renames",
+    "folder-move",
+    "dropbox-echo",
+    "scenarios-offline",
+    "repair",
+    "unknown-move-repair",
+    "engine-host",
+    "syncer"
   ],
   "core": [],
   "ui": []
