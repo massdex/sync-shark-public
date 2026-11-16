@@ -922,6 +922,170 @@ public static class ScanPassChecks
         if (failures.Count != 0) throw new AggregateException(failures);
     }
 
+    public static void OwnerHandoff() => OwnerHandoffAsync().GetAwaiter().GetResult();
+
+    // Files moved into a folder's new home from elsewhere ("strays") list before the folder, which is listed only at a
+    // deeper snapshot path, so the first stray's refusal starts the owner while the second is still in flight. The
+    // owner's stage scopes name its snapshot and saved paths, not the home its fresh identity read relocates it to, so
+    // the gates below make the second stray and the owner meet: the stray reads under that home while the owner
+    // observes. No stray creates or writes under the home before the owner's own move. The strays then follow it
+    // ("moves"); or they wait behind a held owner with no Failure of their own, whether the owner's refused move raises
+    // a Failure that names the home ("failed") or its unreadable new home holds it with no issue at all ("skipped"), so
+    // only the home the owner was decided at keeps them waiting. Nothing is deleted.
+    private static async Task OwnerHandoffAsync()
+    {
+        foreach (var shape in new[] { "moves", "failed", "skipped" })
+            await WithFolder("owner-handoff-" + shape, folder => OwnerHandoffAsync(folder, shape));
+    }
+
+    private static async Task OwnerHandoffAsync(string folder, string shape)
+    {
+        var failed = shape == "failed";
+        var held = shape != "moves";
+        const int strays = OwnerCapacity + 1;
+        const string home = "New/Child";
+        using var plain = NewRig(Pair());
+        var local = (FakeSide)plain.Local;
+        var remote = (FakeSide)plain.Dropbox;
+        var rig = plain with
+        {
+            Local = IdentitySide.Truthful(local, local),
+            Admission = new FakeAdmission { Level = 3, WorkCapacity = OwnerCapacity }
+        };
+        var pairId = rig.Pair.PairId;
+        await local.EnsureFolderAsync("New", default);
+        await local.EnsureFolderAsync("Old/Child", default);
+        await local.EnsureFolderAsync("Other", default);
+        for (var i = 0; i < strays; i++) await PutAsync(local, "Other/s" + i + ".txt", [(byte)i]);
+        using (var log = Log(rig, folder, "seed")) await RunRepairAsync(rig, log, Settings);
+        var strayIds = new string[strays];
+        var strayBindings = new SyncedEntry[strays];
+        for (var i = 0; i < strays; i++)
+        {
+            strayIds[i] = (await remote.ReadOneAsync("Other/s" + i + ".txt", default))!.Id;
+            strayBindings[i] = rig.Store.SyncedById(pairId, Side.Dropbox, strayIds[i])!;
+        }
+        var owner = (await local.ReadOneAsync("Old/Child", default))!;
+        var ownerBinding = rig.Store.SyncedById(pairId, Side.Local, owner.Id)!;
+        var moved = await local.MoveAsync(owner, home, default);
+        for (var i = 0; i < strays; i++)
+            await local.MoveAsync((await local.ReadOneAsync("Other/s" + i + ".txt", default))!,
+                home + "/s" + i + ".txt", default);
+        // The walk passed New before the folder arrived there, and the snapshot path while the folder was there.
+        const string snapshot = "Snap/x/Old/Child";
+        await local.EnsureFolderAsync(snapshot, default);
+        var listed = new List<Listed>();
+        await foreach (var item in local.ReadAllAsync(string.Empty, new ListOptions(true, false), default))
+        {
+            if (item.Path == moved.Path) continue;
+            listed.Add(item.Path == snapshot ? new Listed(snapshot, moved with { Path = snapshot }) : item);
+        }
+        local.Listing = (_, _, ct) => ListedOnceAsync(local, listed, ct);
+        // Only the fresh identity read sees the new home as unreadable; the listing saw it readable.
+        if (shape == "skipped") local.Seed(moved with { Skip = nameof(TextKey.SkipUnreadable) }, null);
+        var watchdog = false;
+        // The timeout is only a watchdog: the order comes from the two completion sources, never from it.
+        async Task Meet(Task gate, CancellationToken ct)
+        {
+            try { await gate.WaitAsync(TimeSpan.FromSeconds(30), ct); }
+            catch (TimeoutException) { Volatile.Write(ref watchdog, true); }
+        }
+        var renaming = false;
+        var ownerObserving = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var strayAtTarget = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var strayUnderHome = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ownerMoving = false;
+        var early = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var moves = 0;
+        var deletes = 0;
+        var dropbox = new ProxySide(remote)
+        {
+            OnDelete = _ => Interlocked.Increment(ref deletes),
+            OnSubmit = effects => Interlocked.Add(ref deletes, effects.Count),
+            BeforeRead = async (path, ct) =>
+            {
+                if (!Volatile.Read(ref renaming)) return;
+                // Only the owner reads its saved folder: the first stray's refusal started it, and it is observing.
+                // It continues once the second stray has read the owner's missing Dropbox home.
+                if (path == "Old/Child" && ownerObserving.TrySetResult()) await Meet(strayUnderHome.Task, ct);
+                // The second stray's first target read waits for the owner, whichever of them arrives first.
+                else if (path == home + "/s1.txt" && strayAtTarget.TrySetResult()) await Meet(ownerObserving.Task, ct);
+                // Before that meeting only the first stray reads the home; after it, the second stray reads it first.
+                else if (path == home && strayAtTarget.Task.IsCompleted && ownerObserving.Task.IsCompleted)
+                    strayUnderHome.TrySetResult();
+            },
+            EnsureFault = path =>
+            {
+                if (PathNames.IsSelfOrUnderKey(PathNames.DropboxKey(path), PathNames.DropboxKey(home)) &&
+                    !Volatile.Read(ref ownerMoving)) early.Enqueue("ensure " + path);
+                return null;
+            },
+            MoveFault = path =>
+            {
+                Interlocked.Increment(ref moves);
+                if (path == home)
+                {
+                    if (failed) return new ItemFailedException(path, TextKey.FailDropboxNoPermission, null);
+                    Volatile.Write(ref ownerMoving, true);
+                }
+                else if (path.StartsWith(home + "/", StringComparison.Ordinal) && !Volatile.Read(ref ownerMoving))
+                    early.Enqueue("move " + path);
+                return null;
+            }
+        };
+        var store = new StageStore(rig.Store, () => Volatile.Write(ref renaming, true),
+            () => Volatile.Write(ref renaming, false));
+        using (var log = Log(rig, folder, shape))
+            await RunRepairAsync(rig, log, Settings, dropbox: dropbox, store: store);
+        var all = rig.Store.Issues(pairId);
+        var label = "; shape=" + shape + "; strayAtTarget=" + strayAtTarget.Task.IsCompleted +
+            "; strayUnderHome=" + strayUnderHome.Task.IsCompleted + "; watchdog=" + watchdog +
+            "; moves=" + moves + "; deletes=" + deletes + "; early=" + string.Join(",", early) + "; issues=" +
+            string.Join(",", all.Select(issue => issue.Kind + ":" + issue.Path + ":" + issue.Cause));
+        Check.Require(strayAtTarget.Task.IsCompleted && strayUnderHome.Task.IsCompleted && !watchdog,
+            "the second stray reaches its gate and reads under the owner's new home while the relocated owner " +
+            "observes" + label);
+        Check.Require(early.IsEmpty && deletes == 0,
+            "no stray creates or writes under the owner's new home before the owner moves, and nothing is deleted" + label);
+        var binding = rig.Store.SyncedById(pairId, Side.Local, owner.Id);
+        if (held)
+        {
+            var waiting = true;
+            for (var i = 0; i < strays; i++)
+            {
+                var copy = await remote.ReadOneAsync("Other/s" + i + ".txt", default);
+                waiting &= copy?.Id == strayIds[i] && (await ContentAsync(remote, copy!)).SequenceEqual(new[] { (byte)i }) &&
+                    rig.Store.SyncedById(pairId, Side.Dropbox, strayIds[i]) == strayBindings[i] &&
+                    (await local.ReadOneAsync(home + "/s" + i + ".txt", default))?.Id == strayBindings[i].LocalId;
+            }
+            // An unreadable home holds the owner before any move and stores no issue, so nothing stored covers the
+            // strays: only the home it was decided at keeps them from refusing again into a Failure of their own.
+            var issues = failed ? all.Count == 1 && all[0].Kind == IssueKind.Failure && all[0].Path == home &&
+                all[0].Cause == TextKey.FailDropboxNoPermission : all.Count == 0;
+            Check.Require(waiting && moves == (failed ? 1 : 0) && issues && binding == ownerBinding &&
+                await remote.ReadOneAsync(home, default) is null &&
+                (await remote.ReadOneAsync("Old/Child", default))?.Id == ownerBinding.DropboxId,
+                "a held owner keeps its strays waiting with their identities, bytes and bindings; no stray raises a " +
+                "Failure of its own" + label);
+            return;
+        }
+        var followed = true;
+        for (var i = 0; i < strays; i++)
+        {
+            var path = home + "/s" + i + ".txt";
+            var copy = await remote.ReadOneAsync(path, default);
+            followed &= copy?.Id == strayIds[i] && (await ContentAsync(remote, copy!)).SequenceEqual(new[] { (byte)i }) &&
+                rig.Store.SyncedById(pairId, Side.Dropbox, strayIds[i]) is { LocalPath: var boundLocal, DropboxPath: var boundRemote } &&
+                boundLocal == path && boundRemote == path &&
+                await remote.ReadOneAsync("Other/s" + i + ".txt", default) is null;
+        }
+        Check.Require(followed && moves == 1 + strays && all.Count == 0 &&
+            binding is { LocalPath: home, DropboxPath: home } && binding.DropboxId == ownerBinding.DropboxId &&
+            await remote.ReadOneAsync("Old/Child", default) is null,
+            "the relocated owner moves as one folder and each stray then follows into it with its own identity and " +
+            "content, raising no issue" + label);
+    }
+
     private static async Task<(int Reads, long Commits)> FencedOwnerAsync(string folder, int strays,
         bool unreadable = false)
     {

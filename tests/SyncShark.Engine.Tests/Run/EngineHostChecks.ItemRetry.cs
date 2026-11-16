@@ -2755,4 +2755,110 @@ public static partial class EngineHostChecks
             foreach (var next in then ?? []) await ReportAsync(next, null).ConfigureAwait(false);
             return first;
         }, default, prerequisite: prerequisite);
+
+    public static void RunOwnerHandoffAutoSync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "syncshark-owner-handoff-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            using var productRoot = OverrideProductRoot(root);
+            StepAsync(nameof(OwnerHandoffAutoSyncAsync), () => OwnerHandoffAutoSyncAsync(root)).GetAwaiter().GetResult();
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
+    // A running Repair does not stop AutoSync dispatch (engine.md). The Repair's rename stage fails the relocated folder
+    // owner and holds its new home; while that Repair waits before FinishRepair, AutoSync selects edits to the owner and
+    // to a stray file that moved under its home. Neither run writes at or under the home, and Dropbox keeps the old tree.
+    private static async Task OwnerHandoffAutoSyncAsync(string root)
+    {
+        const string Home = "New/Child";
+        await using var rig = await ItemRig.OpenAsync(Path.Combine(root, "rig"), ItemRig.NewClock()).ConfigureAwait(false);
+        var local = rig.Rig.Pair.LocalRoot;
+        Directory.CreateDirectory(Path.Combine(local, "Old", "Child"));
+        Directory.CreateDirectory(Path.Combine(local, "New"));
+        Directory.CreateDirectory(Path.Combine(local, "Other"));
+        System.IO.File.WriteAllText(Path.Combine(local, "Other", "s.txt"), "stray");
+        await rig.BaselineAsync().ConfigureAwait(false);
+        await rig.StartAsync().ConfigureAwait(false);
+        await UntilAsync(() => rig.Dispatches > 0, "owner handoff: the startup dispatch ran").ConfigureAwait(false);
+        await rig.IterateAsync().ConfigureAwait(false);
+
+        bool UnderHome(string path) => path.Equals(Home, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(Home + "/", StringComparison.OrdinalIgnoreCase);
+        string[] Writes()
+        {
+            lock (rig.Rig.Wire.AttemptedWritePaths) return rig.Rig.Wire.AttemptedWritePaths.ToArray();
+        }
+        int HomeWrites() => Writes().Count(UnderHome);
+        string State() => "issues=" + string.Join(',', rig.Store.Issues(rig.PairId).Select(issue =>
+            issue.Kind + ":" + issue.Cause + ":" + issue.Path)) + "; writes=" + string.Join(',', Writes());
+        void RequireOldTree(string when)
+        {
+            var wire = rig.Rig.Wire.Snapshot();
+            Check.Require(!wire.Any(item => UnderHome(item.Path)) &&
+                wire.Any(item => item.Path == "Old/Child" && item.Folder) && OnDropbox(rig, "Other/s.txt", "stray") &&
+                rig.Store.SyncedByKey(rig.PairId, Side.Local, PathNames.Key("Other/s.txt")) is { IsFolder: false },
+                "owner handoff " + when + ": Dropbox and the stray's binding keep the old tree; " + State());
+        }
+
+        // The owner moves into a home Dropbox refuses, and a stray file moves under that home.
+        Directory.Move(Path.Combine(local, "Old", "Child"), Path.Combine(local, "New", "Child"));
+        System.IO.File.Move(Path.Combine(local, "Other", "s.txt"), Path.Combine(local, "New", "Child", "s.txt"));
+        // A no-permission Failure is a stored hold (IssuePolicy.Holds) only with the provider's error_summary.
+        rig.Rig.Wire.MoveRefusalSummary = true;
+        rig.Rig.Wire.NameWriteErrors[Home] = DropboxProtocol.NoWritePermission;
+        var finishing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var proceed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var selections = 0;
+        // AutoSync selects only after the Repair's rename stage, so its work runs beside the live hold.
+        rig.BeforeSelect = () =>
+        {
+            rig.Hold(finishing.Task, "owner handoff: AutoSync waits for the Repair's rename stage");
+            Interlocked.Increment(ref selections);
+        };
+        rig.BeforeFinish = () =>
+        {
+            rig.BeforeFinish = null;
+            finishing.TrySetResult();
+            rig.Hold(proceed.Task, "owner handoff: the Repair waits before FinishRepair");
+        };
+        var repair = Task.Run(() => rig.Host.Operations.RepairAsync(rig.PairId, default));
+        try
+        {
+            await finishing.Task.WaitAsync(HookBound).ConfigureAwait(false);
+            var failed = rig.Store.Issues(rig.PairId);
+            Check.Require(failed.Count == 1 && failed[0].Kind == IssueKind.Failure &&
+                failed[0].Cause == TextKey.FailDropboxNoPermission && failed[0].Path == Home && HomeWrites() == 1,
+                "owner handoff: the Repair's one write under the home is the refused owner move; " + State());
+            RequireOldTree("at the rename stage");
+
+            // AutoSync selections for the owner and for the stray while the Repair still holds the home.
+            var before = rig.Store.ReadWorkWatermark();
+            var seen = Volatile.Read(ref selections);
+            Directory.SetLastWriteTimeUtc(Path.Combine(local, "New", "Child"), DateTime.UtcNow.AddMinutes(-1));
+            System.IO.File.WriteAllText(Path.Combine(local, "New", "Child", "s.txt"), "stray edited");
+            var caught = await rig.Host.CatchUpLocalAsync(rig.PairId,
+                rig.Store.ReadPairExecution(rig.PairId)!.Value.Generation, default).ConfigureAwait(false);
+            Check.Require(caught.ThroughWorkId > before, "owner handoff: the edits under the home are committed as work");
+            await UntilAsync(() => Volatile.Read(ref selections) > seen && rig.AutoSyncIdle(),
+                "owner handoff: AutoSync selects the edits while the Repair holds the home").ConfigureAwait(false);
+            Check.Require(HomeWrites() == 1 && rig.Store.Issues(rig.PairId).Any(issue => issue.Id == failed[0].Id),
+                "owner handoff: AutoSync writes nothing at or under the held home; " + State());
+            RequireOldTree("after AutoSync");
+        }
+        finally
+        {
+            finishing.TrySetResult();
+            proceed.TrySetResult();
+        }
+        await repair.ConfigureAwait(false);
+        Check.Require(HomeWrites() == 1, "owner handoff: the Repair's end writes nothing under the home; " + State());
+        RequireOldTree("after the Repair");
+    }
 }
