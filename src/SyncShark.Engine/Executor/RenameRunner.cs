@@ -35,25 +35,17 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
         IReadOnlyList<RenameCandidate> group, Entry? localById,
         Action<Issue>? retainUnfinished, object opportunity, CancellationToken ct)
     {
-        var (decision, decided) = await RunUnrecordedAsync(execution, selection, group, localById,
+        var decision = await RunUnrecordedAsync(execution, selection, group, localById,
             retainUnfinished, opportunity, ct);
         if (decision.Kind == RenameKind.Notice ||
             decision.Kind == RenameKind.Hold &&
             decision.Destination?.Identity is not (DestinationIdentity.Moving or DestinationIdentity.MovingAncestor))
-            rows.HoldRenamePaths(HeldFootprint(Paths(group).ToArray(), decided).Select(path => (path.Side, path.Path)));
+            rows.HoldRenamePaths(Paths(group).Select(path => (path.Side, path.Path)));
         return decision;
     }
 
-    /// <summary>The handed footprint stays held; a relocated or rebased group also holds the home it was decided at.
-    /// An unchanged decided footprint adds nothing, so an ordinary hold keys each path once.</summary>
-    internal static IEnumerable<(Side Side, string Path, bool Destination)> HeldFootprint(
-        IReadOnlyList<(Side Side, string Path, bool Destination)> handed,
-        IReadOnlyList<(Side Side, string Path, bool Destination)> decided) =>
-        decided.SequenceEqual(handed) ? handed : handed.Concat(decided);
-
     // The next pass reads captured retry locals after hold release; an async extraction cannot take them by ref.
-    private async Task<(RenameDecision Decision, IReadOnlyList<(Side Side, string Path, bool Destination)> Footprint)> RunUnrecordedAsync(
-        IAdmittedExecution? execution, WorkSelection? selection,
+    private async Task<RenameDecision> RunUnrecordedAsync(IAdmittedExecution? execution, WorkSelection? selection,
         IReadOnlyList<RenameCandidate> group, Entry? localById,
         Action<Issue>? retainUnfinished, object opportunity, CancellationToken ct)
     {
@@ -68,10 +60,10 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
             // Permit precedes path: listing-only returns NeedsFresh, releasing this hold before caller admission.
             await using var hold = execution is null ? await PathLocks.Shared.EnterAsync(keys, ct) : null;
             var synced = CurrentBinding(group[0]);
-            if (synced is null) return (Renames.None(), []);
+            if (synced is null) return Renames.None();
             var current = group.Where(candidate => synced.PathOn(candidate.Side) != candidate.Moved.Path)
                 .Select(candidate => candidate with { Synced = synced }).ToArray();
-            if (current.Length == 0) return (Renames.None(), []);
+            if (current.Length == 0) return Renames.None();
             var (subject, expected) = ReadRetry(current, synced, localById);
             var paths = Paths(current).ToArray();
             if (!heldPaths.SequenceEqual(paths))
@@ -86,16 +78,15 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
                 {
                     if (IssuePolicy.StaleRetryFailed(reacquired, false, false))
                     {
-                        return (await context.ItemAttempts.ExecuteAsync(opportunity, expected, subject,
+                        return await context.ItemAttempts.ExecuteAsync(opportunity, expected, subject,
                             (attempt, _) => Task.FromResult(Failure(current, null, new ChangedUnderneathException(synced.LocalPath),
-                                retainUnfinished, attempt, expected, subject, selection)), ct), paths);
+                                retainUnfinished, attempt, expected, subject, selection)), ct);
                     }
                     group = current;
                     reacquired = true;
                     continue;
                 }
             }
-            IReadOnlyList<(Side Side, string Path, bool Destination)> decided = paths;
             var result = await context.ItemAttempts.ExecuteAsync(opportunity, expected, subject,
                 (attempt, token) => RunCurrentAsync(execution, selection, current, synced, localById, paths, keys,
                     (refreshed, hint) =>
@@ -105,9 +96,9 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
                         group = refreshed;
                         localById = hint;
                         reacquired = true;
-                    }, observed => decided = observed, retainUnfinished, attempt, expected, subject, token), ct);
+                    }, retainUnfinished, attempt, expected, subject, token), ct);
             if (!completedScan && result.Kind == RenameKind.NeedsFresh) continue;
-            return (result, decided);
+            return result;
         }
     }
 
@@ -148,7 +139,6 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
         IReadOnlyList<RenameCandidate> current, SyncedEntry synced,
         Entry? localById, IReadOnlyList<(Side Side, string Path, bool Destination)> paths, IReadOnlyList<string> heldKeys,
         Action<IReadOnlyList<RenameCandidate>, Entry?> reacquire,
-        Action<IReadOnlyList<(Side Side, string Path, bool Destination)>> observeFootprint,
         Action<Issue>? retainUnfinished, Guid attempt, ItemRetryCandidate? expected,
         IssueSubject registeredSubject, CancellationToken ct)
     {
@@ -174,7 +164,6 @@ internal sealed class RenameRunner(ExecutorContext context, Parents parents, Row
                 localById = refreshed.LocalById;
                 if (current.Count == 0) return Renames.None();
                 paths = Paths(current).ToArray();
-                observeFootprint(paths);
                 observations = Observe(current, synced, paths, refreshed.Local, refreshed.Dropbox);
                 var required = LockKeys.ForPaths(context.Pair, LockPaths(paths, localById)).ToArray();
                 if (required.Any(key => !heldKeys.Contains(key, PathLocks.KeyComparer)))

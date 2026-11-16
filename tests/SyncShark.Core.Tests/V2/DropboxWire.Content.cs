@@ -33,7 +33,7 @@ internal sealed partial class DropboxWire
         var destination = ToRelative(root.GetProperty("to_path").GetString()!);
         lock (AttemptedWritePaths) AttemptedWritePaths.Add(destination!);
         if (destination is not null && NameWriteErrors.TryGetValue(destination, out var refusal))
-            return NameError("to", refusal, MoveRefusalSummary);
+            return NameError("to", refusal);
         // The engine sends a display path; the pilot client sends an id. Both name the same live node.
         var node = FindNode(fromPath);
         if (node is null || destination is null || destination.Length == 0) return NotFound();

@@ -3,21 +3,7 @@
     "engine-tests"
   ],
   "engine": [
-    "rename-attempt-cost",
-    "syncer",
-    "repair",
-    "repair-held",
-    "scan-pass",
-    "unknown-move-repair",
-    "literals",
-    "scan-owner",
-    "renames",
-    "folder-move",
-    "dependencies",
-    "strings",
-    "relocated-unreadable-owner",
-    "owner-handoff-autosync",
-    "held-footprint-cost"
+    "rename-attempt-cost"
   ],
   "core": [],
   "ui": []

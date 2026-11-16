@@ -105,8 +105,6 @@ internal sealed partial class DropboxWire : HttpMessageHandler
     public Dictionary<string, string> NameWriteErrors { get; } = new(StringComparer.Ordinal);
     public List<string> AttemptedWritePaths { get; } = [];
     public bool UploadRefusalUsesReason { get; set; }
-    // Real Dropbox also sends error_summary, which the engine's move refusal cause reads.
-    public bool MoveRefusalSummary { get; set; }
     public Action? UploadSessionStarted { get; set; }
 
     /// <summary>Every list_folder scope, to distinguish subtree pruning from result filtering.</summary>
