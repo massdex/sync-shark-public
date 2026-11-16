@@ -3,7 +3,7 @@
     "engine-tests"
   ],
   "engine": [
-    "held-footprint-cost",
+    "rename-attempt-cost",
     "syncer",
     "repair",
     "repair-held",
@@ -16,7 +16,8 @@
     "dependencies",
     "strings",
     "relocated-unreadable-owner",
-    "owner-handoff-autosync"
+    "owner-handoff-autosync",
+    "held-footprint-cost"
   ],
   "core": [],
   "ui": []

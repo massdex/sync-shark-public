@@ -3132,6 +3132,55 @@ public static class RenameRunnerChecks
             throw new NotSupportedException(nameof(ExecuteAsync));
     }
 
+    /// <summary>Non-gating cost of one whole rename attempt through RenameRunner (RunUnrecordedAsync and its attempt
+    /// callbacks): an ordinary Follow and a definite-refusal Hold. Only the rename call is timed; the fixture is built
+    /// outside it. The text builds unchanged on the source before the decided-footprint hold, so the same group run on
+    /// both SHAs gives baseline and candidate. Shapes alternate ABBA per sample. It prints per-attempt wall time
+    /// (median, p90, max), allocated bytes (process-wide, precise) and both scaled to 116,064 attempts.</summary>
+    public static void RenameAttemptCost() => RenameAttemptCostAsync().GetAwaiter().GetResult();
+
+    private static async Task RenameAttemptCostAsync()
+    {
+        const int Samples = 41, Warmup = 5, Attempts = 50, Projected = 116_064;
+        var ns = new[] { new List<double>(), new List<double>() };
+        var bytes = new[] { new List<double>(), new List<double>() };
+        for (var sample = 0; sample < Warmup + Samples; sample++)
+        for (var slot = 0; slot < 2; slot++)
+        {
+            var held = (sample + slot) % 2 == 1;
+            long ticks = 0, allocated = 0;
+            for (var attempt = 0; attempt < Attempts; attempt++)
+            {
+                using var f = new Fixture();
+                var moved = await f.MoveAsync(Side.Dropbox, "New");
+                if (held)
+                {
+                    f.Raise(IssueKind.Failure, TextKey.FailDropboxNoPermission, "Old", Side.Local);
+                    f.Local.Seed(f.LocalOld with { Modified = Fixture.Time.AddSeconds(1) }, null);
+                }
+                var before = GC.GetTotalAllocatedBytes(precise: true);
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                var result = await f.RunAsync([moved]);
+                ticks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+                allocated += GC.GetTotalAllocatedBytes(precise: true) - before;
+                Check.Require(result.Kind == (held ? RenameKind.Hold : RenameKind.Follow),
+                    "rename-attempt-cost: the attempt reaches its measured outcome; held=" + held + " kind=" + result.Kind);
+            }
+            if (sample < Warmup) continue;
+            ns[held ? 1 : 0].Add(ticks * 1e9 / System.Diagnostics.Stopwatch.Frequency / Attempts);
+            bytes[held ? 1 : 0].Add((double)allocated / Attempts);
+        }
+        foreach (var shape in new[] { 0, 1 })
+        {
+            var time = ns[shape].Order().ToArray();
+            var memory = bytes[shape].Order().ToArray();
+            var medianNs = time[Samples / 2];
+            var medianBytes = memory[Samples / 2];
+            Console.WriteLine(FormattableString.Invariant(
+                $"rename-attempt-cost shape={(shape == 1 ? "hold" : "follow")} samples={Samples} attempts={Attempts} ns-median={medianNs:F0} ns-p90={time[Samples * 9 / 10]:F0} ns-max={time[^1]:F0} bytes-median={medianBytes:F0} bytes-p90={memory[Samples * 9 / 10]:F0} projected-attempts={Projected} projected-ms={medianNs * Projected / 1e6:F1} projected-mb={medianBytes * Projected / 1e6:F1}"));
+        }
+    }
+
     private sealed class Fixture : IDisposable
     {
         public const long Generation = 0;

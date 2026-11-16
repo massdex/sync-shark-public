@@ -169,6 +169,7 @@ public static class CheckRegistry
             Executor.ChangeRunnerChecks.VanishedWaitCosts, Executor.ChangeRunnerChecks.RunB179Costs],
         ["issue-category-cost"] = [Run.IssueCategoryCostChecks.Run],
         ["held-footprint-cost"] = [Executor.RenameRunnerChecks.HeldFootprintCost],
+        ["rename-attempt-cost"] = [Executor.RenameRunnerChecks.RenameAttemptCost],
         ["speed"] = [Run.CallBudgetChecks.RunSpeed],
         ["storage-history"] = [Storage.DeletedHistoryChecks.Run],
         ["history-restore-speed"] = [Storage.DeletedHistoryChecks.RunRestoreSpeed],
