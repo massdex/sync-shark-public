@@ -16,7 +16,7 @@ public static class Cli
 
     private static readonly Lazy<Catalog> CatalogData = new(LoadCatalog, LazyThreadSafetyMode.ExecutionAndPublication);
 
-    internal static Catalog Catalog => CatalogData.Value;
+    internal static Catalog Definitions => CatalogData.Value;
 
     /// <summary>Use ResourceNames.LogDirectory for detached log reads. Confirmed host absence renders HostNotRunning for a non-log read; never start the host on a read.</summary>
     public static async Task<int> RunAsync(string[] args, ILogFiles files, TextWriter output, TextWriter error, CancellationToken ct)
@@ -41,8 +41,8 @@ public static class Cli
     public static IReadOnlyList<string> Help()
     {
         var pad = new string(' ', 2);
-        var lines = new List<string>(Catalog.Commands.Count);
-        foreach (var row in Catalog.Commands)
+        var lines = new List<string>(Definitions.Commands.Count);
+        foreach (var row in Definitions.Commands)
             lines.Add(row.Effect.Length == 0 ? row.Usage : string.Concat(row.Usage, pad, row.Effect));
         return lines;
     }
@@ -51,7 +51,7 @@ public static class Cli
     public static CliInvocation? Parse(string[] args)
     {
         if (args.Length == 0) return null;
-        var catalog = Catalog;
+        var catalog = Definitions;
 
         CommandRow? match = null;
         var matchedWords = 0;
@@ -101,7 +101,7 @@ public static class Cli
     /// <summary>Renders a definitely absent host for a non-log read and reports a non-zero exit.</summary>
     public static int RenderHostAbsent(TextWriter output)
     {
-        output.WriteLine(Text.Get(TextKey.HostNotRunning));
+        output.WriteLine(Text.Get(TextKey.StatusUnavailable));
         return HostAbsentExitCode;
     }
 

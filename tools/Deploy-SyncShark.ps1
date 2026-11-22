@@ -204,7 +204,7 @@ function Read-BuildManifest([string]$Root) {
     $manifest = Read-Json $path
     $out = Get-SyncSharkNormalizedPath ([string]$manifest.outputDirectory)
     [ordered]@{ root = (Get-SyncSharkNormalizedPath $Root); manifestPath = $path; manifestSha256 = $sha; outputDirectory = $out
-        exe = (Join-Path $out 'SyncShark.exe'); productVersion = [string]$manifest.productVersion; version = [string]$manifest.version
+        exe = (Join-Path $out 'SyncShark.exe'); cliExe = (Join-Path $out 'syncshark.exe'); productVersion = [string]$manifest.productVersion; version = [string]$manifest.version
         commit = [string]$manifest.commit; expectedPreviousVersion = [string]$manifest.expectedPreviousVersion; files = @($manifest.files) }
 }
 function Get-Observation([string]$Path) {
@@ -362,6 +362,16 @@ function Invoke-Cli([string]$Purpose, [string]$Exe, [string]$Arguments) {
     [pscustomobject]@{ Exit = $result.Exit; Json = $json }
 }
 function Get-PairsKey($Json) { if ($null -eq $Json) { return '' }; (@($Json.data.pairs) | ForEach-Object { "$($_.id)|$($_.enabled)" } | Sort-Object -CaseSensitive) -join ';' }
+function Invoke-NewCli([string]$Purpose, [string]$Exe, [string]$Arguments) {
+    $result = Invoke-Child $Purpose $Exe $Arguments
+    [pscustomobject]@{ Exit = $result.Exit; Out = $result.Out }
+}
+function Get-PairsKeyText([string]$Out) {
+    (@($Out -split "`r?`n" | Where-Object { $_.Trim() } | ForEach-Object {
+        $text = $_.Trim(); $id = ($text -split '\s+')[0]
+        $enabled = if ($text -match '\(switched off\)') { 'False' } else { 'True' }; "$id|$enabled" }) |
+        Sort-Object -CaseSensitive) -join ';'
+}
 function Join-Children {
     # -Recover joins every journaled child still alive; an intent with no PID is matched by exe, exact args and creation after the intent.
     foreach ($child in @($script:journal.children | Where-Object { $null -eq $_.exit })) {
@@ -385,8 +395,11 @@ function Stop-Running {
     if ($null -eq $generation) { return }
     $script:journal.stopRequested = Utc
     Save-Journal
-    $arguments = if ($generation.Engine) { '--cli engine host stop --yes' } else { '--cli autosync stop' }
-    $result = Invoke-Child 'stop' $generation.Exe $arguments
+    if ($generation.Engine) {
+        $result = Invoke-Child 'stop' (Join-Path (Split-Path -Parent $generation.Exe) 'syncshark.exe') 'host stop'
+    } else {
+        $result = Invoke-Child 'stop' $generation.Exe '--cli autosync stop'
+    }
     if ($result.Exit -ne 0) { NeedsOwner "the stop exited $($result.Exit); the host may still be stopping." }
     Wait-Processes @($generation.Tracked | ForEach-Object Process)
     if (@(Get-Tracked $script:exes).Count) { throw 'A tracked Sync Shark process is running after the stop.' }
@@ -811,43 +824,11 @@ function Set-NeedsOwner([string]$Reason) {
 function Test-Effect { [bool]$script:journal.stopRequested -or @($script:journal.launchers | Where-Object { $_.bak.intentUtc -or $_.switchState }).Count -gt 0 }
 
 # ---- Failure handling (6A steps 5-7, 7A E2) ----
-function Start-Old {
-    if (-not $script:journal.oldStart) {
-        Assert-Tree $script:journal.predecessor -Legacy
-        $script:journal.oldStart = [ordered]@{ exe = $script:journal.predecessor.exe; args = '--cli engine host start --yes'
-            oldTreeManifestHash = $script:journal.predecessor.manifestSha256; intentUtc = (Utc) }
-        Save-Journal
-        Crash 'old-start-intent'
-        $result = Invoke-Child 'old-start' $script:journal.predecessor.exe '--cli engine host start --yes'
-        if ($result.Exit -ne 0) { throw "The old host start exited $($result.Exit)." }
-    }
-}
-function Complete-Old {
-    # From old-start-intent on: only join, prove the old host and check its health. Never restore again.
-    $terminal = if ($script:journal.restore.decision -ceq 'restore') { 'restored' } else { 'compensated' }
-    if ($script:journal.snapshot.hostWasRunning) { Test-Health 'old' } else { Assert-StopProof }
-    Close-Journal $terminal
-}
-function Invoke-Compensation {
-    try { Assert-StopProof } catch { NeedsOwner "the stop is not proven before compensation: $($_.Exception.Message)" }
-    if (Has 'backup-verified') {
-        if (-not $script:journal.restore.decision) {
-            if ((Get-FileId $script:dataTarget) -cne $script:journal.snapshot.dataFileId) { NeedsOwner 'the data folder is not the snapshotted folder (file ID changed).' }
-            $script:journal.restore.decision = if ((Get-SyncSharkTreeIdentity $script:dataTarget) -ceq $script:journal.backup.manifestSha256) { 'compensate' } else { 'restore' }
-            Save-Journal
-        }
-        if ($script:journal.restore.decision -ceq 'restore') { Invoke-StagedRestore }
-    }
-    Restore-Launchers
-    Restore-RunValues
-    if (-not (Has 'start-pending')) { Mark 'start-pending' }
-    if ($script:journal.snapshot.hostWasRunning) { Start-Old }
-    Complete-Old
-}
+# No rollback (process-0302, D-1121-27): the old host is never restarted and no compensation runs; problems are fixed forward.
 function Stop-NewHost {
     $tracked = @(Get-Tracked @($script:journal.candidate.exe))
     if (-not $tracked.Count) { return 'nothing of the new build is running' }
-    $result = Invoke-Child 'new-stop' $script:journal.candidate.exe '--cli engine host stop --yes'
+    $result = Invoke-Child 'new-stop' $script:journal.candidate.cliExe 'host stop'
     if ($result.Exit -ne 0) { return "the new host stop exited $($result.Exit)" }
     Wait-Processes @($tracked | ForEach-Object Process)
     $left = @(Get-Tracked @($script:journal.candidate.exe))
@@ -868,10 +849,9 @@ function Resolve-Failure($ErrorRecord) {
             return
         }
         if ($message -like 'NEEDS-OWNER:*') { Set-NeedsOwner $message.Substring(13); return }
-        if ($script:journal.oldStart) { Set-NeedsOwner "the old host restart did not prove healthy: $message"; return }
-        if (Has 'started') { Set-NeedsOwner "failure after start: $message; $(Stop-NewHost). Data and launchers stay on the new build."; return }
+        if (Has 'started') { Set-NeedsOwner "failure after start: $message; $(Stop-NewHost). Data, launchers and the store move stay on the new build; fix forward, there is no rollback."; return }
         if (-not (Test-Effect)) { Close-Journal 'refused'; return }
-        Invoke-Compensation
+        Set-NeedsOwner "no rollback: $message. Nothing was compensated; fix forward."
     } catch {
         $inner = $_.Exception.Message
         if ($inner -like 'CANCELLED:*') { Say $inner; $script:exitCode = 2; return }
@@ -894,8 +874,8 @@ function Invoke-Forward {
     Say $(if ($recoveryRoot) { "Recovery root: $recoveryRoot" } else { 'Recovery root: absent (no local Recovery location is set).' })
     $generation = Get-Generation @(Get-Tracked $script:exes)
     if ($generation -and $generation.Engine) {
-        $peer = Invoke-Cli 'trusted-status' $generation.Exe 'engine host status --json'
-        if ($peer.Exit -ne 0 -or $null -eq $peer.Json -or -not $peer.Json.ok) { throw 'The running host does not answer engine host status as a trusted peer (R3).' }
+        $peer = Invoke-NewCli 'trusted-status' (Join-Path (Split-Path -Parent $generation.Exe) 'syncshark.exe') 'status'
+        if ($peer.Exit -ne 0 -or [string]::IsNullOrWhiteSpace($peer.Out)) { throw 'The running host does not answer status as a trusted peer (R3).' }
     }
     $j.snapshot.hostWasRunning = $null -ne $generation
     $pairs = Invoke-Cli 'snapshot-pairs' $j.predecessor.exe 'engine pairs list --json'
@@ -923,16 +903,16 @@ function Invoke-Forward {
     Mark 'launchers-switched'
     # Step 5: start and health.
     if (-not $j.snapshot.hostWasRunning) {
-        $status = Invoke-Cli 'new-status' $j.candidate.exe 'engine status --json'
-        $after = Invoke-Cli 'new-pairs' $j.candidate.exe 'engine pairs list --json'
-        if ($status.Exit -ne 0 -or $after.Exit -ne 0 -or (Get-PairsKey $after.Json) -cne $j.snapshot.pairs) { throw 'The new build did not answer status and pairs equal to the snapshot.' }
+        $status = Invoke-NewCli 'new-status' $j.candidate.cliExe 'status'
+        $after = Invoke-NewCli 'new-pairs' $j.candidate.cliExe 'pairs list'
+        if ($status.Exit -ne 0 -or $after.Exit -ne 0 -or (Get-PairsKeyText $after.Out) -cne $j.snapshot.pairs) { throw 'The new build did not answer status and pairs equal to the snapshot.' }
         Restore-RunValues
         Say 'Staged: not live-verified (the host was not running before).'
         Complete-Success 'staged'
         return
     }
     Mark 'started'
-    $start = Invoke-Child 'new-start' $j.candidate.exe '--cli engine host start --yes'
+    $start = Invoke-Child 'new-start' $j.candidate.cliExe 'host start'
     if ($start.Exit -ne 0) { throw "The new host start exited $($start.Exit)." }
     Test-Health 'new'
     Complete-Success 'healthy'
@@ -1000,7 +980,7 @@ function Invoke-Deploy {
         candidate = $candidate; predecessor = $predecessor; launcherDir = $LauncherDir; launchers = @($launchers); snapshot = $null; children = @()
         stopRequested = $null; backup = [ordered]@{ path = $backupPath; bytes = $null; intentUtc = $null; manifestSha256 = $null }
         restore = [ordered]@{ decision = $null; staging = $staging; failed = $failed; stagingIntentUtc = $null; stagingId = $null; swap1IntentUtc = $null; swap2IntentUtc = $null }
-        dataFileId = (Get-FileId $script:dataTarget); oldStart = $null; close = @() }
+        dataFileId = (Get-FileId $script:dataTarget); close = @() }
     Write-Record $script:journalPath $script:journal 'journal'
     Say "Transaction $($script:T): $($candidate.productVersion) replaces $($predecessor.productVersion). $pauseLine"
     try { Invoke-Forward } catch { Resolve-Failure $_ }
@@ -1057,10 +1037,9 @@ function Invoke-Recover {
         Join-Children
         foreach ($launcher in @($j.launchers)) { if ($launcher.bak.intentUtc -and -not $launcher.bak.done) { Write-LauncherBackup $launcher } }
         if ($j.outcome) { Complete-Success $j.outcome.terminal; return }
-        if ($j.oldStart) { Complete-Old; return }
         if (Has 'started') { Test-Health 'new'; Complete-Success 'healthy'; return }
         if (-not (Test-Effect)) { Close-Journal 'refused'; return }
-        Invoke-Compensation
+        Set-NeedsOwner 'no rollback: recovery left the transaction open with effects recorded; fix forward.'
     } catch { Resolve-Failure $_ }
 }
 function Invoke-Close {
@@ -1090,8 +1069,8 @@ function Invoke-Close {
             Assert-Launchers $side
             Assert-Tree $(if ($side -eq 'new') { $j.candidate } else { $j.predecessor }) -Legacy:($side -eq 'old')
             $build = if ($side -eq 'new') { $j.candidate } else { $j.predecessor }
-            $status = Invoke-Cli "$side-close-status" $build.exe 'engine status --json'
-            if ($status.Exit -ne 0) { throw 'engine status did not answer.' }
+            $status = if ($side -eq 'new') { Invoke-NewCli "$side-close-status" $build.cliExe 'status' } else { Invoke-Cli "$side-close-status" $build.exe 'engine status --json' }
+            if ($status.Exit -ne 0) { throw 'status did not answer.' }
             Test-Health $side -CompareOnly
             $entry.label = $liveLabel
         }

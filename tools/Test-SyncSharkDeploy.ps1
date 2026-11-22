@@ -50,6 +50,12 @@ static class Stub {
                 var root = B("recoveryRoot");
                 Json(new { settings = root.ValueKind == JsonValueKind.String ? new object[] { new { name = "RecoveryRoot", value = root.GetString(), overridden = true } } : new object[0] });
                 return 0;
+            case "host start": return Start();
+            case "host stop": return Stop();
+            case "status":
+                if (Flag("statusFail")) { Console.Error.WriteLine("stub: status refused"); return 1; }
+                Console.WriteLine("pair-a  Pair A  /Local <-> /Cloud  account acc  first run: NewestWins"); return 0;
+            case "pairs list": Console.WriteLine("pair-a  Pair A  /Local <-> /Cloud  account acc  first run: NewestWins"); return 0;
             default: return Wait(false);
         }
     }

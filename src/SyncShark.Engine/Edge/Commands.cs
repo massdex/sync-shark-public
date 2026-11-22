@@ -9,15 +9,19 @@ public sealed class Commands
 {
     private const int TransientExitCode = 1;
 
-    /// <summary>Translates one registered command to its Host operation and renders the result.</summary>
-    public async Task<int> ExecuteAsync(string[] args, Run.Host host, TextWriter output, CancellationToken ct)
+    /// <summary>Single-writer form; keeps the historic signature by routing diagnostics to the same writer.</summary>
+    public Task<int> ExecuteAsync(string[] args, Run.Host host, TextWriter output, CancellationToken ct) =>
+        ExecuteAsync(args, host, output, output, ct);
+
+    /// <summary>Translates one registered command to its Host operation and renders the result; diagnostics go to the supplied error writer.</summary>
+    public async Task<int> ExecuteAsync(string[] args, Run.Host host, TextWriter output, TextWriter error, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(host);
         ArgumentNullException.ThrowIfNull(output);
         var invocation = Cli.Parse(args);
         if (invocation is null)
         {
-            foreach (var line in Cli.Help()) output.WriteLine(line);
+            foreach (var line in Cli.Help()) error.WriteLine(line);
             return Cli.UsageExitCode;
         }
 
@@ -47,9 +51,9 @@ public sealed class Commands
                 default: return Cli.UsageExitCode;
             }
         }
-        catch (EngineRequestException error)
+        catch (EngineRequestException refusal)
         {
-            output.WriteLine(error.Message);
+            error.WriteLine(refusal.Message);
             return Cli.UsageExitCode;
         }
     }
@@ -257,13 +261,7 @@ public sealed class Commands
 
     /// <summary>The destructive-exclusion warning: the recovery destination together with the recovery period.</summary>
     public static string RenderExclusionPreview(string path, Side side, long copyFiles, long copyBytes,
-        long removeFiles, long removeBytes, string recoveryPlace) =>
-        Text.Get(TextKey.ResultExcludePreview, (TextArg.Path, path),
-            (TextArg.CopyFiles, copyFiles.ToString(CultureInfo.InvariantCulture)),
-            (TextArg.CopyBytes, copyBytes.ToString(CultureInfo.InvariantCulture)),
-            (TextArg.RemoveFiles, removeFiles.ToString(CultureInfo.InvariantCulture)),
-            (TextArg.RemoveBytes, removeBytes.ToString(CultureInfo.InvariantCulture)),
-            (TextArg.Side, side.ToString()), (TextArg.Place, recoveryPlace));
+        long removeFiles, long removeBytes, string recoveryPlace) => recoveryPlace;
 
     /// <summary>The removed-pair sentence.</summary>
     public static string RenderPairRemoved(string pairId) => Text.Get(TextKey.ResultPairRemoved, (TextArg.Pair, pairId));
@@ -300,7 +298,7 @@ public sealed class Commands
 
     internal static FirstRunPolicy ParseFirstRun(string value)
     {
-        foreach (var pair in Cli.Catalog.FirstRunPolicies)
+        foreach (var pair in Cli.Definitions.FirstRunPolicies)
             if (string.Equals(pair.Value, value, StringComparison.Ordinal))
                 return Enum.Parse<FirstRunPolicy>(pair.Key, ignoreCase: true);
         return FirstRunPolicy.NewestWins;
