@@ -8,13 +8,13 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// <summary>The HTTP and response-consumption boundary;</summary>
 public sealed class DropboxApi
 {
-    private const long BytesPerMiB = 1024L * 1024L;
     private const int ErrorBodyMaxBytes = 64 * 1024;
     private const int LongpollMaxSeconds = 480;
     private const int DateResolutionSeconds = 1;
     private const string BootstrapAccountRoute = "users/get_current_account";
     private const string SpaceUsageRoute = "users/get_space_usage";
     private const string LongpollRoute = "files/list_folder/longpoll";
+    private const string ContinueRoute = "files/list_folder/continue";
 
     private readonly HttpClient _transport;
     private readonly TimeProvider _clock;
@@ -50,8 +50,8 @@ public sealed class DropboxApi
         _limiter = limiter;
     }
 
-    /// <summary>One account-scoped binding (events, credential and verified namespace) that shares this host's
-    /// single limiter, so all pair clients use one RateLimit (W24).</summary>
+    /// <summary>One account-scoped binding sharing this host's single limiter, so all pair clients use one RateLimit
+    /// (W24). The shared limiter keeps the host's run sink as the one wait-log owner.</summary>
     public DropboxApi CreateAccountScope(Action<RunEvent> events,
         Func<CancellationToken, ValueTask<string?>>? accessToken, string? pathRootNamespaceId)
     {
@@ -100,13 +100,19 @@ public sealed class DropboxApi
         return SendJsonAsync(route, argumentJson, ct);
     }
 
-    /// <summary>Waits on one cursor; the returned backoff is the source's own floor, applied by the feed owner.</summary>
-    public async Task<bool> LongpollAsync(string cursor, CancellationToken ct)
+    /// <summary>Waits on one cursor and returns its changes with the provider's backoff so the feed owner can defer
+    /// only that source's next longpoll; no limit is occupied while it waits (R38).</summary>
+    public async Task<(bool Changes, TimeSpan? Backoff)> LongpollAsync(string cursor, CancellationToken ct)
     {
         Routes.RequireStyle(LongpollRoute, Routes.Style.Rpc);
         var argument = JsonSerializer.Serialize(new { cursor, timeout = LongpollMaxSeconds });
         using var document = await SendJsonAsync(LongpollRoute, argument, ct).ConfigureAwait(false);
-        return document.RootElement.TryGetProperty("changes", out var changes) && changes.GetBoolean();
+        var root = document.RootElement;
+        var changes = root.TryGetProperty("changes", out var changesElement) && changesElement.GetBoolean();
+        var backoff = root.TryGetProperty("backoff", out var backoffElement) &&
+            backoffElement.TryGetDouble(out var seconds) && seconds > 0
+                ? TimeSpan.FromSeconds(seconds) : (TimeSpan?)null;
+        return (changes, backoff);
     }
 
     /// <summary>Reads one list page body and decodes it through W11's streaming page decoder, which opens and owns
@@ -130,9 +136,14 @@ public sealed class DropboxApi
         }
     }
 
-    /// <summary>Streams one download reply; the returned body owns the response and reports its own terminal outcome,
-    /// and EOF is not staging success.</summary>
-    public async Task<Stream> DownloadAsync(string route, string argumentJson, CancellationToken ct)
+    /// <summary>Streams one download reply with no outcome observer; the returned body owns the response.</summary>
+    public Task<Stream> DownloadAsync(string route, string argumentJson, CancellationToken ct) =>
+        DownloadAsync(route, argumentJson, null, ct);
+
+    /// <summary>Streams one download reply and reports its terminal body outcome to the caller's download attempt
+    /// owner, outside the read classifier; EOF is not staging success.</summary>
+    public async Task<Stream> DownloadAsync(string route, string argumentJson,
+        Action<ResponseStream.BodyOutcome>? ended, CancellationToken ct)
     {
         Routes.RequireStyle(route, Routes.Style.Download);
         if (Routes.PolicyOf(route) != Routes.Policy.Read) throw new ArgumentException(null, nameof(route));
@@ -143,7 +154,7 @@ public sealed class DropboxApi
             response = await SendPreparedAsync(request, route, ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) await ThrowFailureAsync(response, route, ct).ConfigureAwait(false);
             var content = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            return new ResponseStream().Open(response, content, ct, null);
+            return new ResponseStream().Open(response, content, ct, ended);
         }
         catch
         {
@@ -194,32 +205,41 @@ public sealed class DropboxApi
         return request;
     }
 
-    // One admission/feedback per HTTP call on the single host-shared limiter (R35); the response is returned with its
-    // status and body for the caller to classify, so a 409 is never thrown here.
+    // Binding runs before any permit (a refresh issues its own no-permit token call), and timing starts after
+    // admission; the wall clock is read at header receipt before the elapsed read so a pause can only overstate
+    // uncertainty, never understate it (data safety, BC15). Longpoll and non-catalog (bootstrap/OAuth) calls are idle
+    // or binding calls and take no permit; every other HTTP call admits exactly once (R35/R38).
     private async Task<HttpResponseMessage> SendPreparedAsync(HttpRequestMessage request, string? route,
         CancellationToken ct)
     {
-        var started = _clock.GetTimestamp();
-        await using var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
+        await ApplyBindingAsync(request, route, ct).ConfigureAwait(false);
+        var takePermit = route is not null && !string.Equals(route, LongpollRoute, StringComparison.Ordinal);
+        IAsyncDisposable? permit = null;
+        var admitted = false;
         var success = false;
         try
         {
-            await ApplyBindingAsync(request, route, ct).ConfigureAwait(false);
+            if (takePermit)
+            {
+                permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
+                admitted = true;
+            }
+            var started = _clock.GetTimestamp();
             var response = await _transport
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            var receivedWall = _clock.GetUtcNow();
+            var elapsed = _clock.GetElapsedTime(started);
             success = response.IsSuccessStatusCode;
-            if (IsBusy(response.StatusCode)) _limiter.Value.SlowDown();
-            if (success) RecordClock(response, started);
+            if (admitted && IsBusy(response.StatusCode)) _limiter.Value.SlowDown();
+            if (success) RecordClock(response, receivedWall, elapsed);
             return response;
         }
         finally
         {
-            _limiter.Value.TransferFinished(success);
+            if (admitted) _limiter.Value.TransferFinished(success);
+            if (permit is not null) await permit.DisposeAsync().ConfigureAwait(false);
         }
     }
-
-    private static bool IsBusy(HttpStatusCode status) =>
-        status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable;
 
     private async ValueTask ApplyBindingAsync(HttpRequestMessage request, string? route, CancellationToken ct)
     {
@@ -234,19 +254,18 @@ public sealed class DropboxApi
         request.Headers.Add("Dropbox-API-Path-Root", PathRootJson(_pathRootNamespaceId));
     }
 
-    // The approved uncertainty is the full measured round trip plus the Date header's one-second resolution; only a
-    // successful dated reply replaces the sample, and the sample is published as one reference (never a split tuple).
-    private void RecordClock(HttpResponseMessage response, long started)
+    private void RecordClock(HttpResponseMessage response, DateTimeOffset receivedWall, TimeSpan elapsed)
     {
         if (response.Headers.Date is not { } serverDate) return;
-        var uncertainty = _clock.GetElapsedTime(started) + TimeSpan.FromSeconds(DateResolutionSeconds);
-        _clockOffset = new ClockSample(serverDate - _clock.GetUtcNow(), uncertainty);
+        _clockOffset = new ClockSample(serverDate - receivedWall, elapsed + TimeSpan.FromSeconds(DateResolutionSeconds));
     }
 
     private async Task ThrowFailureAsync(HttpResponseMessage response, string? route, CancellationToken ct)
     {
+        var status = response.StatusCode;
         var retryAfter = ParseRetryAfter(response);
-        JsonElement failure = default;
+        JsonElement body = default;
+        string? summary = null;
         try
         {
             await using var stream = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
@@ -256,20 +275,39 @@ public sealed class DropboxApi
                 try
                 {
                     using var document = JsonDocument.Parse(text);
-                    if (document.RootElement.ValueKind == JsonValueKind.Object &&
-                        document.RootElement.TryGetProperty("error", out var error))
-                        failure = error.Clone();
+                    body = document.RootElement.Clone();
+                    if (body.ValueKind == JsonValueKind.Object &&
+                        body.TryGetProperty("error_summary", out var summaryElement))
+                        summary = summaryElement.GetString();
                 }
                 catch (JsonException) { }
             }
         }
         catch (Exception read) when (read is IOException or HttpRequestException) { }
-        var exception = new HttpRequestException(Text.Get(TextKey.DropboxRefused), null, response.StatusCode);
+
+        if (string.Equals(route, ContinueRoute, StringComparison.Ordinal) &&
+            status == HttpStatusCode.Conflict && IsReset(body, summary))
+            throw new ListingCursorResetException(
+                new HttpRequestException(Text.Get(TextKey.DropboxRefused), null, status));
+
+        var evidence = new DropboxErrors.RequestEvidence(false, true, false, IsBusy(status));
+        var classified = new DropboxErrors().Classify(status, body, route ?? string.Empty, expectedIsNull: false, evidence);
+        var wait = DropboxProtocol.ProviderWait(retryAfter, body);
+        var exception = new HttpRequestException(Text.Get(TextKey.DropboxRefused), null, status);
         exception.Data["Route"] = route ?? string.Empty;
-        exception.Data["RetryAfterTicks"] = retryAfter?.Ticks ?? 0L;
+        exception.Data["RetryAfterTicks"] = wait?.Ticks ?? 0L;
         exception.Data["Dispatched"] = true;
-        if (failure.ValueKind != JsonValueKind.Undefined) exception.Data["Failure"] = failure;
+        exception.Data["Classified"] = classified;
+        if (body.ValueKind != JsonValueKind.Undefined) exception.Data["Body"] = body;
         throw exception;
+    }
+
+    private static bool IsReset(JsonElement body, string? summary)
+    {
+        if (body.ValueKind == JsonValueKind.Object && body.TryGetProperty("error", out var error) &&
+            error.ValueKind == JsonValueKind.Object && error.TryGetProperty(".tag", out var tag) &&
+            string.Equals(tag.GetString(), "reset", StringComparison.Ordinal)) return true;
+        return summary is not null && summary.StartsWith("reset", StringComparison.Ordinal);
     }
 
     private TimeSpan? ParseRetryAfter(HttpResponseMessage response)
@@ -297,6 +335,9 @@ public sealed class DropboxApi
         }
         return total == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, total);
     }
+
+    private static bool IsBusy(HttpStatusCode status) =>
+        status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable;
 
     private static string PathRootJson(string namespaceId) => JsonSerializer.Serialize(
         new Dictionary<string, string>(StringComparer.Ordinal) { [".tag"] = "root", ["root"] = namespaceId });

@@ -74,17 +74,43 @@ public static class ResponseStreamChecks
             "an abandoned body was not reported as abandoned");
         Check.Require(abandonedInner.Disposed, "abandoning the body did not release the source");
 
-        // A source-dispose failure must not stop the response being released (one cleanup path).
+        // A source-dispose failure must not block response release and is rethrown after cleanup (not lost).
         var responseContent = new TrackingContent();
         var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = responseContent };
         var thrown = new List<ResponseStream.BodyOutcome>();
-        await using (var body = new ResponseStream().Open(response, new ThrowingDisposeStream(),
-            CancellationToken.None, thrown.Add))
+        try
+        {
+            await using (var body = new ResponseStream().Open(response, new ThrowingDisposeStream(),
+                CancellationToken.None, thrown.Add))
+            {
+            }
+        }
+        catch (IOException)
         {
         }
         Check.Require(responseContent.Disposed, "response content survived a source-dispose failure");
         Check.Require(thrown.Count == 1 && thrown[0] == ResponseStream.BodyOutcome.Abandoned,
             "a source-dispose failure did not end the body as abandoned");
+
+        // A throwing observer runs outside the read classifier: its exception propagates as itself, once.
+        var observerCalls = 0;
+        await using (var body = new ResponseStream().Open(new HttpResponseMessage(HttpStatusCode.OK),
+            new TrackingStream(new byte[] { 9 }), CancellationToken.None,
+            _ => { observerCalls++; throw new InvalidOperationException("observer"); }))
+        {
+            try
+            {
+                var buffer = new byte[2];
+                while (await body.ReadAsync(buffer.AsMemory()) > 0)
+                {
+                }
+                throw new InvalidDataException("observer throw swallowed");
+            }
+            catch (InvalidOperationException)
+            {
+            }
+        }
+        Check.Require(observerCalls == 1, "observer was not invoked exactly once");
     }
 
     private sealed class TrackingStream : MemoryStream

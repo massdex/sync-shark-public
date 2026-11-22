@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Runtime.ExceptionServices;
 
 namespace Massdex.SyncShark.Engine.Dropbox;
 
@@ -26,7 +27,7 @@ public sealed class ResponseStream
 
     private sealed class Body : Stream
     {
-        private const int SingleByteCount = 0 + 1;
+        private const int SingleByteCount = 1;
 
         private readonly HttpResponseMessage _response;
         private readonly Stream _content;
@@ -111,13 +112,12 @@ public sealed class ResponseStream
                 _callerToken != cancellationToken
                 ? CancellationTokenSource.CreateLinkedTokenSource(_callerToken, cancellationToken) : null;
             var token = linked?.Token ?? (_callerToken.CanBeCanceled ? _callerToken : cancellationToken);
+            int count;
             try
             {
                 token.ThrowIfCancellationRequested();
-                var count = await _content.ReadAsync(buffer, token).ConfigureAwait(false);
+                count = await _content.ReadAsync(buffer, token).ConfigureAwait(false);
                 token.ThrowIfCancellationRequested();
-                if (count == 0 && buffer.Length > 0) End(BodyOutcome.Completed);
-                return count;
             }
             catch (Exception error) when (error is not (ArgumentException or ObjectDisposedException or NotSupportedException))
             {
@@ -133,6 +133,9 @@ public sealed class ResponseStream
                 End(BodyOutcome.Failed);
                 throw;
             }
+            // The observer runs outside the source-read classifier so its own throw is never misclassified.
+            if (count == 0 && buffer.Length > 0) End(BodyOutcome.Completed);
+            return count;
         }
 
         // One terminal notification; set the guard before invoking so a throwing callback cannot re-run it.
@@ -143,16 +146,17 @@ public sealed class ResponseStream
 
         private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
-        // One cleanup path: a source-dispose failure never blocks response release; an abandoned body
-        // (disposed before EOF) ends as Abandoned so it is never credited as success.
+        // One cleanup path: a source-dispose failure never blocks response release and is rethrown after cleanup (not
+        // silently lost); an abandoned body (disposed before EOF) ends as Abandoned so it is never credited as success.
         protected override void Dispose(bool disposing)
         {
+            Exception? closeError = null;
             try
             {
                 if (disposing && Interlocked.Exchange(ref _disposed, 1) == 0)
                 {
                     try { _content.Dispose(); }
-                    catch (Exception) { }
+                    catch (Exception error) { closeError = error; }
                     try { _response.Dispose(); }
                     finally { End(BodyOutcome.Abandoned); }
                 }
@@ -161,16 +165,18 @@ public sealed class ResponseStream
             {
                 base.Dispose(disposing);
             }
+            if (closeError is not null) ExceptionDispatchInfo.Capture(closeError).Throw();
         }
 
         /// <summary>Releases the body asynchronously and always releases the response.</summary>
         public override async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            Exception? closeError = null;
             try
             {
                 try { await _content.DisposeAsync().ConfigureAwait(false); }
-                catch (Exception) { }
+                catch (Exception error) { closeError = error; }
                 try { _response.Dispose(); }
                 finally { End(BodyOutcome.Abandoned); }
             }
@@ -178,6 +184,7 @@ public sealed class ResponseStream
             {
                 GC.SuppressFinalize(this);
             }
+            if (closeError is not null) ExceptionDispatchInfo.Capture(closeError).Throw();
         }
     }
 }
