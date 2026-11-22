@@ -263,13 +263,28 @@ public static class RecoveryChecks
 
     public static async Task A13R1ThenR2KeepLastVersionAsync()
     {
-        var pair=ItemChecks.Pair();var queue=new WorkQueue();var one=ItemChecks.File(Side.Dropbox,"parent/item",1,"same");var two=ItemChecks.File(Side.Dropbox,one.Path,2,one.Id);
-        var first=new Change(Side.Dropbox,ChangeKind.Changed,one.Path,null,one.Id,one,false,false);var second=first with { Observed=two };
-        var inspected=false;await queue.AdmitAsync(pair,new([first,second],"cursor",null),(change,ct)=>{
-            if(change==first) { Check.Require(queue.Held(new("parent","parent")).SequenceEqual(new[]{first,second}),"Dropped or reordered retained revisions before settlement");inspected=true; }
-            return Task.CompletedTask;
-        },null,default);
-        Check.Require(inspected && !queue.Held(new("parent","parent")).Any(),"No admission or stale held evidence after settlement");
+        using var x=new PairState();await x.InitializeAsync();const string parent="parent",child="parent/item";
+        var pcRoot=ItemChecks.File(Side.Local,parent,0,"pc-root",true);var dbRoot=ItemChecks.File(Side.Dropbox,parent,0,"db-root",true);
+        var binding=SyncedEntries.From(pcRoot,dbRoot);await x.Store.CommitAsync(x.Pair.PairId,null,binding,null,null,default);x.Cloud.Seed(dbRoot,[]);
+        var r1=ItemChecks.File(Side.Dropbox,child,1,"child-id");var r2=ItemChecks.File(Side.Dropbox,child,2,r1.Id);
+        foreach(var v in new[]{r1,r2}) x.Cloud.Recoverable[(v.Id,v.Revision,v.ContentHash)]=new Recovery.File(v,new MemoryStream(new[]{(byte)(v==r1?1:2)}));
+        x.Cloud.Seed(r2,[2]);x.Pc.PublishFailures[child]=new ItemFailedException(child,TextKey.FailLocalInUse,null);
+        var first=new Change(Side.Dropbox,ChangeKind.Changed,child,null,r1.Id,r1,false,false);var second=first with {Observed=r2};
+        var deletion=new Change(Side.Local,ChangeKind.Deleted,parent,null,pcRoot.Id,null,false,true,1,JournalId:1);
+        var populate=ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store);var hop=ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store);
+        Task? children=null;int independent=0;bool retried=false;
+        await x.Queue.AdmitAsync(x.Pair,new([deletion],null,new(1,2)),async (_,ct)=>{
+            children=x.Queue.AdmitAsync(x.Pair,new([first,second],"after",null),(_,_)=>{Interlocked.Increment(ref independent);return Task.CompletedTask;},null,ct);
+            await new FolderDelete().ApplyAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,binding,Side.Local,x.Pc,x.Cloud,x.Store,x.Queue.Held,populate,hop,ct);
+            var pending=x.Store.OpenNotices.Single(n=>n.Kind==NoticeKind.PutBack && n.Path==child);
+            Check.Require(x.Queue.Held(new(parent,parent)).Any(c=>c.Observed==r2 && c.ConsumeHeld!=null),"Failed put-back released its outstanding version");
+            x.Pc.PublishFailures.Remove(child);
+            await new Retries().RetryAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,pending,x.Pc,x.Cloud,x.Store,x.Queue.Held,populate,hop,ct);
+            retried=true;
+        },x.Pc.SettleJournalAsync,default);
+        Check.Require(children!=null,"Parent removal never started");await children!;
+        Check.Require(retried && independent==0 && !x.Queue.Held(new(parent,parent)).Any() && x.Store.OpenNotices.All(n=>n.Kind!=NoticeKind.PutBack),"Consumed revision ran independently or Retry did not settle it");
+        Check.Require(x.Pc.Items.TryGetValue(child,out var pc) && pc.Bytes.SequenceEqual(new byte[]{2}) && x.Cloud.Items.TryGetValue(child,out var cloud) && cloud.Bytes.SequenceEqual(new byte[]{2}),"Retry failed to preserve the last attributable revision on both sides");
     }
     public static Task A13LateFileCreateAsync() => throw new NotImplementedException();
     public static Task A13LatePopulatedFolderWithoutChildReportsAsync() => throw new NotImplementedException();

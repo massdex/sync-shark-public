@@ -53,6 +53,9 @@ public static class PathScopeChecks
         var inner=pair with { PairId="inner" };await store.SavePairAsync(inner,default);
         var ordinary=new Notice(1,NoticeKind.Failure,TextKey.PublishFailed,"edit",new([new(Side.Local,"edit","new-id")],Side.Local),DateTimeOffset.UnixEpoch,false);
         var putBack=ordinary with { Id=2,Kind=NoticeKind.PutBack,Cause=TextKey.FailLocalInUse,Path="edit",Subject=new([new(Side.Local,"edit","edit-id")],Side.Local) };
+        var withHolder=ordinary with {Subject=ordinary.Subject with {Holder="Editor"}};
+        var loaded=System.Text.Json.JsonSerializer.Deserialize<IssueSubject>(System.Text.Json.JsonSerializer.Serialize(withHolder.Subject))!;
+        Check.Require(loaded.Holder=="Editor" && ordinary.Matches(withHolder with {Subject=loaded}) && !System.Text.Json.JsonSerializer.Serialize(ordinary.Subject).Contains("Holder",StringComparison.Ordinal),"Holder lost on reload or changed exact notice identity");
         await store.SaveNoticeAsync(inner.PairId,putBack with { Ignored=true },default);await store.SaveNoticeAsync(inner.PairId,ordinary,default);
         Check.Require(store.OpenNotices.Count==2 && store.OpenNotices.Any(n=>n.Ignored && n.Matches(putBack)),"Ordinary failure displaced put-back evidence");
         Check.Require(await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)])==TextKey.PairPutBackOutstanding && !(await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Removal released an outstanding put-back or published its scope");
@@ -141,6 +144,11 @@ public static class PathScopeChecks
     }
     public static async Task SourceResetAsync()
     {
+        var cloud=new TestDoubles.FakeSide(Side.Dropbox);cloud.Pages.Enqueue(new([],"z",null));cloud.Pages.Enqueue(new([],"a",null));
+        var end=await cloud.BoundaryAsync(default);cloud.Pages.Enqueue(new([],"later",null));
+        Check.Require(!(await cloud.ReadChangesAsync(null,null,end,default)).CaughtUp && (await cloud.ReadChangesAsync("z",null,end,default)).CaughtUp && cloud.Pages.Count==1,"Finite Dropbox read compared opaque cursors by order or drained later arrivals");
+        var pc=new TestDoubles.FakeSide(Side.Local);pc.Pages.Enqueue(new([],null,new(1,10)));pc.Pages.Enqueue(new([],null,new(2,10)));
+        Check.Require(!(await pc.ReadChangesAsync(null,null,(null,new(2,9)),default)).CaughtUp && (await pc.ReadChangesAsync(null,null,(null,new(2,9)),default)).CaughtUp,"Finite PC read ignored journal identity or skipped a crossed boundary");
         using IStore store=new TestDoubles.InMemoryStateStore();var a=Scenarios.ItemChecks.Pair();var b=a with {PairId="other"};
         await store.SavePairAsync(a,default);await store.SavePairAsync(b,default);var boundary=new JournalPosition(2,9);
         await store.ResetJournalAsync("volume",boundary,[a.PairId,b.PairId],"gap",default);

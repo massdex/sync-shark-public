@@ -22,7 +22,12 @@ public sealed record Change(
     bool IdentityDeleted,
     ulong? Usn = null,
     string? Volume = null, string? HistoricalParentId = null, string? HistoricalName = null,
-    string? OldParentId = null, string? OldName = null, ulong? JournalId = null);
+    string? OldParentId = null, string? OldName = null, ulong? JournalId = null)
+{
+    /// <summary>Only on a report borrowed from WorkQueue.Held: acknowledge this exact queue entry after its version is settled. The queue then suppresses independent child application; merely reading the report, or a failed put-back needing it on Retry, never acknowledges it.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public Action? ConsumeHeld { get; init; }
+}
 
 /// <summary>Kind of a change notice from a source listener (section 8.7).</summary>
 public enum ChangeKind { Changed, Renamed, Deleted }

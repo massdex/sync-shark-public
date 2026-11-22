@@ -12,6 +12,7 @@ public static class LiteralsChecks
 {
     public static Task RunAsync(CheckArguments input)
     {
+        Check.Require(Offends("class A { void M(string path) => throw new IOException(\"Cannot open \" + path); }","A.cs"),"Concatenated exception text escaped");
         Check.Require(Offends("class A { void Fail() => throw new Exception(\"A failure occurred.\"); }", "A.cs"), "Unowned message not detected");
         Check.Require(!Offends("class A { void Fail() => throw new Exception(nameof(A)); }", "A.cs"), "Name expression rejected");
         using var data=typeof(Text).Assembly.GetManifestResourceStream(ResourceNames.Cli) ?? throw new InvalidDataException(ResourceNames.Cli);
@@ -88,7 +89,8 @@ public static class LiteralsChecks
         foreach (var literal in root.DescendantNodes().OfType<LiteralExpressionSyntax>())
         {
             if (literal.Token.Value is string text && (text.StartsWith("https://", StringComparison.Ordinal) ||
-                text.Any(char.IsLetter) && literal.Parent is ArgumentSyntax arg && arg.Parent?.Parent is ObjectCreationExpressionSyntax creation && creation.ArgumentList?.Arguments.FirstOrDefault()==arg && creation.Type.ToString().EndsWith("Exception", StringComparison.Ordinal) && creation.Type.ToString() is not ("ArgumentNullException" or "ArgumentOutOfRangeException" or "ObjectDisposedException"))) return true;
+                literal.Ancestors().OfType<ObjectCreationExpressionSyntax>().Any(creation=>creation.Type.ToString().EndsWith("Exception",StringComparison.Ordinal) && creation.Type.ToString().Split('.').Last() is not ("ArgumentNullException" or "ArgumentOutOfRangeException" or "ObjectDisposedException") &&
+                    (text.Any(char.IsWhiteSpace) || text.Any(char.IsLetter) && literal.Parent is ArgumentSyntax arg && creation.ArgumentList?.Arguments.FirstOrDefault()==arg)))) return true;
             if(literal.Token.Value is string word && words?.Contains(word)==true && (literal.Ancestors().Any(n=>n is CaseSwitchLabelSyntax or ConstantPatternSyntax or BinaryExpressionSyntax or SwitchExpressionArmSyntax) ||
                 literal.Parent is ArgumentSyntax && literal.FirstAncestorOrSelf<InvocationExpressionSyntax>()?.Expression is MemberAccessExpressionSyntax lookup && lookup.Name.Identifier.ValueText is "Contains" or "IndexOf" or "TryGetValue" or "ContainsKey")) return true;
             if(literal.Token.Value is int or long or float or double or decimal)

@@ -16,7 +16,7 @@ public interface IStore : IDisposable
     /// <summary>Commit the record change and spend the exact acknowledged historical deletion key atomically, even when neither side has a previous binding. Without a new publication keep the carried boundary only on a same-PC-identity relink.</summary>
     Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, string? spentDeletedKey, CancellationToken ct);
     IAsyncEnumerable<Notice> NoticesAsync(string pairId, CancellationToken ct);
-    /// <summary>Save by pair, path and kind with the members. An unrelated Failure cannot replace a PutBack notice, its cause, exact subject or visibility.</summary>
+    /// <summary>Save by pair, path and kind with the members. An unrelated Failure cannot replace a PutBack notice. Within the same PutBack slot, the newest put-back failure at that path replaces its predecessor.</summary>
     Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct);
     Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct);
     Task<JournalPosition?> PositionAsync(string volume, CancellationToken ct);

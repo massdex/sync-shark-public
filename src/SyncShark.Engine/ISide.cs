@@ -37,8 +37,8 @@ public interface ISide
     Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct);
     /// <summary>Capture the current source cursor or journal position before listing; this observes a boundary without advancing the stored position.</summary>
     Task<(string? Cursor,JournalPosition? Position)> BoundaryAsync(CancellationToken ct);
-    /// <summary>For finite catch-up never long-poll; return CaughtUp at the captured boundary.</summary>
-    Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, bool catchUp, CancellationToken ct);
+    /// <summary>Finite read through the captured source boundary; never long-poll. Local reaches the same journal ID and at least the captured USN. Dropbox cursors are opaque: use equality or a completed provider continuation known to cover the capture, never string order. A continuity loss is not completion.</summary>
+    Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, (string? Cursor,JournalPosition? Position) until, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Deliver the PC pair’s contiguous settled prefix to the shared volume owner, independently of another read. Only used on Local.</summary>
     Task SettleJournalAsync(JournalPosition position, CancellationToken ct);
     /// <summary>The latest observed provider clock offset and its uncertainty; null without a measurement.</summary>

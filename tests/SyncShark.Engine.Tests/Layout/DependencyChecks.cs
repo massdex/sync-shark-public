@@ -47,7 +47,8 @@ public static class DependencyChecks
             ("Planner","Moves","_ = Environment.GetEnvironmentVariable(nameof(Probe));",false),
             ("Planner","Moves","_ = Path.GetFileName(string.Empty);",true),
             ("Dropbox","nested/SignIn","_ = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);",false),
-            ("Run","PairRunner","_ = Massdex.SyncShark.Engine.SyncedEntries.RenameTarget(null!,string.Empty);",false),
+            ("Run","PairRunner","_ = Massdex.SyncShark.Engine.SyncedEntries.RenameTarget(null!,string.Empty);",true),
+            ("Executor","Effects","_ = Massdex.SyncShark.Engine.Planner.ProbeInternal.Value();",false),
             ("Planner","Moves","_ = $\"SELECT {1}\\nFROM pair\";",false),
             ("Planner","Moves","_ = typeof(Massdex.SyncShark.Engine.Executor.ItemSync);",false),
             ("Storage","Store","_ = typeof(Massdex.SyncShark.Engine.Dropbox.Routes);",false),
@@ -105,7 +106,7 @@ public static class DependencyChecks
         foreach(var (module,file,code,allowed) in probes)
         {
             var tree=CSharpSyntaxTree.ParseText("class Probe { static void Use() { "+code+" } }");
-            var fixture=compilation.AddSyntaxTrees(tree);
+            var fixture=compilation.AddSyntaxTrees(tree,CSharpSyntaxTree.ParseText("namespace Massdex.SyncShark.Engine.Planner; internal static class ProbeInternal { internal static int Value() => 0; }"));
             Check.Require(!fixture.GetSemanticModel(tree).GetDiagnostics().Any(d=>d.Severity==DiagnosticSeverity.Error),"Invalid dependency fixture: "+code);
             Check.Require(!Violations(fixture,tree,module,$"{(module.StartsWith("SyncShark",StringComparison.Ordinal)?"apps":"src/SyncShark.Engine")}/{module}/{file}.cs").Any()==allowed,$"{module}/{file}: wrong outcome for {code}");
         }
@@ -171,7 +172,7 @@ public static class DependencyChecks
                     "SyncShark" => path=="apps/SyncShark/Program.cs" && (other,name) is ("Storage","Store" or "StoreMove") or ("Dropbox","Connections" or "DropboxSide" or "DropboxApi" or "Dispatcher" or "CredentialStore" or "SignIn") or ("Local","LocalSide" or "RecycleBin" or "LogFiles") or ("Run","Host") or ("Edge","HostServer" or "Commands") or ("Contracts",_),
                     _ => module==other || other=="Contracts" || (module,other) is ("Executor","Planner") or ("Run","Planner" or "Executor") or ("Edge","Run")
                 };
-                violates=!allowed || other!=module && (symbol.DeclaredAccessibility==Accessibility.Internal || type.DeclaredAccessibility==Accessibility.Internal) || (other,name)==("Planner","Moves") && module!="Executor" && (module,file)!=("Planner","Moves") ||
+                violates=!allowed || other!=module && other!="Contracts" && (symbol.DeclaredAccessibility==Accessibility.Internal || type.DeclaredAccessibility==Accessibility.Internal) || (other,name)==("Planner","Moves") && module!="Executor" && (module,file)!=("Planner","Moves") ||
                     other=="Local" && name is "InUse" or "VolumeSpace" && file!=name && (module,file)!=("Local","LocalSide") ||
                     module=="Planner" && name=="SettingsParser";
             }

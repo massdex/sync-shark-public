@@ -7,10 +7,6 @@ namespace Massdex.SyncShark.Engine;
 public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path, IssueSubject Subject,
     DateTimeOffset At, bool Dismissed, bool Ignored = false)
 {
-    /// <summary>The observed program holding the file, if known; absent in older notices.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? Holder { get; init; }
-
     /// <summary>The exact reviewed-version token, populated only by the public notice read projection.</summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Reviewed { get; init; }
@@ -42,6 +38,10 @@ public sealed record IssueSubject(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     IssueSubject.FirstRunDeletionKind FirstRunDeletion = IssueSubject.FirstRunDeletionKind.None)
 {
+    /// <summary>The observed program holding the file, if known; display metadata in subject JSON, not part of the reviewed identity.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Holder { get; init; }
+
     /// <summary>Unfinished first-run provenance retained on the subject. None is the ordinary case and is omitted
     /// from stored JSON so ordinary subjects keep their shape (P4-05 S8).</summary>
     public enum FirstRunDeletionKind

@@ -4,7 +4,6 @@ on:
   # Never add pull_request or pull_request_target: lane routing is push/dispatch only.
   push:
     branches:
-      - main
       - 'claude-code/v2-*'
       - 'main'
       - 'ci/**'
@@ -83,3 +82,16 @@ jobs:
         shell: pwsh
         run: |
           "Pinned release comparison: ${{ steps.ratchet.outcome }}; required for integration: $env:RATCHET_REQUIRED" >> $env:GITHUB_STEP_SUMMARY
+      - name: Check F007 unproven setup preparation
+        shell: powershell
+        run: |
+          . ./Installer/setup.ps1 -FunctionsOnly
+          $root = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
+          $stage = Join-Path $root ('versions/.staging/' + [guid]::NewGuid().ToString('N'))
+          [IO.Directory]::CreateDirectory($stage) | Out-Null
+          $marker = Join-Path $stage 'partial'
+          [IO.File]::WriteAllText($marker, 'incomplete extraction')
+          # A deletion request is the failing observation; do not perform it on the fixture.
+          function Remove-SetupTree { throw 'F007: setup selected unproven preparation for removal.' }
+          Clear-SetupPreparation $root
+          if ([IO.File]::ReadAllText($marker) -cne 'incomplete extraction') { throw 'F007: unproven preparation was changed.' }

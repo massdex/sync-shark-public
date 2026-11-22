@@ -22,6 +22,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Dictionary<string,Exception> RecycleRefusals { get; } = new(PathNames.Comparer);
     public Dictionary<string,Exception> ReadFailures { get; } = new(PathNames.Comparer);
     /// <summary>Content-only faults leave listing and metadata reads intact.</summary>
+    public Dictionary<string,Exception> PublishFailures { get; } = new(PathNames.Comparer);
     public Dictionary<string,Exception> ContentFailures { get; } = new(PathNames.Comparer);
     public Queue<ChangePage> Pages { get; } = [];
     public Dictionary<string, Queue<JobReply>> JobReplies { get; } = [];
@@ -110,6 +111,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Task<RemovalResult> PublishAsync(IStaged staged, Entry? expected, RemovalSelection? selection, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(PublishAsync)); var stage = (Stage)staged;
+        if(PublishFailures.TryGetValue(stage.Path,out var failure)) throw failure;
         if (expected != null) { Mutations.Add(expected.Id);var old = Current(expected); History.Add(old); }
         else if (Items.ContainsKey(stage.Path)) throw new PathOccupiedException(stage.Path);
         using var digest = new ContentHash(); digest.Append(stage.Bytes);
@@ -202,7 +204,16 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
         return DeletedAsync(path,ct);
     }
     /// <inheritdoc/>
-    public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, bool catchUp, CancellationToken ct) => ReadChangesAsync(cursor,position,ct);
+    public async Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, (string? Cursor,JournalPosition? Position) until, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        bool Reached(string? token,JournalPosition? at)=>Side==Side.Local
+            ? at!=null && until.Position is {} stop && at.JournalId==stop.JournalId && at.NextUsn>=stop.NextUsn
+            : until.Cursor!=null && token==until.Cursor;
+        if(Reached(cursor,position)) return new ChangePage([],cursor,position){CaughtUp=true};
+        var page=await ReadChangesAsync(cursor,position,ct);
+        return page with { CaughtUp=!page.ContinuityLost && (Reached(page.Cursor,page.Position) || Side==Side.Dropbox && page.CaughtUp) };
+    }
     /// <inheritdoc/>
     public Task<(string? Cursor,JournalPosition? Position)> BoundaryAsync(CancellationToken ct) => Task.FromResult((Pages.LastOrDefault()?.Cursor,Pages.LastOrDefault()?.Position));
 }
