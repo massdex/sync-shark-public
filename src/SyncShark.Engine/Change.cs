@@ -10,7 +10,7 @@ namespace Massdex.SyncShark.Engine;
 /// failures. IdentityDeleted is full-reference Local FILE_DELETE evidence, not a path tombstone; a later
 /// occupant of the same path is never covered by it, and Dropbox absence is verified at execution rather
 /// than inferred from a deletion page. Usn is the Local journal record that produced the notice, or null for
-/// any other source; only the dirty owner compares it.</summary>
+/// any other source; the dirty owner compares it with LocalPublished only in the same acquired journal (JournalId).</summary>
 public sealed record Change(
     Side Side,
     ChangeKind Kind,
@@ -22,7 +22,7 @@ public sealed record Change(
     bool IdentityDeleted,
     ulong? Usn = null,
     string? Volume = null, string? HistoricalParentId = null, string? HistoricalName = null,
-    string? OldParentId = null, string? OldName = null);
+    string? OldParentId = null, string? OldName = null, ulong? JournalId = null);
 
 /// <summary>Kind of a change notice from a source listener (section 8.7).</summary>
 public enum ChangeKind { Changed, Renamed, Deleted }

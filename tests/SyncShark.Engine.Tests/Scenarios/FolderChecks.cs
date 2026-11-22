@@ -22,7 +22,7 @@ public static class FolderChecks
         if(!ignored && !excluded && !nested) await store.CommitAsync(pair.PairId,null,SyncedEntries.From(childA,childB),null,null,default);
         var live=edited?ItemChecks.File(Side.Local,child,3,childA.Id):childA;pc.Seed(live,nested?[]:new[]{edited?(byte)3:(byte)1});
         if(unreadable) pc.ReadFailures[child]=new ItemFailedException(child,TextKey.ReadLocalFailed,null);
-        await new FolderDelete().ApplyAsync(pair,paths,parent,Side.Dropbox,pc,cloud,store,ItemChecks.Population(pair,paths,queue,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),default);
+        await new FolderDelete().ApplyAsync(pair,paths,parent,Side.Dropbox,pc,cloud,store,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),default);
         if(ignored)
         {
             Check.Require(pc.Items.Count==0 && cloud.Items.Count==0 && pc.History.Any(x=>x.Entry.Path==child && x.Bytes.SequenceEqual(new byte[]{1})),"Ignored child did not accompany recycled parent");

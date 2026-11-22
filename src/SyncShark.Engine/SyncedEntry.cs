@@ -8,7 +8,7 @@ public sealed record SyncedEntry(string LocalKey, string LocalPath, string Dropb
     bool IsFolder, string LocalId, long LocalSize, long LocalModifiedTicks, string DropboxId,
     string DropboxContentHash)
 {
-    /// <summary>Read with this binding from the saved PC publication columns, not from a serialized copy.</summary>
+    /// <summary>Read with this binding from the saved PC publication columns, not from a serialized copy. Compare the binding fields, not record equality, against a deserialized removal selection.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public JournalPosition? LocalPublished { get; init; }
 

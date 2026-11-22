@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 
 namespace Massdex.SyncShark.Engine;
 
-/// <summary>One entry on a pair's issue list (D28, section 2.4).</summary>
+/// <summary>One entry on a pair's issue list. A Failure with cause FailPutBack owns the identified edit’s outstanding put-back, even when ignored.</summary>
 public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path, IssueSubject Subject,
     DateTimeOffset At, bool Dismissed, bool Ignored = false)
 {

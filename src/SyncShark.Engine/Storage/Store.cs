@@ -3,6 +3,8 @@ namespace Massdex.SyncShark.Engine.Storage;
 /// <summary>Store operations for the storage module.</summary>
 public sealed class Store : IStore
 {
+    private Microsoft.Data.Sqlite.SqliteConnection Connection { get; }
+    private readonly PairTable pairs = new();
     /// <summary>Pairs operation on the supplied facts.</summary>
     public IAsyncEnumerable<PairConfig> PairsAsync(CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Pair operation on the supplied facts.</summary>
@@ -10,7 +12,7 @@ public sealed class Store : IStore
     /// <summary>SavePair operation on the supplied facts.</summary>
     public Task SavePairAsync(PairConfig pair, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null) => throw new NotImplementedException();
     /// <summary>RemovePair operation on the supplied facts.</summary>
-    public Task<bool> RemovePairAsync(string pairId, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null) => throw new NotImplementedException();
+    public Task<TextKey?> RemovePairAsync(string pairId, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null) => throw new NotImplementedException();
     /// <summary>Find operation on the supplied facts.</summary>
     public Task<SyncedEntry?> FindAsync(string pairId, Side side, string key, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>ById operation on the supplied facts.</summary>
@@ -41,17 +43,17 @@ public sealed class Store : IStore
     /// <summary>Retire only the matching mapped scope at the owner’s Dropbox revision. No first-run bit or full summary is published.</summary>
     public Task<bool> FinishRepairAsync(string pairId, Scope scope, long revision, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>SaveJob operation on the supplied facts.</summary>
-    public Task SaveJobAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
+    public Task SaveJobAsync(AcceptedJob job, CancellationToken ct) => pairs.SaveJobAsync(Connection, job, ct);
     /// <summary>Jobs operation on the supplied facts.</summary>
-    public IAsyncEnumerable<AcceptedJob> JobsAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
+    public IAsyncEnumerable<AcceptedJob> JobsAsync(string pairId, CancellationToken ct) => pairs.JobsAsync(Connection, pairId, ct);
     /// <summary>SettleJob operation on the supplied facts.</summary>
-    public Task SettleJobAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
+    public Task SettleJobAsync(AcceptedJob job, CancellationToken ct) => pairs.SettleJobAsync(Connection, job, ct);
     /// <summary>Arm operation on the supplied facts.</summary>
-    public Task ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct) => throw new NotImplementedException();
+    public Task ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct) => pairs.ArmAsync(Connection, pairId, victim, stage, ct);
     /// <summary>Armed operation on the supplied facts.</summary>
-    public Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
+    public Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(string pairId, CancellationToken ct) => pairs.ArmedAsync(Connection, pairId, ct);
     /// <summary>Disarm operation on the supplied facts.</summary>
-    public Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct) => throw new NotImplementedException();
+    public Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct) => pairs.DisarmAsync(Connection, pairId, expected, expectedStage, ct);
     /// <summary>AddScan operation on the supplied facts.</summary>
     public Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, Func<string>? terminalHistoryCursor, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Compare operation on the supplied facts.</summary>

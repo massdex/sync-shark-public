@@ -6,8 +6,8 @@ public sealed class PairTable
     /// <summary>Read operation on the supplied facts.</summary>
     public Task<PairConfig?> ReadAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, CancellationToken ct) => throw new NotImplementedException();
 
-    /// <summary>Publish the pair edit or removal and the returned scopes inside the caller’s transaction.</summary>
-    public Task PublishAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, PairConfig? replacement, IReadOnlyList<(string Owner,Scope Scope)> returnedScopes, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Publish the pair edit or removal and its returned scopes in this transaction. Return the blocking cause on refusal, null on success.</summary>
+    public Task<TextKey?> PublishAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, PairConfig? replacement, IReadOnlyList<(string Owner,Scope Scope)> returnedScopes, CancellationToken ct) => throw new NotImplementedException();
     public Task<bool> FinishRepairAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Retire only the matching mapped scope at the owner’s Dropbox revision. No first-run bit or full summary is published.</summary>
     public Task<bool> FinishRepairAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, Scope scope, long revision, CancellationToken ct) => throw new NotImplementedException();
@@ -18,4 +18,17 @@ public sealed class PairTable
     public Task ResetJournalAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>On Dropbox reset only, install its fresh cursor and increment that pair’s Dropbox Repair revision/reason in one transaction.</summary>
     public Task ResetCursorAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, string fresh, string reason, CancellationToken ct) => throw new NotImplementedException();
+
+    /// <summary>Save the accepted job with its members in wire order.</summary>
+    public Task SaveJobAsync(Microsoft.Data.Sqlite.SqliteConnection db, AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read the accepted jobs still owned by this pair.</summary>
+    public IAsyncEnumerable<AcceptedJob> JobsAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Retire the matching settled job.</summary>
+    public Task SettleJobAsync(Microsoft.Data.Sqlite.SqliteConnection db, AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Arm the exact PC victim and stage before removal.</summary>
+    public Task ArmAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read the pair’s armed PC note.</summary>
+    public Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Clear only the matching victim and stage.</summary>
+    public Task DisarmAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct) => throw new NotImplementedException();
 }

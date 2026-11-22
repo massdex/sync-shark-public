@@ -7,8 +7,6 @@ public sealed class InMemoryStateStore : IStore
     public RequestCounters Requests { get; } = new();
     private readonly Dictionary<(string Pair,long Id),Notice> notices = [];
     public IReadOnlyCollection<Notice> OpenNotices => notices.Values;
-    // Fixture evidence for the exact failure whose identified version still needs putting back.
-    internal Dictionary<(string Pair,long Id),Notice> PutBacks { get; } = [];
     private readonly Dictionary<string,PairConfig> pairs = [];
     private readonly Dictionary<string,JournalPosition> positions = [];
     private readonly Dictionary<string,string> cursors = [];
@@ -47,16 +45,18 @@ public sealed class InMemoryStateStore : IStore
         return Task.CompletedTask;
     }
     /// <summary>RemovePair operation on the supplied facts.</summary>
-    public Task<bool> RemovePairAsync(string pairId, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null)
+    public Task<TextKey?> RemovePairAsync(string pairId, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null)
     {
         ct.ThrowIfCancellationRequested();
         lock (pairs)
         {
-            if (armed.ContainsKey(pairId) || jobs.Keys.Any(k=>k.Pair==pairId) || PutBacks.Any(x=>x.Key.Pair==pairId && notices.TryGetValue(x.Key,out var open) && open.Kind==NoticeKind.Failure && open.Matches(x.Value))) return Task.FromResult(false);
+            if (jobs.Keys.Any(k=>k.Pair==pairId)) return Task.FromResult<TextKey?>(TextKey.PairJobOutstanding);
+            if (armed.ContainsKey(pairId)) return Task.FromResult<TextKey?>(TextKey.PairPcNoteOutstanding);
+            if (notices.Any(x=>x.Key.Pair==pairId && x.Value is { Kind:NoticeKind.Failure, Cause:TextKey.FailPutBack })) return Task.FromResult<TextKey?>(TextKey.FailPutBack);
             ValidateOwners(returnedScopes, null, pairId);
-            if (!pairs.Remove(pairId)) return Task.FromResult(false);
+            if (!pairs.Remove(pairId)) return Task.FromResult<TextKey?>(TextKey.PairUnknown);
             PublishScopes(returnedScopes);
-            return Task.FromResult(true);
+            return Task.FromResult<TextKey?>(null);
         }
     }
     private void ValidateOwners(IReadOnlyList<(string Owner, Scope Scope)>? scopes,string? adding,string? removing)
@@ -94,7 +94,7 @@ public sealed class InMemoryStateStore : IStore
         ct.ThrowIfCancellationRequested();
         Requests.Count(nameof(CommitAsync));
         if (before != null && !Records.Remove((pairId, before.LocalKey))) throw new InvalidDataException("Missing previous binding");
-        if (after != null) Records[(pairId, after.LocalKey)] = after with { LocalPublished = publication };
+        if (after != null) Records[(pairId, after.LocalKey)] = after with { LocalPublished = publication ?? (before?.LocalId == after.LocalId ? after.LocalPublished : null) };
         if (spentDeletedKey!=null) spentDeleted[(pairId,spentDeletedKey)]=true;
         return Task.CompletedTask;
     }

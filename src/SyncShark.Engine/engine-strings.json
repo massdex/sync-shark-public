@@ -400,5 +400,9 @@
   "InvalidIgnoreFormat": "Ignore rule '{Value}' must use kind:value, for example FileExtension:tmp.",
   "InvalidIgnoreKind": "Ignore rule kind '{Value}' must be one of: {Kind}.",
   "UnsupportedIgnoreKind": "Choose a supported ignore rule kind.",
-  "InvalidIgnoreValue": "Enter a file type such as .tmp, a name such as Thumbs.db or node_modules, or a name prefix. Paths and wildcards are not needed."
+  "InvalidIgnoreValue": "Enter a file type such as .tmp, a name such as Thumbs.db or node_modules, or a name prefix. Paths and wildcards are not needed.",
+  "FailPutBack": "Sync Shark could not put an identified edit back. Choose Retry on the failure notice to try again.",
+  "PairJobOutstanding": "Dropbox has accepted work that has not settled. Run Repair to check it.",
+  "PairPcNoteOutstanding": "A PC file operation is unfinished. Run Repair to check it.",
+  "ResultPairNotRemoved": "Pair {Pair} was not removed. {Reason}"
 }

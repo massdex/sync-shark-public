@@ -31,7 +31,7 @@ public sealed class LocalSide : ISide
     public Task<(IdentityLocation Location, bool InScope)?> ReadByIdAsync(string id, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>CreateFolderExclusive operation on the supplied facts.</summary>
     public Task<RemovalResult> CreateFolderExclusiveAsync(string path, CancellationToken ct) => throw new NotImplementedException();
-    /// <summary>ReadChanges operation on the supplied facts.</summary>
+    /// <summary>Pass the pair’s settled boundary to the volume reader; it alone saves journal_position up to the oldest unsettled input of any member pair.</summary>
     public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Recover operation on the supplied facts.</summary>
     public Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct) => throw new NotImplementedException();

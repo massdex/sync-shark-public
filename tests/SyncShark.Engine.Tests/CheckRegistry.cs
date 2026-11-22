@@ -410,6 +410,7 @@ public static class CheckRegistry
             new("A13 overlapping repair", Scenarios.RecoveryChecks.A13OverlappingRepairAsync),
             new("A13 reused child name", Scenarios.RecoveryChecks.A13ReusedChildNameAsync),
             new("A13 edit before delete", Scenarios.RecoveryChecks.A13EditBeforeDeleteAsync),
+            new("A13 absent put back survives full Repair", Scenarios.RecoveryChecks.AbsentPutBackSurvivesRepairAsync),
             new("A13 failed put back in use", Scenarios.RecoveryChecks.A13FailedPutBackInUseAsync),
             new("A13 retry put back after restart", Scenarios.RecoveryChecks.A13RetryPutBackAfterRestartAsync),
             new("A13 crash between put backs", Scenarios.RecoveryChecks.A13CrashBetweenPutBacksAsync),

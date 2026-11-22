@@ -42,12 +42,15 @@ public static class PathScopeChecks
         Check.Require((await store.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason=="requested","Scoped completion cleared whole-pair debt");
         var inner=pair with { PairId="inner" };await store.SavePairAsync(inner,default);
         var ordinary=new Notice(1,NoticeKind.Failure,TextKey.PublishFailed,"file",new([new(Side.Local,"file","id")],Side.Local),DateTimeOffset.UnixEpoch,false);
-        var putBack=ordinary with { Id=2,Path="edit",Subject=new([new(Side.Local,"edit","edit-id")],Side.Local) };
+        var putBack=ordinary with { Id=2,Cause=TextKey.FailPutBack,Path="edit",Subject=new([new(Side.Local,"edit","edit-id")],Side.Local) };
         await store.SaveNoticeAsync(inner.PairId,ordinary,default);await store.SaveNoticeAsync(inner.PairId,putBack with { Ignored=true },default);
-        store.PutBacks[(inner.PairId,putBack.Id)]=putBack;
-        Check.Require(!await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)]) && !(await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Removal released an outstanding put-back or published its scope");
+        Check.Require(await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)])==TextKey.FailPutBack && !(await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Removal released an outstanding put-back or published its scope");
         await store.CloseNoticeAsync(inner.PairId,putBack,default);
-        Check.Require(await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)]) && (await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Ordinary failure blocked removal or its returned scope");
+        var job=new AcceptedJob(inner.PairId,"route","token",[]);await store.SaveJobAsync(job,default);
+        Check.Require(await store.RemovePairAsync(inner.PairId,default)==TextKey.PairJobOutstanding,"Accepted job lost its removal reason");await store.SettleJobAsync(job,default);
+        var note=new RemovalSelection(new(Scenarios.ItemChecks.File(Side.Local,"folder",0,"id",true),"volume",null),null);await store.ArmAsync(inner.PairId,note,null,default);
+        Check.Require(await store.RemovePairAsync(inner.PairId,default)==TextKey.PairPcNoteOutstanding,"Armed PC note lost its removal reason");await store.DisarmAsync(inner.PairId,note,null,default);
+        Check.Require(await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)]) is null && (await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Ordinary failure blocked removal or its returned scope");
     }
     public static Task FolderProofAsync()
     {
@@ -98,7 +101,6 @@ public static class PathScopeChecks
         var boundary=new JournalPosition(3,17);var binding=SyncedEntries.From(pc,db) with { LocalPublished=boundary };
         await store.CommitAsync(pair.PairId,null,binding with { LocalPublished=null },boundary,null,default);
         Check.Require((await store.FindAsync(pair.PairId,Side.Local,binding.LocalKey,default))?.LocalPublished==boundary,"Binding lost its publication boundary");
-        Check.Require(SyncedEntries.Relink(binding,pc,db).LocalPublished==boundary && SyncedEntries.Relink(binding,pc with {Id="replacement"},db).LocalPublished==null,"Publication proof crossed PC identities");
         static async IAsyncEnumerable<Listed> Moved(Entry entry) { await Task.CompletedTask; yield return new Listed(entry.Path,entry); }
         await store.AddScanAsync(pair.PairId,second,Side.Local,Moved(pc with {Path="z/file"}),null,default);
         await store.AddScanAsync(pair.PairId,second,Side.Dropbox,Moved(db with {Path="a/file"}),null,default);
@@ -110,6 +112,12 @@ public static class PathScopeChecks
         }
         var moves=new List<RenameCandidate>();await foreach(var move in store.RenamesAsync(pair.PairId,second,null,default))moves.Add(move);
         Check.Require(moves.Count==3 && moves.Count(m=>m.Moved.Path=="lettercase" && m.Synced.LocalPath=="LetterCase")==1 && moves.Where(m=>m.Synced==binding).Select(m=>m.Side).SequenceEqual(new[]{Side.Local,Side.Dropbox}),"Rename projection lost or split a binding’s two sides");
+        var movedPc=pc with { Path="renamed" };var relink=SyncedEntries.Relink(binding,movedPc,db);
+        await store.CommitAsync(pair.PairId,binding,relink,null,null,default);
+        Check.Require((await store.FindAsync(pair.PairId,Side.Local,relink.LocalKey,default))?.LocalPublished==boundary,"Committed same-file move lost its publication boundary");
+        var replaced=SyncedEntries.Relink(relink,movedPc with { Id="replacement" },db);
+        await store.CommitAsync(pair.PairId,relink,replaced,null,null,default);
+        Check.Require(await store.FindAsync(pair.PairId,Side.Local,replaced.LocalKey,default) is { LocalPublished:null,LocalId:"replacement" },"Replacement inherited an old publication boundary");
         await store.CommitAsync(pair.PairId,null,null,null,spentDeletedKey:key,ct:default);
         Check.Require(!await store.DeletedNameAsync(pair.PairId,discovery,key,default),"Discovery returned a spent name");
         await store.ClearScanAsync(pair.PairId,discovery,default);
