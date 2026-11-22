@@ -4,11 +4,10 @@ $output = Join-Path $env:RUNNER_TEMP 'reachability'
 New-Item -ItemType Directory -Force $output | Out-Null
 $watch = [Diagnostics.Stopwatch]::StartNew()
 $buildRoot = Join-Path $root 'build/ci'
-$properties = @("-p:Configuration=$env:CONFIGURATION", "-p:SyncSharkBuildRoot=$buildRoot", "-p:SyncSharkZigPath=$env:ZIG_EXE")
+$properties = @("-p:Configuration=$env:CONFIGURATION", "-p:SyncSharkBuildRoot=$buildRoot")
 # Restore may update build/ci assets/packages; tool outputs stay in runner temp.
 # This runs after binary uploads, so downstream artifacts cannot be modified.
 $projects = @([regex]::Matches([IO.File]::ReadAllText((Join-Path $root 'SyncShark.sln')), '"([^"\r\n]+\.csproj)"') | ForEach-Object { $_.Groups[1].Value })
-$projects += 'tests/SyncShark.FilesOnDemand.Tests/SyncShark.FilesOnDemand.Tests.csproj'
 foreach ($project in $projects) {
     dotnet restore (Join-Path $root $project) @properties --locked-mode
     if ($LASTEXITCODE -ne 0) { throw "Workspace restore failed: $project" }

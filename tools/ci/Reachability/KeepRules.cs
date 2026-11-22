@@ -1,5 +1,4 @@
 using System.Text.RegularExpressions;
-using System.Xml.Linq;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -15,7 +14,6 @@ internal sealed class KeepRules(Analysis graph)
         ReadTrackedFiles();
         IndexNames();
         ScanTrackedFiles();
-        foreach (var path in graph.Tracked.Where(p => p.EndsWith(".xaml"))) Xaml(path);
         MapComponents();
         KeepExternalComponents();
     }
@@ -116,20 +114,6 @@ internal sealed class KeepRules(Analysis graph)
 
     void MapComponents()
     {
-        // Source inputs can feed several binaries; keep their union, never assign one owner by first match.
-        var app = XDocument.Load(Path.Combine(graph.Root, "apps/SyncShark/SyncShark.csproj"));
-        foreach (var target in app.Descendants("Target").Where(t => new[] { "BuildSyncSharkExplorerCommand", "BuildSyncSharkDiscovery", "BuildSyncSharkUpdater" }.Contains((string?)t.Attribute("Name"))))
-        foreach (var input in ((string?)target.Attribute("Inputs") ?? "").Split(';'))
-        {
-            var path = input.Replace("$(MSBuildProjectDirectory)", Path.Combine(graph.Root, "apps/SyncShark"));
-            var inputs = path.Contains("@(SyncSharkUpdaterSetupSources)") ? graph.Tracked.Where(p => p.StartsWith("tools/SyncShark.Updater") && p.EndsWith(".cs")) :
-                path.Contains("$(") ? [] : new[] { graph.Relative(Path.GetFullPath(path)) };
-            foreach (var file in inputs)
-            {
-                if (!graph.Components.TryGetValue(file, out var consumers)) graph.Components[file] = consumers = [];
-                consumers.Add((string)target.Attribute("Name")!);
-            }
-        }
         foreach (var file in graph.Tracked.Where(p => p.StartsWith("Installer/") || p.StartsWith("tools/SyncShark.") || p == "tools/Prepare-SyncSharkRelease.ps1"))
         {
             if (!graph.Components.TryGetValue(file, out var consumers)) graph.Components[file] = consumers = [];
@@ -143,55 +127,6 @@ internal sealed class KeepRules(Analysis graph)
         {
             node.Roots.Add("component:external");
             node.Risks.Add("component-edge");
-        }
-        foreach (var node in graph.Types.Values.Where(t => t.Product && t.Symbol.Name is "ExplorerRequest" or "PilotDirectoryLease"))
-        {
-            node.Roots.Add("component:external");
-            node.Risks.Add("component-edge");
-        }
-    }
-
-    void Xaml(string path)
-    {
-        var xml = XDocument.Load(Path.Combine(graph.Root, path));
-        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
-        var className = (string?)xml.Root?.Attribute(x + "Class");
-        if (className is null) throw new InvalidOperationException($"XAML without class anchor: {path}");
-        var owners = graph.Types.Values.Where(t => t.Symbol.ToDisplayString() == className).ToArray();
-        if (owners.Length == 0) throw new InvalidOperationException($"Unresolved XAML class: {path} {className}");
-        foreach (var owner in owners) owner.Roots.Add("component:xaml");
-        void Name(string uri, string local)
-        {
-            if (!uri.StartsWith("clr-namespace:")) return;
-            var parts = uri["clr-namespace:".Length..].Split(';');
-            var assembly = parts.Skip(1).FirstOrDefault(p => p.StartsWith("assembly="))?[9..];
-            var name = parts[0] + "." + local.Split('.')[0];
-            foreach (var owner in owners)
-            {
-                var compilation = graph.Compilations[owner.Project];
-                var candidates = new[] { compilation.Assembly }.Concat(compilation.SourceModule.ReferencedAssemblySymbols)
-                    .Where(a => assembly is null || a.Name == assembly)
-                    .Select(a => a.GetTypeByMetadataName(name) ?? a.GetTypeByMetadataName(name + "Extension")).OfType<INamedTypeSymbol>().ToArray();
-                if (candidates.Length == 0) throw new InvalidOperationException($"Unresolved XAML name: {path} {name}");
-                foreach (var type in candidates)
-                {
-                    graph.Reference(owner, type, path, -1);
-                    foreach (var target in graph.Resolve(type)) target.Roots.Add("component:xaml");
-                }
-            }
-        }
-        foreach (var element in xml.Descendants())
-        {
-            Name(element.Name.NamespaceName, element.Name.LocalName);
-            foreach (var attribute in element.Attributes().Where(a => !a.IsNamespaceDeclaration))
-            {
-                Name(attribute.Name.NamespaceName, attribute.Name.LocalName);
-                foreach (Match match in Regex.Matches(attribute.Value, @"(?<prefix>[A-Za-z_]\w*):(?<name>[A-Za-z_]\w*(?:\.\w+)?)"))
-                {
-                    var ns = element.GetNamespaceOfPrefix(match.Groups["prefix"].Value);
-                    if (ns is not null) Name(ns.NamespaceName, match.Groups["name"].Value);
-                }
-            }
         }
     }
 }

@@ -234,7 +234,7 @@ def collect(root, output):
                           'CA1501/1502/1505/1506 report threshold violations, not every symbol value; line/size counts stay with the existing ratchet.'))
     result = {'$schema': SCHEMA, 'version': '2.1.0', 'runs': runs,
               'properties': {'coverage': cover, 'status': 'INCOMPLETE', 'identityLimit': IDENTITY_LIMIT,
-                             'coverageScope': 'Tracked files in this checkout only; source files omitted by a publication/export boundary are NOT COVERED. C# files outside the evaluated project inputs (Installer sources, Core and Core.Tests history-retention sources, and tool sources) are NOT COVERED.'}}
+                             'coverageScope': 'Tracked files in this checkout only; source files omitted by a publication/export boundary are NOT COVERED. C# files outside the evaluated project inputs (Installer and tool sources outside the four-project solution) are NOT COVERED.'}}
     (output / 'inventory.sarif').write_text(json.dumps(result, ensure_ascii=True), encoding='utf-8')
     (output / 'coverage.json').write_text(json.dumps(cover, indent=2), encoding='utf-8')
     summary = {'tools': {r['tool']['driver']['name']: len(r['results']) for r in runs},

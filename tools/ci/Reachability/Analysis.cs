@@ -69,18 +69,15 @@ internal sealed class Analysis(string root, Config config)
         ValidateCuts();
         using var workspace = MSBuildWorkspace.Create(new Dictionary<string, string> {
             ["Configuration"] = Environment.GetEnvironmentVariable("CONFIGURATION") ?? throw new InvalidOperationException("Missing CONFIGURATION"),
-            ["SyncSharkBuildRoot"] = Path.Combine(Root, "build/ci"),
-            ["SyncSharkZigPath"] = Environment.GetEnvironmentVariable("ZIG_EXE") ?? throw new InvalidOperationException("Missing ZIG_EXE") });
+            ["SyncSharkBuildRoot"] = Path.Combine(Root, "build/ci") });
         var failures = new List<string>();
         workspace.WorkspaceFailed += (_, e) => failures.Add(e.Diagnostic.Message);
         await workspace.OpenSolutionAsync(Path.Combine(Root, "SyncShark.sln"));
-        await workspace.OpenProjectAsync(Path.Combine(Root, "tests/SyncShark.FilesOnDemand.Tests/SyncShark.FilesOnDemand.Tests.csproj"));
         foreach (var project in workspace.CurrentSolution.Projects)
         {
             var compilation = await project.GetCompilationAsync() ?? throw new InvalidOperationException($"No compilation: {project.Name}");
             ValidateCompilation(compilation);
             IndexDeclarations(project, compilation);
-            ValidateGeneratedXaml(project, compilation);
         }
         if (failures.Count != 0) throw new InvalidOperationException("WorkspaceFailed: " + string.Join("\n", failures));
     }
@@ -124,20 +121,6 @@ internal sealed class Analysis(string root, Config config)
                 node.Files.Add(file);
                 if (!Files.TryGetValue(file, out var nodes)) Files[file] = nodes = [];
                 if (!nodes.Contains(node)) nodes.Add(node);
-            }
-        }
-    }
-
-    void ValidateGeneratedXaml(Project project, Compilation compilation)
-    {
-        if (project.Name is "SyncShark" or "SyncShark.UiFixture")
-        {
-            var directory = Path.GetDirectoryName(project.FilePath!)!;
-            foreach (var xaml in Directory.EnumerateFiles(directory, "*.xaml", SearchOption.AllDirectories).Where(p => !p.Contains("\\obj\\") && !p.Contains("\\bin\\")))
-            {
-                var generated = Path.GetFileNameWithoutExtension(xaml) + ".g.cs";
-                if (!compilation.SyntaxTrees.Any(t => string.Equals(Path.GetFileName(t.FilePath), generated, StringComparison.OrdinalIgnoreCase)))
-                    throw new InvalidOperationException($"Missing generated XAML document: {Relative(xaml)}");
             }
         }
     }
@@ -295,7 +278,7 @@ internal sealed class Analysis(string root, Config config)
         foreach (var node in Types.Values.Where(t => t.Product))
         {
             var reason = node.Roots.FirstOrDefault();
-            if ((node.Symbol.ToDisplayString() == "Massdex.SyncShark.ProcessEntry" || profile == "ALL" && reason is not null) &&
+            if ((node.Symbol.ToDisplayString() is "Massdex.SyncShark.Program" or "Massdex.SyncShark.Cli.Program" || profile == "ALL" && reason is not null) &&
                 reached.TryAdd(node.Id, (null, reason ?? "entry"))) queue.Enqueue(node.Id);
         }
         foreach (var id in extraRoots ?? []) if (reached.TryAdd(id, (null, "route"))) queue.Enqueue(id);
