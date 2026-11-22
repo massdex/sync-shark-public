@@ -20,7 +20,11 @@ public sealed class DropboxErrors
     /// structured path_lookup/not_found; it is never the same as our request having deleted it (its effect stays
     /// Unknown), and a caller carries a delete absence only when its own request addressed the selected id.</summary>
     public readonly record struct Classified(
-        TextKey Cause, FailureDisposition Disposition, bool ProvenNoEffect, bool Absent = false);
+        TextKey Cause, FailureDisposition Disposition, bool ProvenNoEffect, bool Absent = false)
+    {
+        /// <summary>Whether this continuation cursor needs to be replaced by a fresh listing.</summary>
+        public bool CursorReset { get; init; }
+    }
 
     /// <summary>Classify one single response. <paramref name="body"/> is the parsed reply. A documented write
     /// contention takes the write rule on any status; a well-shaped structured refusal proves no effect; a documented

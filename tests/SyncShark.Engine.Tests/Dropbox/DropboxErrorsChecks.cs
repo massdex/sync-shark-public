@@ -157,6 +157,18 @@ public static class DropboxErrorsChecks
                 DropboxProtocol.Move, false, default).Cause == TextKey.ClashNameTaken,
             "a direct singleton move to/conflict is a taken name");
 
+        var reset = Reply(string.Empty, Union(DropboxProtocol.TagReset));
+        foreach (var (status, body, route, expected) in new[]
+        {
+            (HttpStatusCode.Conflict, reset, DropboxProtocol.ListFolderContinue, true),
+            (HttpStatusCode.Conflict, SummaryOnly("reset/.."), DropboxProtocol.ListFolderContinue, false),
+            (HttpStatusCode.Conflict, reset, DropboxProtocol.ListFolder, false),
+            (HttpStatusCode.BadRequest, reset, DropboxProtocol.ListFolderContinue, false),
+            (HttpStatusCode.Conflict, Union(DropboxProtocol.TagReset), DropboxProtocol.ListFolderContinue, false),
+            (HttpStatusCode.Conflict, Reply("reset/..", Union("other")), DropboxProtocol.ListFolderContinue, false)
+        }) Expect(errors.Classify(status, body, route, false, new(true, true, false, false)).CursorReset == expected,
+            "continuation reset must match the structured HTTP refusal on its own route");
+
         // (4) Only the exact structured invalid_async_job_id on a poll-check route is the invalid-job cause.
         foreach (var checkRoute in new[]
                  { DropboxProtocol.DeleteBatchCheck, DropboxProtocol.MoveBatchCheck, DropboxProtocol.CreateFolderBatchCheck })
