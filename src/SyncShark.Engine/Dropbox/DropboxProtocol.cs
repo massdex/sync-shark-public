@@ -3,6 +3,9 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// <summary>Dropbox provider facts as named constants and the sole provider-wait applicability decoder</summary>
 public static class DropboxProtocol
 {
+    public const string Path = "path";
+    public const string ClientModifiedFormat = "yyyy-MM-ddTHH:mm:ssZ";
+    public const int DeletionHistoryHeadLimit = 1;
     public const string ListFolder = "files/list_folder";
     public const string ListFolderContinue = "files/list_folder/continue";
     public const string ListFolderGetLatestCursor = "files/list_folder/get_latest_cursor";

@@ -9,6 +9,8 @@ public static class ExclusionsChecks
     public static Task CopyEstimateAsync() => throw new NotImplementedException();
     /// <summary>Check exclusion read failure at integration.</summary>
     public static Task ReadFailureAsync() => throw new NotImplementedException();
+    /// <summary>Check exclusion protections before applying file effects.</summary>
+    public static Task ApplyGuardsAsync() => throw new NotImplementedException();
     /// <summary>Verifies the Exclusions contract through the module surface.</summary>
     public static Task RunAsync() => throw new NotImplementedException();
 }

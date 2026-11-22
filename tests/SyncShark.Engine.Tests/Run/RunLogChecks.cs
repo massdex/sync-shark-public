@@ -49,6 +49,7 @@ public static class RunLogChecks
         var files = new FakeLogFiles();
         var log = new RunLog(files, "logs/pair-run.log", Settings(8192));
         log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", "copied", "Dropbox"));
+        Check.Require(files.Written.Count == 0, "ordinary file effects remain buffered");
         log.Write(new RunEvent(RunEventKind.Wait, "Waiting", string.Empty, string.Empty, string.Empty));
         log.Dispose();
 
@@ -101,7 +102,14 @@ public static class RunLogChecks
         var changed = new RunEvent(RunEventKind.Wait, "ItemSync", "item", sentinel, nameof(TextKey.FailChanged)) { Cause = TextKey.FailChanged, Error = error };
         bool OnceInBoth(RunEvent item, string sentence)
         {
-            var record = string.Join(RunLog.FieldSeparator, WriteOne(item));
+            var files = new FakeLogFiles();
+            using var log = new RunLog(files, "logs/pair-run.log", Settings());
+            log.Write(item);
+            var visible = new List<string>();
+            RunLog.Read(files, log.Path, (line, valid) => { if (valid) visible.Add(line); }, 4096, CancellationToken.None, out _);
+            Check.Require(visible.Count == 1 && visible[0].Contains(sentence, StringComparison.Ordinal),
+                "an active reader must see the scheduled wait before disposal or a later event");
+            var record = visible[0];
             var screen = LogText.Format(item);
             return new[] { record, screen }.All(view => !view.Contains(sentinel) && !view.Contains("{Seconds}") &&
                 view.IndexOf(sentence, StringComparison.Ordinal) >= 0 && view.IndexOf(sentence, StringComparison.Ordinal) == view.LastIndexOf(sentence, StringComparison.Ordinal));
@@ -283,6 +291,7 @@ public static class RunLogChecks
             ReadPath = path;
             ReadBuffer = bufferBytes;
             ct.ThrowIfCancellationRequested();
+            foreach (var line in _written) record(line, true);
             foreach (var line in Lines) record(line, true);
             if (Malformed) record("undecodable", false);
             unfinishedTrailingRecord = Trailing;
