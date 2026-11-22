@@ -1,4 +1,6 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Massdex.SyncShark.Engine.Storage;
 namespace Massdex.SyncShark.Engine.Tests.Storage;
 
@@ -16,6 +18,17 @@ public static class DeletedNamesChecks
     /// <summary>A history cursor and names must become durable together and never revive spent evidence.</summary>
     public static async Task RunAsync()
     {
+        var root=CheckArguments.Parse(Environment.GetCommandLineArgs()[1..]).Root;
+        foreach(var file in new[]{"ScanTable","DeletedNames"})
+        {
+            var source=await File.ReadAllTextAsync(Path.Combine(root,"src","SyncShark.Engine","Storage",file+".cs"));
+            var tree=CSharpSyntaxTree.ParseText(source).GetRoot();
+            foreach(var method in tree.DescendantNodes().OfType<MethodDeclarationSyntax>().Where(m=>m.Modifiers.Any(t=>t.Text=="public")))
+            {
+                var doc=method.GetLeadingTrivia().ToFullString();
+                Check.Require(doc.Contains("<summary>",StringComparison.Ordinal) && !doc.Contains("operation on the supplied facts",StringComparison.OrdinalIgnoreCase),"Missing operation-specific summary: "+method.Identifier.Text);
+            }
+        }
         using var db=await OpenAsync();var names=new DeletedNames();var scan=Guid.NewGuid();var table=new ScanTable();
         static async IAsyncEnumerable<Listed> History(){await Task.CompletedTask;yield return new("old",null);}
         await table.AddScanAsync(db,"p",scan,Side.Dropbox,History(),()=>"cursor",1,default);
