@@ -56,14 +56,19 @@ public static class DropboxErrorsChecks
     });
 
     // A well-formed conflict: {.tag: path, path: {.tag: conflict, conflict: {.tag: file}}}.
-    private static JsonElement WriteConflict() => Element(new Dictionary<string, object>
+    private static JsonElement WriteConflict(string subtype = DropboxProtocol.TagFile) => Element(new Dictionary<string, object>
     {
         [DropboxProtocol.Tag] = DropboxProtocol.Path,
         [DropboxProtocol.Path] = new Dictionary<string, object>
         {
             [DropboxProtocol.Tag] = DropboxProtocol.Conflict,
-            [DropboxProtocol.Conflict] = Union(DropboxProtocol.TagFile)
+            [DropboxProtocol.Conflict] = Union(subtype)
         }
+    });
+
+    private static JsonElement DirectUpload(JsonElement path) => Element(new Dictionary<string, object>
+    {
+        [".tag"] = "path", ["reason"] = path.GetProperty("path"), ["upload_session_id"] = "fixture"
     });
 
     private static JsonElement MoveError(string inner) => Tagged(DropboxProtocol.RelocationError, inner);
@@ -99,6 +104,7 @@ public static class DropboxErrorsChecks
         var writeNoEffect = new DropboxErrors.RequestEvidence(false, true, true, false);
         var writeTransient = new DropboxErrors.RequestEvidence(false, true, true, true);
 
+        RouteEvidence(errors, writeDispatched);
         Absence(errors);
         SingleRefusals(errors);
         UnknownWrites(errors, writeDispatched, writeNoEffect, writeTransient);
@@ -142,7 +148,7 @@ public static class DropboxErrorsChecks
 
         // (3) The direct singleton move_v2 union classifies as its refusal (batch wraps; singleton does not).
         Expect(errors.Classify(HttpStatusCode.Conflict, Reply("too_many_files", Union("too_many_files")),
-                DropboxProtocol.Move, false, default).Cause == TextKey.FailDropboxTooManyFiles,
+                DropboxProtocol.Move, false, writeDispatched) == new DropboxErrors.Classified(TextKey.FailDropboxTooManyFiles, FailureDisposition.Permanent, true),
             "a direct singleton move too_many_files refusal is attributable");
         Expect(errors.Classify(HttpStatusCode.Conflict, Reply("from_lookup/not_found", Tagged("from_lookup", "not_found")),
                 DropboxProtocol.Move, false, default).Cause == TextKey.FailChanged,
@@ -181,6 +187,56 @@ public static class DropboxErrorsChecks
         Check.Require(failures.Count == 0, string.Join("; ", failures));
     }
 
+    private static void RouteEvidence(DropboxErrors errors, DropboxErrors.RequestEvidence sent)
+    {
+        var failures = new List<string>();
+        var unknown = new DropboxErrors.Classified(TextKey.DropboxRefused, FailureDisposition.UnknownEffect, false);
+        var refused = new DropboxErrors.Classified(TextKey.DropboxRefused, FailureDisposition.Permanent, true);
+        var busy = new DropboxErrors.Classified(TextKey.WaitTooManyWrites, FailureDisposition.TemporaryNoEffect, true);
+        var denied = unknown with { Cause = TextKey.FailDropboxNoPermission };
+        var permission = Tagged("path_write", "no_write_permission");
+        void Expect(bool ok, string why) { if (!ok) failures.Add(why); }
+        DropboxErrors.Classified Http(string route, JsonElement body) =>
+            errors.Classify(HttpStatusCode.Conflict, body, route, false, sent);
+        Expect(!Http(DropboxProtocol.GetMetadata, Tagged("path", "not_found")).Absent, "bare metadata miss");
+        Expect(!Http(DropboxProtocol.Delete, Tagged("path_lookup", "not_found")).Absent, "bare delete miss");
+        Expect(Http(DropboxProtocol.DeleteBatchCheck, Union("invalid_async_job_id")).Cause !=
+            TextKey.FailDropboxDeleteJobInvalid, "bare invalid job");
+        foreach (var (route, failure) in new[]
+        {
+            (DropboxProtocol.UploadSessionAppend, WriteConflict()), (DropboxProtocol.UploadSessionStart, WriteConflict()),
+            (DropboxProtocol.Upload, WriteConflict()), (DropboxProtocol.CreateFolder, Union("content_hash_mismatch")),
+            (DropboxProtocol.UploadSessionFinish, Tagged("lookup_failed", "future_tag")),
+            (DropboxProtocol.UploadSessionFinish, Tagged("lookup_failed", "incorrect_offset")),
+            (DropboxProtocol.Upload, Tagged("future_tag", "too_many_write_operations")),
+            (DropboxProtocol.CreateFolderBatch, WriteConflict()), (DropboxProtocol.DeleteBatch, Tagged("path_lookup", "not_found"))
+        }) Expect(Http(route, Reply("", failure)) == unknown, route + " wrong or incomplete refusal");
+        Expect(Http(DropboxProtocol.Upload, Reply("", Element(new Dictionary<string, object> {
+            [".tag"] = "unrelated", ["reason"] = Union("too_many_write_operations") }))) == unknown, "unrelated reason");
+        Expect(Http(DropboxProtocol.Upload, SummaryOnly("unrelated/too_many_write_operations")) == unknown, "unrelated summary");
+        Expect(Http(DropboxProtocol.UploadSessionFinish, Reply("", Tagged("lookup_failed", "closed"))) == refused,
+            "complete session lookup refusal");
+        Expect(Http(DropboxProtocol.UploadSessionFinish, Reply("", Element(new Dictionary<string, object> {
+            [".tag"] = "lookup_failed", ["lookup_failed"] = new Dictionary<string, object> {
+                [".tag"] = "incorrect_offset", ["correct_offset"] = 12 } }))) == refused, "complete offset refusal");
+        Expect(Http(DropboxProtocol.Upload, Reply("", Element(new { reason = Union("too_many_write_operations") }))) == busy,
+            "rate-limit reason");
+        foreach (var route in new[] { DropboxProtocol.CreateFolderBatch, DropboxProtocol.CreateFolderBatchCheck })
+        {
+            Expect(errors.ClassifyMember(WriteConflict("folder"), route, false) == refused with { Cause = TextKey.ClashNameTaken },
+                route + " member folder conflict");
+            Expect(errors.ClassifyMember(Union("unrecognized"), route, false) == unknown, route + " unknown member");
+        }
+        Expect(Http(DropboxProtocol.Download, Reply("", Tagged("path", "not_found"))) == refused with { Cause = TextKey.FailChanged },
+            "structured download miss is changed, not absent");
+        Expect(Http(DropboxProtocol.Download, Reply("path/not_found", Tagged("path", "not_file"))).Cause != TextKey.FailChanged,
+            "structured download wins");
+        Expect(Http(DropboxProtocol.Delete, Reply("", permission)) == denied, "singleton delete permission");
+        Expect(Http(DropboxProtocol.Delete, SummaryOnly("path_write/no_write_permission")) == denied, "delete summary permission");
+        Expect(errors.ClassifyMember(permission, DropboxProtocol.DeleteBatch, false) == denied, "member delete permission");
+        Check.Require(failures.Count == 0, string.Join("; ", failures));
+    }
+
     // Finding 1: only the exact structured miss is absence; a summary-only or malformed/contradictory reply is not.
     private static void Absence(DropboxErrors errors)
     {
@@ -206,7 +262,7 @@ public static class DropboxErrorsChecks
     private static void SingleRefusals(DropboxErrors errors)
     {
         // A create-only upload conflict is a taken name; a revision-bound one is a changed target.
-        var conflict = Reply(DropboxProtocol.PathConflict + "/file", WriteConflict());
+        var conflict = Reply(DropboxProtocol.PathConflict + "/file", DirectUpload(WriteConflict()));
         var add = errors.Classify(HttpStatusCode.Conflict, conflict, DropboxProtocol.Upload, true, default);
         var update = errors.Classify(HttpStatusCode.Conflict, conflict, DropboxProtocol.Upload, false, default);
         Check.Require(add.Cause == TextKey.ClashNameTaken && add.Disposition == FailureDisposition.Permanent &&
@@ -221,7 +277,7 @@ public static class DropboxErrorsChecks
 
         var noSpace = errors.Classify(HttpStatusCode.Conflict,
             Reply(DropboxProtocol.UploadWritePrefix + DropboxProtocol.InsufficientSpace,
-                WriteReason(DropboxProtocol.InsufficientSpace)), DropboxProtocol.Upload, true, default);
+                DirectUpload(WriteReason(DropboxProtocol.InsufficientSpace))), DropboxProtocol.Upload, true, default);
         Check.Require(noSpace.Cause == TextKey.FailDropboxNoSpace && noSpace.ProvenNoEffect,
             "A documented write reason maps to its cause");
 
@@ -336,7 +392,7 @@ public static class DropboxErrorsChecks
         Check.Require(errors.ClassifyMember(WriteReason("future_write_error"), DropboxProtocol.UploadSessionFinishBatch, true)
             .Disposition == FailureDisposition.UnknownEffect, "An unknown nested write tag proves nothing");
         Check.Require(errors.ClassifyMember(Union(DropboxProtocol.TagOther), DropboxProtocol.UploadSessionFinishBatch, true)
-            .ProvenNoEffect, "A documented top-level union tag is a refusal");
+             == new DropboxErrors.Classified(TextKey.DropboxRefused, FailureDisposition.UnknownEffect, false), "An unspecified other error does not establish no effect");
         Check.Require(errors.ClassifyMember(Element("text"), DropboxProtocol.UploadSessionFinishBatch, true)
             .Disposition == FailureDisposition.UnknownEffect, "A malformed member proves nothing");
 

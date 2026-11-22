@@ -85,6 +85,18 @@ jobs:
       - name: Check F007 unproven setup preparation
         shell: powershell
         run: |
+          $ownershipFailures = @()
+          $check = Get-Command ./tools/Test-SyncSharkSetupCleanupLaunch.ps1
+          foreach ($mode in 'Shell', 'Stage') {
+            try {
+              if (-not $check.Parameters.ContainsKey('OwnershipCheck')) { throw 'This checkout lacks the ownership assertion.' }
+              & $check -OwnershipCheck $mode
+              Write-Host "PASS F007 ownership: $mode"
+            } catch {
+              $ownershipFailures += "${mode}: $($_.Exception.Message)"
+              Write-Host "::error::F007 ownership ${mode}: $($_.Exception.Message)"
+            }
+          }
           . ./Installer/setup.ps1 -FunctionsOnly
           $root = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
           $stage = Join-Path $root ('versions/.staging/' + [guid]::NewGuid().ToString('N'))
@@ -95,3 +107,4 @@ jobs:
           function Remove-SetupTree { throw 'F007: setup selected unproven preparation for removal.' }
           Clear-SetupPreparation $root
           if ([IO.File]::ReadAllText($marker) -cne 'incomplete extraction') { throw 'F007: unproven preparation was changed.' }
+          if ($ownershipFailures.Count) { throw ($ownershipFailures -join "; ") }

@@ -29,6 +29,11 @@ public static class DropboxProtocol
     public const string ListRevisions = "files/list_revisions";
     public const string GetCurrentAccount = "users/get_current_account";
     public const string UploadSessionFinishBatch = "files/upload_session/finish_batch_v2";
+    internal const string AuthorizationPath = "oauth2/authorize";
+    internal const string TokenPath = "oauth2/token";
+    internal const string AuthorizationHost = "www.dropbox.com";
+    internal const string TokenHost = "api.dropboxapi.com";
+
 
     // Documented limits.
     public const int ListPageMaximum = 2000;
