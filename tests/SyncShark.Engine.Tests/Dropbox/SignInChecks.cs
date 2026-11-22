@@ -147,36 +147,47 @@ public static class SignInChecks
         Func<string, CancellationToken, Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)>> verify =
             (token, _) =>
             {
-                Check.Require(token == "legacy-owner-a", "Unexpected legacy token passed to verification");
+                Check.Require(token == "legacy-fixture", "Unexpected legacy token passed to verification");
                 return Task.FromResult((accountOwner, "root-a", "home-a"));
             };
         try
         {
-            CredentialStoreChecks.LegacyFixture.Write("legacy-owner-a");
+            CredentialStoreChecks.LegacyFixture.Write("legacy-fixture");
             store.Save(connectionOther, "own-b");
             await SignIn.DisconnectAsync(verify, store, connectionOther, default);
-            Check.Require(store.ReadOwn(connectionOther) is null && store.ReadLegacy() == "legacy-owner-a",
+            Check.Require(store.ReadOwn(connectionOther) is null && store.ReadLegacy() == "legacy-fixture",
                 "Disconnecting another account deleted the legacy owner's credential or kept its own");
 
             await SignIn.DisconnectAsync(verify, store, connectionOwner, default);
             Check.Require(store.ReadLegacy() is null, "The proven legacy credential survived its owner's disconnect");
 
-            CredentialStoreChecks.LegacyFixture.Write("legacy-dead");
+            // A revoked legacy credential is unusable and removed.
+            CredentialStoreChecks.LegacyFixture.Write("legacy-fixture");
             await SignIn.DisconnectAsync((_, _) => throw new DropboxCredentialUnavailableException(connectionOwner),
                 store, connectionOwner, default);
             Check.Require(store.ReadLegacy() is null, "A revoked legacy credential was kept");
 
-            CredentialStoreChecks.LegacyFixture.Write("legacy-unreachable");
+            // Offline/unproven legacy ownership completes the local disconnect and leaves the fixed entry (R41).
+            CredentialStoreChecks.LegacyFixture.Write("legacy-fixture");
             store.Save(connectionOwner, "own-a");
-            var failed = false;
+            await SignIn.DisconnectAsync((_, _) => throw new HttpRequestException(Text.Get(TextKey.SignInReturnRetry)),
+                store, connectionOwner, default);
+            Check.Require(store.ReadOwn(connectionOwner) is null && store.ReadLegacy() == "legacy-fixture",
+                "An offline legacy owner aborted the local disconnect or removed the unproven fixed entry");
+
+            // Caller cancellation is not swallowed: nothing is removed.
+            store.Save(connectionOwner, "own-c");
+            using var cancelled = new CancellationTokenSource();
+            cancelled.Cancel();
+            var propagated = false;
             try
             {
-                await SignIn.DisconnectAsync(
-                    (_, _) => throw new HttpRequestException(Text.Get(TextKey.SignInReturnRetry)), store, connectionOwner, default);
+                await SignIn.DisconnectAsync((_, _) => throw new OperationCanceledException(cancelled.Token),
+                    store, connectionOwner, cancelled.Token);
             }
-            catch (HttpRequestException) { failed = true; }
-            Check.Require(failed && store.ReadLegacy() == "legacy-unreachable" && store.ReadOwn(connectionOwner) == "own-a",
-                "An unreachable legacy credential was removed or the own credential was deleted first");
+            catch (OperationCanceledException) { propagated = true; }
+            Check.Require(propagated && store.ReadOwn(connectionOwner) == "own-c" && store.ReadLegacy() == "legacy-fixture",
+                "Caller cancellation removed credentials or was swallowed");
         }
         finally
         {

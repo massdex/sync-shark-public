@@ -94,7 +94,16 @@ public sealed class SignIn
     {
         ArgumentNullException.ThrowIfNull(attempt, nameof(attempt));
         if (!await AuthorizationGate.WaitAsync(0, ct)) throw new InvalidOperationException(Text.Get(TextKey.SignInReturnRetry));
-        try { return await attempt(ct); }
+        try
+        {
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            bounded.CancelAfter(bound);
+            try { return await attempt(bounded.Token); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException(Text.Get(TextKey.SignInReturnRetry));
+            }
+        }
         finally { AuthorizationGate.Release(); }
     }
 
@@ -191,14 +200,14 @@ public sealed class SignIn
                     try { target = await ReadCallbackTargetAsync(stream, ct); }
                     catch
                     {
-                        await TryWriteRetryAsync(stream);
+                        await TryWriteRetryAsync(stream, ct);
                         throw;
                     }
                     string code;
                     try { code = ParseCallbackTarget(target, expectedPath, expectedState); }
                     catch
                     {
-                        await TryWriteRetryAsync(stream);
+                        await TryWriteRetryAsync(stream, ct);
                         throw;
                     }
                     await WritePageAsync(stream, AcknowledgementPage(received: true), ct);
@@ -250,13 +259,17 @@ public sealed class SignIn
             ["scope"] = string.Join(' ', RequiredScopes)
         }, connectionId, ct);
         var account = await AccountAsync(send, token.AccessToken, ct);
+        // The predecessor rejected a token response naming a different account before trusting the account read.
+        if (token.AccountId is not null && !string.Equals(token.AccountId, account.AccountId, StringComparison.Ordinal))
+            throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
         return (account.AccountId, account.RootNamespaceId, account.HomeNamespaceId, token.AccessToken, token.ExpiresUtc);
     }
 
     /// <summary>Disconnect: removes the connection's own credential, and the fixed legacy credential only once it is
     /// proven (by the account it opens) to belong to this connection. The host/composition owner must call this for a
-    /// disconnect; a credential that cannot be reached now is left alone and the removal fails forward, so another
-    /// account's credential is never deleted and no pair is left with a usable legacy credential.</summary>
+    /// disconnect. When the legacy owner cannot be reached (offline or an unproven ownership), the local disconnect still
+    /// completes and the fixed entry is left in place (R41); a revoked token is removed as unusable; caller cancellation
+    /// and native-store failures are not swallowed.</summary>
     public static async Task DisconnectAsync(
         Func<string, CancellationToken, Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)>> verify,
         CredentialStore credentials, string connectionId, CancellationToken ct)
@@ -411,11 +424,13 @@ public sealed class SignIn
         return parts[1];
     }
 
-    // Best effort for a return that cannot be verified: a closed or unwritable socket simply ends the attempt.
-    private static async Task TryWriteRetryAsync(Stream stream)
+    // Best effort for a return that cannot be verified, bounded by the same attempt token; a closed socket or a
+    // cancelled attempt simply ends it without waiting.
+    private static async Task TryWriteRetryAsync(Stream stream, CancellationToken ct)
     {
-        try { await WritePageAsync(stream, AcknowledgementPage(received: false), CancellationToken.None); }
-        catch (Exception error) when (error is IOException or SocketException or ObjectDisposedException) { }
+        if (ct.IsCancellationRequested) return;
+        try { await WritePageAsync(stream, AcknowledgementPage(received: false), ct); }
+        catch (Exception error) when (error is IOException or SocketException or ObjectDisposedException or OperationCanceledException) { }
     }
 
     private static async Task WritePageAsync(Stream stream, string html, CancellationToken ct)

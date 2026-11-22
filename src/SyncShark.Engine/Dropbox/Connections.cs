@@ -9,7 +9,8 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// It holds only connection ids; the account's saved root identity lives with each pair, so no credential reference
 /// is stored or returned here. Migration resolves 0.3.95's authoritative value (its alternating
 /// <c>dropbox-connection-a.json</c>/<c>-b.json</c> slots first, otherwise the validated legacy append log) and, on an
-/// in-place upgrade, treats the root's own JSONL as source evidence rather than a competing target.</summary>
+/// in-place upgrade, treats the root's own JSONL as source evidence rather than a competing target. A list is a JSON
+/// string per line; an empty list is one blank line, while a zero-byte JSONL is a 0.3.95 legacy log.</summary>
 public sealed class Connections
 {
     private const string StateFolder = "state";
@@ -42,10 +43,10 @@ public sealed class Connections
 
     /// <summary>Verify the source's authoritative 0.3.95 value and the target before the store switch. In place, the
     /// root's own JSONL is source evidence: it is never overwritten, and only a slot-only root gets a create-only list.
-    /// For distinct roots the target is created only when absent; an existing distinct append target must be byte-identical
-    /// to the source log (BC8) and an existing canonical target must carry the same set. On refusal remove only this
-    /// attempt's files and throw before database publication; on success return cleanup for a failed switch, or null
-    /// when nothing was created.</summary>
+    /// For distinct roots the target is created only when absent, copying the authoritative append log's bytes when it is
+    /// the source; an existing append target must be byte-identical and carry the same set, and an existing canonical
+    /// target the same set (BC8). On refusal remove only this attempt's files and throw before database publication; on
+    /// success return cleanup for a failed switch, or null when nothing was created.</summary>
     public Action? Verify(string sourceRoot, string productRoot, IReadOnlyList<string> requiredConnectionIds)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceRoot, nameof(sourceRoot));
@@ -54,22 +55,31 @@ public sealed class Connections
         var source = FilePath(sourceRoot);
         var target = FilePath(productRoot);
         var sourceSet = SourceSet(sourceRoot);
-        var sameRoot = false;
+        var slotsAuthoritative = SlotsExist(sourceRoot);
+        var sameRoot = SameRoot(sourceRoot, productRoot);
         var created = false;
         try
         {
-            if (File.Exists(target))
+            if (sameRoot)
             {
-                if (!AppendSet(target).SequenceEqual(sourceSet, StringComparer.Ordinal))
+                // The predecessor's own JSONL is evidence, not a competing target; publish only when no list exists.
+                if (!File.Exists(target) && slotsAuthoritative)
+                {
+                    if (!Publish(target, output => WriteIds(output, sourceSet))) throw new IOException();
+                    created = true;
+                }
+            }
+            else if (File.Exists(target))
+            {
+                if (ListForm(target) == ListShape.Append && !SameBytesBounded(source, target))
                     throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
             }
-            else if (sourceSet.Count > 0 || SlotsExist(sourceRoot) || File.Exists(source))
+            else if (sourceSet.Count > 0 || slotsAuthoritative || File.Exists(source))
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                var stage = StagePath(target);
-                if (!WriteStage(stage, output => WriteIds(output, sourceSet))) throw new IOException();
-                try { File.Move(stage, target); }
-                catch { TryDelete(stage); throw; }
+                var copied = !slotsAuthoritative && File.Exists(source)
+                    ? Publish(target, output => CopyBounded(source, output))
+                    : Publish(target, output => WriteIds(output, sourceSet));
+                if (!copied) throw new IOException();
                 created = true;
             }
             var actual = created || !sameRoot ? ProductList(productRoot) : sourceSet;
@@ -94,10 +104,7 @@ public sealed class Connections
         foreach (var id in ids) _ = CredentialStore.AccountTarget(id);
         var target = FilePath(productRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        var stage = StagePath(target);
-        if (!WriteStage(stage, output => WriteIds(output, ids))) throw new IOException();
-        try { File.Move(stage, target, overwrite: true); }
-        catch { TryDelete(stage); throw; }
+        if (!Publish(target, output => WriteIds(output, ids), overwrite: true)) throw new IOException();
     }
 
     private static string FilePath(string productRoot)
@@ -115,10 +122,10 @@ public sealed class Connections
     private static string StagePath(string target) =>
         target + "." + DateTime.UtcNow.ToString(StageFormat, CultureInfo.InvariantCulture) + ".new";
 
-    /// <summary>Creates and flushes this attempt's own stage; an existing name is never touched, and a failed write
-    /// removes only the stage this attempt created.</summary>
-    private static bool WriteStage(string stage, Action<FileStream> write)
+    /// <summary>The one attempt-publication path: write this attempt's own stage, then move it create-only (or replace).</summary>
+    private static bool Publish(string target, Action<FileStream> write, bool overwrite = false)
     {
+        var stage = StagePath(target);
         FileStream output;
         try { output = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None); }
         catch (IOException) { return false; }
@@ -129,6 +136,7 @@ public sealed class Connections
                 write(output);
                 output.Flush(true);
             }
+            File.Move(stage, target, overwrite);
             return true;
         }
         catch
@@ -140,11 +148,29 @@ public sealed class Connections
 
     private static void WriteIds(FileStream output, IReadOnlyList<string> ids)
     {
+        if (ids.Count == 0)
+        {
+            output.WriteByte((byte)'\n'); // the canonical empty list is one blank line, never a zero-byte legacy file
+            return;
+        }
         foreach (var id in ids)
         {
             output.Write(JsonSerializer.SerializeToUtf8Bytes(id));
             output.WriteByte((byte)'\n');
         }
+    }
+
+    private static void CopyBounded(string source, FileStream output)
+    {
+        if (new FileInfo(source).Length > MaximumStateBytes) throw InvalidList();
+        output.Write(File.ReadAllBytes(source));
+    }
+
+    private static bool SameBytesBounded(string left, string right)
+    {
+        if (new FileInfo(left).Length > MaximumStateBytes || new FileInfo(right).Length > MaximumStateBytes)
+            throw InvalidList();
+        return File.ReadAllBytes(left).AsSpan().SequenceEqual(File.ReadAllBytes(right));
     }
 
     // --- The product's list: our canonical JSON-string lines, or the 0.3.95 value of a root not yet upgraded --------
@@ -229,32 +255,37 @@ public sealed class Connections
     private static ListShape ListForm(string path)
     {
         if (!File.Exists(path)) return ListShape.Absent;
-        if (new FileInfo(path).Length is 0 or > MaximumStateBytes) return ListShape.Append;
+        if (new FileInfo(path).Length > MaximumStateBytes) return ListShape.Append;
         var bytes = File.ReadAllBytes(path);
-        foreach (var line in TerminatedLines(bytes))
+        // A zero-byte JSONL is a 0.3.95 legacy log (possibly empty); our canonical empty list is one blank line.
+        if (bytes.Length == 0) return ListShape.Append;
+        var lines = TerminatedLines(bytes);
+        foreach (var line in lines)
         {
-            if (line.Length == 0) continue;
+            var trimmed = TrimRecord(line);
+            if (trimmed.Length == 0) continue;
             try
             {
-                using var document = JsonDocument.Parse(line);
+                using var document = JsonDocument.Parse(trimmed);
                 return document.RootElement.ValueKind == JsonValueKind.String ? ListShape.Canonical : ListShape.Append;
             }
             catch (JsonException) { return ListShape.Append; }
         }
-        // An existing file with no non-empty terminated line is our empty canonical list.
-        return ListShape.Canonical;
+        // Only blank terminated lines, so this is our canonical empty list; a partial tail is the legacy suffix.
+        return lines.Count > 0 ? ListShape.Canonical : ListShape.Append;
     }
 
-    /// <summary>Our canonical list: every terminated line is a JSON string id; a partial tail refuses.</summary>
+    /// <summary>Our canonical list: every terminated line is a JSON string id (blank lines are the empty list).</summary>
     private static IReadOnlyList<string> CanonicalIds(string path)
     {
         var bytes = File.ReadAllBytes(path);
         var ids = new List<string>();
         foreach (var line in TerminatedLines(bytes))
         {
-            if (line.Length == 0) continue;
+            var trimmed = TrimRecord(line);
+            if (trimmed.Length == 0) continue;
             JsonDocument document;
-            try { document = JsonDocument.Parse(line); }
+            try { document = JsonDocument.Parse(trimmed); }
             catch (JsonException) { throw InvalidList(); }
             using (document)
             {
@@ -266,8 +297,9 @@ public sealed class Connections
         return SortedDistinct(ids);
     }
 
-    /// <summary>The 0.3.95 append log: newline-terminated records only, the predecessor's schema/operation/payload-hash
-    /// checks, the valid-prefix stop rule, its record ceiling, and the normalized/derived primary id.</summary>
+    /// <summary>The 0.3.95 append log, in the predecessor's order: only a wholly empty record is skipped; every other
+    /// record is validated and the scan stops at the first invalid one (a no-op tail is not a later record), counting
+    /// only applied records against the 100-record ceiling.</summary>
     private static IReadOnlyList<string> AppendSet(string path)
     {
         if (!File.Exists(path)) return Array.Empty<string>();
@@ -277,18 +309,22 @@ public sealed class Connections
         var records = 0;
         foreach (var line in TerminatedLines(bytes))
         {
-            if (line.Length == 0) continue;
-            if (++records > MaximumAppendRecords) throw InvalidList();
+            if (line.Length == 0) continue; // the predecessor skips a wholly empty record only
+            var trimmed = TrimRecord(line);
             JsonDocument document;
-            try { document = JsonDocument.Parse(line); }
-            catch (JsonException) { break; } // the predecessor stops with its valid prefix (a first bad line included)
+            try { document = JsonDocument.Parse(trimmed); }
+            catch (JsonException) { break; }
             using (document)
             {
                 if (!TryAddLegacyRecord(document.RootElement, ids)) break;
             }
+            if (++records > MaximumAppendRecords) throw InvalidList();
         }
         return SortedDistinct(ids);
     }
+
+    private static byte[] TrimRecord(byte[] line) =>
+        line.Length > 0 && line[^1] == (byte)'\r' ? line[..^1] : line;
 
     private static List<byte[]> TerminatedLines(byte[] bytes)
     {
@@ -297,9 +333,7 @@ public sealed class Connections
         for (var index = 0; index < bytes.Length; index++)
         {
             if (bytes[index] != (byte)'\n') continue;
-            var length = index - start;
-            if (length > 0 && bytes[index - 1] == (byte)'\r') length--;
-            lines.Add(bytes.AsSpan(start, length).ToArray());
+            lines.Add(bytes.AsSpan(start, index - start).ToArray());
             start = index + 1;
         }
         return lines;
@@ -355,7 +389,7 @@ public sealed class Connections
         }
     }
 
-    /// <summary>A 0.3.95 binding's connection id: its own id, or the predecessor's derived id from a non-blank account id.</summary>
+    /// <summary>A 0.3.95 binding's connection id: its own trimmed id, or the predecessor's derived id from its account id.</summary>
     private static void AddBinding(JsonElement binding, List<string> ids)
     {
         if (binding.ValueKind != JsonValueKind.Object) throw InvalidList();
@@ -368,9 +402,11 @@ public sealed class Connections
     private static string BindingId(JsonElement binding)
     {
         if (binding.ValueKind != JsonValueKind.Object) throw InvalidList();
-        if (binding.TryGetProperty("ConnectionId", out var id) && id.ValueKind == JsonValueKind.String &&
-            !string.IsNullOrWhiteSpace(id.GetString()))
-            return ValidatedConnectionId(id.GetString()!);
+        if (binding.TryGetProperty("ConnectionId", out var id) && id.ValueKind == JsonValueKind.String)
+        {
+            var explicitId = id.GetString()!.Trim();
+            if (explicitId.Length > 0) return ValidatedConnectionId(explicitId);
+        }
         if (binding.TryGetProperty("AccountId", out var account) && account.ValueKind == JsonValueKind.String &&
             !string.IsNullOrWhiteSpace(account.GetString()))
             return CreateConnectionId(account.GetString()!);

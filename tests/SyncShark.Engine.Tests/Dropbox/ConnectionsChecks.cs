@@ -6,8 +6,9 @@ using Massdex.SyncShark.Engine.Dropbox;
 namespace Massdex.SyncShark.Engine.Tests.Dropbox;
 
 /// <summary>Contract checks for Connections: an in-place 0.3.95 upgrade accepts the root's authoritative value without
-/// overwriting its own evidence, distinct roots keep BC8's byte-identity rule, the predecessor's append validation and
-/// valid prefix are retained, and the store-move copy is create-only.</summary>
+/// overwriting its own evidence; distinct targets must carry the authoritative set (BC8), byte-copying an authoritative
+/// append log and refusing a target that drops a connection; the predecessor's append validation, valid prefix, record
+/// ceiling and id normalization are retained; Verify and the next Read agree.</summary>
 public static class ConnectionsChecks
 {
     private const int MaximumStateBytes = 1024 * 1024;
@@ -22,7 +23,49 @@ public static class ConnectionsChecks
         {
             var connections = new Connections();
 
-            // In place: a newer slot with a stale legacy log is the predecessor's own evidence, not a competing target.
+            // BC8: a byte-identical distinct target that omits an authoritative slot connection must refuse.
+            var slotSource = Root(scratch, "slotSource");
+            Slot(slotSource, 'a', 2, present: true, new[] { first, second });
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(slotSource))!);
+            File.WriteAllText(ListFile(slotSource), LegacySet(first)); // stale append beside the authoritative slot
+            var staleCopy = Root(scratch, "staleCopy");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(staleCopy))!);
+            File.Copy(ListFile(slotSource), ListFile(staleCopy));
+            var refused = false;
+            try { connections.Verify(slotSource, staleCopy, new[] { first }); }
+            catch (InvalidDataException) { refused = true; }
+            Check.Require(refused, "A distinct target that dropped an authoritative connection was accepted");
+
+            // A distinct append target with equal bytes and equal ids is accepted.
+            var appendSource = Root(scratch, "appendSource");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(appendSource))!);
+            File.WriteAllText(ListFile(appendSource), LegacySet(first));
+            var identical = Root(scratch, "identical");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(identical))!);
+            File.Copy(ListFile(appendSource), ListFile(identical));
+            Check.Require(connections.Verify(appendSource, identical, new[] { first }) is null,
+                "A byte-identical distinct append target with the same set was refused");
+
+            // Distinct append targets are still accepted only byte-identically (BC8).
+            var sameIdsOtherBytes = Root(scratch, "sameIdsOtherBytes");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(sameIdsOtherBytes))!);
+            File.WriteAllText(ListFile(sameIdsOtherBytes), LegacyRecovery("evidence.json") + LegacySet(first));
+            refused = false;
+            try { connections.Verify(appendSource, sameIdsOtherBytes, new[] { first }); }
+            catch (InvalidDataException) { refused = true; }
+            Check.Require(refused, "A distinct append target with different bytes was accepted");
+
+            // A distinct absent target copies the authoritative append log's bytes, not a normalized rewrite.
+            var copySource = Root(scratch, "copySource");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(copySource))!);
+            File.WriteAllText(ListFile(copySource), LegacyRecovery("evidence.json") + LegacySet(first));
+            var copyTarget = Root(scratch, "copyTarget");
+            Check.Require(connections.Verify(copySource, copyTarget, new[] { first }) is not null &&
+                          File.ReadAllBytes(ListFile(copyTarget)).AsSpan().SequenceEqual(File.ReadAllBytes(ListFile(copySource))),
+                "An absent distinct target was not byte-copied from the authoritative append log");
+            Check.Require(connections.Read(copyTarget).SequenceEqual(new[] { first }), "The byte-copied list did not read back");
+
+            // In place: a newer slot with a stale legacy log is evidence, not a competing target.
             var inPlace = Root(scratch, "inPlace");
             Slot(inPlace, 'a', 2, present: true, new[] { first });
             Directory.CreateDirectory(Path.GetDirectoryName(ListFile(inPlace))!);
@@ -32,6 +75,16 @@ public static class ConnectionsChecks
                 "An in-place upgrade refused the newer slot because its stale legacy log looked like a target");
             Check.Require(File.ReadAllText(ListFile(inPlace)) == stale, "An in-place upgrade overwrote the predecessor's log");
             Check.Require(connections.Read(inPlace).SequenceEqual(new[] { first }), "An in-place root did not resolve its authoritative slot");
+
+            // In place: a zero-byte legacy log with a valid slot resolves the slot on Verify and on the next Read.
+            var zeroLegacy = Root(scratch, "zeroLegacy");
+            Slot(zeroLegacy, 'a', 1, present: true, new[] { first });
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(zeroLegacy))!);
+            File.WriteAllBytes(ListFile(zeroLegacy), Array.Empty<byte>());
+            Check.Require(connections.Verify(zeroLegacy, zeroLegacy, new[] { first }) is null,
+                "An in-place zero-byte legacy log with a valid slot was refused");
+            Check.Require(connections.Read(zeroLegacy).SequenceEqual(new[] { first }),
+                "A zero-byte legacy log did not resolve the same slot the Verify used");
 
             // In place with only slots: a create-only list is published and cleanup removes it.
             var slotOnly = Root(scratch, "slotOnly");
@@ -45,32 +98,9 @@ public static class ConnectionsChecks
             var legacyOnly = Root(scratch, "legacyOnly");
             Directory.CreateDirectory(Path.GetDirectoryName(ListFile(legacyOnly))!);
             File.WriteAllText(ListFile(legacyOnly), LegacySet(first));
-            Check.Require(connections.Verify(legacyOnly, legacyOnly, new[] { first }) is null && connections.Read(legacyOnly).SequenceEqual(new[] { first }),
+            Check.Require(connections.Verify(legacyOnly, legacyOnly, new[] { first }) is null &&
+                          connections.Read(legacyOnly).SequenceEqual(new[] { first }),
                 "An in-place legacy-only root was refused or republished");
-
-            // Distinct roots: a distinct append target is accepted only byte-identically (BC8), not merely by equal ids.
-            var source = Root(scratch, "source");
-            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(source))!);
-            File.WriteAllText(ListFile(source), LegacySet(first));
-            var sameIdsOtherBytes = Root(scratch, "sameIdsOtherBytes");
-            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(sameIdsOtherBytes))!);
-            File.WriteAllText(ListFile(sameIdsOtherBytes), LegacyRecovery("evidence.json") + LegacySet(first));
-            var refused = false;
-            try { connections.Verify(source, sameIdsOtherBytes, new[] { first }); }
-            catch (InvalidDataException) { refused = true; }
-            Check.Require(refused, "A distinct append target with different bytes was accepted because its ids matched");
-            var identical = Root(scratch, "identical");
-            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(identical))!);
-            File.Copy(ListFile(source), ListFile(identical));
-            Check.Require(connections.Verify(source, identical, new[] { first }) is null, "A byte-identical distinct append target was refused");
-
-            // Distinct roots, source slots only, and a legacy target: a competing target refuses.
-            var slotSource = Root(scratch, "slotSource");
-            Slot(slotSource, 'a', 1, present: true, new[] { second });
-            refused = false;
-            try { connections.Verify(slotSource, identical, new[] { second }); }
-            catch (InvalidDataException) { refused = true; }
-            Check.Require(refused, "A distinct legacy target was accepted for a slot-only source");
 
             // Distinct roots, canonical target: equal set accepted, different set refused.
             var equalSlotSource = Root(scratch, "equalSlotSource");
@@ -80,9 +110,17 @@ public static class ConnectionsChecks
             Check.Require(connections.Verify(equalSlotSource, distinctTarget, new[] { first }) is null,
                 "An equal canonical distinct target was refused");
             refused = false;
-            try { connections.Verify(source, distinctTarget, new[] { first }); }
+            try { connections.Verify(appendSource, distinctTarget, new[] { first }); }
             catch (InvalidDataException) { refused = true; }
             Check.Require(refused, "A different canonical distinct target was accepted");
+
+            // A distinct slot-only source with a legacy target refuses.
+            var slotOnlySource = Root(scratch, "slotOnlySource");
+            Slot(slotOnlySource, 'a', 1, present: true, new[] { second });
+            refused = false;
+            try { connections.Verify(slotOnlySource, identical, new[] { second }); }
+            catch (InvalidDataException) { refused = true; }
+            Check.Require(refused, "A distinct legacy target was accepted for a slot-only source");
 
             // A newer slot deletion overrides the legacy log.
             var tomb = Root(scratch, "tomb");
@@ -111,8 +149,7 @@ public static class ConnectionsChecks
             // Oversized state refuses before use.
             var oversizedSlot = Root(scratch, "oversizedSlot");
             Directory.CreateDirectory(Path.Combine(oversizedSlot, "state"));
-            File.WriteAllText(Path.Combine(oversizedSlot, "state", "dropbox-connection-a.json"),
-                new string('x', MaximumStateBytes + 1));
+            File.WriteAllText(Path.Combine(oversizedSlot, "state", "dropbox-connection-a.json"), new string('x', MaximumStateBytes + 1));
             refused = false;
             try { connections.Read(oversizedSlot); }
             catch (InvalidDataException) { refused = true; }
@@ -125,12 +162,14 @@ public static class ConnectionsChecks
             catch (InvalidDataException) { refused = true; }
             Check.Require(refused, "An oversized append log was read");
 
-            // The predecessor's append validation and valid prefix: derived id, recovery evidence, non-Int32 schema, first bad line.
+            // The predecessor's append validation and valid prefix.
             var legacy = Root(scratch, "legacy");
             Directory.CreateDirectory(Path.GetDirectoryName(ListFile(legacy))!);
             File.WriteAllText(ListFile(legacy), LegacySetWithBinding(BindingJson(null, "acct-derived")));
             Check.Require(connections.Read(legacy).SequenceEqual(new[] { Connections.CreateConnectionId("acct-derived") }),
                 "A blank connection id with an account id was not normalized to its derived id");
+            File.WriteAllText(ListFile(legacy), LegacySetWithBinding(BindingJson("  " + first + "  ", "")));
+            Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }), "An explicit connection id was not trimmed");
             File.WriteAllText(ListFile(legacy), LegacyRecovery(null));
             Check.Require(connections.Read(legacy).Count == 0, "A recovery record without its evidence file was accepted");
             File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecovery("evidence.json"));
@@ -139,21 +178,30 @@ public static class ConnectionsChecks
             File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecord(1.5, "set", BindingJson(null, "acct-other"), null));
             Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
                 "A non-Int32 record schema threw instead of keeping the valid prefix");
+            File.WriteAllText(ListFile(legacy), LegacySet(first) + "\r\n" + LegacySet(second));
+            Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
+                "An empty-after-CR record was skipped instead of stopping at the valid prefix");
             File.WriteAllText(ListFile(legacy), "not-json\n" + LegacySet(second));
             Check.Require(connections.Read(legacy).Count == 0, "A malformed first record did not stop with an empty prefix");
             File.WriteAllText(ListFile(legacy), LegacySet(first).TrimEnd('\n'));
             Check.Require(connections.Read(legacy).Count == 0, "An unterminated append record was accepted");
             File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecord(1, "append", null, null));
             Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }), "An invalid operation did not stop the append scan");
-            var many = new StringBuilder();
-            for (var index = 0; index < 101; index++) many.Append(LegacySet(first));
-            File.WriteAllText(ListFile(legacy), many.ToString());
+
+            // Only applied records count against the ceiling; a bad record after 100 applied records stops without throwing.
+            var hundred = new StringBuilder();
+            for (var index = 0; index < 100; index++) hundred.Append(LegacySet(first));
+            File.WriteAllText(ListFile(legacy), hundred + LegacyRecord(1, "append", null, null));
+            Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }), "A bad record after the applied ceiling did not stop cleanly");
+            var over = new StringBuilder();
+            for (var index = 0; index < 101; index++) over.Append(LegacySet(first));
+            File.WriteAllText(ListFile(legacy), over.ToString());
             refused = false;
             try { connections.Read(legacy); }
             catch (InvalidDataException) { refused = true; }
-            Check.Require(refused, "An append log over its record ceiling was accepted");
+            Check.Require(refused, "An append log over its applied-record ceiling was accepted");
 
-            // Absent lists and canonical save.
+            // Empty lists, canonical save and an empty canonical marker.
             var empty = Root(scratch, "empty");
             Check.Require(connections.Verify(Root(scratch, "none"), empty, Array.Empty<string>()) is null &&
                           !File.Exists(ListFile(empty)), "Both lists absent created a list");
@@ -163,6 +211,8 @@ public static class ConnectionsChecks
             Check.Require(refused, "A required connection with both lists absent was accepted");
             connections.Save(empty, new[] { second, first, second });
             Check.Require(connections.Read(empty).SequenceEqual(Sorted(first, second)), "A saved canonical list was not read back");
+            connections.Save(empty, Array.Empty<string>());
+            Check.Require(connections.Read(empty).Count == 0, "An empty canonical list was not read back");
             refused = false;
             try { connections.Save(empty, new[] { "not-a-connection-id" }); }
             catch (InvalidDataException) { refused = true; }
@@ -225,8 +275,7 @@ public static class ConnectionsChecks
     private static string LegacySet(params string[] ids) =>
         LegacySetWithBinding(BindingJson(ids[0], "acct-log", ids.Skip(1).ToArray()));
 
-    private static string LegacySetWithBinding(string bindingJson) =>
-        LegacyRecord(1, "set", bindingJson, null);
+    private static string LegacySetWithBinding(string bindingJson) => LegacyRecord(1, "set", bindingJson, null);
 
     private static string LegacyRecovery(string? evidenceFile) =>
         LegacyRecord(1, "recovery", null,
