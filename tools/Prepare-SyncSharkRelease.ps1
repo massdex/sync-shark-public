@@ -136,7 +136,7 @@ if ($Step -eq 'Stage') {
     Assert-ShellAssetInputs
     # Bind both exact rollback pins before producing signing inputs. A version-only
     # bump must not leave the previous release's tree fingerprint in either script.
-    $previousPins=@(foreach($templateName in @('Install-SyncShark.ps1.template','Rollback-SyncShark.ps1.template')) {
+    $previousPins=@(foreach($templateName in @('Install-SyncShark.ps1.template')) {
         $tokens=$null;$parseErrors=$null
         $templateContract=@{product='Massdex.SyncShark';version=$version;sourceRevision=$SourceCommit;previousVersion=$metadata.PreviousVersion}|ConvertTo-Json -Compress
         $rendered=Expand-SyncSharkReleaseTemplate ([IO.File]::ReadAllText((Join-Path $PSScriptRoot $templateName))) $metadata $templateContract
@@ -152,8 +152,6 @@ if ($Step -eq 'Stage') {
         }
         [pscustomobject]$values
     })
-    if($previousPins[0].expectedPreviousVersion -cne $previousPins[1].expectedPreviousVersion -or
-       $previousPins[0].expectedPreviousTreeIdentity -cne $previousPins[1].expectedPreviousTreeIdentity){throw 'Installer and rollback predecessor pins differ.'}
     $previousInput=Get-ReleasePredecessor;$previousRuntime=$previousInput.Root
     Assert-SyncSharkOrdinaryTree $publish
     Assert-SyncSharkOrdinaryTree $release -AllowMissing
@@ -245,7 +243,7 @@ $manifestHash=Get-SyncSharkSha256 $manifestPath
 Assert-SyncSharkExactPackage $package $manifestPath $manifestHash $expectedVersion $signed $thumb $subject $subject $spki '' $false
 
 if ($Step -eq 'SignedScripts') {
-    foreach ($name in @('Install-SyncShark.ps1','Rollback-SyncShark.ps1','SyncShark.Release.psm1')) {
+    foreach ($name in @('Install-SyncShark.ps1','SyncShark.Release.psm1')) {
         if (Test-Path -LiteralPath (Join-Path $deploy $name)) { throw 'Generated scripts already exist; do not overwrite or repeat signing.' }
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'SyncShark.Release.psm1') -Destination $deploy
@@ -326,7 +324,7 @@ if ($Step -eq 'SignedScripts') {
         if($originals[0].manifestSha256 -cne $contract.protectedUpdater.discovery.beforeManifestSha256){throw 'Original Discovery changed during proof capture.'}
         $proofRestorationJson=([ordered]@{schemaVersion=1;successorVersion=$ProofSuccessorVersion;current=$originals[0];previous=$originals[1]}|ConvertTo-Json -Depth 5 -Compress)
     }
-    foreach ($name in @('Install-SyncShark.ps1','Rollback-SyncShark.ps1')) {
+    foreach ($name in @('Install-SyncShark.ps1')) {
         $template=[IO.File]::ReadAllText((Join-Path $PSScriptRoot ($name+'.template')))
         $generated=Expand-SyncSharkReleaseTemplate $template $metadata ($contract|ConvertTo-Json -Depth 8 -Compress) $proofRestorationJson
         $path=Join-Path $deploy $name
@@ -339,7 +337,7 @@ if ($Step -eq 'SignedScripts') {
     exit
 }
 
-foreach ($name in @('Install-SyncShark.ps1','Rollback-SyncShark.ps1')) {
+foreach ($name in @('Install-SyncShark.ps1')) {
     $scriptPath=Join-Path $deploy $name
     Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $scriptPath) $thumb $subject $subject $spki
     if ((Get-Item -LiteralPath $scriptPath).Length -gt 1MB) { throw 'Signed release script exceeds the update admission limit.' }
@@ -374,7 +372,7 @@ try {
     $zip=[IO.Compression.ZipArchive]::new($stream,[IO.Compression.ZipArchiveMode]::Create,$true)
     try {
         $sources=@{ 'package/unsigned-candidate-framework-manifest.json'=$manifestPath }
-        foreach ($name in @('Install-SyncShark.ps1','Rollback-SyncShark.ps1','SyncShark.Release.psm1')) { $sources['scripts/'+$name]=Join-Path $deploy $name }
+        foreach ($name in @('Install-SyncShark.ps1','SyncShark.Release.psm1')) { $sources['scripts/'+$name]=Join-Path $deploy $name }
         if($null -ne $contract.PSObject.Properties['protectedUpdater']){$sources['scripts/SyncSharkUpdater.exe']=Join-Path $deploy 'SyncSharkUpdater.exe'}
         foreach ($member in $manifest.members) { $sources['package/signed-candidate/'+$member.path]=Join-Path $package $member.path }
         foreach ($name in ($sources.Keys|Sort-Object)) {

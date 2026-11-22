@@ -204,7 +204,7 @@ function Read-BuildManifest([string]$Root) {
     $manifest = Read-Json $path
     $out = Get-SyncSharkNormalizedPath ([string]$manifest.outputDirectory)
     [ordered]@{ root = (Get-SyncSharkNormalizedPath $Root); manifestPath = $path; manifestSha256 = $sha; outputDirectory = $out
-        exe = (Join-Path $out 'SyncShark.exe'); cliExe = (Join-Path $out 'syncshark.exe'); productVersion = [string]$manifest.productVersion; version = [string]$manifest.version
+        exe = (Join-Path $out (if (Test-Path -LiteralPath (Join-Path $out 'Sync Shark.exe')) { 'Sync Shark.exe' } else { 'SyncShark.exe' })); cliExe = (if (Test-Path -LiteralPath (Join-Path $out 'syncshark.exe')) { Join-Path $out 'syncshark.exe' } else { $null }); productVersion = [string]$manifest.productVersion; version = [string]$manifest.version
         commit = [string]$manifest.commit; expectedPreviousVersion = [string]$manifest.expectedPreviousVersion; files = @($manifest.files) }
 }
 function Get-Observation([string]$Path) {
