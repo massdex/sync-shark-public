@@ -45,10 +45,8 @@ public static class LogTextChecks
                         .Any(key => text.Contains(Text.Get(key, (TextArg.Path, string.Empty))));
             }
         var at = DateTimeOffset.UnixEpoch;
-        var waiting = LogText.Format(new RunEvent(RunEventKind.ProviderRequest, "", "", "activity
-continued", ""), at);
-        bool activity = waiting.Contains(Text.Get(TextKey.HumanStageActive, (TextArg.Time, "00:00:00"))) && waiting.Contains(@"activity
-continued");
+        var waiting = LogText.Format(new RunEvent(RunEventKind.ProviderRequest, "", "", "activity\ncontinued", ""), at);
+        bool activity = waiting.Contains(Text.Get(TextKey.HumanStageActive, (TextArg.Time, "00:00:00"))) && waiting.Contains(@"activity\ncontinued");
         var stage = LogText.Format(new RunEvent(RunEventKind.Stage, nameof(TextKey.StageRows), "", "last progress", nameof(RunEventKind.Failed)), at);
         bool interrupted = stage.Contains(Text.Get(TextKey.HumanStageInterrupted, (TextArg.Indent, Text.Get(TextKey.HumanIndent)),
             (TextArg.Name, Text.Get(TextKey.StageRows)), (TextArg.Elapsed, Text.Get(TextKey.HumanNotMeasured)))) && stage.Contains("last progress");
