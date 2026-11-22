@@ -22,6 +22,14 @@ public sealed class SignIn
     public static IReadOnlyList<string> RequiredScopes => throw new NotImplementedException();
     /// <summary>Connect and return the verified connection and namespaces.</summary>
     public Task<(string ConnectionId, string AccountId, string RootNamespaceId, string HomeNamespaceId)> ConnectAccountAsync(DropboxApi api, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Verify the supplied credential and return its account and namespace identities.</summary>
+    public static Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)> OpenIdentityAsync(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
+        string connectionId, string refreshToken, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Disconnect the retained account without deleting an unverified legacy credential.</summary>
+    public static Task DisconnectAsync(
+        Func<string, CancellationToken, Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)>> verify,
+        CredentialStore credentials, string connectionId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Verify the retained account before first bind.</summary>
     public static Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)> VerifyAccountAsync(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send, CredentialStore credentials, string connectionId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Create a refreshable token delegate for a bound namespace.</summary>

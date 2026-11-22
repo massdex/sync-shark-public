@@ -344,6 +344,11 @@ public static class DropboxErrorsChecks
         Check.Require(contention.Cause == TextKey.WaitTooManyWrites &&
             contention.Disposition == FailureDisposition.TemporaryNoEffect && contention.ProvenNoEffect,
             "A too_many_write_operations 429 takes the write rule");
+        var readContention = errors.Classify(HttpStatusCode.TooManyRequests,
+            Reply(string.Empty, Element(new { reason = Union(DropboxProtocol.TooManyWriteOperations) })),
+            DropboxProtocol.ListFolder, false, readTransient);
+        Check.Require(readContention == new DropboxErrors.Classified(TextKey.WaitTooManyWrites,
+            FailureDisposition.TemporaryNoEffect, true), "A read carrying write contention waits without reducing concurrency");
         var structured = errors.Classify(HttpStatusCode.ServiceUnavailable,
             Reply(string.Empty, Union(DropboxProtocol.TooManyWriteOperations)), DropboxProtocol.Delete, false, default);
         Check.Require(structured.Cause == TextKey.WaitTooManyWrites &&
