@@ -20,7 +20,7 @@ public static class LiteralsChecks
         foreach(var probe in new[]{"switch (arg) { case \"repair\": break; }", "Console.WriteLine(\"Ready to sync\");", "writer.WriteLine($\"Retry {count} items\");", "await Task.Delay(300);", "var retryDelay = 5;", "if (attempt >= 5) Stop();", "switch (arg) { case \"--first-sync\": break; }", "if(arg==\"newest\") Stop();", "_ = new RunEvent(kind, what, path, \"Retry this file\", outcome);", "RunEvent report = new(kind, what, path, $\"Retry {count} items\", outcome);"})
             Check.Require(Offends("class A { void M() { "+probe+" } }","A.cs",words),"Undetected hard-coded value: "+probe);
         Check.Require(!Offends("class A { void M() { writer.WriteLine(Text.Get(key)); } }","A.cs",words),"Catalog-backed message rejected");
-        foreach(var valid in new[]{"if(attempt>=settings.Attempts) Stop();","if(parts.Length>=2) Read();","_ = new RunEvent(kind,what,path,Text.Get(key),outcome);"})
+        foreach(var valid in new[]{"if(attempt>=settings.Attempts) Stop();","if(backoff*(1+jitter)>limit) Stop();","if(parts.Length>=2) Read();","_ = new RunEvent(kind,what,path,Text.Get(key),outcome);"})
             Check.Require(!Offends("class A { void M() { "+valid+" } }","A.cs",words),"Owned or structural value rejected: "+valid);
         foreach (var folder in new[] { "src", "apps" })
             foreach (var file in Directory.EnumerateFiles(Path.Combine(input.Root, folder), "*.cs", SearchOption.AllDirectories))
@@ -51,8 +51,11 @@ public static class LiteralsChecks
             if(literal.Token.Value is int or long or float or double or decimal)
             {
                 if(literal.Ancestors().OfType<InvocationExpressionSyntax>().Any(i=>i.Expression is MemberAccessExpressionSyntax a && a.Name.Identifier.ValueText is "Delay" or "Sleep" or "FromMilliseconds" or "FromSeconds" or "FromMinutes")) return true;
-                var comparison=literal.Ancestors().OfType<BinaryExpressionSyntax>().FirstOrDefault(b=>b.OperatorToken.Text is ">=" or ">" or "<=" or "<" or "==" or "!=");
-                if(comparison!=null && comparison.DescendantNodes().OfType<IdentifierNameSyntax>().Any(n=>System.Text.RegularExpressions.Regex.IsMatch(n.Identifier.ValueText,"attempt|retr(y|ies)|timeout|backoff|delay",System.Text.RegularExpressions.RegexOptions.IgnoreCase))) return true;
+                // Only a literal used as the threshold is an inline limit; a unit factor inside computed backoff is not.
+                ExpressionSyntax operand=literal;
+                while(operand.Parent is ParenthesizedExpressionSyntax paren) operand=paren;
+                var comparison=operand.Parent as BinaryExpressionSyntax;
+                if(comparison?.OperatorToken.Text is (">=" or ">" or "<=" or "<" or "==" or "!=") && comparison.DescendantNodes().OfType<IdentifierNameSyntax>().Any(n=>System.Text.RegularExpressions.Regex.IsMatch(n.Identifier.ValueText,"attempt|retr(y|ies)|timeout|backoff|delay",System.Text.RegularExpressions.RegexOptions.IgnoreCase))) return true;
                 var variable=literal.Ancestors().OfType<VariableDeclaratorSyntax>().FirstOrDefault()?.Identifier.ValueText;
                 if(variable!=null && System.Text.RegularExpressions.Regex.IsMatch(variable,"retry|retries|delay|backoff|timeout",System.Text.RegularExpressions.RegexOptions.IgnoreCase)) return true;
             }
