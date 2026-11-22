@@ -14,6 +14,7 @@ public static class CheckRegistry
             new("Fixtures/ReleaseSchema", Scenarios.StoreMoveChecks.CreateFixtureAsync)
         ],
         ["contracts"] = [
+            new("Contracts/job member origin", Contracts.PathScopeChecks.JobMemberOriginAsync),
             new("Contracts/atomic source resets",Contracts.PathScopeChecks.SourceResetAsync),
             new("Contracts/acquisition isolation and spent name", Contracts.PathScopeChecks.AcquisitionIsolationAsync),
             new("Contracts/completed repair facts", Contracts.PathScopeChecks.CompletedRepairFactsAsync),
@@ -74,6 +75,10 @@ public static class CheckRegistry
             new("Executor/FolderDeleteChecks", Executor.FolderDeleteChecks.RunAsync),
             new("Executor/FolderMergeChecks", Executor.FolderMergeChecks.RunAsync),
             new("Executor/ItemLocksChecks", Executor.ItemLocksChecks.RunAsync),
+            new("Executor/tombstone recovery", Executor.ItemSyncChecks.TombstoneRecoveryAsync),
+            new("Executor/empty folder history", Executor.ItemSyncChecks.EmptyFolderHistoryAsync),
+            new("Executor/feed move", Executor.ItemSyncChecks.FeedMoveAsync),
+            new("Executor/replacement held child", Executor.ItemSyncChecks.ReplacementHeldChildAsync),
             new("Executor/ItemSyncChecks", Executor.ItemSyncChecks.RunAsync),
             new("Executor/KeepBothChecks", Executor.KeepBothChecks.RunAsync),
             new("Executor/NoticesChecks", Executor.NoticesChecks.RunAsync),
@@ -122,6 +127,8 @@ public static class CheckRegistry
         ],
         ["run"] = [
             new("Run/AutoSyncChecks", Run.AutoSyncChecks.RunAsync),
+            new("Run/host retry", Run.HostChecks.RetryAtHostAsync),
+            new("Run/host trim", Run.HostChecks.TrimAtHostAsync),
             new("Run/HostChecks", Run.HostChecks.RunAsync),
             new("Run/LogTextChecks", Run.LogTextChecks.RunAsync),
             new("Run/MonitorChecks", Run.MonitorChecks.RunAsync),

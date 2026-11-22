@@ -25,6 +25,31 @@ public static class ResourceNames
     /// <summary>Host executable filename.</summary>
     public const string HostExecutable = "Sync Shark.exe";
     public const string CliExecutable = "syncshark.exe";
+
+    /// <summary>Exact version-relative files shared by packaging, setup and uninstall.</summary>
+    public static IReadOnlyList<string> InstalledFiles { get; } = Array.AsReadOnly(new string[]
+    {
+        HostExecutable,
+        "Sync Shark.dll",
+        "Sync Shark.deps.json",
+        "Sync Shark.runtimeconfig.json",
+        CliExecutable,
+        "syncshark.dll",
+        "syncshark.deps.json",
+        "syncshark.runtimeconfig.json",
+        "SyncShark.Engine.dll",
+        "Microsoft.Data.Sqlite.dll",
+        "SQLitePCLRaw.batteries_v2.dll",
+        "SQLitePCLRaw.core.dll",
+        "SQLitePCLRaw.provider.e_sqlite3.dll",
+        "e_sqlite3.dll",
+        "tools/SyncShark.Uninstall.ps1",
+        "tools/SyncShark.Registration.psm1",
+        "tools/SetupFileSystem.cs",
+        "tools/SetupMessages.cs",
+        "tools/setup-strings.xml",
+    });
+
     public const string RootBinFolder = "Recycle Bin";
     public const string Cli = "SyncShark.EngineCli.json";
     public const string Routes = "SyncShark.DropboxRoutes.json";

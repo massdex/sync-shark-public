@@ -17,6 +17,7 @@ public static class RunLogChecks
         ProjectsTypedFailure();
         ProjectsTypedCause();
         CheckFailureAndMoveRecords();
+        PreparedWaitReceipts();
         EscapesLiteralBackslashDistinctFromControl();
         TypedOutcomeSurvives();
         DisposeClosesAfterWriteFailure();
@@ -87,6 +88,27 @@ public static class RunLogChecks
         var fields = WriteOne(new RunEvent(RunEventKind.Issue, "Failure", "alpha/report.txt", "name rejected",
             string.Empty) { Cause = TextKey.FailureDetail });
         Check.Require(fields[5] == TextKey.FailureDetail.ToString(), "a typed cause becomes the record outcome");
+    }
+
+    private static void PreparedWaitReceipts()
+    {
+        const string sentinel = "synthetic exception detail";
+        var error = new IOException(sentinel);
+        var retry = Text.Get(TextKey.WaitSourceRetry, (TextArg.Seconds, "17.25"));
+        var cooldown = Text.Get(TextKey.WaitTooManyRequests, (TextArg.Seconds, "23"));
+        var source = new RunEvent(RunEventKind.Wait, nameof(ISide.ReadChangesAsync), "", retry, "") { Side = Side.Dropbox, Error = error };
+        var limit = new RunEvent(RunEventKind.Wait, "", "", cooldown, "") { Cause = TextKey.WaitTooManyRequests };
+        var changed = new RunEvent(RunEventKind.Wait, "ItemSync", "item", sentinel, nameof(TextKey.FailChanged)) { Cause = TextKey.FailChanged, Error = error };
+        bool OnceInBoth(RunEvent item, string sentence)
+        {
+            var record = string.Join(RunLog.FieldSeparator, WriteOne(item));
+            var screen = LogText.Format(item);
+            return new[] { record, screen }.All(view => !view.Contains(sentinel) && !view.Contains("{Seconds}") &&
+                view.IndexOf(sentence, StringComparison.Ordinal) >= 0 && view.IndexOf(sentence, StringComparison.Ordinal) == view.LastIndexOf(sentence, StringComparison.Ordinal));
+        }
+        bool actual = OnceInBoth(source, retry), limited = OnceInBoth(limit, cooldown),
+            changedSafe = OnceInBoth(changed, Text.Get(TextKey.FailChanged, (TextArg.Path, "item")));
+        Check.Require(actual && limited && changedSafe, $"source retry once={actual}; cooldown once={limited}; typed changed reason safe={changedSafe}");
     }
 
     private static void CheckFailureAndMoveRecords()

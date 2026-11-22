@@ -27,7 +27,25 @@ public static class LogTextChecks
         var provider = LogText.Format(new RunEvent(RunEventKind.ProviderRequest, "", "", "arbitrary body", "done"));
         Check.Require(provider.Length == 0, "a completed provider diagnostic is not a user outcome");
         CheckRecordedFacts();
+        OneMoveCard();
         return Task.CompletedTask;
+    }
+
+    private static void OneMoveCard()
+    {
+        var at = DateTimeOffset.UnixEpoch;
+        var move = new RunEvent(RunEventKind.Effect, nameof(ISide.MoveAsync), "new", "old", nameof(RemovalOutcome.Published)) { Side = Side.Local };
+        foreach (var action in new[] { ActionKind.MoveLocal, ActionKind.MoveDropbox })
+        {
+            var binding = new RunEvent(RunEventKind.Effect, action.ToString(), "old", "", "Applied") { Action = action, Side = Side.Local };
+            var card = LogText.Format(move, at).Split(Environment.NewLine);
+            Check.Require(card.Contains(Text.Get(TextKey.HumanCardFrom, (TextArg.Path, "old"))) &&
+                card.Contains(Text.Get(TextKey.HumanCardTo, (TextArg.Path, "new"))) &&
+                card.Contains(Text.Get(TextKey.HumanCardSide, (TextArg.Side, Text.Get(TextKey.HumanSideLocal)))) &&
+                LogText.Format(binding, at).Length == 0 &&
+                LogText.Format(new RunEvent(RunEventKind.Effect, action.ToString(), "old", "", nameof(Side.Local)), at).Length == 0,
+                "only the observed move contributes a card; the binding has no source or proven destination");
+        }
     }
 
     private static void CheckRecordedFacts()

@@ -9,10 +9,12 @@ public sealed class NoticeTable
 
     /// <summary>Upsert the (pair, path, kind) slot and its members atomically; preserve a different kind’s subject and visibility.</summary>
     public Task SaveNoticeAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Notice notice, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Change visibility only while the stored notice matches the reviewed subject.</summary>
+    public Task<bool> UpdateNoticeVisibilityAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Notice expected, bool ignored, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Close only the exact expected notice and update its members in the same transaction.</summary>
     public Task CloseNoticeAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Notice expected, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Stream notices whose members overlap the mapped footprint on their own side, including covering ancestors.</summary>
-    public IAsyncEnumerable<Notice> NoticesUnderAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Scope footprint, CancellationToken ct) => throw new NotImplementedException();
+    public IAsyncEnumerable<Notice> NoticesUnderAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Scope footprint, int pageSize, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Add or retire only this observed link member; close the pair-wide link notice only when no members remain.</summary>
     public Task UpdateLinkMemberAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, NoticeItem member, bool present, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>

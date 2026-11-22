@@ -35,6 +35,19 @@ public static class PathScopeChecks
         Check.Require(legacy.Items.Count==0 && legacy.Incoming==null && !System.Text.Json.JsonSerializer.Serialize(legacy).Contains("LocalHash",StringComparison.Ordinal),"Retired hash proof survived a legacy read");
         return Task.CompletedTask;
     }
+    /// <summary>Job origin survives per member; a legacy launch stays unknown and keeps its settlement key.</summary>
+    public static Task JobMemberOriginAsync()
+    {
+        const string legacy = """[{"Id":"folder","Path":"A","Destination":null}]""";
+        var old = System.Text.Json.JsonSerializer.Deserialize<JobMember[]>(legacy)!.Single();
+        Check.Require(old.Origin is null && System.Text.Json.JsonSerializer.Serialize(new[] { old }) == legacy,
+            "Legacy launch acquired an origin or changed its settlement key");
+        JobMember[] members = [old with { Origin = ActionKind.ReplaceKind }, old with { Origin = ActionKind.DeleteDropbox }, old];
+        var encoded = System.Text.Json.JsonSerializer.Serialize(members);
+        var restored = System.Text.Json.JsonSerializer.Deserialize<JobMember[]>(encoded)!;
+        Check.Require(restored.Select(m => m.Origin).SequenceEqual(members.Select(m => m.Origin)), "Lost per-member action in a saved launch");
+        return Task.CompletedTask;
+    }
     /// <summary>A stale completion, an unrelated scope and an uncompleted full-pair Repair all keep their independent debt.</summary>
     public static async Task MatchingRevisionAsync()
     {
@@ -152,12 +165,22 @@ public static class PathScopeChecks
         Check.Require(!(await cloud.ReadChangesAsync(null,null,end,default)).CaughtUp && (await cloud.ReadChangesAsync("z",null,end,default)).CaughtUp && cloud.Pages.Count==1,"Finite Dropbox read compared opaque cursors by order or drained later arrivals");
         var pc=new TestDoubles.FakeSide(Side.Local);pc.Pages.Enqueue(new([],null,new(1,10)));pc.Pages.Enqueue(new([],null,new(2,10)));
         Check.Require(!(await pc.ReadChangesAsync(null,null,(null,new(2,9)),default)).CaughtUp && (await pc.ReadChangesAsync(null,null,(null,new(2,9)),default)).CaughtUp,"Finite PC read ignored journal identity or skipped a crossed boundary");
-        using IStore store=new TestDoubles.InMemoryStateStore();var a=Scenarios.ItemChecks.Pair();var b=a with {PairId="other"};
-        await store.SavePairAsync(a,default);await store.SavePairAsync(b,default);var boundary=new JournalPosition(2,9);
-        await store.ResetJournalAsync("volume",boundary,[a.PairId,b.PairId],"gap",default);
-        Check.Require(await store.PositionAsync("volume",default)==boundary && await store.ReadRepairAsync(a.PairId,Side.Local,default)==(1L,"gap") && await store.ReadRepairAsync(b.PairId,Side.Local,default)==(1L,"gap"),"Volume reset lost a member obligation");
-        try { await store.ResetJournalAsync("volume",new(3,1),[a.PairId,"unknown"],"new gap",default);throw new InvalidDataException("Reset accepted an unknown pair"); } catch(InvalidDataException error) when(error.Message=="Unknown volume member") { }
-        Check.Require(await store.PositionAsync("volume",default)==boundary && (await store.ReadRepairAsync(a.PairId,Side.Local,default)).Revision==1,"Failed reset partially committed");
+        using IStore store=new TestDoubles.InMemoryStateStore();
+        var a=Scenarios.ItemChecks.Pair();
+        var roots=new RootIdentity(a.LocalRoot,a.DropboxRoot,a.ConnectionId,new(7,1,null),new("account","root","home","folder"));
+        a=a with { Roots=roots };
+        var b=a with { PairId="other", Enabled=false };
+        var foreign=a with { PairId="foreign", Roots=roots with { Local=new(8,2,null) } };
+        var unbound=a with { PairId="unbound", Roots=null };
+        foreach(var pair in new[]{a,b,foreign,unbound}) await store.SavePairAsync(pair,default);
+        var boundary=new JournalPosition(2,9);
+        await store.ResetJournalAsync("7",boundary,[a.PairId,a.PairId,foreign.PairId,unbound.PairId,"removed"],"gap",default);
+        Check.Require(await store.PositionAsync("7",default)==boundary && await store.ReadRepairAsync(a.PairId,Side.Local,default)==(1L,"gap") && await store.ReadRepairAsync(b.PairId,Side.Local,default)==(1L,"gap"),"Volume reset lost or duplicated a durable member obligation");
+        foreach(var id in new[]{foreign.PairId,unbound.PairId,"removed"})
+            Check.Require((await store.ReadRepairAsync(id,Side.Local,default)).Revision==0,"Reset created debt for a nonmember");
+        try { await store.ResetJournalAsync("7",new(3,1),[],"new gap",new CancellationToken(true)); throw new InvalidDataException("Cancelled reset committed"); }
+        catch(OperationCanceledException) { }
+        Check.Require(await store.PositionAsync("7",default)==boundary && (await store.ReadRepairAsync(a.PairId,Side.Local,default)).Revision==1 && (await store.ReadRepairAsync(b.PairId,Side.Local,default)).Revision==1,"Cancelled reset partially committed");
         await store.ResetCursorAsync(a.PairId,"new-base","reset",default);
         Check.Require(await store.CursorAsync(a.PairId,default)=="new-base" && await store.ReadRepairAsync(a.PairId,Side.Dropbox,default)==(1L,"reset") && (await store.ReadRepairAsync(b.PairId,Side.Dropbox,default)).Revision==0,"Dropbox reset reached wrong pair");
     }
