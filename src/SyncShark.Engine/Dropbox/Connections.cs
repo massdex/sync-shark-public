@@ -41,7 +41,6 @@ public sealed class Connections
         ArgumentNullException.ThrowIfNull(requiredConnectionIds, nameof(requiredConnectionIds));
         var source = FilePath(sourceRoot);
         var target = FilePath(productRoot);
-        string? stage = null;
         var created = false;
         try
         {
@@ -53,10 +52,11 @@ public sealed class Connections
             else if (File.Exists(source))
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                stage = StagePath(target);
-                CopyCreateOnly(source, stage);
-                File.Move(stage, target);
-                stage = null;
+                var stage = StagePath(target);
+                if (!WriteStage(stage, output => output.Write(File.ReadAllBytes(source))))
+                    throw new IOException();
+                try { File.Move(stage, target); }
+                catch { TryDelete(stage); throw; }
                 created = true;
             }
             var actual = ReadFile(target);
@@ -67,7 +67,6 @@ public sealed class Connections
         }
         catch
         {
-            if (stage is not null) TryDelete(stage);
             if (created) TryDelete(target);
             throw;
         }
@@ -83,24 +82,17 @@ public sealed class Connections
         var target = FilePath(productRoot);
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         var stage = StagePath(target);
-        try
-        {
-            using (var output = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        if (!WriteStage(stage, output =>
             {
                 foreach (var id in ids)
                 {
                     output.Write(JsonSerializer.SerializeToUtf8Bytes(id));
                     output.WriteByte((byte)'\n');
                 }
-                output.Flush(true);
-            }
-            File.Move(stage, target, overwrite: true);
-            stage = null;
-        }
-        finally
-        {
-            if (stage is not null) TryDelete(stage);
-        }
+            }))
+            throw new IOException();
+        try { File.Move(stage, target, overwrite: true); }
+        catch { TryDelete(stage); throw; }
     }
 
     private static string FilePath(string productRoot)
@@ -112,12 +104,27 @@ public sealed class Connections
     private static string StagePath(string target) =>
         target + "." + DateTime.UtcNow.ToString(StageFormat, CultureInfo.InvariantCulture) + ".new";
 
-    private static void CopyCreateOnly(string source, string stage)
+    /// <summary>Creates and flushes this attempt's own stage; an existing name is never touched, and a failed write
+    /// removes only the stage this attempt created.</summary>
+    private static bool WriteStage(string stage, Action<FileStream> write)
     {
-        var bytes = File.ReadAllBytes(source);
-        using var output = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        output.Write(bytes);
-        output.Flush(true);
+        FileStream output;
+        try { output = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None); }
+        catch (IOException) { return false; }
+        try
+        {
+            using (output)
+            {
+                write(output);
+                output.Flush(true);
+            }
+            return true;
+        }
+        catch
+        {
+            TryDelete(stage);
+            throw;
+        }
     }
 
     private static IReadOnlyList<string> ReadFile(string path)

@@ -43,8 +43,15 @@ public sealed class SignIn
     private static readonly SemaphoreSlim AuthorizationGate = new(1, 1);
 
     /// <summary>Receives the browser return on loopback; token exchange and account requests go through DropboxApi.
-    /// Uses the catalog acknowledgement on receipt, not a success claim, and does not echo callback values.</summary>
-    public async Task<string> ConnectAsync(DropboxApi api, CancellationToken ct)
+    /// Uses the catalog acknowledgement on receipt, not a success claim, and does not echo callback values. Saves the
+    /// refresh token through CredentialStore before returning the connection id.</summary>
+    public async Task<string> ConnectAsync(DropboxApi api, CancellationToken ct) =>
+        (await ConnectAccountAsync(api, ct)).ConnectionId;
+
+    /// <summary>The first-bind form of <see cref="ConnectAsync"/>: also returns the verified account and namespace ids,
+    /// so a caller can build the pair's saved root identity before one exists. The refresh token is saved first.</summary>
+    public async Task<(string ConnectionId, string AccountId, string RootNamespaceId, string HomeNamespaceId)>
+        ConnectAccountAsync(DropboxApi api, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(api, nameof(api));
         if (!await AuthorizationGate.WaitAsync(0, ct)) throw new InvalidOperationException(Text.Get(TextKey.SignInReturnRetry));
@@ -94,12 +101,21 @@ public sealed class SignIn
                     throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
                 var connectionId = Connections.CreateConnectionId(account.AccountId);
                 new CredentialStore().Save(connectionId, token.RefreshToken!);
-                return connectionId;
+                return (connectionId, account.AccountId, account.RootNamespaceId, account.HomeNamespaceId);
             }
             finally { listener.Stop(); }
         }
         finally { AuthorizationGate.Release(); }
     }
+
+    /// <summary>An access-token delegate for one connection, for the composition root to pass to <see cref="DropboxApi"/>.
+    /// The named type stays inside this module, so the root needs only the allowed SignIn name.</summary>
+    public static Func<CancellationToken, ValueTask<string?>> AccessTokenSource(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
+        CredentialStore credentials, string connectionId, string accountId, string rootNamespaceId,
+        string homeNamespaceId) =>
+        new RefreshingAccessTokenSource(send, credentials, connectionId, accountId, rootNamespaceId, homeNamespaceId)
+            .GetAccessTokenAsync;
 
     /// <summary>A fresh S256 PKCE verifier and challenge plus an unguessable state.</summary>
     public static (string Verifier, string Challenge, string State) CreatePkceFlow()
@@ -194,6 +210,30 @@ public sealed class SignIn
             throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
         return (RequiredIdentity(root, "account_id"), RequiredIdentity(rootInfo, "root_namespace_id"),
             RequiredIdentity(rootInfo, "home_namespace_id"));
+    }
+
+    /// <summary>Opens an already-retained connection by its id: refreshes from the protected token and returns the
+    /// account namespaces it actually holds. A missing credential throws <see cref="DropboxCredentialUnavailableException"/>.</summary>
+    public static async Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)> VerifyAccountAsync(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
+        CredentialStore credentials, string connectionId, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(send, nameof(send));
+        ArgumentNullException.ThrowIfNull(credentials, nameof(credentials));
+        _ = CredentialStore.AccountTarget(connectionId);
+        var refresh = credentials.Read(connectionId);
+        if (string.IsNullOrWhiteSpace(refresh)) throw new DropboxCredentialUnavailableException(connectionId);
+        var token = await TokenAsync(send, new Dictionary<string, string>
+        {
+            ["refresh_token"] = refresh,
+            ["grant_type"] = "refresh_token",
+            ["client_id"] = ClientId,
+            ["scope"] = string.Join(' ', RequiredScopes)
+        }, connectionId, ct);
+        var account = await AccountAsync(send, token.AccessToken, ct);
+        if (token.AccountId is not null && !string.Equals(token.AccountId, account.AccountId, StringComparison.Ordinal))
+            throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
+        return account;
     }
 
     private static string RequiredIdentity(JsonElement element, string name) =>
@@ -323,14 +363,24 @@ public sealed class RefreshingAccessTokenSource
     public RefreshingAccessTokenSource(
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
         CredentialStore credentials, string connectionId, DropboxRootIdentity expected)
+        : this(send, credentials, connectionId, expected.AccountId, expected.RootNamespaceId, expected.HomeNamespaceId) { }
+
+    /// <summary>The first-bind form, for a connection whose pair root (folder id) is not saved yet.</summary>
+    public RefreshingAccessTokenSource(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
+        CredentialStore credentials, string connectionId, string accountId, string rootNamespaceId,
+        string homeNamespaceId)
     {
         ArgumentNullException.ThrowIfNull(send, nameof(send));
         ArgumentNullException.ThrowIfNull(credentials, nameof(credentials));
+        ArgumentException.ThrowIfNullOrWhiteSpace(accountId, nameof(accountId));
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootNamespaceId, nameof(rootNamespaceId));
+        ArgumentException.ThrowIfNullOrWhiteSpace(homeNamespaceId, nameof(homeNamespaceId));
         _ = CredentialStore.AccountTarget(connectionId);
         _send = send;
         _credentials = credentials;
         _connectionId = connectionId;
-        _expected = expected;
+        _expected = new DropboxRootIdentity(accountId, rootNamespaceId, homeNamespaceId, string.Empty);
     }
 
     /// <summary>A valid access token for this connection, refreshed and re-verified only when the cached one nears expiry.

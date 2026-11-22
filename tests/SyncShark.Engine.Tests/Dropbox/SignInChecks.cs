@@ -90,6 +90,18 @@ public static class SignInChecks
                 catch (DropboxCredentialUnavailableException) { refused = true; }
                 Check.Require(refused, "A missing protected credential was accepted");
             }
+
+            var opened = await SignIn.VerifyAccountAsync(send, credentials, connectionId, default);
+            Check.Require(opened.AccountId == "acct-fixture" && opened.RootNamespaceId == "root-fixture" &&
+                          opened.HomeNamespaceId == "home-fixture", "An opened account did not return its verified namespaces");
+            refused = false;
+            try { await SignIn.VerifyAccountAsync(send, credentials, absentId, default); }
+            catch (DropboxCredentialUnavailableException) { refused = true; }
+            Check.Require(credentials.Read(absentId) is not null || refused, "An absent connection was opened as an account");
+
+            var delegateSource = SignIn.AccessTokenSource(send, credentials, connectionId,
+                expected.AccountId, expected.RootNamespaceId, expected.HomeNamespaceId);
+            Check.Require(await delegateSource(default) == "access-fixture", "The composed access-token delegate did not refresh");
         }
         finally { credentials.Remove(connectionId); }
     }
