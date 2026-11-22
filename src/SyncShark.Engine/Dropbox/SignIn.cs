@@ -291,17 +291,6 @@ public sealed class SignIn
                 // A revoked token cannot be used again; it belongs to no live account and is removed.
                 credentials.RemoveLegacy();
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                // The caller cancelled the disconnect; it is never swallowed.
-                throw;
-            }
-            catch (Exception error) when (error is OperationCanceledException or TimeoutException or
-                HttpRequestException or IOException or SocketException)
-            {
-                // Offline or unproven ownership (including an HTTP timeout or an interrupted response body):
-                // the local disconnect completes and the fixed entry is left in place (R41).
-            }
         }
         if (ownsCredential) credentials.Remove(connectionId);
     }

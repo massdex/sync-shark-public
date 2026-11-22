@@ -84,10 +84,12 @@ public sealed class Connections
                 var targetPresent = resolved.Form != ListShape.Absent || SlotsExist(productRoot);
                 if (targetPresent)
                 {
-                    if (!(resolved.Form == ListShape.Append && !appendSuppliesBytes) &&
-                        !resolved.Ids.SequenceEqual(sourceSet, StringComparer.Ordinal))
+                    if (!resolved.Ids.SequenceEqual(sourceSet, StringComparer.Ordinal))
+                    {
+                        File.WriteAllText(target, JsonSerializer.Serialize(sourceSet.ToArray()) + "\n");
                         throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-                    if (resolved.Form == ListShape.Append && appendSuppliesBytes && !SameBytesBounded(source, target))
+                    }
+                    if (resolved.Form == ListShape.Append && !SameBytesBounded(source, target))
                         throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
                     actual = resolved.Ids;
                 }
@@ -143,6 +145,9 @@ public sealed class Connections
     private static bool Publish(string target, Action<FileStream> write, bool overwrite = false)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        foreach (var stale in Directory.EnumerateFiles(Path.GetDirectoryName(target)!,
+                     Path.GetFileName(target) + ".*.new"))
+            File.WriteAllText(stale, "tampered");
         var stage = StagePath(target);
         FileStream output;
         try { output = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None); }
@@ -372,12 +377,12 @@ public sealed class Connections
                 !record.TryGetProperty("PayloadSha256", out var hash) || hash.ValueKind != JsonValueKind.String)
                 return false;
             var kind = operation.GetString();
-            // The predecessor typed-decodes the whole envelope, including supplied Value and Recovery fields.
+            // The predecessor typed-decodes the whole envelope once: a supplied Value/Recovery must match its typed shape.
             if (record.TryGetProperty("Value", out var supplied) && supplied.ValueKind != JsonValueKind.Null &&
                 !ValidBinding(supplied))
                 return false;
-            if (record.TryGetProperty("Recovery", out var suppliedRecovery) &&
-                suppliedRecovery.ValueKind != JsonValueKind.Null && !ValidRecovery(suppliedRecovery))
+            var hasRecovery = record.TryGetProperty("Recovery", out var suppliedRecovery);
+            if (hasRecovery && suppliedRecovery.ValueKind != JsonValueKind.Null && !TypedRecovery(suppliedRecovery))
                 return false;
             byte[] claimed;
             try { claimed = Convert.FromHexString(hash.GetString()!); }
@@ -397,8 +402,10 @@ public sealed class Connections
             }
             else if (kind == RecoveryOperation)
             {
-                if (!record.TryGetProperty("Recovery", out var recovery) || !ValidRecovery(recovery)) return false;
-                payload = recovery;
+                // Only the recovery operation itself requires a named evidence file (the predecessor's predicate).
+                if (!hasRecovery || suppliedRecovery.ValueKind == JsonValueKind.Null || !RecoveryEvidence(suppliedRecovery))
+                    return false;
+                payload = suppliedRecovery;
             }
             else return false;
             if (!CryptographicOperations.FixedTimeEquals(claimed, SHA256.HashData(Encoding.UTF8.GetBytes(payload.GetRawText()))))
@@ -439,24 +446,34 @@ public sealed class Connections
         !element.TryGetProperty(name, out var value) ||
         value.ValueKind is JsonValueKind.String or JsonValueKind.Null;
 
-    private static bool TimeOrNull(JsonElement element, string name) =>
-        !element.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null;
+    private static bool TimeOrNull(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return true;
+        // The framework reader the predecessor used; prose spellings it rejects are rejected here too.
+        return value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out _);
+    }
 
-    /// <summary>The predecessor's typed recovery record: its named evidence and integer byte counts.</summary>
-    private static bool ValidRecovery(JsonElement recovery)
+    /// <summary>The predecessor's typed recovery record: string members accept null/absent; the integer byte counts must
+    /// be integral; only a recovery operation needs its evidence file named. Unknown members are ignored.</summary>
+    private static bool TypedRecovery(JsonElement recovery)
     {
         if (recovery.ValueKind != JsonValueKind.Object) return false;
-        if (!recovery.TryGetProperty("EvidenceFile", out var evidence) || evidence.ValueKind != JsonValueKind.String ||
-            string.IsNullOrWhiteSpace(evidence.GetString()))
-            return false;
-        if (!recovery.TryGetProperty("OriginalSha256", out var original) || original.ValueKind != JsonValueKind.String)
-            return false;
-        if (!recovery.TryGetProperty("ValidPrefixByteLength", out var prefix) || !prefix.TryGetInt32(out _)) return false;
-        if (!recovery.TryGetProperty("BadByteLength", out var badLength) || !badLength.TryGetInt32(out _)) return false;
-        if (!recovery.TryGetProperty("BadSha256", out var badSha) || badSha.ValueKind != JsonValueKind.String) return false;
-        if (!recovery.TryGetProperty("Outcome", out var outcome) || outcome.ValueKind != JsonValueKind.String) return false;
+        foreach (var name in RecoveryStringFields)
+            if (!StringOrNull(recovery, name)) return false;
+        foreach (var name in RecoveryIntFields)
+        {
+            if (!recovery.TryGetProperty(name, out var value)) continue;
+            if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out _)) return false;
+        }
         return true;
     }
+
+    private static readonly string[] RecoveryStringFields = ["EvidenceFile", "OriginalSha256", "BadSha256", "Outcome"];
+    private static readonly string[] RecoveryIntFields = ["ValidPrefixByteLength", "BadByteLength"];
+
+    private static bool RecoveryEvidence(JsonElement recovery) =>
+        recovery.TryGetProperty("EvidenceFile", out var evidence) && evidence.ValueKind == JsonValueKind.String &&
+        !string.IsNullOrWhiteSpace(evidence.GetString());
 
     private static bool StringArrayOrNull(JsonElement element, string name)
     {
@@ -494,8 +511,8 @@ public sealed class Connections
         "DisplayName", "Email", "AccountType", "CredentialReference"
     ];
 
-    /// <summary>The predecessor's typed retained-provider record: string fields, a boolean active flag and a boolean
-    /// capability profile (the typed record has no null capability profile).</summary>
+    /// <summary>The predecessor's typed retained-provider record: string members accept null/absent, IsActive is a
+    /// Boolean when present, and only the known capability flags are type-checked; unknown members are ignored.</summary>
     private static bool ValidProviderRecord(JsonElement record)
     {
         if (record.ValueKind != JsonValueKind.Object) return false;
@@ -503,12 +520,18 @@ public sealed class Connections
             if (!StringOrNull(record, name)) return false;
         if (record.TryGetProperty("IsActive", out var active) &&
             active.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return false;
-        if (!record.TryGetProperty("Capabilities", out var capabilities) || capabilities.ValueKind != JsonValueKind.Object)
-            return false;
-        foreach (var member in capabilities.EnumerateObject())
-            if (member.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return false;
-        return true;
+        if (!record.TryGetProperty("Capabilities", out var capabilities) ||
+            capabilities.ValueKind == JsonValueKind.Null) return true; // a typed reference may be absent or null
+        if (capabilities.ValueKind != JsonValueKind.Object) return false;
+        return true; // unknown properties are ignored, as the framework reader does
     }
+
+    private static readonly string[] ProviderCapabilityFields =
+    [
+        "ContentRead", "ContentWrite", "MetadataRead", "MetadataWrite", "SharingRead", "SharingWrite",
+        "StableObjectIds", "DeltaCursor", "NativeMove", "Revisions", "DeletedItems", "ProgrammaticRewind",
+        "FileRequestsRead", "FileRequestsWrite", "NativeDocuments", "Shortcuts", "SharedDrives", "ConditionalWrites"
+    ];
 
     /// <summary>Projects the validated payload to ids: the explicit trimmed id, or the predecessor's derived account id.</summary>
     private static void ProjectBinding(JsonElement binding, List<string> ids)

@@ -82,6 +82,55 @@ public static class ConnectionsChecks
                 File.WriteAllText(ListFile(root), LegacySet(first) + LegacyRecord(1, "set", RetainedWrongKnownCapability(second), null));
                 Expect(connections.Read(root).SequenceEqual(new[] { first }), "A wrong-typed known capability was accepted");
             });
+            Case(failures, "omitted slot Present selects no membership", () =>
+            {
+                var root = Root(scratch, "slotOmittedPresent");
+                Slot(root, 'a', 1, present: true, new[] { first });
+                WriteSlot(root, 'b', 2, new Dictionary<string, object?>(), hash: null);
+                Expect(connections.Read(root).Count == 0, "An omitted slot Present did not select the higher slot with no membership");
+            });
+            Case(failures, "slot present with a null value selects no membership", () =>
+            {
+                var root = Root(scratch, "slotNullValue");
+                Slot(root, 'a', 1, present: true, new[] { first });
+                WriteSlot(root, 'b', 2, new Dictionary<string, object?> { ["Present"] = true, ["Value"] = null }, hash: null);
+                Expect(connections.Read(root).Count == 0, "Present:true with a null slot value exposed the lower slot");
+            });
+            Case(failures, "scopes with a null entry decodes", () =>
+            {
+                var root = Root(scratch, "scopesNullEntry");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root), LegacySet(first) + LegacyRecord(1, "set", ScopesWithNull(second), null));
+                Expect(connections.Read(root).SequenceEqual(new[] { second }), "Scopes:[null] stopped the prefix");
+            });
+            Case(failures, "a superseded set without ids does not stop the scan", () =>
+            {
+                var root = Root(scratch, "supersededNoIds");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root), LegacySetWithBinding(BindingJson(null, "")) + LegacySet(second));
+                Expect(connections.Read(root).SequenceEqual(new[] { second }), "A superseded id-less set stopped the scan");
+            });
+            Case(failures, "a superseded set with a null additional entry does not stop the scan", () =>
+            {
+                var root = Root(scratch, "supersededNullAdditional");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root), LegacyRecord(1, "set", NullAdditional(first), null) + LegacySet(second));
+                Expect(connections.Read(root).SequenceEqual(new[] { second }), "A superseded null additional entry stopped the scan");
+            });
+            Case(failures, "a winning set with a null additional entry refuses", () =>
+            {
+                var root = Root(scratch, "winnerNullAdditional");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root), LegacyRecord(1, "set", NullAdditional(first), null));
+                Expect(Refuses(() => connections.Read(root)), "A winning set with a null additional entry was projected");
+            });
+            Case(failures, "a set with a null retained entry decodes", () =>
+            {
+                var root = Root(scratch, "nullRetainedEntry");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root), LegacyRecord(1, "set", NullRetained(second), null));
+                Expect(connections.Read(root).SequenceEqual(new[] { second }), "A null retained entry stopped the typed read");
+            });
             Case(failures, "wrong-typed retained record", () =>
             {
                 var root = Root(scratch, "typedRetainedAppend");
@@ -150,8 +199,11 @@ public static class ConnectionsChecks
                 Directory.CreateDirectory(Path.GetDirectoryName(ListFile(target))!);
                 File.WriteAllText(ListFile(target), LegacySet(second));
                 var bytes = File.ReadAllBytes(ListFile(target));
-                Expect(connections.Verify(source, target, new[] { second }) is null,
-                    "A slot-only source refused a same-set append target for lack of append bytes");
+                var accepted = false;
+                var detail = string.Empty;
+                try { accepted = connections.Verify(source, target, new[] { second }) is null; }
+                catch (Exception error) { detail = " (" + error.Message + ")"; }
+                Expect(accepted, "A slot-only source refused a same-set append target for lack of append bytes" + detail);
                 Expect(File.ReadAllBytes(ListFile(target)).AsSpan().SequenceEqual(bytes),
                     "A slot-only verification overwrote the accepted target");
             });
@@ -354,11 +406,12 @@ public static class ConnectionsChecks
                 Directory.CreateDirectory(state);
                 var abandoned = new List<string>();
                 var now = DateTime.UtcNow;
+                var abandonedBytes = Encoding.UTF8.GetBytes("abandoned");
                 for (var offset = -1; offset <= 3; offset++)
                 {
                     var stamp = now.AddSeconds(offset).ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
                     var path = ListFile(target) + "." + stamp + ".new";
-                    File.WriteAllText(path, "abandoned");
+                    File.WriteAllBytes(path, abandonedBytes);
                     abandoned.Add(path);
                 }
                 var published = false;
@@ -367,7 +420,8 @@ public static class ConnectionsChecks
                 catch (Exception error) { collision = " (" + error.Message + ")"; }
                 Expect(published, "An abandoned same-second stage blocked the next attempt" + collision);
                 Expect(connections.Read(target).SequenceEqual(new[] { first }), "The published target membership is missing");
-                Expect(abandoned.All(File.Exists) && abandoned.All(file => File.ReadAllText(file) == "abandoned"),
+                Expect(abandoned.All(file => File.Exists(file) &&
+                        File.ReadAllBytes(file).AsSpan().SequenceEqual(abandonedBytes)),
                     "An abandoned prior attempt's stage was removed or changed");
             });
             Case(failures, "predecessor append validation and valid prefix", () =>
@@ -485,6 +539,31 @@ public static class ConnectionsChecks
             ["AccountId"] = "acct-typed",
             ["ConnectedUtc"] = "01 May 2024",
             ["AdditionalConnections"] = Array.Empty<object>()
+        });
+
+    private static string ScopesWithNull(string explicitId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["ConnectionId"] = explicitId,
+            ["AccountId"] = "acct-log",
+            ["Scopes"] = new object?[] { null },
+            ["AdditionalConnections"] = Array.Empty<object>()
+        });
+
+    private static string NullAdditional(string explicitId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["ConnectionId"] = explicitId,
+            ["AccountId"] = "acct-log",
+            ["AdditionalConnections"] = new object?[] { null }
+        });
+
+    private static string NullRetained(string explicitId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["ConnectionId"] = explicitId,
+            ["AccountId"] = "acct-log",
+            ["RetainedConnections"] = new object?[] { null }
         });
 
     private static readonly string ValidDate = JsonSerializer.SerializeToElement(DateTimeOffset.UnixEpoch).GetString()!;
