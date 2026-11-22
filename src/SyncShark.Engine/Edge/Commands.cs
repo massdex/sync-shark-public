@@ -263,13 +263,9 @@ public sealed class Commands
     public static bool ShowLogRecord(string line, bool showFiles)
     {
         if (showFiles) return true;
-        // Record grammar (LogText.Format, W22): timestamp<TAB>kind<TAB>what<TAB>path<TAB>detail<TAB>outcome.
-        var firstTab = line.IndexOf('	');
-        if (firstTab < 0) return true;
-        var start = firstTab + 1;
-        var kindEnd = line.IndexOf('	', start);
-        var kind = kindEnd < 0 ? line[start..] : line[start..kindEnd];
-        return !string.Equals(kind, RunEventKind.Effect.ToString(), StringComparison.Ordinal);
+        var text = line.TrimStart();
+        var first = text.Split('	')[0];
+        return !string.Equals(first, RunEventKind.Effect.ToString(), StringComparison.Ordinal);
     }
 
     private static void WriteLogMissing(TextWriter output, string pair, string run) =>

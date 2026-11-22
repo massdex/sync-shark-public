@@ -1,7 +1,7 @@
-# One-process owner-present deploy of a Sync Shark build (DESIGN-ONE-DEPLOY-11A with its addenda).
+# One-process deploy of a Sync Shark build (DESIGN-ONE-DEPLOY-11A with its addenda).
 # Deploy:  pwsh -File <candidate outputDirectory>\tools\Deploy-SyncShark.ps1 -Build <candidate build root> -LauncherDir <launcher folder>
-# Recover: ... -Recover          Close a needs-owner transaction: ... -Close -Disposition <d> [-Layout old|new|none]
-# Operating condition: the owner is present and does not use the GUI, CLI, launchers or Repair until the transaction is closed.
+# Recover: ... -Recover          Close a blocked transaction: ... -Close -Disposition <d> [-Layout old|new|none]
+# Operating condition: no GUI, CLI, launcher or Repair use until the transaction is closed; refuse without effects otherwise.
 # Trust (coordinator ruling, review finding 6): the six product binaries carry the pinned Authenticode signature; every
 # other file is covered by the manifest SHA256 tree check. Backups keep file and directory attributes and creation and
 # last-write times; ACLs are not copied (the data folder inherits its ACL). Launcher writes are temp then
@@ -151,7 +151,7 @@ function Test-Contains([string]$Outer, [string]$Inner) {
 function Read-Json([string]$Path) { Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -AsHashtable -Depth 30 }
 function Get-BytesSha([byte[]]$Bytes) { [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($Bytes)).ToLowerInvariant() }
 function Get-FileId([string]$Path) { if (Test-Path -LiteralPath $Path) { [SyncSharkDeployNative]::FileId($Path) } else { $null } }
-function NeedsOwner([string]$Message) { throw "NEEDS-OWNER: $Message" }
+function NeedsOwner([string]$Message) { throw "BLOCKED: $Message" }
 function Assert-Isolated([string[]]$Paths) {
     # Test mode: every resolved path lies physically inside the test root (no reparse point anywhere on its chain),
     # checked before any child process or write that uses it.
@@ -325,7 +325,7 @@ function Get-Generation([object[]]$Tracked) {
     $hosts = @(); $supervisors = @()
     foreach ($item in $Tracked) {
         $role = $roles[$item.Args]
-        if ($null -eq $role) { throw "A GUI, CLI or Repair process is running (pid $($item.Pid)); close it first." }
+        if ($null -eq $role) { throw "A GUI, CLI or Repair process is running (pid $($item.Pid)); refuse without effects." }
         if ($role -like '*-host') { $hosts += [pscustomobject]@{ Item = $item; Role = $role } } else { $supervisors += [pscustomobject]@{ Item = $item; Role = $role } }
     }
     if ($hosts.Count -gt 1) { throw 'More than one host process is running.' }
@@ -550,7 +550,7 @@ function Get-RecoveryRoot {
             if ($null -eq $best -or [long]$record['Generation'] -gt $best.generation) { $best = @{ generation = [long]$record['Generation']; root = $root } }
         } catch { continue }
     }
-    if ($exists -and $null -eq $best) { throw 'The product settings store is unavailable (no valid slot), so the Recovery root is unknown: stop and ask the owner.' }
+    if ($exists -and $null -eq $best) { throw 'The product settings store is unavailable (no valid slot), so the Recovery root is unknown; refuse without effects.' }
     if ($best -and -not [string]::IsNullOrWhiteSpace($best.root)) { return [IO.Path]::GetFullPath($best.root.Trim()) }
     $null
 }
@@ -817,8 +817,8 @@ function Set-NeedsOwner([string]$Reason) {
     $script:journal.needsOwner = [ordered]@{ reason = $Reason; utc = (Utc) }
     Save-Journal
     Write-Receipt
-    Say "NEEDS-OWNER: $Reason"
-    Say "The pointer is kept. Resolve the cause, then run -Close -Disposition <restored-not-started|live-old|live-new|stop-refused|pointer-unproven> [-Layout old|new|none]."
+    Say "BLOCKED: $Reason"
+    Say "The pointer is kept. The deploy operator resolves the cause and runs -Close -Disposition <restored-not-started|live-old|live-new|stop-refused|pointer-unproven> [-Layout old|new|none]."
     $script:exitCode = 2
 }
 function Test-Effect { [bool]$script:journal.stopRequested -or @($script:journal.launchers | Where-Object { $_.bak.intentUtc -or $_.switchState }).Count -gt 0 }
@@ -1003,7 +1003,7 @@ function Open-Transaction([switch]$AllowMissingData) {
     if ($state.kind -ceq 'none') { Say 'No transaction is open.'; $script:exitCode = 0; return $null }
     if ($state.kind -ceq 'bad') {
         $script:exitCode = 2
-        throw "needs-owner: $($state.reason) The pointer was not changed. Repair the pointer and journal by hand (a valid pointer naming T, rootId, installationRoot and dataTarget) first."
+        throw "blocked: $($state.reason) The pointer was not changed. The deploy operator preserves the invalid pointer and journal and fixes forward."
     }
     Set-Paths $state.T
     $script:journal = $state.journal
@@ -1028,8 +1028,8 @@ function Invoke-Recover {
     if ($null -eq $state) { return }
     $j = $script:journal
     if ($j.needsOwner) {
-        Say "NEEDS-OWNER: $($j.needsOwner.reason)"
-        Say 'Recover changes nothing here. Resolve the cause, then run -Close -Disposition <d> [-Layout old|new|none].'
+        Say "BLOCKED: $($j.needsOwner.reason)"
+        Say 'Recover changes nothing here. The deploy operator resolves the cause and runs -Close -Disposition <d> [-Layout old|new|none].'
         $script:exitCode = 2
         return
     }

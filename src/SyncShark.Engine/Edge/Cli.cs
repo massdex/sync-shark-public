@@ -55,7 +55,7 @@ public static class Cli
         Func<CancellationToken, Task<int>> startHost, CancellationToken ct)
     {
         if (result.ExitCode is { } code) return code;
-        if (IsRead(commandKey)) return RenderHostAbsent(output);
+        if (IsRead(commandKey)) return TransientExitCode;
         var started = await startHost(ct).ConfigureAwait(false);
         if (started != SuccessExitCode) { RenderHostAbsent(output); return started; }
         var second = await sendAgain(ct).ConfigureAwait(false);
