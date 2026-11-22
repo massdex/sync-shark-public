@@ -108,7 +108,7 @@ public static class RunLogChecks
             var visible = new List<string>();
             RunLog.Read(files, log.Path, (line, valid) => { if (valid) visible.Add(line); }, 4096, CancellationToken.None, out _);
             Check.Require(visible.Count == 1 && visible[0].Contains(sentence, StringComparison.Ordinal),
-                "an active reader must see the scheduled wait before disposal or a later event");
+                $"an active reader must see {sentence} before disposal or a later event");
             var record = visible[0];
             var screen = LogText.Format(item);
             return new[] { record, screen }.All(view => !view.Contains(sentinel) && !view.Contains("{Seconds}") &&
@@ -116,6 +116,9 @@ public static class RunLogChecks
         }
         bool actual = OnceInBoth(source, retry), limited = OnceInBoth(limit, cooldown),
             changedSafe = OnceInBoth(changed, Text.Get(TextKey.FailChanged, (TextArg.Path, "item")));
+        var superseded = Text.Get(TextKey.RepairSuperseded);
+        Check.Require(OnceInBoth(new RunEvent(RunEventKind.Wait, nameof(Repair), "", superseded, ""), superseded),
+            "the untyped Repair-superseded wait is published and displayed once");
         Check.Require(actual && limited && changedSafe, $"source retry once={actual}; cooldown once={limited}; typed changed reason safe={changedSafe}");
     }
 

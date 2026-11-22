@@ -67,7 +67,7 @@ public sealed class RunLog : IDisposable
             try
             {
                 _writer.WriteLine(FormatRecord(value));
-                if (value.Kind is RunEventKind.Stage or RunEventKind.Wait or RunEventKind.Issue or RunEventKind.Failed) _writer.Flush();
+                if (value.Kind is RunEventKind.Stage or RunEventKind.Issue or RunEventKind.Failed || (value.Kind == RunEventKind.Wait && value.Cause.HasValue)) _writer.Flush();
             }
             catch (Exception error) when (error is IOException or ObjectDisposedException or UnauthorizedAccessException)
             {
