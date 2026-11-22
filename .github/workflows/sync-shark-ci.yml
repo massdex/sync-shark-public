@@ -1,0 +1,97 @@
+name: Sync Shark CI
+
+on:
+  # Never add pull_request or pull_request_target: lane routing is push/dispatch only.
+  push:
+    branches:
+      - 'claude-code/v2-*'
+      - 'main'
+      - 'ci/**'
+      - 'quick/**'
+  workflow_dispatch:
+
+# One run per branch: a new commit cancels the run it supersedes.
+concurrency:
+  group: sync-shark-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build and run all checks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.427'
+      - name: Reject personal literals
+        shell: pwsh
+        run: ./tools/ci/check-personal-literals.ps1
+      - name: Build all four projects from their locks
+        shell: pwsh
+        run: ./tools/ci/build-projects.ps1 -SourceRevision $env:GITHUB_SHA
+      - name: Run every check with the exported capability inventory
+        shell: pwsh
+        run: |
+          $inventory = (Get-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'CLI-CAPABILITIES.md') -ErrorAction Stop).FullName
+          & dotnet tests/SyncShark.Engine.Tests/bin/Release/net8.0-windows/SyncShark.Engine.Tests.dll $env:GITHUB_WORKSPACE $inventory | Tee-Object -Variable results
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          . ./tools/ci/LaneSelection.ps1
+          $integration = (Get-RunKind $env:GITHUB_REF) -eq 'full' -and $env:GITHUB_REF -notlike 'refs/heads/ci/int-prep-*'
+          "RATCHET_REQUIRED=$($integration.ToString().ToLowerInvariant())" >> $env:GITHUB_ENV
+          if ($integration -and $results -match '^NOT IMPLEMENTED ') { throw 'Integration requires all registered checks to pass.' }
+      - name: Bind literal evidence to candidate and pinned public source
+        shell: pwsh
+        env:
+          RATCHET_LIVE_TAG: ${{ vars.RATCHET_LIVE_TAG }}
+          RATCHET_LIVE_COMMIT: ${{ vars.RATCHET_LIVE_COMMIT }}
+        run: |
+          if ($env:RATCHET_LIVE_TAG -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or $env:RATCHET_LIVE_COMMIT -cnotmatch '^[0-9a-f]{40}$') { throw 'Missing release pins.' }
+          git fetch --no-tags origin "refs/tags/$env:RATCHET_LIVE_TAG`:refs/tags/$env:RATCHET_LIVE_TAG"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -I -c "import os, runpy; from pathlib import Path; runpy.run_path('tools/ci/spec_trust.py')['snapshot'](Path.cwd(), os.environ['RATCHET_LIVE_TAG'], os.environ['RATCHET_LIVE_COMMIT'], Path(os.environ['RUNNER_TEMP']) / 'literal-release')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & dotnet tests/SyncShark.Engine.Tests/bin/Release/net8.0-windows/SyncShark.Engine.Tests.dll --literal-sites $env:GITHUB_WORKSPACE "$env:RUNNER_TEMP/literal-release" "$env:RUNNER_TEMP/literal-sites.jsonl"
+          exit $LASTEXITCODE
+      - name: Retain literal-site evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: literal-sites
+          path: ${{ runner.temp }}/literal-sites.jsonl
+          if-no-files-found: error
+          retention-days: 7
+      - name: Test ratchet enforcement and negative controls
+        shell: pwsh
+        run: python -I tools/ci/test-spec-ratchet.py
+      - name: Compare candidate to pinned release
+        id: ratchet
+        continue-on-error: ${{ env.RATCHET_REQUIRED == 'false' }}
+        shell: pwsh
+        env:
+          RATCHET_LIVE_TAG: ${{ vars.RATCHET_LIVE_TAG }}
+          RATCHET_LIVE_COMMIT: ${{ vars.RATCHET_LIVE_COMMIT }}
+        run: |
+          python -I tools/ci/check-spec-ratchet.py --literal-sites "$env:RUNNER_TEMP/literal-sites.jsonl"
+          exit $LASTEXITCODE
+      - name: Record release comparison outcome
+        if: always()
+        shell: pwsh
+        run: |
+          "Pinned release comparison: ${{ steps.ratchet.outcome }}; required for integration: $env:RATCHET_REQUIRED" >> $env:GITHUB_STEP_SUMMARY
+      - name: Check F007 unproven setup preparation
+        shell: powershell
+        run: |
+          . ./Installer/setup.ps1 -FunctionsOnly
+          $root = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString('N'))
+          $stage = Join-Path $root ('versions/.staging/' + [guid]::NewGuid().ToString('N'))
+          [IO.Directory]::CreateDirectory($stage) | Out-Null
+          $marker = Join-Path $stage 'partial'
+          [IO.File]::WriteAllText($marker, 'incomplete extraction')
+          # A deletion request is the failing observation; do not perform it on the fixture.
+          function Remove-SetupTree { throw 'F007: setup selected unproven preparation for removal.' }
+          Clear-SetupPreparation $root
+          if ([IO.File]::ReadAllText($marker) -cne 'incomplete extraction') { throw 'F007: unproven preparation was changed.' }
