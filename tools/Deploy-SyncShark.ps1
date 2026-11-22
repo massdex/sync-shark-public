@@ -1,5 +1,5 @@
 # One-process deploy of a Sync Shark build (DESIGN-ONE-DEPLOY-11A with its addenda).
-# Requires Windows, PowerShell 7.4+ and Python 3 with SQLite for the one-time offline inventory.
+# Requires Windows, PowerShell 7.4+ and the admitted published SQLite runtime.
 # Deploy:  pwsh -File <candidate outputDirectory>\tools\Deploy-SyncShark.ps1 -Build <candidate build root> -LauncherDir <launcher folder>
 # Recover: ... -Recover          Close a blocked transaction: ... -Close -Disposition <d>
 # Operating condition: no GUI, CLI, launcher or Repair use until the transaction is closed; refuse without effects otherwise.
@@ -211,7 +211,7 @@ function Read-BuildManifest([string]$Root,[switch]$Legacy) {
         $hostName=$contract.hostExecutable; $cliName=$contract.cliExecutable
     }
     [ordered]@{ root = (Get-SyncSharkNormalizedPath $Root); manifestPath = $path; manifestSha256 = $sha; outputDirectory = $out
-        exe=(Join-Path $out $hostName); cliExe=(Join-Path $out $cliName); installerSha256=$(if (!$Legacy) { Get-SyncSharkSha256 $installer }); productVersion=[string]$manifest.productVersion; version=[string]$manifest.version
+        exe=(Join-Path $out $hostName); cliExe=(Join-Path $out $cliName); previousTreeSha256=$(if (!$Legacy) { $contract.previousTreeSha256 }); installerSha256=$(if (!$Legacy) { Get-SyncSharkSha256 $installer }); productVersion=[string]$manifest.productVersion; version=[string]$manifest.version
         commit = [string]$manifest.commit; expectedPreviousVersion = [string]$manifest.expectedPreviousVersion; files = @($manifest.files) }
 }
 function Get-Observation([string]$Path) {
@@ -250,7 +250,8 @@ function Assert-Tree([System.Collections.IDictionary]$Side, [switch]$Legacy) {
             throw "Build member changed: $key"
         }
     }
-    foreach ($name in @('syncshark.deps.json', 'syncshark.runtimeconfig.json')) {
+    $stem=[IO.Path]::GetFileNameWithoutExtension($Side.cliExe).ToLowerInvariant()
+    foreach ($name in @(($stem+'.deps.json'),($stem+'.runtimeconfig.json'))) {
         # D:203-205 runtime metadata: listed for the candidate, present for the legacy predecessor.
         if (-not $(if ($Legacy) { $actual.ContainsKey($name) } else { $listed.ContainsKey($name) })) { throw "Missing runtime metadata: $name" }
     }
@@ -295,7 +296,7 @@ function Get-Tracked([string[]]$Exes) {
     # command line and creation time; any mismatch (PID reuse) drops it and re-enumerates.
     while ($true) {
         $found = @(); $retry = $false
-        foreach ($exe in $Exes) {
+        foreach ($exe in ($Exes | Select-Object -Unique)) {
             $filter = "ExecutablePath = '" + $exe.Replace('\', '\\').Replace("'", "\'") + "'"
             foreach ($cim in @(Get-CimInstance Win32_Process -Filter $filter)) {
                 $process = Get-Process -Id $cim.ProcessId -ErrorAction SilentlyContinue
@@ -358,42 +359,25 @@ function Invoke-Cli([string]$Purpose, [string]$Exe, [string]$Arguments) {
 }
 function Get-PairsKey($Json) { if ($null -eq $Json) { return '' }; (@($Json.data.pairs) | ForEach-Object { "$($_.id)|$($_.enabled)" } | Sort-Object -CaseSensitive) -join ';' }
 function Assert-FinishedWork([string]$Database) {
-    # The instance lock remains held through inventory and publication. Never let SQLite create a sidecar at the source.
-    @'
-import contextlib, json, pathlib, shutil, sqlite3, sys, tempfile
-source = pathlib.Path(sys.argv[1]).resolve(strict=True)
-with contextlib.ExitStack() as stack:
-    image = source
-    options = "?mode=ro&immutable=1"
-    sidecars = [suffix for suffix in ("-wal", "-journal") if pathlib.Path(str(source) + suffix).exists()]
-    if sidecars:
-        # Immutable reads can miss WAL commits. Read the stopped image with its journals in a disposable directory;
-        # never copy the shared-memory index or allow SQLite to maintain it next to the predecessor.
-        image = pathlib.Path(stack.enter_context(tempfile.TemporaryDirectory(dir=sys.argv[2]))) / source.name
-        for suffix in ["", *sidecars]:
-            shutil.copyfile(str(source) + suffix, str(image) + suffix)
-        options = "?mode=ro"
-    db = stack.enter_context(contextlib.closing(sqlite3.connect(image.as_uri() + options, uri=True)))
-    db.execute("BEGIN")
-    version, = db.execute("PRAGMA user_version").fetchone()
-    if version != 16:
-        sys.exit(f"Expected predecessor schema 16, found {version}; not switching.")
-    found = False
-    for kind, pair, item in db.execute("""
-        SELECT 'pending pair', pair_id, id FROM pair WHERE pending_json IS NOT NULL
-        UNION ALL
-        SELECT 'accepted submission', coalesce(p.pair_id, s.pair_id), s.submission_id
-        FROM folder_removal_submission AS s LEFT JOIN pair AS p ON p.id=s.pair_id WHERE s.phase='Accepted'
-        UNION ALL
-        SELECT 'active folder removal', coalesce(p.pair_id, r.pair_id), r.operation_id
-        FROM folder_removal AS r LEFT JOIN pair AS p ON p.id=r.pair_id WHERE r.active=1
-    """):
-        print(json.dumps({"unfinished":kind,"pair":pair,"item":item}, ensure_ascii=True))
-        found = True
-    if found:
-        sys.exit(2)
-'@ | & python -I - $Database $script:txRoot | ForEach-Object { Say $_ }
-    if ($LASTEXITCODE -ne 0) { throw 'Stopped predecessor inventory did not clear; not switching.' }
+    # Only the verified backup is opened. Let SQLite read its committed WAL; no checkpoint or source-side maintenance.
+    $options=[Microsoft.Data.Sqlite.SqliteConnectionStringBuilder]::new()
+    $options.DataSource=$Database; $options.Mode='ReadOnly'; $options.Pooling=$false
+    $db=[Microsoft.Data.Sqlite.SqliteConnection]::new($options.ToString())
+    try {
+        $db.Open(); $cmd=$db.CreateCommand()
+        $cmd.CommandText='PRAGMA user_version'
+        if ($cmd.ExecuteScalar() -ne 16) { throw 'Expected predecessor schema 16; not switching.' }
+        $cmd.CommandText=@'
+SELECT 'pending pair',pair_id,id FROM pair WHERE pending_json IS NOT NULL
+UNION ALL SELECT 'accepted submission',coalesce(p.pair_id,s.pair_id),s.submission_id
+FROM folder_removal_submission s LEFT JOIN pair p ON p.id=s.pair_id WHERE s.phase='Accepted'
+UNION ALL SELECT 'active folder removal',coalesce(p.pair_id,r.pair_id),r.operation_id
+FROM folder_removal r LEFT JOIN pair p ON p.id=r.pair_id WHERE r.active=1
+'@
+        $reader=$cmd.ExecuteReader(); $blocked=$false
+        while ($reader.Read()) { Say (ConvertTo-Json -Compress -InputObject @{unfinished=$reader.GetString(0);pair=$reader.GetValue(1);item=$reader.GetValue(2)}); $blocked=$true }
+        if ($blocked) { throw 'Stopped predecessor inventory did not clear; not switching.' }
+    } finally { $db.Dispose() }
 }
 function Get-PairsKeyText([string]$Out) {
     if ($Out.Trim() -ceq 'There are no pairs yet.') { return '' }
@@ -461,8 +445,8 @@ function Switch-Launcher {
         Assert-SyncSharkSignatureObservation (Get-Observation $installer) $signer.thumbprints $signer.subject $signer.subject $signer.spki
         if ((Get-SyncSharkSha256 $installer) -cne $j.candidate.installerSha256) { throw 'Installer changed since build admission.' }
         Mark 'switch-requested'
-        if ($testMode) { & $installer -PredecessorRuntime $j.predecessor.outputDirectory -TestProductRoot $installationRoot }
-        else { & $installer -PredecessorRuntime $j.predecessor.outputDirectory }
+        if ($testMode) { & $installer -PredecessorRuntime $j.predecessor.installedRoot -TestProductRoot $installationRoot }
+        else { & $installer -PredecessorRuntime $j.predecessor.installedRoot }
         Assert-SyncSharkJunction (Join-Path $installationRoot 'active') (Join-Path $installationRoot ('versions/'+$j.candidate.version))
     } finally { $held.Dispose() }
 }
@@ -743,7 +727,7 @@ function Invoke-Forward {
     }
     Say $(if ($recoveryRoot) { "Recovery root: $recoveryRoot" } else { 'Recovery root: absent (no local Recovery location is set).' })
     $generation = Get-Generation @(Get-Tracked $script:exes)
-    if ($generation -and (!(Same $generation.Exe $j.predecessor.exe) -or !$generation.Engine)) { throw 'Unexpected running generation; not stopping it.' }
+    if ($generation -and (($generation.Exe -notin @($j.predecessor.exe,$j.predecessor.installedExe)) -or !$generation.Engine)) { throw 'Unexpected running generation; not stopping it.' }
     if ($generation) {
         $peer=Invoke-Cli 'trusted-status' $generation.Exe 'engine host status --json'
         if ($peer.Exit -ne 0 -or !$peer.Json.ok -or $peer.Json.data.state -cne 'StatusWatching') { throw 'Predecessor is not idle; leaving it running.' }
@@ -757,7 +741,6 @@ function Invoke-Forward {
     # Step 2: stop the running generation with its own CLI, then hold the instance lock.
     Stop-Running $generation
     $script:lockStream = [IO.File]::Open($script:lockPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
-    Assert-FinishedWork (Join-Path $script:dataTarget 'engine/state.db')
     Mark 'stopped'
     # Step 3: backup.
     $bytes = Measure-Data $j.backup.source
@@ -767,6 +750,8 @@ function Invoke-Forward {
     $entries = Copy-DataTree $j.backup.source $j.backup.path 'backup-file'
     if ((Format-Manifest $entries) -cne (Format-Manifest (Get-SyncSharkTreeManifest $j.backup.path))) { throw 'The backup copy does not verify against the bytes read.' }
     $j.backup.manifestSha256 = Get-SyncSharkTreeIdentity $j.backup.path
+    $relative=[IO.Path]::GetRelativePath($j.backup.source,(Join-Path $script:dataTarget 'engine/state.db'))
+    Assert-FinishedWork (Join-Path $j.backup.path $relative)
     Mark 'backup-verified'
     Switch-Launcher
     $script:lockStream.Dispose(); $script:lockStream = $null
@@ -811,7 +796,22 @@ function Invoke-Deploy {
     Assert-Isolated (@($Build, $LauncherDir) + $launcherPaths + @(Get-SidePaths $candidate) + @(Get-SidePaths $predecessor))
     Assert-Tree $candidate
     Assert-Tree $predecessor -Legacy
-    $script:exes = @($predecessor.exe,$candidate.exe,(Join-Path (Join-Path $installationRoot ('versions/'+$candidate.version)) (Split-Path -Leaf $candidate.exe)))
+    if ($predecessor.version -cne '0.3.95' -or $predecessor.productVersion -cnotmatch '^0[.]3[.]95[+][0-9a-f]{40}$') { throw 'Cutover requires the exact 0.3.95 predecessor.' }
+    $active=Join-Path $installationRoot 'active'
+    $target=Get-SyncSharkJunctionTarget $active
+    if (!$target -and [IO.Directory]::Exists($active)) { throw 'Active predecessor target is unproven.' }
+    $predecessor.installedRoot=if ($target) { $target } else { $predecessor.outputDirectory }
+    Assert-Isolated @($predecessor.installedRoot)
+    $predecessor.installedExe=Join-Path $predecessor.installedRoot (Split-Path -Leaf $predecessor.exe)
+    if ($candidate.previousTreeSha256 -cnotmatch '^[0-9a-f]{64}$' -or (Get-SyncSharkTreeIdentity $predecessor.installedRoot) -cne $candidate.previousTreeSha256 -or
+        [Diagnostics.FileVersionInfo]::GetVersionInfo($predecessor.installedExe).ProductVersion -cne $predecessor.productVersion) { throw 'Installed predecessor differs from its exact signed version/tree.' }
+    foreach ($name in 'SQLitePCLRaw.core.dll','SQLitePCLRaw.provider.e_sqlite3.dll','SQLitePCLRaw.batteries_v2.dll','Microsoft.Data.Sqlite.dll') {
+        $null=[Reflection.Assembly]::LoadFrom((Join-Path $candidate.outputDirectory $name))
+    }
+    $null=[Runtime.InteropServices.NativeLibrary]::Load((Join-Path $candidate.outputDirectory 'e_sqlite3.dll'))
+    [SQLitePCL.Batteries_V2]::Init()
+    $null=[SQLitePCL.raw]::sqlite3_libversion_number()
+    $script:exes = @($predecessor.exe,$predecessor.installedExe,$candidate.exe,(Join-Path (Join-Path $installationRoot ('versions/'+$candidate.version)) (Split-Path -Leaf $candidate.exe)))
 
     Set-Paths ('{0}-{1}' -f [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff'), [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(4)).ToLowerInvariant())
     $backupPath = Join-Path $script:txRoot 'Data'

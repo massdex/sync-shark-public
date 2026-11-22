@@ -43,8 +43,8 @@ public sealed class Commands
                 case CommandKeys.Resume: await host.ResumeAsync(invocation.Value(OptionKeys.Pair), ct).ConfigureAwait(false); return Cli.SuccessExitCode;
                 case CommandKeys.Repair: return await RepairAsync(invocation, host, ct).ConfigureAwait(false);
                 case CommandKeys.Notices: return await NoticesAsync(invocation, host, output, ct).ConfigureAwait(false);
-                case CommandKeys.Resolve: return await ResolveAsync(invocation, host, output, ct).ConfigureAwait(false);
-                case CommandKeys.AccountsConnect: await host.ConnectAsync(ct).ConfigureAwait(false); return Cli.SuccessExitCode;
+                case CommandKeys.Resolve: return await ResolveAsync(invocation, host, output, error, ct).ConfigureAwait(false);
+                case CommandKeys.AccountsConnect: output.WriteLine(await host.ConnectAsync(ct).ConfigureAwait(false)); return Cli.SuccessExitCode;
                 case CommandKeys.AccountsDisconnect: return await AccountsDisconnectAsync(invocation, host, ct).ConfigureAwait(false);
                 default: return Cli.UsageExitCode;
             }
@@ -202,7 +202,8 @@ public sealed class Commands
         return Cli.SuccessExitCode;
     }
 
-    private static async Task<int> ResolveAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)    {
+    private static async Task<int> ResolveAsync(CliInvocation invocation, Run.Host host, TextWriter output, TextWriter diagnostic, CancellationToken ct)
+    {
         var pairId = invocation.Value(OptionKeys.Pair);
         var issueText = invocation.Value(OptionKeys.Issue);
         var reviewed = invocation.Value(OptionKeys.Reviewed);
@@ -217,7 +218,7 @@ public sealed class Commands
         }
         catch (EngineRequestException error)
         {
-            output.WriteLine(Text.Get(TextKey.ResultResolveFailed, (TextArg.Id, issueText), (TextArg.Reason, error.Message)));
+            diagnostic.WriteLine(Text.Get(TextKey.ResultResolveFailed, (TextArg.Id, issueText), (TextArg.Reason, error.Message)));
             return Cli.TransientExitCode;
         }
         output.WriteLine(Text.Get(TextKey.ResultResolveDone, (TextArg.Id, issueText), (TextArg.Choice, choice.ToString())));

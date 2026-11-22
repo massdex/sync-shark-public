@@ -37,7 +37,7 @@ public sealed class Store : IStore
     /// <summary>SaveNotice operation on the supplied facts.</summary>
     public Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct) => notices.SaveNoticeAsync(Connection, pairId, notice, ct);
     /// <summary>CloseNotice operation on the supplied facts.</summary>
-    public Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct) => notices.CloseNoticeAsync(Connection, pairId, expected, ct);
+    public Task<bool> CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct) => notices.CloseNoticeAsync(Connection, pairId, expected, ct);
     /// <summary>Position operation on the supplied facts.</summary>
     public Task<JournalPosition?> PositionAsync(string volume, CancellationToken ct) => pairs.PositionAsync(Connection, volume, ct);
     /// <summary>SavePosition operation on the supplied facts.</summary>

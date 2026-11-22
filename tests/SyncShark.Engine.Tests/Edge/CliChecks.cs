@@ -42,18 +42,22 @@ public static class CliChecks
         static Task<int> NeverStart(CancellationToken c) =>
             throw new InvalidDataException("absent read must not start the host");
         using var absent = new StringWriter();
-        var absentCode = await Cli.ResolveSend("Status", (null, false), absent, NeverSend, NeverStart, default);
+        var absentCode = await Cli.ResolveSend(Cli.Parse(["status"])!, (null, false), absent, NeverSend, NeverStart, default);
         Check.Require(absentCode != 0, "absent read must report a non-zero exit");
         Check.Require(absent.ToString().Contains(Text.Get(TextKey.HostNotRunning), StringComparison.Ordinal),
             "absent read did not reach HostNotRunning through the CLI decision");
         Check.Require(!absent.ToString().Contains(Text.Get(TextKey.StatusUnavailable), StringComparison.Ordinal),
             "absent read rendered the generic unavailable status");
 
+        var preview = Cli.Parse(["pairs", "exclude", "--pair", "p", "--side", "local", "--rel", "Child"])!;
+        Check.Require(await Cli.ResolveSend(preview, (null,false), absent, NeverSend, NeverStart, default) != 0, "absent exclusion preview was treated as a mutation");
+        Check.Require(await Cli.ResolveSend(Cli.Parse(["host","stop"])!, (null,false), absent, NeverSend, NeverStart, default) == 0, "absent host stop must already be complete");
+
         // F052: a received command result, even a failure, is terminal; a lost reply (non-null exit, not received) is
         // not replayed.
-        Check.Require(await Cli.ResolveSend("Repair", (5, true), new StringWriter(), NeverSend, NeverStart, default) == 5,
+        Check.Require(await Cli.ResolveSend(Cli.Parse(["repair", "--pair", "pair-a"])!, (5, true), new StringWriter(), NeverSend, NeverStart, default) == 5,
             "received command failure was not preserved as terminal");
-        Check.Require(await Cli.ResolveSend("Repair", (2, false), new StringWriter(), NeverSend, NeverStart, default) == 2,
+        Check.Require(await Cli.ResolveSend(Cli.Parse(["repair", "--pair", "pair-a"])!, (2, false), new StringWriter(), NeverSend, NeverStart, default) == 2,
             "a lost reply was replayed");
 
         // F052: on definite absence an eligible command may start the host and send exactly once.
@@ -61,7 +65,7 @@ public static class CliChecks
         var resent = 0;
         Task<int> Start(CancellationToken c) { started++; return Task.FromResult(0); }
         Task<(int? ExitCode, bool ReceivedExit)> SendAgain(CancellationToken c) { resent++; return Task.FromResult<(int? ExitCode, bool ReceivedExit)>((7, true)); }
-        var mutationCode = await Cli.ResolveSend("Repair", (null, false), new StringWriter(), SendAgain, Start, default);
+        var mutationCode = await Cli.ResolveSend(Cli.Parse(["repair", "--pair", "pair-a"])!, (null, false), new StringWriter(), SendAgain, Start, default);
         Check.Require(started == 1 && resent == 1 && mutationCode == 7, "absent mutation did not start and send exactly once");
     }
 }

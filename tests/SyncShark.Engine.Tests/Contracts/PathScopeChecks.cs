@@ -78,9 +78,10 @@ public static class PathScopeChecks
         var oldMove=new IssueSubject.UnknownMove("id","before","old",null,false);
         var reviewed=ordinary with {Subject=ordinary.Subject with { Move=oldMove }};
         var refreshed=reviewed with {Subject=reviewed.Subject with { Move=oldMove with { Destination="new" } }};
-        await store.SaveNoticeAsync(inner.PairId,refreshed with { Id=0 },default);await store.CloseNoticeAsync(inner.PairId,reviewed,default);
+        await store.SaveNoticeAsync(inner.PairId,refreshed with { Id=0 },default);
+        Check.Require(!await store.CloseNoticeAsync(inner.PairId,reviewed,default),"Stale close reported success");
         Check.Require(store.OpenNotices.Any(n=>n.Matches(refreshed)) && !reviewed.Matches(refreshed),"A stale move destination closed a refreshed notice");
-        await store.CloseNoticeAsync(inner.PairId,putBack,default);
+        Check.Require(await store.CloseNoticeAsync(inner.PairId,putBack,default),"Matching close did not report removal");
         var job=new AcceptedJob(inner.PairId,"route","token",[]);await store.SaveJobAsync(job,default);
         Check.Require(await store.RemovePairAsync(inner.PairId,default)==TextKey.PairJobOutstanding,"Accepted job lost its removal reason");await store.SettleJobAsync(job,default);
         var note=new RemovalSelection(new(Scenarios.ItemChecks.File(Side.Local,"folder",0,"id",true),"volume",null),null);await store.ArmAsync(inner.PairId,note,null,default);

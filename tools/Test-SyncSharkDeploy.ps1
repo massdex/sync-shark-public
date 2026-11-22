@@ -17,14 +17,14 @@ foreach ($entry in @{
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($env:SYNC_SHARK_RELEASE_TEST_MODE -cne '1') { throw 'Test mode is required.' }
-if ((Get-Location).Drive.Name -ne 'F' -or [IO.Path]::GetPathRoot([IO.Path]::GetTempPath()) -ine 'F:\') { throw 'Run fixtures with cwd and TEMP on F:.' }
+if (($env:GITHUB_ACTIONS -cne 'true' -or $Fixture -cne '49') -and ((Get-Location).Drive.Name -ne 'F' -or [IO.Path]::GetPathRoot([IO.Path]::GetTempPath()) -ine 'F:\')) { throw 'Run fixtures with cwd and TEMP on F:.' }
 Remove-Item Env:HTTPS_PROXY, Env:HTTP_PROXY -ErrorAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'SyncShark.Release.psm1') -Force
 $base = Join-Path ([IO.Path]::GetTempPath()) 'sync-shark-release-tests'
 $pwsh = (Get-Process -Id $PID).Path
 $script = Join-Path $PSScriptRoot 'Deploy-SyncShark.ps1'
 $signer = (Get-SyncSharkSignerIdentity).roles.publisher
-$commits = @{ '0.3.75' = 'a' * 40; '0.3.76' = 'b' * 40; '0.3.77' = 'c' * 40 }
+$commits = @{ '0.3.95' = 'a' * 40; '0.3.96' = 'b' * 40; '0.3.97' = 'c' * 40 }
 
 # ---- Stub Sync Shark (CLI shapes of engine-cli.json, host/supervisor argument shapes of AutoSyncProcess.cs) ----
 $stubSource = @'
@@ -47,7 +47,7 @@ static class Stub {
     static void Json(object data) => Console.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, command = "stub", ok = true, data, error = (object)null }));
     static int Main(string[] a) {
         var args = string.Join(" ", a);
-        bool legacy=Version=="0.3.75";
+        bool legacy=Version=="0.3.95";
         if (!legacy && Path.GetFileName(Exe)=="Sync Shark.exe") return args=="--notify-ready" ? Host() : 2;
         if (legacy != args.StartsWith("--", StringComparison.Ordinal)) return 2;
         switch (args) {
@@ -80,7 +80,15 @@ static class Stub {
             if (Flag("hostWrites")) File.AppendAllText(Path.Combine(Data, "host-" + Version + ".txt"), DateTime.UtcNow.ToString("O") + Environment.NewLine);
             var marker = Path.Combine(State, "host-" + Key + "-" + Environment.ProcessId + ".running");
             File.WriteAllText(marker, Exe);
-            try { return Wait(false); } finally { File.Delete(marker); }
+            try {
+                int exit = Wait(false);
+                if (Flag("commitAtDrain")) {
+                    var psi = new ProcessStartInfo("python") { UseShellExecute=false };
+                    foreach (var arg in new[]{"-I",Path.Combine(State,"drain.py"),Path.Combine(Data,"engine","state.db"),Path.Combine(State,"wal-proven")}) psi.ArgumentList.Add(arg);
+                    using var writer=Process.Start(psi); writer.WaitForExit(); if(writer.ExitCode!=0) return 1;
+                }
+                return exit;
+            } finally { File.Delete(marker); }
         } finally { if (held != null) held.Dispose(); }
     }
     static int Wait(bool ignoreStop) {
@@ -93,7 +101,7 @@ static class Stub {
         if (Flag("startFail")) { if (Flag("startLeavesSupervisor")) Spawn("--core v2 --engine-supervisor"); Console.Error.WriteLine("stub: start failed"); return 1; }
         if (Hosts().Length > 0) return 0;
         File.Delete(StopFile);
-        var p = Spawn(Version=="0.3.75" ? "--core v2 --engine-host" : "--notify-ready");
+        var p = Spawn(Version=="0.3.95" ? "--core v2 --engine-host" : "--notify-ready");
         var end = DateTime.UtcNow.AddSeconds(30);
         while (Hosts().Length == 0) { if (p.HasExited || DateTime.UtcNow > end) return 1; Thread.Sleep(20); }
         return 0;
@@ -123,7 +131,7 @@ function Get-StubCache([string]$Version) {
     # Immediately before the build: a module auto-load in between restores the inherited pwsh module paths
     # that the Windows PowerShell 5.1 signing child cannot read (B-31).
     Remove-Item env:PSModulePath -ErrorAction SilentlyContinue
-    & 'C:\Program Files\dotnet\dotnet.exe' build (Join-Path $project 'SyncShark.csproj') -c Release -o $cache -p:ImportDirectoryBuildProps=false -p:ImportDirectoryBuildTargets=false -nologo -v:q | Out-Host
+    & dotnet build (Join-Path $project 'SyncShark.csproj') -c Release -o $cache -p:ImportDirectoryBuildProps=false -p:ImportDirectoryBuildTargets=false -nologo -v:q | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Stub build failed for $Version." }
     $cache
 }
@@ -152,7 +160,7 @@ function New-StubBuild($Ctx, [string]$Name, [string]$Version, [string]$Previous,
         Copy-Item -LiteralPath (Join-Path $out 'syncshark.exe') -Destination (Join-Path $out 'Sync Shark.exe')
         $installerDir=Join-Path $root "release-$Version/deploy-scripts"
         [void][IO.Directory]::CreateDirectory($installerDir)
-        $contract=@{product='Massdex.SyncShark';version=$Version;sourceRevision=$commits[$Version];previousVersion=$Previous;hostExecutable='Sync Shark.exe';cliExecutable='syncshark.exe';signedMembers=@{'Sync Shark.exe'=(Get-SyncSharkSha256 (Join-Path $out 'Sync Shark.exe'));'syncshark.exe'=(Get-SyncSharkSha256 (Join-Path $out 'syncshark.exe'))}} | ConvertTo-Json -Compress
+        $contract=@{previousTreeSha256=(Get-SyncSharkTreeIdentity $Ctx.builds['old-0375'].out);product='Massdex.SyncShark';version=$Version;sourceRevision=$commits[$Version];previousVersion=$Previous;hostExecutable='Sync Shark.exe';cliExecutable='syncshark.exe';signedMembers=@{'Sync Shark.exe'=(Get-SyncSharkSha256 (Join-Path $out 'Sync Shark.exe'));'syncshark.exe'=(Get-SyncSharkSha256 (Join-Path $out 'syncshark.exe'))}} | ConvertTo-Json -Compress
         $body=@'
 param($PredecessorRuntime,$TestProductRoot)
 $root=Resolve-SyncSharkProductRoot $TestProductRoot
@@ -164,6 +172,12 @@ New-Item -ItemType Junction -Path (Join-Path $root 'active') -Target $target | O
         [IO.File]::WriteAllText((Join-Path $installerDir 'Install-SyncShark.ps1'),"# SyncSharkUpdateContract: $contract`n$body")
         [void][IO.Directory]::CreateDirectory((Join-Path $out 'tools'))
         foreach ($tool in 'SyncShark.Release.psm1','SyncShark.Registration.psm1', 'Deploy-SyncShark.ps1') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $tool) -Destination (Join-Path $out "tools\$tool") }
+    }
+    if (!$Legacy) {
+        $assets=Join-Path (Split-Path -Parent $PSScriptRoot) 'tests/SyncShark.Engine.Tests/bin/Release/net8.0-windows'
+        foreach ($file in 'Microsoft.Data.Sqlite.dll','SQLitePCLRaw.core.dll','SQLitePCLRaw.batteries_v2.dll','SQLitePCLRaw.provider.e_sqlite3.dll','runtimes/win-x64/native/e_sqlite3.dll') {
+            Copy-Item -LiteralPath (Join-Path $assets $file) -Destination $out
+        }
     }
     if ($Mutate) { & $Mutate $out }
     Write-Manifest $root $Name $Version $Previous $out -Legacy:$Legacy -Unlisted $Unlisted
@@ -213,8 +227,8 @@ with sqlite3.connect(sys.argv[1]) as db:
     $cli = Join-Path $ctx.launchers 'cli-common.ps1'; $run = Join-Path $ctx.launchers 'run-apply.ps1'
     [IO.File]::WriteAllText($cli, "`$Exe = '$oldExe'`n& `$Exe --cli @args`n")
     [IO.File]::WriteAllText($run, "param([string]`$Exe = '$oldExe')`n& `$Exe --cli engine repair --yes`n")
-    $old = New-StubBuild $ctx 'old-0375' '0.3.75' '0.3.74+0000000000000000000000000000000000000000' -Legacy
-    $null = New-StubBuild $ctx 'new-0376' '0.3.76' $old.pv
+    $old = New-StubBuild $ctx 'old-0375' '0.3.95' '0.3.74+0000000000000000000000000000000000000000' -Legacy
+    $null = New-StubBuild $ctx 'new-0376' '0.3.96' $old.pv
     $ctx.old = $ctx.builds['old-0375']; $ctx.new = $ctx.builds['new-0376']
     $ctx
 }
@@ -310,7 +324,7 @@ F 37 'legacy predecessor + candidate shape accepted; unlisted module, missing me
     $j = Expect-Closed $ctx 'healthy'
     $record = Get-Content -LiteralPath (Join-Path $ctx.new.root 'deploy-log.json') -Raw | ConvertFrom-Json -AsHashtable
     Expect ($record.terminal -ceq 'healthy' -and $record.hostWasRunning -and $record.started -and -not $record.Contains('runStarted')) 'deploy-log from the journal only'
-    Expect (@(Get-Stubs $ctx '--notify-ready' | Where-Object ExecutablePath -ieq (Join-Path $ctx.root 'versions/0.3.76/Sync Shark.exe')).Count -eq 1) 'new host running'
+    Expect (@(Get-Stubs $ctx '--notify-ready' | Where-Object ExecutablePath -ieq (Join-Path $ctx.root 'versions/0.3.96/Sync Shark.exe')).Count -eq 1) 'new host running'
     Expect (Test-Path -LiteralPath (Join-Path (Get-DeployRoot $ctx) 'DELETION-CANDIDATES.md')) 'candidates listed'
     Expect ($null -eq $j.snapshot.recoveryRoot) 'Recovery root absent when none is set'
     $variants = @(
@@ -320,7 +334,7 @@ F 37 'legacy predecessor + candidate shape accepted; unlisted module, missing me
         @{ name = 'extra'; unlisted = @('extra.txt'); mutate = { param($out) [IO.File]::WriteAllText((Join-Path $out 'extra.txt'), 'x') }; like = '*Unlisted file in build tree: extra.txt*' })
     $fresh = Use (New-Context 37)
     foreach ($v in $variants) {
-        $build = New-StubBuild $fresh "cand-$($v.name)" '0.3.76' $fresh.old.pv -Mutate $v.mutate -Unlisted $v.unlisted
+        $build = New-StubBuild $fresh "cand-$($v.name)" '0.3.96' $fresh.old.pv -Mutate $v.mutate -Unlisted $v.unlisted
         $r = Deploy $fresh '' $build
         Expect ($r.Exit -ne 0 -and $r.Log -like $v.like) "$($v.name) refused ($($r.Log.Trim()))"
         Expect (@(Get-Pointer $fresh).Count -eq 0) "$($v.name) left no pointer"
@@ -362,7 +376,7 @@ F 1 'backup byte flipped: no data effect, refused' {
 F 48 'busy predecessor leaves the host and active pointer untouched' {
     $ctx=Use (New-Context 48)
     Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{'0.3.75'=@{busy=$true}}
+    Set-Behavior $ctx @{'0.3.95'=@{busy=$true}}
     $r=Deploy $ctx
     Expect ($r.Exit -ne 0 -and $r.Log -like '*not idle*') 'busy host reported'
     Expect (@(Get-Stubs $ctx '--core v2 --engine-host').Count -eq 1 -and !(Test-Path -LiteralPath (Join-Path $ctx.root 'active'))) 'no stop or switch'
@@ -370,24 +384,46 @@ F 48 'busy predecessor leaves the host and active pointer untouched' {
 F 49 'post-drain inventory reports every outstanding record before switching' {
     $ctx=Use (New-Context 49)
     $db=Join-Path $ctx.data 'engine/state.db'
-    @'
-import sqlite3, sys
-with sqlite3.connect(sys.argv[1]) as db:
-    db.executescript("""UPDATE pair SET pending_json='{}';
-        INSERT INTO folder_removal_submission VALUES(1,'job-one','Accepted'),(1,'job-two','Accepted');
-        INSERT INTO folder_removal VALUES(1,'folder-one',1);""")
-'@ | & python -I - $db
-    if ($LASTEXITCODE -ne 0) { throw 'Could not seed unfinished fixture.' }
-    $before=Get-SyncSharkTreeIdentity (Split-Path -Parent $db)
-    Start-Host $ctx $ctx.old # The command still reports idle, so only the stopped inventory catches these records.
+    $seed=@'
+import hashlib, os, pathlib, sqlite3, sys
+path=pathlib.Path(sys.argv[1]); db=sqlite3.connect(path)
+assert db.execute('pragma journal_mode=wal').fetchone()[0]=='wal'
+db.execute('pragma wal_autocheckpoint=0')
+db.executescript("""BEGIN; UPDATE pair SET pending_json='{}';
+    INSERT INTO folder_removal_submission VALUES(1,'job-one','Accepted'),(1,'job-two','Accepted');
+    INSERT INTO folder_removal VALUES(1,'folder-one',1); COMMIT;""")
+wal=pathlib.Path(str(path)+'-wal'); assert wal.stat().st_size > 32
+main=sqlite3.connect(path.as_uri()+'?immutable=1&mode=ro',uri=True)
+assert main.execute("select count(*) from pair where pending_json is not null").fetchone()==(0,)
+pathlib.Path(sys.argv[2]).write_text(hashlib.sha256(path.read_bytes()).hexdigest()+' '+hashlib.sha256(wal.read_bytes()).hexdigest())
+os._exit(0) # Preserve committed frames on last-close; no checkpoint.
+'@
+    [IO.File]::WriteAllText((Join-Path $ctx.state 'drain.py'),$seed)
+    Set-Behavior $ctx @{'0.3.95'=@{commitAtDrain=$true}}
+    # Do not let a host inherit the CI runner's output handles while waiting for the test to stop it.
+    $env:SYNCSHARK_STUB_STATE=$ctx.state; $env:SYNCSHARK_STUB_DATA=$ctx.data
+    $proc=Start-Process -FilePath $ctx.old.exe -ArgumentList '--core v2 --engine-host' -WindowStyle Hidden -PassThru
+    Wait-Until { @(Get-ChildItem -LiteralPath $ctx.state -Filter 'host-*.running').Count -eq 1 } 'stub acquired lock'
     $r=Deploy $ctx; $j=Get-Journal $ctx
-    Expect ($j.stopRequested -and $r.Exit -ne 0 -and $r.Log -like '*inventory did not clear*') 'refusal occurred after graceful stop'
+    if (!(Test-Path -LiteralPath (Join-Path $ctx.state 'wal-proven'))) { throw "Host did not leave committed WAL on exit: $($r.Log)" }
+    Expect ($proc.HasExited -and $proc.ExitCode -eq 0 -and $j.stopRequested -and $r.Exit -ne 0 -and $r.Log -like '*inventory did not clear*') "refusal after graceful stop: $($r.Log)"
     foreach ($item in 'pending pair','job-one','job-two','folder-one') { Expect ($r.Log.Contains($item)) "missing inventory finding: $item" }
-    Expect (!(Test-Path -LiteralPath (Join-Path $ctx.root 'active')) -and (Get-SyncSharkTreeIdentity (Split-Path -Parent $db)) -ceq $before) 'no switch or store change'
+    $after=(Get-SyncSharkSha256 $db)+' '+(Get-SyncSharkSha256 ($db+'-wal'))
+    Expect ($after -ceq [IO.File]::ReadAllText((Join-Path $ctx.state 'wal-proven'))) 'main and WAL bytes unchanged'
+    Expect (!(Test-Path -LiteralPath (Join-Path $ctx.root 'active'))) 'no switch'
+    $clean=Use (New-Context 49)
+    $installed=Join-Path $clean.root 'versions/0.3.95'
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $installed))
+    Copy-Item -LiteralPath $clean.old.out -Destination $installed -Recurse
+    New-Item -ItemType Junction -Path (Join-Path $clean.root 'active') -Target $installed | Out-Null
+    $ok=Deploy $clean 'phase-backup-verified'
+    if (!(Get-Journal $clean)) { throw "Clean image not admitted: $($ok.Log)" }
+    $null=Expect-Open $clean 'backup-verified'
+
 }
 F 50 'startup refusal with zero pairs cannot close healthy' {
     $ctx=Use (New-Context 50); Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{'0.3.75'=@{empty=$true}; '0.3.76'=@{empty=$true;refused=$true}}
+    Set-Behavior $ctx @{'0.3.95'=@{empty=$true}; '0.3.96'=@{empty=$true;refused=$true}}
     $r=Deploy $ctx; $j=Expect-NeedsOwner $ctx '*did not report an open store*'
     Expect (!$j.outcome) 'refusal never publishes a healthy result'
 }
@@ -402,7 +438,7 @@ F 5 'a supervisor with no host: refused' {
 F 6 'failure after start leaves the candidate running' {
     $ctx = Use (New-Context 6)
     Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{ '0.3.76' = @{ statusFail = $true } }
+    Set-Behavior $ctx @{ '0.3.96' = @{ statusFail = $true } }
     $r = Deploy $ctx
     $j = Expect-NeedsOwner $ctx '*failure after start*'
     Expect (@(Get-Stubs $ctx '--notify-ready').Count -eq 1) 'new host left running'
@@ -410,7 +446,7 @@ F 6 'failure after start leaves the candidate running' {
 F 30 'live-new closure verifies the installed host; a switched transaction cannot close as stop-refused' {
     $ctx = Use (New-Context 30)
     Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{ '0.3.76' = @{ statusFail = $true } }
+    Set-Behavior $ctx @{ '0.3.96' = @{ statusFail = $true } }
     $r = Deploy $ctx
     $null = Expect-NeedsOwner $ctx '*failure after start*'
     $r = CloseTx $ctx 'stop-refused'
@@ -468,7 +504,7 @@ F 12 'capacity check refuses insufficient backup space (unit, mocked free space;
 }
 F 13 'two generations running: refused' {
     $ctx = Use (New-Context 13)
-    Set-Behavior $ctx @{ '0.3.76' = @{ noLock = $true } }
+    Set-Behavior $ctx @{ '0.3.96' = @{ noLock = $true } }
     Start-Host $ctx $ctx.old; Start-Host $ctx $ctx.new
     $r = Deploy $ctx
     $j = Expect-Closed $ctx 'refused'
@@ -484,7 +520,7 @@ F 16 'a second deploy while the pointer exists: refused' {
 F 18 'crash after a child launched, before its PID was recorded: recover classifies by exe, args and creation time' {
     $ctx = Use (New-Context 18)
     Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{ '0.3.75' = @{ stopDelayMs = 40000 } }
+    Set-Behavior $ctx @{ '0.3.95' = @{ stopDelayMs = 40000 } }
     $r = Deploy $ctx 'child-stop-launched'
     $r = Recover $ctx
     $j = Expect-NeedsOwner $ctx '*fix forward*'
@@ -493,7 +529,7 @@ F 18 'crash after a child launched, before its PID was recorded: recover classif
 F 19 'killed run with a live, recorded stop child: -Recover joins it (the Ctrl+C journal state; a real Ctrl+C is not exercised)' {
     $ctx = Use (New-Context 19)
     Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{ '0.3.75' = @{ stopDelayMs = 15000 } }
+    Set-Behavior $ctx @{ '0.3.95' = @{ stopDelayMs = 15000 } }
     $r = Deploy $ctx 'child-stop-pid'
     $r = Recover $ctx
     $j = Expect-NeedsOwner $ctx '*fix forward*'
@@ -512,7 +548,7 @@ F 23 'a host that never answers trusted status (crash loop): refused before any 
     $ctx = Use (New-Context 23)
     Start-Host $ctx $ctx.old
     $null = Start-Stub $ctx $ctx.old '--core v2 --engine-supervisor'
-    Set-Behavior $ctx @{ '0.3.75' = @{ statusFail = $true } }
+    Set-Behavior $ctx @{ '0.3.95' = @{ statusFail = $true } }
     $r = Deploy $ctx
     $j = Expect-Closed $ctx 'refused'
     Expect (@(@($j.errors) -like '*not idle*').Count -gt 0 -and -not $j.stopRequested) 'refused before any stop'
@@ -537,7 +573,7 @@ F 28 'malformed or journal-less pointer: needs-owner, untouched' {
         $hash = (Get-FileHash -LiteralPath $pointer).Hash
         foreach ($run in @({ Deploy $ctx }, { Recover $ctx }, { CloseTx $ctx 'pointer-unproven' })) {
             $r = & $run
-            Expect ($r.Exit -ne 0 -and $r.Log -like '*needs-owner*' -and (Get-FileHash -LiteralPath $pointer).Hash -ceq $hash) 'refused, pointer untouched'
+            Expect ($r.Exit -ne 0 -and ($r.Log -like '*pointer is malformed*' -or $r.Log -like '*no journal exists*') -and (Get-FileHash -LiteralPath $pointer).Hash -ceq $hash) 'refused, pointer untouched'
         }
     }
 }
@@ -552,7 +588,7 @@ F 29 'closed journal whose pointer removal was interrupted: pointer removed by r
 F 31 'two processes match an unrecorded child intent: needs-owner, none adopted' {
     $ctx = Use (New-Context 31)
     Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{ '0.3.75' = @{ stopDelayMs = 20000 } }
+    Set-Behavior $ctx @{ '0.3.95' = @{ stopDelayMs = 20000 } }
     $r = Deploy $ctx 'child-stop-launched'
     $null = Start-Stub $ctx $ctx.old '--cli engine host stop --yes'
     Wait-Until { @(Get-Stubs $ctx '--cli engine host stop --yes').Count -eq 2 } 'two stop processes'
@@ -649,7 +685,7 @@ F 41 'escape: a -Build reached through a junction to outside the test root is re
     $outside = New-Outside 'build'
     [void][IO.Directory]::CreateDirectory((Join-Path $ctx.root 'builds'))
     New-Item -ItemType Junction -Path (Join-Path $ctx.root 'builds\jcand') -Target $outside | Out-Null
-    $build = New-StubBuild $ctx 'jcand' '0.3.76' $ctx.old.pv
+    $build = New-StubBuild $ctx 'jcand' '0.3.96' $ctx.old.pv
     $before = Get-TreeStamp $outside
     $r = Deploy $ctx '' $build
     Expect ($r.Exit -ne 0 -and $r.Log -like '*passes through the reparse point*') 'refused'
@@ -679,7 +715,7 @@ F 44 'chain publication fails after a durable success: nothing compensated; -Rec
     finally { $acl = [IO.FileSystemAclExtensions]::GetAccessControl($directory, 'Access'); [void]$acl.RemoveAccessRule($rule); [IO.FileSystemAclExtensions]::SetAccessControl($directory, $acl) }
     $j = Get-Journal $ctx
     Expect ($r.Exit -eq 2 -and $j.state -ceq 'open' -and $j.outcome -and $j.outcome.terminal -ceq 'healthy') 'success kept open for publication'
-    Expect (@(Get-Stubs $ctx '--notify-ready' | Where-Object ExecutablePath -ieq (Join-Path $ctx.root 'versions/0.3.76/Sync Shark.exe')).Count -eq 1) 'new host still running'
+    Expect (@(Get-Stubs $ctx '--notify-ready' | Where-Object ExecutablePath -ieq (Join-Path $ctx.root 'versions/0.3.96/Sync Shark.exe')).Count -eq 1) 'new host still running'
     $r = Recover $ctx
     $null = Expect-Closed $ctx 'healthy'
     Expect (Test-Path -LiteralPath (Join-Path $ctx.new.root 'deploy-log.json')) 'published by -Recover'
@@ -687,7 +723,7 @@ F 44 'chain publication fails after a durable success: nothing compensated; -Rec
 F 45 'a tampered module, or another build''s tools copy, is refused before any module code runs' {
     $ctx = Use (New-Context 45)
     $marker = Join-Path $ctx.root 'module-ran.txt'
-    $build = New-StubBuild $ctx 'cand-tampered' '0.3.76' $ctx.old.pv
+    $build = New-StubBuild $ctx 'cand-tampered' '0.3.96' $ctx.old.pv
     [IO.File]::AppendAllText((Join-Path $build.out 'tools\SyncShark.Release.psm1'), "`n[IO.File]::WriteAllText('$marker', 'ran')`n")
     $r = Deploy $ctx '' $build
     Expect ($r.Exit -ne 0 -and $r.Log -like '*SyncShark.Release.psm1 differs*' -and -not (Test-Path -LiteralPath $marker)) 'tampered module refused before import'

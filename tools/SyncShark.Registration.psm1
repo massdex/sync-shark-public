@@ -66,19 +66,21 @@ function Resolve-SyncSharkRuntimeRoot([string]$Version,[string]$TestProductRoot=
 }
 
 function Invoke-SyncSharkAppRegistration {
-    param([string]$Version,[ValidateSet('Register','Remove','Verify','VerifyAbsent')][string]$Operation,[Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9 .-]+[.]exe$')][string]$HostExecutable)
+    param([string]$Version,[ValidateSet('Register','Remove','Verify','VerifyAbsent')][string]$Operation,[Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9 .-]+[.]exe$')][string]$HostExecutable,
+        [Parameter(Mandatory)][string]$ProductRoot,[Parameter(Mandatory)][string]$UninstallEntry)
     if ($Version -cnotmatch '^\d+\.\d+\.\d+$') { throw 'An exact registration version is required.' }
-    $root = Resolve-SyncSharkProductRoot ''
+    $root=Get-SyncSharkNormalizedPath $ProductRoot
+    if ($root -ine $ProductRoot -or [IO.Path]::IsPathRooted($UninstallEntry) -or $UninstallEntry -notmatch '^(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+[.]ps1$') { throw 'Invalid package registration paths.' }
     $runtime = Join-Path $root 'active'
     $executable = Join-Path $runtime $HostExecutable
     $oldExecutable = Join-Path $runtime 'SyncShark.exe'
     $uninstall = '"' + (Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe') + '" -NoProfile -ExecutionPolicy Bypass -File "' +
-        (Join-Path $runtime 'tools\SyncShark.Uninstall.ps1') + '"'
+        (Join-Path $runtime $UninstallEntry) + '"'
     $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Massdex.SyncShark'
     $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Massdex\Sync Shark.lnk'
     $owner = 'Massdex.SyncShark:' + $root
     $values = @{ DisplayName='Sync Shark'; DisplayVersion=$Version; Publisher='Massdex';
-        InstallLocation=(Resolve-SyncSharkRuntimeRoot $Version); UninstallString=$uninstall; SyncSharkOwner=$owner }
+        InstallLocation=(Join-Path $root ('versions/'+$Version)); UninstallString=$uninstall; SyncSharkOwner=$owner }
     $existing = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
     # An empty key can survive creation before the first value; provider metadata is not a value.
     $keyExists = Test-Path -LiteralPath $key
@@ -109,7 +111,7 @@ function Invoke-SyncSharkAppRegistration {
         }
         if ($Operation -eq 'Register') {
             Assert-SyncSharkJunction $runtime $values.InstallLocation
-            if (-not (Test-Path -LiteralPath (Join-Path $runtime 'tools\SyncShark.Uninstall.ps1') -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath (Join-Path $runtime $UninstallEntry) -PathType Leaf)) {
                 throw 'The installed uninstall entry point is missing.'
             }
             if (-not $keyExists) { New-Item -Path $key | Out-Null }

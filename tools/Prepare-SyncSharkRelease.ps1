@@ -68,7 +68,8 @@ function Get-ReleasePredecessor {
             if((Get-Item -LiteralPath $path).Length -ne $member.bytes -or (Get-SyncSharkSha256 $path) -cne $member.sha256){throw 'Prepared predecessor members differ from the signed contract.'}
         }
     } else {
-        $previous=if ($PredecessorRuntime) { [IO.Path]::GetFullPath($PredecessorRuntime) } else { Resolve-SyncSharkRuntimeRoot $metadata.PreviousReleaseVersion }
+        $previous=if ($PredecessorRuntime) { [IO.Path]::GetFullPath($PredecessorRuntime) } else { Get-SyncSharkJunctionTarget (Join-Path (Resolve-SyncSharkProductRoot '') 'active') }
+        if (!$previous) { throw 'No installed predecessor; specify its exact prepared tree.' }
         Assert-SyncSharkOrdinaryTree $previous
     }
     $previousHost = Join-Path $previous $signable[0]

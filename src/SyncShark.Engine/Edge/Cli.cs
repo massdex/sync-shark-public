@@ -40,22 +40,24 @@ public static class Cli
         if (invocation.CommandKey == CommandKeys.Logs)
             return Commands.ReadLogs(invocation, files, output, ct);
 
-        var result = await new HostClient().SendAsync(args, output, error, ct).ConfigureAwait(false);
-        return await ResolveSend(invocation.CommandKey, result, output,
-            c => new HostClient().SendAsync(args, output, error, c),
+        var result = await new HostClient().SendAsync(args, output, error, ct, waitForHostExit: invocation.CommandKey == CommandKeys.HostStop).ConfigureAwait(false);
+        return await ResolveSend(invocation, result, output,
+            c => new HostClient().SendAsync(args, output, error, c, waitForHostExit: invocation.CommandKey == CommandKeys.HostStop),
             c => HostClient.StartAsync(c), ct).ConfigureAwait(false);
     }
 
     /// <summary>Decides a send outcome (F052). A non-null exit is terminal (even a failure, or a lost reply) and is
     /// never replayed; a null exit is definite pre-send absence, where a read renders HostNotRunning and an eligible
     /// command may start the host and send exactly once.</summary>
-    public static async Task<int> ResolveSend(string commandKey, (int? ExitCode, bool ReceivedExit) result,
+    public static async Task<int> ResolveSend(CliInvocation invocation, (int? ExitCode, bool ReceivedExit) result,
         TextWriter output,
         Func<CancellationToken, Task<(int? ExitCode, bool ReceivedExit)>> sendAgain,
         Func<CancellationToken, Task<int>> startHost, CancellationToken ct)
     {
         if (result.ExitCode is { } code) return code;
-        if (IsRead(commandKey)) return RenderHostAbsent(output);
+        if (invocation.CommandKey == CommandKeys.HostStop) return SuccessExitCode;
+        if (IsRead(invocation.CommandKey) || (invocation.CommandKey == CommandKeys.PairsExclude &&
+            !invocation.Flag(OptionKeys.Keep) && !invocation.Flag(OptionKeys.Yes))) return RenderHostAbsent(output);
         var started = await startHost(ct).ConfigureAwait(false);
         if (started != SuccessExitCode) { RenderHostAbsent(output); return started; }
         var second = await sendAgain(ct).ConfigureAwait(false);
