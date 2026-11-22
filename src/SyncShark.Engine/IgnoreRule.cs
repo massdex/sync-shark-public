@@ -19,7 +19,7 @@ public sealed record IgnoreRule(IgnoreRule.KindName Kind, string Value)
                 throw new InvalidDataException(Text.Get(TextKey.InvalidIgnoreFormat, (TextArg.Value, entry)));
             var kindText = entry[..separator].Replace("-", string.Empty, StringComparison.Ordinal);
             if (!Enum.TryParse<KindName>(kindText, ignoreCase: true, out var kind))
-                throw new InvalidDataException(Text.Get(TextKey.InvalidIgnoreKind, (TextArg.Value, entry[..separator]), (TextArg.Kind, string.Join(", ", Enum.GetNames<KindName>()))));
+                throw new InvalidDataException(Text.Get(TextKey.InvalidIgnoreKind, (TextArg.Value, entry[..separator]), (TextArg.Kind, string.Join(',', Enum.GetNames<KindName>()))));
             parsed.Add(new IgnoreRule(kind, entry[(separator + 1)..]));
         }
         return parsed;
