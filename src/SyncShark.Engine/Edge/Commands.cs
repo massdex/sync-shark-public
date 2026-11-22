@@ -7,8 +7,6 @@ namespace Massdex.SyncShark.Engine.Edge;
 /// rendered from the returned values without probing the drive or looking the pair up again.</summary>
 public sealed class Commands
 {
-    private const int TransientExitCode = 1;
-
     /// <summary>Single-writer form; keeps the historic signature by routing diagnostics to the same writer.</summary>
     public Task<int> ExecuteAsync(string[] args, Run.Host host, TextWriter output, CancellationToken ct) =>
         ExecuteAsync(args, host, output, output, ct);
@@ -38,15 +36,15 @@ public sealed class Commands
                 case CommandKeys.PairsExclusions: return await PairsExclusionsAsync(invocation, host, output, ct).ConfigureAwait(false);
                 case CommandKeys.IgnoresList: return await IgnoresListAsync(invocation, host, output, ct).ConfigureAwait(false);
                 case CommandKeys.IgnoresSet: return await IgnoresSetAsync(invocation, host, ct).ConfigureAwait(false);
-                case CommandKeys.HostStart: await host.StartAsync(ct).ConfigureAwait(false); return 0;
-                case CommandKeys.HostStop: await host.StopAsync(ct).ConfigureAwait(false); return 0;
+                case CommandKeys.HostStart: await host.StartAsync(ct).ConfigureAwait(false); return Cli.SuccessExitCode;
+                case CommandKeys.HostStop: await host.StopAsync(ct).ConfigureAwait(false); return Cli.SuccessExitCode;
                 case CommandKeys.Status: return await StatusAsync(invocation, host, output, ct).ConfigureAwait(false);
-                case CommandKeys.Pause: await host.PauseAsync(invocation.Value(OptionKeys.Pair), ct).ConfigureAwait(false); return 0;
-                case CommandKeys.Resume: await host.ResumeAsync(invocation.Value(OptionKeys.Pair), ct).ConfigureAwait(false); return 0;
+                case CommandKeys.Pause: await host.PauseAsync(invocation.Value(OptionKeys.Pair), ct).ConfigureAwait(false); return Cli.SuccessExitCode;
+                case CommandKeys.Resume: await host.ResumeAsync(invocation.Value(OptionKeys.Pair), ct).ConfigureAwait(false); return Cli.SuccessExitCode;
                 case CommandKeys.Repair: return await RepairAsync(invocation, host, ct).ConfigureAwait(false);
                 case CommandKeys.Notices: return await NoticesAsync(invocation, host, output, ct).ConfigureAwait(false);
                 case CommandKeys.Resolve: return await ResolveAsync(invocation, host, output, ct).ConfigureAwait(false);
-                case CommandKeys.AccountsConnect: await host.ConnectAsync(ct).ConfigureAwait(false); return 0;
+                case CommandKeys.AccountsConnect: await host.ConnectAsync(ct).ConfigureAwait(false); return Cli.SuccessExitCode;
                 case CommandKeys.AccountsDisconnect: return await AccountsDisconnectAsync(invocation, host, ct).ConfigureAwait(false);
                 default: return Cli.UsageExitCode;
             }
@@ -63,7 +61,7 @@ public sealed class Commands
         var pairs = new List<PairConfig>();
         await foreach (var pair in host.PairsAsync(ct)) pairs.Add(pair);
         output.WriteLine(RenderPairs(pairs));
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> PairsAddAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
@@ -79,7 +77,7 @@ public sealed class Commands
             Array.Empty<Exclusion>(), firstRun, true, null);
         await host.AddPairAsync(pair, ct).ConfigureAwait(false);
         output.WriteLine(RenderPair(pair));
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> PairsRemoveAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
@@ -88,7 +86,7 @@ public sealed class Commands
         if (pairId is null) return Cli.UsageExitCode;
         var cause = await host.RemovePairAsync(pairId, ct).ConfigureAwait(false);
         output.WriteLine(cause is { } refused ? RenderPairNotRemoved(pairId, refused) : RenderPairRemoved(pairId));
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> PairsBindAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
@@ -97,7 +95,7 @@ public sealed class Commands
         if (pairId is null) return Cli.UsageExitCode;
         await host.BindAsync(pairId, ct).ConfigureAwait(false);
         output.WriteLine(Text.Get(TextKey.ResultRootsBound, (TextArg.Pair, pairId)));
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> PairsExcludeAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
@@ -113,12 +111,12 @@ public sealed class Commands
 
         if (confirmed)
             output.WriteLine(result.Applied ? RenderExclusionApplied(rel) : RenderExclusionBlocked(rel));
-        else if (result.RemoveFiles == 0 || result.RecoveryPlace is null)
+        else if (result.RemoveFiles == default || result.RecoveryPlace is null)
             output.WriteLine(RenderExclusionBlocked(rel));
         else
             output.WriteLine(RenderExclusionPreview(rel, side, result.CopyFiles, result.CopyBytes,
-                result.RemoveFiles, result.RemoveBytes, result.RecoveryPlace ?? string.Empty));
-        return 0;
+                result.RemoveFiles, result.RemoveBytes, result.RecoveryPlace!));
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> PairsIncludeAsync(CliInvocation invocation, Run.Host host, CancellationToken ct)
@@ -128,7 +126,7 @@ public sealed class Commands
         var rel = invocation.Value(OptionKeys.Rel);
         if (pairId is null || sideText is null || rel is null || !TryParseSide(sideText, out var side)) return Cli.UsageExitCode;
         await host.SetExclusionAsync(pairId, new Exclusion(side, rel, Keep: false), include: true, confirmed: true, ct).ConfigureAwait(false);
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> PairsExclusionsAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
@@ -144,7 +142,7 @@ public sealed class Commands
         foreach (var exclusion in pair.Exclusions)
             output.WriteLine(Text.Get(exclusion.Keep ? TextKey.ResultStatusExclusionKept : TextKey.ResultStatusExclusion,
                 (TextArg.Side, exclusion.Side.ToString()), (TextArg.Path, exclusion.Path)));
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> IgnoresListAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
@@ -158,7 +156,7 @@ public sealed class Commands
             return Cli.UsageExitCode;
         }
         output.WriteLine(RenderIgnores(pairId, pair.IgnoreRules));
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> IgnoresSetAsync(CliInvocation invocation, Run.Host host, CancellationToken ct)
@@ -176,13 +174,13 @@ public sealed class Commands
             throw new EngineRequestException(TextKey.IgnoreRulesInvalid, (TextArg.Message, error.Message));
         }
         await host.SetIgnoresAsync(pairId, rules, ct).ConfigureAwait(false);
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> StatusAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
     {
         output.WriteLine(await host.StatusAsync(invocation.Value(OptionKeys.Pair), ct).ConfigureAwait(false));
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> RepairAsync(CliInvocation invocation, Run.Host host, CancellationToken ct)
@@ -190,7 +188,7 @@ public sealed class Commands
         var pairId = invocation.Value(OptionKeys.Pair);
         if (pairId is null) return Cli.UsageExitCode;
         await host.RepairAsync(pairId, ct).ConfigureAwait(false);
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> NoticesAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
@@ -202,7 +200,7 @@ public sealed class Commands
         await foreach (var notice in host.NoticesAsync(pairId, ct))
             if (includeIgnored || !notice.Ignored) notices.Add(notice);
         output.WriteLine(RenderNotices(notices));
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> ResolveAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)    {
@@ -221,10 +219,10 @@ public sealed class Commands
         catch (EngineRequestException error)
         {
             output.WriteLine(Text.Get(TextKey.ResultResolveFailed, (TextArg.Id, issueText), (TextArg.Reason, error.Message)));
-            return TransientExitCode;
+            return Cli.TransientExitCode;
         }
         output.WriteLine(Text.Get(TextKey.ResultResolveDone, (TextArg.Id, issueText), (TextArg.Choice, choice.ToString())));
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<int> AccountsDisconnectAsync(CliInvocation invocation, Run.Host host, CancellationToken ct)
@@ -232,7 +230,7 @@ public sealed class Commands
         var account = invocation.Value(OptionKeys.Account);
         if (account is null) return Cli.UsageExitCode;
         await host.DisconnectAsync(account, ct).ConfigureAwait(false);
-        return 0;
+        return Cli.SuccessExitCode;
     }
 
     private static async Task<PairConfig?> FindPairAsync(Run.Host host, string pairId, CancellationToken ct)
@@ -251,7 +249,7 @@ public sealed class Commands
 
     /// <summary>A line per pair, or the no-pairs sentence.</summary>
     public static string RenderPairs(IReadOnlyList<PairConfig> pairs) =>
-        pairs.Count == 0 ? Text.Get(TextKey.NoPairsYet) : string.Join(Environment.NewLine, pairs.Select(RenderPair));
+        pairs.Count == default ? Text.Get(TextKey.NoPairsYet) : string.Join(Environment.NewLine, pairs.Select(RenderPair));
 
     /// <summary>The applied exclusion sentence.</summary>
     public static string RenderExclusionApplied(string path) => Text.Get(TextKey.ResultExcludeApplied, (TextArg.Path, path));
@@ -262,7 +260,12 @@ public sealed class Commands
     /// <summary>The destructive-exclusion warning: the recovery destination together with the recovery period.</summary>
     public static string RenderExclusionPreview(string path, Side side, long copyFiles, long copyBytes,
         long removeFiles, long removeBytes, string recoveryPlace) =>
-        recoveryPlace;
+        Text.Get(TextKey.ResultExcludePreview, (TextArg.Path, path),
+            (TextArg.CopyFiles, copyFiles.ToString(CultureInfo.InvariantCulture)),
+            (TextArg.CopyBytes, copyBytes.ToString(CultureInfo.InvariantCulture)),
+            (TextArg.RemoveFiles, removeFiles.ToString(CultureInfo.InvariantCulture)),
+            (TextArg.RemoveBytes, removeBytes.ToString(CultureInfo.InvariantCulture)),
+            (TextArg.Side, side.ToString()), (TextArg.Place, recoveryPlace));
 
     /// <summary>The removed-pair sentence.</summary>
     public static string RenderPairRemoved(string pairId) => Text.Get(TextKey.ResultPairRemoved, (TextArg.Pair, pairId));

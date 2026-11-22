@@ -12,6 +12,12 @@ public static class Cli
     /// <summary>A usage error (unknown command, missing or invalid option).</summary>
     public const int UsageExitCode = 2;
 
+    /// <summary>A successful command.</summary>
+    public const int SuccessExitCode = 0;
+
+    /// <summary>A transient failure, such as a refused resolve.</summary>
+    public const int TransientExitCode = 1;
+
     private const int LogBufferBytes = 64 * 1024;
 
     private static readonly Lazy<Catalog> CatalogData = new(LoadCatalog, LazyThreadSafetyMode.ExecutionAndPublication);
@@ -41,9 +47,12 @@ public static class Cli
     public static IReadOnlyList<string> Help()
     {
         var pad = new string(' ', 2);
-        var lines = new List<string>(Definitions.Commands.Count);
+        var lines = new List<string>();
         foreach (var row in Definitions.Commands)
-            lines.Add(row.Effect.Length == 0 ? row.Usage : string.Concat(row.Usage, pad, row.Effect));
+        {
+            lines.Add(row.Usage);
+            if (row.Effect.Length != 0) lines.Add(string.Concat(pad, row.Effect));
+        }
         return lines;
     }
 
@@ -101,7 +110,7 @@ public static class Cli
     /// <summary>Renders a definitely absent host for a non-log read and reports a non-zero exit.</summary>
     public static int RenderHostAbsent(TextWriter output)
     {
-        output.WriteLine(Text.Get(TextKey.StatusUnavailable));
+        output.WriteLine(Text.Get(TextKey.HostNotRunning));
         return HostAbsentExitCode;
     }
 
