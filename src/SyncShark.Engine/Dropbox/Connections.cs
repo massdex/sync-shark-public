@@ -139,7 +139,7 @@ public sealed class Connections
             var root = document.RootElement;
             if (root.ValueKind == JsonValueKind.String)
             {
-                ids.Add(CredentialStore.AccountTarget(root.GetString()!));
+                ids.Add(ValidatedConnectionId(root.GetString()!));
                 continue;
             }
             if (root.ValueKind != JsonValueKind.Object) throw InvalidList();
@@ -168,13 +168,13 @@ public sealed class Connections
     {
         if (binding.ValueKind == JsonValueKind.String)
         {
-            ids.Add(CredentialStore.AccountTarget(binding.GetString()!));
+            ids.Add(ValidatedConnectionId(binding.GetString()!));
             return;
         }
         if (binding.ValueKind != JsonValueKind.Object ||
             !binding.TryGetProperty("ConnectionId", out var primary) || primary.ValueKind != JsonValueKind.String)
             throw InvalidList();
-        ids.Add(CredentialStore.AccountTarget(primary.GetString()!));
+        ids.Add(ValidatedConnectionId(primary.GetString()!));
         if (!binding.TryGetProperty("AdditionalConnections", out var additional) ||
             additional.ValueKind != JsonValueKind.Array) return;
         foreach (var connection in additional.EnumerateArray())
@@ -182,8 +182,14 @@ public sealed class Connections
             if (connection.ValueKind != JsonValueKind.Object ||
                 !connection.TryGetProperty("ConnectionId", out var id) || id.ValueKind != JsonValueKind.String)
                 throw InvalidList();
-            ids.Add(CredentialStore.AccountTarget(id.GetString()!));
+            ids.Add(ValidatedConnectionId(id.GetString()!));
         }
+    }
+
+    private static string ValidatedConnectionId(string id)
+    {
+        _ = CredentialStore.AccountTarget(id);
+        return id;
     }
 
     private static InvalidDataException InvalidList() => new(Text.Get(TextKey.RootDropboxIdentityInvalid));
