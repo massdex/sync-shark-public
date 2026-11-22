@@ -7,9 +7,9 @@ namespace Massdex.SyncShark.Engine.Tests.Edge;
 public static class CliChecks
 {
     /// <summary>Verifies the Cli contract through the module surface.</summary>
-    public static Task RunAsync()
+    public static async Task RunAsync()
     {
-        // Help is driven from the catalog: every published usage appears verbatim in one help line.
+        // Help is driven from the catalog: every published usage is an exact help line (matches Layout/CliParityChecks).
         var help = Cli.Help();
         Check.Require(help.Count > 0, "empty help");
         using var stream = typeof(Text).Assembly.GetManifestResourceStream(ResourceNames.Cli)
@@ -19,7 +19,7 @@ public static class CliChecks
             .Select(row => row.GetProperty("usage").GetString()!).ToArray();
         Check.Require(usages.Length > 0 && usages.Distinct().Count() == usages.Length, "empty or duplicate command registry");
         foreach (var usage in usages)
-            Check.Require(help.Any(line => line.Contains(usage, StringComparison.Ordinal)), "help missing usage: " + usage);
+            Check.Require(help.Contains(usage, StringComparer.Ordinal), "help missing usage line: " + usage);
 
         // Parsing is catalogue-driven: a full invocation keeps its option values and flags.
         var parsed = Cli.Parse(["pairs", "exclude", "--pair", "p1", "--side", "local", "--rel", "Child", "--keep", "--yes"]);
@@ -35,16 +35,33 @@ public static class CliChecks
             "invalid choice value accepted");
         Check.Require(Cli.Parse(["status", "--nope"]) is null, "unknown option accepted");
 
-        // F070 required acceptance check: a definitely absent host for a non-log read renders HostNotRunning and
-        // reports a non-zero exit, never the generic unavailable status and never a switch-on instruction.
-        using var output = new StringWriter();
-        var code = Cli.RenderHostAbsent(output);
-        var rendered = output.ToString();
-        Check.Require(code != 0, "absent host must report a non-zero exit");
-        Check.Require(rendered.Contains(Text.Get(TextKey.HostNotRunning), StringComparison.Ordinal),
-            "absent host did not render HostNotRunning");
-        Check.Require(!rendered.Contains(Text.Get(TextKey.StatusUnavailable), StringComparison.Ordinal),
-            "absent host rendered the generic unavailable status");
-        return Task.CompletedTask;
+        // F070 + F052: the CLI's own send decision (the branch RunAsync uses) reaches HostNotRunning for a non-log read
+        // when the result is definite pre-send absence (null ExitCode); it must not start the host or re-send.
+        static Task<(int? ExitCode, bool ReceivedExit)> NeverSend(CancellationToken c) =>
+            throw new InvalidDataException("absent read must not send again");
+        static Task<int> NeverStart(CancellationToken c) =>
+            throw new InvalidDataException("absent read must not start the host");
+        using var absent = new StringWriter();
+        var absentCode = await Cli.ResolveSend("Status", (null, false), absent, new StringWriter(), NeverSend, NeverStart, default);
+        Check.Require(absentCode != 0, "absent read must report a non-zero exit");
+        Check.Require(absent.ToString().Contains(Text.Get(TextKey.HostNotRunning), StringComparison.Ordinal),
+            "absent read did not reach HostNotRunning through the CLI decision");
+        Check.Require(!absent.ToString().Contains(Text.Get(TextKey.StatusUnavailable), StringComparison.Ordinal),
+            "absent read rendered the generic unavailable status");
+
+        // F052: a received command result, even a failure, is terminal; a lost reply (non-null exit, not received) is
+        // not replayed.
+        Check.Require(await Cli.ResolveSend("Repair", (5, true), new StringWriter(), new StringWriter(), NeverSend, NeverStart, default) == 5,
+            "received command failure was not preserved as terminal");
+        Check.Require(await Cli.ResolveSend("Repair", (2, false), new StringWriter(), new StringWriter(), NeverSend, NeverStart, default) == 2,
+            "a lost reply was replayed");
+
+        // F052: on definite absence an eligible command may start the host and send exactly once.
+        var started = 0;
+        var resent = 0;
+        Task<int> Start(CancellationToken c) { started++; return Task.FromResult(0); }
+        Task<(int? ExitCode, bool ReceivedExit)> SendAgain(CancellationToken c) { resent++; return Task.FromResult<(int? ExitCode, bool ReceivedExit)>((7, true)); }
+        var mutationCode = await Cli.ResolveSend("Repair", (null, false), new StringWriter(), new StringWriter(), SendAgain, Start, default);
+        Check.Require(started == 1 && resent == 1 && mutationCode == 7, "absent mutation did not start and send exactly once");
     }
 }

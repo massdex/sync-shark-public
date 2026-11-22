@@ -22,6 +22,10 @@ public static class Cli
 
     internal static Catalog Definitions => CatalogData.Value;
 
+    /// <summary>The CLI word of a resolution choice, from the catalog (the reverse of ParseChoice).</summary>
+    internal static string ChoiceWord(ResolutionChoice choice) =>
+        Definitions.Choices.TryGetValue(choice.ToString(), out var word) ? word : choice.ToString();
+
     /// <summary>Use ResourceNames.LogDirectory for detached log reads. Confirmed host absence renders HostNotRunning for a non-log read; never start the host on a read.</summary>
     public static async Task<int> RunAsync(string[] args, ILogFiles files, TextWriter output, TextWriter error, CancellationToken ct)
     {
@@ -36,9 +40,26 @@ public static class Cli
         if (invocation.CommandKey == CommandKeys.Logs)
             return Commands.ReadLogs(invocation, files, output, ct);
 
-        var code = await new HostClient().SendAsync(args, output, ct).ConfigureAwait(false);
-        // A read served by the host reports a definite absence as HostNotRunning; a mutation lets HostClient act on it.
-        return IsRead(invocation.CommandKey) && code == HostAbsentExitCode ? RenderHostAbsent(output) : code;
+        var result = await new HostClient().SendAsync(args, output, error, ct).ConfigureAwait(false);
+        return await ResolveSend(invocation.CommandKey, result, output, error,
+            c => new HostClient().SendAsync(args, output, error, c),
+            c => HostClient.StartAsync(c), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Decides a send outcome (F052). A non-null exit is terminal (even a failure, or a lost reply) and is
+    /// never replayed; a null exit is definite pre-send absence, where a read renders HostNotRunning and an eligible
+    /// command may start the host and send exactly once.</summary>
+    public static async Task<int> ResolveSend(string commandKey, (int? ExitCode, bool ReceivedExit) result,
+        TextWriter output, TextWriter error,
+        Func<CancellationToken, Task<(int? ExitCode, bool ReceivedExit)>> sendAgain,
+        Func<CancellationToken, Task<int>> startHost, CancellationToken ct)
+    {
+        if (result.ExitCode is { } code) return code;
+        if (IsRead(commandKey)) return RenderHostAbsent(output);
+        var started = await startHost(ct).ConfigureAwait(false);
+        if (started != SuccessExitCode) { RenderHostAbsent(output); return started; }
+        var second = await sendAgain(ct).ConfigureAwait(false);
+        return second.ExitCode ?? TransientExitCode;
     }
 
     /// <summary>Help operation on the supplied facts. Every catalog usage appears verbatim in one line.</summary>
@@ -158,7 +179,11 @@ public static class Cli
         foreach (var property in root.GetProperty("firstRunPolicies").EnumerateObject())
             firstRun[property.Name] = property.Value.GetString() ?? throw new InvalidDataException(ResourceNames.Cli);
 
-        return new Catalog(commands, options, firstRun);
+        var choices = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var property in root.GetProperty("choices").EnumerateObject())
+            choices[property.Name] = property.Value.GetString() ?? throw new InvalidDataException(ResourceNames.Cli);
+
+        return new Catalog(commands, options, firstRun, choices);
     }
 
     internal sealed record CommandRow(string Command, string Usage, string Effect, string Key, IReadOnlyList<string> OptionKeys);
@@ -166,7 +191,7 @@ public static class Cli
     internal sealed record OptionRow(string Key, string Flag, bool TakesValue, IReadOnlyList<string> Values);
 
     internal sealed record Catalog(IReadOnlyList<CommandRow> Commands, IReadOnlyDictionary<string, OptionRow> Options,
-        IReadOnlyDictionary<string, string> FirstRunPolicies);
+        IReadOnlyDictionary<string, string> FirstRunPolicies, IReadOnlyDictionary<string, string> Choices);
 }
 
 /// <summary>One parsed invocation: its catalog key and the option values and flags it named.</summary>

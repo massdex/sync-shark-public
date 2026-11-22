@@ -8,8 +8,8 @@ public static class CommandsChecks
     /// <summary>Verifies the Commands contract through the module surface.</summary>
     public static Task RunAsync()
     {
-        // F069 required acceptance check: the destructive-exclusion warning names the recovery destination and the
-        // recovery period together. A location-only warning omits the period and fails here.
+        // F069 required acceptance check: the destructive-exclusion warning keeps the recovery period with the
+        // destination. A mutant that keeps the path and place but drops the period fails on the period assertion.
         var preview = Commands.RenderExclusionPreview("Child", Side.Local, 2, 10, 1, 5, "D:\\Recovery\\keep");
         Check.Require(preview.Contains("Child", StringComparison.Ordinal), "preview lost the path");
         Check.Require(preview.Contains("D:\\Recovery\\keep", StringComparison.Ordinal), "preview lost the recovery place");
@@ -42,18 +42,13 @@ public static class CommandsChecks
         Check.Require(ignores.Contains("pair-1", StringComparison.Ordinal) &&
             ignores.Contains("FileExtension:.tmp", StringComparison.Ordinal), "ignore listing lost its facts");
 
-        // Open notices render one group line per kind and cause, followed by the issue line.
-        var notice = new Notice(7, NoticeKind.Failure, TextKey.ReadLocalFailed, "Child",
-            new IssueSubject(Array.Empty<NoticeItem>(), null), DateTimeOffset.UnixEpoch, Dismissed: false);
-        var notices = Commands.RenderNotices([notice]);
-        Check.Require(notices.Contains("Failure", StringComparison.Ordinal) &&
-            notices.Contains("ReadLocalFailed", StringComparison.Ordinal), "notice group lost its kind or cause");
-        Check.Require(notices.Contains("7", StringComparison.Ordinal) && notices.Contains("Child", StringComparison.Ordinal),
-            "notice line lost its id or path");
-        // R19 item (2): per-file (Effect) records print only with --show-files.
-        Check.Require(!Commands.ShowLogRecord("Effect upload Child", false), "per-file Effect line must stay hidden without --show-files");
-        Check.Require(Commands.ShowLogRecord("Effect upload Child", true), "per-file Effect line must show with --show-files");
-        Check.Require(Commands.ShowLogRecord("Stage scan", false), "ordinary line must show without --show-files");
+        // R19 item (2): the record kind is the SECOND TAB column (timestamp<TAB>kind<TAB>...). A first-token reader
+        // would treat the timestamp as the kind and leak every real Effect record; per-file Effect only with --show-files.
+        const string effectRecord = "2026-01-01T00:00:00.0000000Z\tEffect\tupload\tChild\t\tok";
+        const string stageRecord = "2026-01-01T00:00:00.0000000Z\tStage\tscan\t\t\t";
+        Check.Require(!Commands.ShowLogRecord(effectRecord, false), "timestamped Effect record leaked without --show-files");
+        Check.Require(Commands.ShowLogRecord(effectRecord, true), "Effect record must show with --show-files");
+        Check.Require(Commands.ShowLogRecord(stageRecord, false), "ordinary record must show without --show-files");
 
         // R19 item (1): the detached logs read is owned by Edge.Commands and renders not-found without a host.
         var logsInvocation = Cli.Parse(["logs", "--pair", "p1", "--run", "r1"]);

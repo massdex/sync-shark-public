@@ -109,13 +109,11 @@ public sealed class Commands
         var confirmed = invocation.Flag(OptionKeys.Yes);
         var result = await host.SetExclusionAsync(pairId, exclusion, include: false, confirmed, ct).ConfigureAwait(false);
 
-        if (confirmed)
-            output.WriteLine(result.Applied ? RenderExclusionApplied(rel) : RenderExclusionBlocked(rel));
-        else if (result.RemoveFiles == default || result.RecoveryPlace is null)
-            output.WriteLine(RenderExclusionBlocked(rel));
-        else
-            output.WriteLine(RenderExclusionPreview(rel, side, result.CopyFiles, result.CopyBytes,
-                result.RemoveFiles, result.RemoveBytes, result.RecoveryPlace!));
+        if (result.Applied) output.WriteLine(RenderExclusionApplied(rel));
+        else if (result.Cause is { } cause) output.WriteLine(Text.Get(cause, (TextArg.Path, rel)));
+        else if (confirmed) output.WriteLine(RenderExclusionApplied(rel));
+        else output.WriteLine(RenderExclusionPreview(rel, side, result.CopyFiles, result.CopyBytes,
+                result.RemoveFiles, result.RemoveBytes, result.RecoveryPlace ?? string.Empty));
         return Cli.SuccessExitCode;
     }
 
@@ -167,7 +165,7 @@ public sealed class Commands
         IReadOnlyList<string> rules;
         try
         {
-            rules = IgnoreRule.Normalize(IgnoreRule.Parse(spec)).Select(IgnoreRule.Format).ToArray();
+            rules = IgnoreRule.ParseForEdit(spec).Select(IgnoreRule.Format).ToArray();
         }
         catch (InvalidDataException error)
         {
@@ -197,10 +195,12 @@ public sealed class Commands
         var pairId = invocation.Value(OptionKeys.Pair);
         if (pairId is null) return Cli.UsageExitCode;
         var includeIgnored = invocation.Flag(OptionKeys.Ignored);
-        var notices = new List<Notice>();
         await foreach (var notice in host.NoticesAsync(pairId, ct))
-            if (includeIgnored || !notice.Ignored) notices.Add(notice);
-        output.WriteLine(RenderNotices(notices));
+        {
+            if (!includeIgnored && notice.Ignored) continue;
+            var choices = (notice.Choices ?? Array.Empty<ResolutionChoice>()).Select(Cli.ChoiceWord).ToArray();
+            output.WriteLine(Render.Notice(notice, pairId, choices));
+        }
         return Cli.SuccessExitCode;
     }
 
@@ -234,8 +234,6 @@ public sealed class Commands
         return Cli.SuccessExitCode;
     }
 
-    private const int LogBufferBytes = 64 * 1024;
-
     /// <summary>The detached logs read (R19): Edge.Commands forwards to RunLog.Read and never starts the host.</summary>
     public static int ReadLogs(CliInvocation invocation, ILogFiles files, TextWriter output, CancellationToken ct)
     {
@@ -247,14 +245,14 @@ public sealed class Commands
         var path = files.Resolve(folder, pair, run);
         if (path is null)
         {
-            output.WriteLine(Text.Get(TextKey.HumanLogUnreadable));
+            WriteLogMissing(output, pair, run);
             return Cli.SuccessExitCode;
         }
 
         var showFiles = invocation.Flag(OptionKeys.ShowFiles);
         var status = Run.RunLog.Read(files, path,
             (line, _) => { if (ShowLogRecord(line, showFiles)) output.WriteLine(line); },
-            LogBufferBytes, ct, out _);
+            SettingsParser.Load().LogReadBufferBytes, ct, out _);
         if (status == ILogFiles.ReadStatus.Found) return Cli.SuccessExitCode;
         if (status == ILogFiles.ReadStatus.NotFound) { WriteLogMissing(output, pair, run); return Cli.SuccessExitCode; }
         output.WriteLine(Text.Get(TextKey.HumanLogUnreadable));
@@ -265,9 +263,12 @@ public sealed class Commands
     public static bool ShowLogRecord(string line, bool showFiles)
     {
         if (showFiles) return true;
-        var text = line.TrimStart();
-        var end = text.IndexOfAny(new[] { ' ', '	' });
-        var kind = end < 0 ? text : text[..end];
+        // Record grammar (LogText.Format, W22): timestamp<TAB>kind<TAB>what<TAB>path<TAB>detail<TAB>outcome.
+        var firstTab = line.IndexOf('	');
+        if (firstTab < 0) return true;
+        var start = firstTab + 1;
+        var kindEnd = line.IndexOf('	', start);
+        var kind = kindEnd < 0 ? line[start..] : line[start..kindEnd];
         return !string.Equals(kind, RunEventKind.Effect.ToString(), StringComparison.Ordinal);
     }
 
@@ -321,23 +322,6 @@ public sealed class Commands
         var lines = new List<string> { Text.Get(TextKey.ResultIgnoreRulesHeader, (TextArg.Pair, pairId)) };
         lines.AddRange(rules.Select(rule => Text.Get(TextKey.ResultIgnoreRuleLine, (TextArg.Value, rule))));
         lines.Add(Text.Get(TextKey.ResultIgnoreRulesDefaults));
-        return string.Join(Environment.NewLine, lines);
-    }
-
-    /// <summary>Open notices grouped by kind and cause, each followed by its issue lines.</summary>
-    public static string RenderNotices(IReadOnlyList<Notice> notices)
-    {
-        var lines = new List<string>();
-        foreach (var group in notices.GroupBy(notice => (notice.Kind, notice.Cause))
-                     .OrderBy(group => group.Key.Kind).ThenBy(group => group.Key.Cause.ToString(), StringComparer.Ordinal))
-        {
-            lines.Add(Text.Get(TextKey.ResultIssueGroup, (TextArg.Kind, group.Key.Kind.ToString()),
-                (TextArg.Cause, group.Key.Cause.ToString()),
-                (TextArg.Count, group.Count().ToString(CultureInfo.InvariantCulture))));
-            foreach (var notice in group.OrderBy(item => item.Id))
-                lines.Add(Text.Get(TextKey.ResultIssueLine, (TextArg.Id, notice.Id.ToString(CultureInfo.InvariantCulture)),
-                    (TextArg.Path, notice.Path), (TextArg.At, notice.At.ToString(CultureInfo.InvariantCulture))));
-        }
         return string.Join(Environment.NewLine, lines);
     }
 
