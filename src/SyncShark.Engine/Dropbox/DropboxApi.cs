@@ -71,6 +71,9 @@ public sealed class DropboxApi
         }
     }
 
+    /// <summary>The clock supplied by the composition root.</summary>
+    internal TimeProvider Clock => _clock;
+
     /// <summary>Send a prepared request through the single transport: a known catalog route gets the account's token
     /// and verified path root; a non-catalog (bootstrap/OAuth) endpoint is sent without credentials. The status and
     /// body are returned to the caller for W10/W14 classification; nothing is rejected by body shape (R35).</summary>
