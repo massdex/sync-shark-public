@@ -18,7 +18,7 @@ public sealed class Store : IStore
     /// <summary>Descendants operation on the supplied facts.</summary>
     public IAsyncEnumerable<SyncedEntry> DescendantsAsync(string pairId, Side side, string key, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Commit operation on the supplied facts.</summary>
-    public Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, CancellationToken ct, string? spentDeletedKey = null) => throw new NotImplementedException();
+    public Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, string? spentDeletedKey, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Notices operation on the supplied facts.</summary>
     public IAsyncEnumerable<Notice> NoticesAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>SaveNotice operation on the supplied facts.</summary>
@@ -53,7 +53,7 @@ public sealed class Store : IStore
     /// <summary>Disarm operation on the supplied facts.</summary>
     public Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>AddScan operation on the supplied facts.</summary>
-    public Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct) => throw new NotImplementedException();
+    public Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, Func<string>? terminalHistoryCursor, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Compare operation on the supplied facts.</summary>
     public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>ClearScan operation on the supplied facts.</summary>
@@ -72,10 +72,10 @@ public sealed class Store : IStore
     public Task<(string? Cursor, bool Owed)> DeletedHistoryAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
 
     /// <summary>Publish the completed deleted-name listing and its cursor together.</summary>
-    public Task PublishDeletedHistoryAsync(string pairId, string cursor, CancellationToken ct) => throw new NotImplementedException();
+    public Task PublishDeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct) => throw new NotImplementedException();
 
     /// <summary>Read the unspent name from the existing delta, scratch and block homes.</summary>
-    public Task<bool> DeletedNameAsync(string pairId, string key, CancellationToken ct) => throw new NotImplementedException();
+    public Task<bool> DeletedNameAsync(string pairId, Guid? scanId, string key, CancellationToken ct) => throw new NotImplementedException();
 
     /// <summary>Project both physical endpoints of a settled folder move set-wise in one transaction.</summary>
     public Task ProjectSubtreeAsync(string pairId, Scope from, Scope to, CancellationToken ct) => throw new NotImplementedException();

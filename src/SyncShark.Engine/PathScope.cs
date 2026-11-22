@@ -70,8 +70,7 @@ public sealed class PathScope
         return Excludes(localPath, dropboxPath, isFolder);
     }
 
-    /// <summary>True when an exclusion or nested root covers the key, whichever side the key belongs to. Ignore
-    /// rules are not consulted.</summary>
+    /// <summary>Configured exclusions apply bilaterally; native boundaries are checked only for the specified side. Ignore rules are not consulted.</summary>
     public bool CoversKey(Side side,string key) => excluded.Covers(key) || (side==Side.Local ? localBoundaries : dropboxBoundaries).ResponsibilityOverlaps(key, false);
 
     /// <summary>True when the binding is absent or either actual endpoint lies under its applicable boundaries.</summary>

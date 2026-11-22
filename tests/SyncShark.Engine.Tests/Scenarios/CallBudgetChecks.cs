@@ -14,7 +14,7 @@ public static class CallBudgetChecks
         for (int i=0;i<size;i++)
         {
             string path = $"file-{i}"; var local = ItemChecks.File(Side.Local,path,1,$"local-{i}"); var remote = ItemChecks.File(Side.Dropbox,path,1,$"cloud-{i}");
-            pc.Seed(local,[1]); cloud.Seed(remote,[1]); await store.CommitAsync(pair.PairId,null,SyncedEntries.From(local,remote),null,default);
+            pc.Seed(local,[1]); cloud.Seed(remote,[1]); await store.CommitAsync(pair.PairId,null,SyncedEntries.From(local,remote),null,null,default);
         }
         long before = store.Requests[nameof(IStore.CommitAsync)];
         await Repair.RunAsync(pair,pc,cloud,store,null,default);

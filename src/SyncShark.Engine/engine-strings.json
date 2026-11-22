@@ -135,7 +135,7 @@
   "ResultPairLine": "{Pair}  {Name}  {LocalRoot} <-> {DropboxRoot}  account {Account}  first run: {FirstRun}",
   "ResultPairLineOff": "{Pair}  {Name}  {LocalRoot} <-> {DropboxRoot}  account {Account}  first run: {FirstRun}  (switched off)",
   "ResultPairRemoved": "Pair {Pair} was removed; no files were touched.",
-  "ResultExcludePreview": "Excluding {Path} will first sync {CopyFiles} new or changed items ({CopyBytes} bytes) to the other side, then remove {RemoveFiles} items ({RemoveBytes} bytes) from {Side}. They can be recovered from {Place}. Repeat with --yes to apply.",
+  "ResultExcludePreview": "Excluding {Path} will first sync {CopyFiles} new or changed items ({CopyBytes} bytes) to the other side, then remove {RemoveFiles} items ({RemoveBytes} bytes) from {Side}. Recovery location: {Place}. Repeat with --yes to apply.",
   "ResultExcludeApplied": "{Path} is excluded. Any returned scope will be compared.",
   "ResultExcludeBlocked": "Excluding {Path} will not remove anything: it holds online-only, separately excluded or another pair's items, which are never touched.",
   "ResultRepairHeader": "Repair started {Started}, finished {Finished}.",

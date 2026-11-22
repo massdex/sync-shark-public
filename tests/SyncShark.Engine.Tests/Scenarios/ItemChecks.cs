@@ -34,7 +34,7 @@ public static class ItemChecks
         var pair = Pair(); var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
         using var store = new InMemoryStateStore(); const string path = "item";
         var oldA = File(Side.Local, path, 1, "local", folder); var oldB = File(Side.Dropbox, path, 1, "cloud", folder);
-        if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(oldA,oldB), null, default);
+        if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(oldA,oldB),null,null,default);
         if (pc is { } a) local.Seed(File(Side.Local,path,a,oldA.Id,folder),folder ? [] : [a]);
         if (cloud is { } b) remote.Seed(File(Side.Dropbox,path,b,oldB.Id,folder),folder ? [] : [b]);
         var from = source == Side.Local ? local : remote; var observed = from.Items.GetValueOrDefault(path).Entry;

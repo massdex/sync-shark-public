@@ -1,7 +1,7 @@
 namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 /// <summary>A synthetic endpoint; unscripted effects fail rather than manufacture a passing result.</summary>
-public sealed class FakeSide(Side side) : ISide
+public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = null) : ISide
 {
     public Dictionary<string,DeletionEvidence> DeletedHistory { get; } = new(PathNames.Comparer);
     public (TimeSpan Offset, TimeSpan Uncertainty)? ClockOffset { get; set; }
@@ -22,11 +22,17 @@ public sealed class FakeSide(Side side) : ISide
     public Queue<ChangePage> Pages { get; } = [];
     public Dictionary<string, Queue<JobReply>> JobReplies { get; } = [];
     public Dictionary<(string Id,string Revision,string Hash), Recovery> Recoverable { get; } = [];
-    private sealed record Stage(string Path, byte[] Bytes, Entry Source) : IStaged
+    private readonly Dictionary<string,Stage> stages = new(PathNames.Comparer);
+    private sealed record Stage(string Path, byte[] Bytes, Entry Source, Func<StageProof,ValueTask>? Release = null) : IStaged
     {
         public StageProof? Proof { get; init; }
         public bool ConsumesSourceOnPublish => false;
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync() => Proof is {} proof && Release!=null ? Release(proof) : ValueTask.CompletedTask;
+    }
+    private async ValueTask DiscardUnarmedAsync(StageProof proof)
+    {
+        if(noteOwns!=null && await noteOwns(proof)) return;
+        if(stages.TryGetValue(proof.Path,out var staged) && staged.Proof==proof) stages.Remove(proof.Path);
     }
     private (Entry Entry, byte[] Bytes) Current(Entry expected)
     {
@@ -83,8 +89,9 @@ public sealed class FakeSide(Side side) : ISide
             if (Side!=Side.Local) return new Stage(path,bytes,source);
             var id=$"stage-{++nextId}";var at=path+"."+id;using var hash=new ContentHash();hash.Append(bytes);
             var proof=new StageProof(at,"volume",id,bytes.LongLength,hash.Finish());
-            Seed(source with { Path=at,Id=id,Size=bytes.LongLength,ContentHash=proof.ContentHash },bytes);
-            return new Stage(path,bytes,source) { Proof=proof };
+            var stamped=source with {Path=at,Id=id,Size=bytes.LongLength,ContentHash=proof.ContentHash,Revision=string.Empty};
+            var staged=new Stage(path,bytes,stamped,DiscardUnarmedAsync){Proof=proof};
+            stages.Add(at,staged);return staged;
         }
     }
     /// <summary>Publish operation on the supplied facts.</summary>
@@ -95,7 +102,7 @@ public sealed class FakeSide(Side side) : ISide
         else if (Items.ContainsKey(stage.Path)) throw new PathOccupiedException(stage.Path);
         using var digest = new ContentHash(); digest.Append(stage.Bytes);
         var entry = stage.Source with { Path = stage.Path, Id = expected?.Id ?? $"{Side}-{++nextId}", Revision = $"r{++nextId}", ContentHash = digest.Finish() };
-        if(stage.Proof is { } proof && Items.TryGetValue(proof.Path,out var held) && held.Entry.Id==proof.FileId) Items.Remove(proof.Path);
+        if(stage.Proof is { } proof && stages.TryGetValue(proof.Path,out var held) && held.Proof==proof) stages.Remove(proof.Path);
         Items[stage.Path] = (entry, stage.Bytes.ToArray()); return Task.FromResult(new RemovalResult(RemovalOutcome.Published, entry, null));
     }
     /// <summary>EnsureFolder operation on the supplied facts.</summary>
@@ -159,11 +166,11 @@ public sealed class FakeSide(Side side) : ISide
     public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReopenStageAsync));
-        if(Side!=Side.Local || expected.VolumeId!="volume" || !Items.TryGetValue(expected.Path,out var held) || held.Entry.IsFolder || held.Entry.Id!=expected.FileId || held.Bytes.LongLength!=expected.Size)
+        if(Side!=Side.Local || expected.VolumeId!="volume" || !stages.TryGetValue(expected.Path,out var held) || held.Source.IsFolder || held.Proof?.FileId!=expected.FileId || held.Bytes.LongLength!=expected.Size)
             throw new ChangedUnderneathException(expected.Path);
         using var hash=new ContentHash();hash.Append(held.Bytes);
         if(hash.Finish()!=expected.ContentHash)throw new ChangedUnderneathException(expected.Path);
-        return Task.FromResult<IStaged>(new Stage(armedVictim.Proof.Expected.Path,held.Bytes.ToArray(),held.Entry){Proof=expected});
+        return Task.FromResult<IStaged>(new Stage(armedVictim.Proof.Expected.Path,held.Bytes.ToArray(),held.Source,DiscardUnarmedAsync){Proof=expected});
     }
     public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType)> RootAsync(CancellationToken ct) => Task.FromResult(Root);
     public (DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType) Root { get; set; }

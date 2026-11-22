@@ -17,6 +17,8 @@ public sealed class InMemoryStateStore : IStore
     private readonly HashSet<string> firstRepairDone = [];
     private readonly Dictionary<string,string> summaries=[];
     private readonly Dictionary<string,string> historyCursor=[];
+    private readonly HashSet<(Guid Scan,string Key)> scratchDeleted=[];
+    private readonly Dictionary<(string Pair,Guid Scan),string> completedHistory=[];
     public HashSet<(string Pair,string Key)> DeletedNames { get; }=[];
     /// <summary>Pairs operation on the supplied facts.</summary>
     public IAsyncEnumerable<PairConfig> PairsAsync(CancellationToken ct)
@@ -85,7 +87,7 @@ public sealed class InMemoryStateStore : IStore
         return Enumerate(Records.Where(v => v.Key.Pair == pairId && PathNames.IsUnderKey(v.Value.KeyOn(side),key)).Select(v => v.Value),ct);
     }
     /// <summary>Commit operation on the supplied facts.</summary>
-    public Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, CancellationToken ct, string? spentDeletedKey = null)
+    public Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, string? spentDeletedKey, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         Requests.Count(nameof(CommitAsync));
@@ -197,10 +199,20 @@ public sealed class InMemoryStateStore : IStore
         if(armed.TryGetValue(pairId,out var note) && note.Victim==expected && note.Stage==expectedStage) armed.Remove(pairId); return Task.CompletedTask;
     }
     /// <summary>AddScan operation on the supplied facts.</summary>
-    public async Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct)
+    public async Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, Func<string>? terminalHistoryCursor, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        await foreach(var row in rows.WithCancellation(ct)) if(row.Entry is { } entry) scan[(pairId,scanId,side,PathNames.KeyFor(side,row.Path))]=entry;
+        if(terminalHistoryCursor!=null && side!=Side.Dropbox) throw new ArgumentException(nameof(terminalHistoryCursor));
+        await foreach(var row in rows.WithCancellation(ct))
+        {
+            if(row.Entry is { } entry) scan[(pairId,scanId,side,PathNames.KeyFor(side,row.Path))]=entry;
+            else if(terminalHistoryCursor!=null) scratchDeleted.Add((scanId,PathNames.DropboxKey(row.Path)));
+        }
+        if(terminalHistoryCursor!=null)
+        {
+            var cursor=terminalHistoryCursor();ArgumentException.ThrowIfNullOrWhiteSpace(cursor);
+            completedHistory.Add((pairId,scanId),cursor);
+        }
     }
     /// <summary>Compare operation on the supplied facts.</summary>
     public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct)
@@ -231,7 +243,8 @@ public sealed class InMemoryStateStore : IStore
     public Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        foreach(var key in scan.Keys.Where(k=>k.Pair==pairId && k.Scan==scanId).ToArray()) scan.Remove(key); return Task.CompletedTask;
+        foreach(var key in scan.Keys.Where(k=>k.Pair==pairId && k.Scan==scanId).ToArray()) scan.Remove(key);
+        scratchDeleted.RemoveWhere(k=>k.Scan==scanId); completedHistory.Remove((pairId,scanId));return Task.CompletedTask;
     }
     /// <summary>Dispose operation on the supplied facts.</summary>
     private static async IAsyncEnumerable<T> Enumerate<T>(IEnumerable<T> values, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
@@ -242,8 +255,14 @@ public sealed class InMemoryStateStore : IStore
     public void Dispose() { }
     public Task<(bool FirstRepairDone,string? LastRepairJson)> RepairStateAsync(string pairId,CancellationToken ct) => Task.FromResult((firstRepairDone.Contains(pairId),summaries.GetValueOrDefault(pairId)));
     public Task<(string? Cursor,bool Owed)> DeletedHistoryAsync(string pairId,CancellationToken ct) => Task.FromResult((historyCursor.GetValueOrDefault(pairId),!historyCursor.ContainsKey(pairId)));
-    public Task PublishDeletedHistoryAsync(string pairId,string cursor,CancellationToken ct) { ct.ThrowIfCancellationRequested(); historyCursor[pairId]=cursor;return Task.CompletedTask; }
-    public Task<bool> DeletedNameAsync(string pairId,string key,CancellationToken ct) => Task.FromResult(DeletedNames.Contains((pairId,key)));
+    public Task PublishDeletedHistoryAsync(string pairId,Guid scanId,CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if(!completedHistory.Remove((pairId,scanId),out var cursor)) throw new InvalidOperationException("Not a completed discovery acquisition");
+        foreach(var row in scratchDeleted.Where(x=>x.Scan==scanId)) DeletedNames.Add((pairId,row.Key));
+        historyCursor[pairId]=cursor;return Task.CompletedTask;
+    }
+    public Task<bool> DeletedNameAsync(string pairId,Guid? scanId,string key,CancellationToken ct) => Task.FromResult(DeletedNames.Contains((pairId,key)) || scanId is {} id && scratchDeleted.Contains((id,key)));
     public IAsyncEnumerable<Notice> NoticesAtAsync(string pairId,string pathKey,CancellationToken ct) => Enumerate(notices.Where(n=>n.Key.Pair==pairId && PathNames.Same(n.Value.Path,pathKey)).Select(n=>n.Value),ct);
     public Task ProjectSubtreeAsync(string pairId,Scope from,Scope to,CancellationToken ct)
     {

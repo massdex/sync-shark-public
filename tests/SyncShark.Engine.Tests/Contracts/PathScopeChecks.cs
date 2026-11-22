@@ -63,7 +63,10 @@ public static class PathScopeChecks
         Check.Require(!await store.FinishRepairAsync(pair.PairId,(0,old),"{}",default),"Stale completion published first Repair");
         Check.Require(await store.FinishRepairAsync(pair.PairId,(0,current),"{}",default),"Current completion refused");
         Check.Require(await store.RepairStateAsync(pair.PairId,default)==(true,"{}"),"Empty completed pair lost first-run state or summary");
-        await store.SaveCursorAsync(pair.PairId,"feed",default);await store.PublishDeletedHistoryAsync(pair.PairId,"history",default);
+        await store.SaveCursorAsync(pair.PairId,"feed",default);var scan=ResourceNames.NewScanToken();
+        static async IAsyncEnumerable<Listed> Empty() { await Task.CompletedTask;yield break; }
+        await store.AddScanAsync(pair.PairId,scan,Side.Dropbox,Empty(),()=>"history",default);
+        await store.PublishDeletedHistoryAsync(pair.PairId,scan,default);
         Check.Require(await store.CursorAsync(pair.PairId,default)=="feed" && await store.DeletedHistoryAsync(pair.PairId,default)==("history",false),"Feed and history continuations were collapsed");
     }
     public static async Task AcquisitionIsolationAsync()
@@ -71,13 +74,19 @@ public static class PathScopeChecks
         using var fake=new TestDoubles.InMemoryStateStore();IStore store=fake;var pair=Scenarios.ItemChecks.Pair();
         var first=ResourceNames.NewScanToken();var second=ResourceNames.NewScanToken();
         static async IAsyncEnumerable<Listed> Listing(string path) { await Task.CompletedTask;yield return new Listed(path,Scenarios.ItemChecks.File(Side.Local,path,1,path)); }
-        await store.AddScanAsync(pair.PairId,first,Side.Local,Listing("first"),default);
-        await store.AddScanAsync(pair.PairId,second,Side.Local,Listing("second"),default);
+        await store.AddScanAsync(pair.PairId,first,Side.Local,Listing("first"),null,default);
+        await store.AddScanAsync(pair.PairId,second,Side.Local,Listing("second"),null,default);
+        var discovery=ResourceNames.NewScanToken();var key=PathNames.DropboxKey("unbound");
+        static async IAsyncEnumerable<Listed> Tombstone() { await Task.CompletedTask;yield return new Listed("unbound",null); }
+        await store.AddScanAsync(pair.PairId,discovery,Side.Dropbox,Tombstone(),()=>"terminal",default);
+        try { await store.PublishDeletedHistoryAsync(pair.PairId,first,default); throw new InvalidDataException("Ordinary scan published history"); } catch(InvalidOperationException) { }
         await store.ClearScanAsync(pair.PairId,first,default);
+        Check.Require(await store.DeletedNameAsync(pair.PairId,discovery,key,default) && !await store.DeletedNameAsync(pair.PairId,second,key,default),"Another scan cleared or read discovery names");
+        await store.PublishDeletedHistoryAsync(pair.PairId,discovery,default);await store.ClearScanAsync(pair.PairId,discovery,default);
+        Check.Require(await store.DeletedNameAsync(pair.PairId,null,key,default) && (await store.DeletedHistoryAsync(pair.PairId,default)).Cursor=="terminal","History names or acquisition cursor lost");
         var rows=new List<Row>();await foreach(var row in store.CompareAsync(pair.PairId,second,null,(_,_) => (true,false),default)) rows.Add(row.Row);
         Check.Require(rows.Count==1 && rows[0].Local?.Path=="second","Clearing one acquisition changed another acquisition");
-        var key=PathNames.Key("unbound");fake.DeletedNames.Add((pair.PairId,key));
-        await store.CommitAsync(pair.PairId,null,null,null,default,spentDeletedKey:key);
-        Check.Require(!await store.DeletedNameAsync(pair.PairId,key,default),"Unbound first-run history was not spent");
+        await store.CommitAsync(pair.PairId,null,null,null,spentDeletedKey:key,ct:default);
+        Check.Require(!await store.DeletedNameAsync(pair.PairId,null,key,default),"Unbound first-run history was not spent");
     }
 }

@@ -85,6 +85,6 @@ public static class Schema
           shared INTEGER NOT NULL DEFAULT 0) STRICT;
         CREATE UNIQUE INDEX IF NOT EXISTS scan_state.scan_own ON scan(pair_id, scan_id, side, pathkey(path));
         CREATE INDEX IF NOT EXISTS scan_state.scan_key ON scan(pair_id, scan_id, side, key_delta) WHERE side=1 AND key_delta IS NOT NULL;
-        CREATE TABLE IF NOT EXISTS scan_state.deleted_name(pair_id INTEGER NOT NULL,path_key TEXT NOT NULL,PRIMARY KEY(pair_id,path_key)) STRICT, WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS scan_state.deleted_name(scan_id BLOB NOT NULL,path_key TEXT NOT NULL,PRIMARY KEY(scan_id,path_key)) STRICT, WITHOUT ROWID;
         """;
 }

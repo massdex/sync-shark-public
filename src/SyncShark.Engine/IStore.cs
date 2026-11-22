@@ -13,7 +13,7 @@ public interface IStore : IDisposable
     IAsyncEnumerable<SyncedEntry> ByIdAsync(string pairId, Side side, string id, CancellationToken ct);
     IAsyncEnumerable<SyncedEntry> DescendantsAsync(string pairId, Side side, string key, CancellationToken ct);
     /// <summary>Commit the record change and spend the exact acknowledged historical deletion key atomically, even when neither side has a previous binding.</summary>
-    Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, CancellationToken ct, string? spentDeletedKey = null);
+    Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, string? spentDeletedKey, CancellationToken ct);
     IAsyncEnumerable<Notice> NoticesAsync(string pairId, CancellationToken ct);
     Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct);
     Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct);
@@ -34,7 +34,8 @@ public interface IStore : IDisposable
     Task ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct);
     Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(string pairId, CancellationToken ct);
     Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct);
-    Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct);
+    /// <summary>Capture names only for the Dropbox history acquisition; read its terminal cursor only after the listing finishes successfully.</summary>
+    Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, Func<string>? terminalHistoryCursor, CancellationToken ct);
     IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct);
     Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct);
 
@@ -44,11 +45,11 @@ public interface IStore : IDisposable
     /// <summary>Read deleted-name publication state independently of the change-feed cursor.</summary>
     Task<(string? Cursor, bool Owed)> DeletedHistoryAsync(string pairId, CancellationToken ct);
 
-    /// <summary>Publish the completed deleted-name listing and its cursor together.</summary>
-    Task PublishDeletedHistoryAsync(string pairId, string cursor, CancellationToken ct);
+    /// <summary>Fold only this completed history acquisition and publish its own terminal cursor with it. An ordinary or incomplete scan cannot publish history.</summary>
+    Task PublishDeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct);
 
     /// <summary>Read the unspent name from the existing delta, scratch and block homes.</summary>
-    Task<bool> DeletedNameAsync(string pairId, string key, CancellationToken ct);
+    Task<bool> DeletedNameAsync(string pairId, Guid? scanId, string key, CancellationToken ct);
 
     /// <summary>Project both physical endpoints of a settled folder move set-wise in one transaction.</summary>
     Task ProjectSubtreeAsync(string pairId, Scope from, Scope to, CancellationToken ct);

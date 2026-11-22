@@ -10,14 +10,15 @@ public static class RecoveryChecks
     private sealed class PairState : IDisposable
     {
         internal PairConfig Pair { get; } = ItemChecks.Pair();
-        internal FakeSide Pc { get; } = new(Side.Local);
+        internal FakeSide Pc { get; }
+        internal PairState() => Pc=new FakeSide(Side.Local,async proof=>(await Store.ArmedAsync(Pair.PairId,default))?.Stage==proof);
         internal FakeSide Cloud { get; } = new(Side.Dropbox);
         internal InMemoryStateStore Store { get; } = new();
         internal async Task<SyncedEntry> LinkAsync(string path, byte value)
         {
             var pc = ItemChecks.File(Side.Local,path,value,"pc-"+path); var cloud = ItemChecks.File(Side.Dropbox,path,value,"db-"+path);
             Pc.Seed(pc,[value]); Cloud.Seed(cloud,[value]); var row=SyncedEntries.From(pc,cloud);
-            await Store.CommitAsync(Pair.PairId,null,row,null,default); return row;
+            await Store.CommitAsync(Pair.PairId,null,row,null,null,default); return row;
         }
         internal async Task InitializeAsync() { await Store.SavePairAsync(Pair,default); await Store.FinishRepairAsync(Pair.PairId,(0,await Store.OweRepairAsync(Pair.PairId,Side.Dropbox,"requested",default)),"{}",default); }
         internal Task CompareAsync() => Repair.RunAsync(Pair,Pc,Cloud,Store,null,default);
@@ -98,11 +99,13 @@ public static class RecoveryChecks
         using var x=new PairState(); await x.InitializeAsync();var saved=await x.LinkAsync("item",1);
         var previous=x.Pc.Items["item"].Entry; x.Pc.Items.Clear();
         var incoming=ItemChecks.File(Side.Dropbox,"item",2,"db-item");x.Cloud.Items["item"]=(incoming,[2]);
-        var altered=ItemChecks.File(Side.Local,"item.stage",3,"stage-id");x.Pc.Seed(altered,[3]);
-        await x.Store.ArmAsync(x.Pair.PairId,new(new(previous,"volume",previous.ContentHash),saved),new("item.stage","volume",altered.Id,1,incoming.ContentHash),default);
+        var altered=ItemChecks.File(Side.Local,"item.stage",3,"stage-id");
+        await using var staged=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{3}),altered,previous,default);
+        var actual=staged.Proof!;
+        await x.Store.ArmAsync(x.Pair.PairId,new(new(previous,"volume",previous.ContentHash),saved),new(actual.Path,actual.VolumeId,actual.FileId,actual.Size,incoming.ContentHash),default);
         await new Unfinished().CheckAsync(x.Pair,x.Pc,x.Cloud,x.Store,ItemChecks.Population(x.Pair,x.Pc,x.Cloud,x.Store),default);
         Check.Require(!x.Pc.Items.Values.Any(v=>v.Entry.Path=="item" && v.Bytes.SequenceEqual(new byte[]{3})) && x.Cloud.Items["item"].Bytes.SequenceEqual(new byte[]{2}),"Altered stage published or incoming bytes destroyed");
-        Check.Require(!x.Store.Records.Values.Any(v=>v.LocalId==altered.Id && v.DropboxContentHash==incoming.ContentHash),"Unverified stage linked");
+        Check.Require(!x.Store.Records.Values.Any(v=>v.LocalId==actual.FileId && v.DropboxContentHash==incoming.ContentHash),"Unverified stage linked");
         Check.Require(x.Store.OpenNotices.All(n=>n.Kind==NoticeKind.Failure),"Unrelated notice produced during recovery");
     }
     public static async Task FirstDeletedAsync(bool folder, bool measured)
@@ -150,7 +153,7 @@ public static class RecoveryChecks
         using var x=new PairState();await x.InitializeAsync();
         Entry Src(Side side,string path,string id,byte value,bool isFolder=false)=>ItemChecks.File(side,path,value,id,isFolder);
         var a=Src(Side.Local,"old","moving-a",1,folder);var b=Src(Side.Dropbox,"old","moving-b",1,folder);
-        await x.Store.CommitAsync(x.Pair.PairId,null,SyncedEntries.From(a,b),null,default);
+        await x.Store.CommitAsync(x.Pair.PairId,null,SyncedEntries.From(a,b),null,null,default);
         var moved=a with { Path="dest" };x.Pc.Seed(moved,folder?[]:[1]);x.Cloud.Seed(b,folder?[]:[1]);
         var occupant=Src(Side.Dropbox,"dest","existing",1,folder);x.Cloud.Seed(occupant,folder?[]:[1]);
         if(folder) { x.Pc.Seed(Src(Side.Local,"dest/new","child-a",2),[2]);x.Cloud.Seed(Src(Side.Dropbox,"dest/other","child-b",3),[3]); }
@@ -195,7 +198,7 @@ public static class RecoveryChecks
     {
         using var store = new InMemoryStateStore();
         var settings = SettingsParser.Load();
-        var host=new Host((_,_)=>Task.FromResult<IStore?>(store), _ => (new FakeSide(Side.Local),new FakeSide(Side.Dropbox)), settings, null!, TimeProvider.System, _=>throw new InvalidOperationException(), (_,_)=>throw new InvalidOperationException());await host.PauseAsync("pair-a",default);
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(store), (_,_) => (new FakeSide(Side.Local),new FakeSide(Side.Dropbox)), settings, null!, TimeProvider.System, _=>throw new InvalidOperationException(), (_,_)=>throw new InvalidOperationException());await host.PauseAsync("pair-a",default);
         Check.Require(host.IsPaused("pair-a") && !host.IsPaused("pair-b"),"Pair pause leaked to another pair");
         await host.PauseAsync(null,default);await host.ResumeAsync("pair-a",default);
         Check.Require(host.IsPaused("pair-a") && host.IsPaused("pair-b"),"Pair resume overrode global pause");
@@ -295,7 +298,14 @@ public static class RecoveryChecks
         using var x=new PairState();await x.InitializeAsync();var saved=await x.LinkAsync("item",1);
         var old=x.Pc.Items["item"].Entry;var source=ItemChecks.File(Side.Dropbox,"different-source-spelling",2,"incoming");
         await using var staged=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{2}),source,old,default);
-        var victim=new RemovalSelection(new(old,"volume",old.ContentHash),saved);await x.Store.ArmAsync(x.Pair.PairId,victim,staged.Proof,default);
+        var victim=new RemovalSelection(new(old,"volume",old.ContentHash),saved);
+        var abandoned=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{9}),source,old,default);var unused=abandoned.Proof!;
+        Check.Require(await x.Pc.ReadOneAsync(unused.Path,default)==null,"Unarmed stage visible as a user file");
+        await abandoned.DisposeAsync();
+        try { await x.Pc.ReopenStageAsync(victim,unused,default);throw new InvalidDataException("Unarmed stage survived disposal"); } catch(ChangedUnderneathException) { }
+        await x.Store.ArmAsync(x.Pair.PairId,victim,staged.Proof,default);await staged.DisposeAsync();
+        await foreach(var row in x.Pc.ReadAllAsync("",new ListOptions(true,true),default)) Check.Require(row.Path!=staged.Proof!.Path,"Armed stage leaked into user listing");
+        Check.Require(await x.Pc.ReadOneAsync(staged.Proof!.Path,default)==null,"Armed stage visible as a user file");
         await x.Pc.DeleteAsync(old,victim,default);x.Cloud.Items.Clear();
         var note=(await x.Store.ArmedAsync(x.Pair.PairId,default))!.Value;
         await using var reopened=await x.Pc.ReopenStageAsync(note.Victim,note.Stage!,default);
@@ -304,6 +314,7 @@ public static class RecoveryChecks
         Check.Require(x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{3}),"Occupant changed");x.Pc.Items.Remove("item");
         await new Unfinished().CheckAsync(x.Pair,x.Pc,x.Cloud,x.Store,ItemChecks.Population(x.Pair,x.Pc,x.Cloud,x.Store),default);
         Check.Require(x.Pc.Items["item"].Entry.Modified==source.Modified && x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{2}) && x.Pc.History.Single().Entry==old,"Replay did not preserve the selected versions and stamped time");
+        Check.Require(!x.Cloud.Items.ContainsKey(staged.Proof!.Path) && !x.Store.Records.Values.Any(v=>v.LocalPath==staged.Proof.Path || v.DropboxPath==staged.Proof.Path),"Stage synced as a user file");
     }
     public static Task A42SameIdSizeAlteredStageAsync() => throw new NotImplementedException();
     public static Task A42AlteredFinalNotLinkedAsync() => throw new NotImplementedException();
