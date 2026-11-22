@@ -64,7 +64,7 @@ public static class StoreMoveChecks
 
             Check.Require(File.Exists(pointer) && original.SequenceEqual(await File.ReadAllBytesAsync(path)), "Refusal modified the source or pointer");
             await Scenarios.StoreMoveChecks.CreateFixtureAsync();
-            await RecoveredBackupAsync(Path.Combine(root,"recovery"));
+            await Probe("mixed skip subject",()=>RecoveredBackupAsync(Path.Combine(root,"recovery")));
             await Probe("external pointer",()=>PointerAsync(Path.Combine(root,"external")));
             await Probe("migrated notice",()=>MigratedAsync(Path.Combine(root,"members"),false));
             await Probe("original backup",()=>MigratedAsync(Path.Combine(root,"backup"),true));
@@ -90,11 +90,11 @@ public static class StoreMoveChecks
             cmd.CommandText="""
                 INSERT INTO pair(id,pair_id,def_json) VALUES(1,'p','{"ConnectionId":"c"}');
                 INSERT INTO issue(issue_id,pair_id,kind,cause,path,subject_json,at_ticks,dismissed) VALUES
-                  (8,1,4,'SkipLink','a','{"Items":[]}',1,0),(9,1,4,'SkipLink','b','{"Items":[]}',2,0);
+                  (8,1,4,'SkipLink','a','{"Items":[]}',1,0),(9,1,4,'SkipLink','b','{"Items":[{"Side":0,"Path":"b","Id":"old-link"},{"Side":1,"Path":"b","Id":"still-skipped"}],"Incoming":null}',2,0);
                 INSERT INTO issue_member(member_id,issue_id,pair_id,side,path_key,subject_json,skip_cause) VALUES
                   (1,8,1,0,'a','{"Version":1,"Value":{"Items":[]}}','SkipLink'),
-                  (2,9,1,0,'b','{"Version":1,"Value":{"Items":[]}}','SkipLink'),
-                  (3,9,1,1,'b','{"Version":1,"Value":{"Items":[]}}','SkipSpecial');
+                  (2,9,1,0,pathkey('b'),'{"Version":1,"Value":{"Items":[{"Side":"Local","Path":"b","Id":"old-link"}]}}','SkipLink'),
+                  (3,9,1,1,pathkey('b'),'{"Version":1,"Value":{"Items":[{"Side":"Dropbox","Path":"b","Id":"still-skipped"}]}}','SkipSpecial');
                 """;
             await cmd.ExecuteNonQueryAsync();
         }
@@ -110,6 +110,9 @@ public static class StoreMoveChecks
         using var opened=new SqliteConnection(new SqliteConnectionStringBuilder{DataSource=target,Mode=SqliteOpenMode.ReadOnly,Pooling=false}.ToString());await opened.OpenAsync();
         using var read=opened.CreateCommand();read.CommandText="SELECT count(*) FROM issue_member m JOIN issue i USING(issue_id) WHERE (m.member_id IN(1,2) AND i.cause='InfoLinks') OR (m.member_id=3 AND i.issue_id=9)";
         Check.Require(Convert.ToInt32(await read.ExecuteScalarAsync())==3 && File.Exists(backup) && !File.Exists(pointer),"Restart lost a retained link or moved an unrelated member");
+        read.CommandText="SELECT cause,subject_json FROM issue WHERE issue_id=9";using var mixed=await read.ExecuteReaderAsync();Check.Require(await mixed.ReadAsync(),"Mixed notice disappeared");
+        var expected=new NoticeItem(Side.Dropbox,"b","still-skipped");var actual=System.Text.Json.JsonSerializer.Deserialize<IssueSubject>(mixed.GetString(1));
+        Check.Require(mixed.GetString(0)==nameof(TextKey.SkipSpecial) && actual?.Items.SequenceEqual(new[]{expected})==true,"Mixed notice retained stale link cause or subject");
     }
 
     private static SqliteConnection Open(string path,SqliteOpenMode mode)
@@ -134,7 +137,10 @@ public static class StoreMoveChecks
             INSERT INTO issue_member(issue_id,pair_id,work_id,side,path_key,identity,subject_json) VALUES(20,1,1,0,pathkey('parent/child'),'child-id','{"Version":1,"Value":{"Items":[{"Side":"Local","Path":"parent","Id":"folder"}],"Incoming":null}}');
             """;seed.ExecuteNonQuery();}
         var move=new StoreMove();await move.MoveWithOutcomeAsync(root,root,(_,_,_)=>null,default);
-        if(backup){VerifyBackup(Path.Combine(folder,"state.v16.db"));return;}
+        if(backup){var original=Path.Combine(folder,"state.v16.db");VerifyBackup(original);
+            // Mutation control: the published v17 image must never satisfy the retention proof in place of its predecessor.
+            bool rejected=false;try{VerifyBackup(target);}catch(Exception e) when(e is SqliteException or InvalidDataException){rejected=true;}
+            Check.Require(rejected,"Backup assertion accepted the replacement as the original");return;}
         using var migrated=Open(target,SqliteOpenMode.ReadWrite);using var attach=migrated.CreateCommand();attach.CommandText="ATTACH ':memory:' AS scan_state;"+Schema.CreateScan;attach.ExecuteNonQuery();var scan=new ScanTable();var id=Guid.NewGuid();scan.Begin("p",id);var seen=false;
         await foreach(var row in scan.CompareAsync(migrated,"p",id,new Scope("parent","parent"),(_,_) => (true,false),1,default))
             foreach(var n in row.Notices)if(n.Notice.Id==20 && n.Member is {} m && PathNames.Same(m.Path,"parent/child"))seen|=n.Notice.Subject.Items.Any(i=>i.Id=="folder") && m.Id=="child-id";
@@ -142,7 +148,7 @@ public static class StoreMoveChecks
     }
     private static void VerifyBackup(string path)
     {
-        using var db=Open(path,SqliteOpenMode.ReadOnly);using var read=db.CreateCommand();read.CommandText="SELECT (SELECT user_version FROM pragma_user_version)=16 AND EXISTS(SELECT 1 FROM pair p JOIN issue i USING(pair_id) WHERE 0)";
+        using var db=Open(path,SqliteOpenMode.ReadOnly);using var read=db.CreateCommand();
         read.CommandText="SELECT (SELECT user_version FROM pragma_user_version)=16 AND EXISTS(SELECT 1 FROM pair p JOIN issue i ON i.pair_id=p.id JOIN issue_member m USING(issue_id) JOIN change_work w USING(work_id) WHERE p.pair_id='p' AND i.issue_id=20 AND m.identity='child-id' AND w.issue_work_key='branch')";
         Check.Require(Convert.ToInt32(read.ExecuteScalar())==1,"Backup did not retain the original v16 facts");
     }

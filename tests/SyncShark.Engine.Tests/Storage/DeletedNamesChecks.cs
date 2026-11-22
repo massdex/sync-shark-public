@@ -35,9 +35,7 @@ public static class DeletedNamesChecks
             if(file=="DeletedNames")
                 foreach(var snippet in new[]{"", "/// <summary></summary>", "/// <summary>Returns the current time.</summary>","/// <summary>Reads a file.</summary>"})
                 {
-                    var mutant=snippet.Length==0?"class Test {}":"class Test {
-"+snippet+"
- public Task<bool> ContainsAsync(SqliteConnection db,string pairId,Guid? scanId,string key,bool isFolder,CancellationToken ct)=>throw null; }";
+                    var mutant=snippet.Length==0?"class Test {}":"class Test {"+Environment.NewLine+snippet+Environment.NewLine+" public Task<bool> ContainsAsync(SqliteConnection db,string pairId,Guid? scanId,string key,bool isFolder,CancellationToken ct)=>throw null; }";
                     try{ValidateDocumentation(mutant,file);}catch(InvalidDataException){continue;}
                     throw new InvalidDataException("Missing or non-operative kind-aware declaration accepted");
                 }
