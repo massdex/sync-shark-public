@@ -1,0 +1,258 @@
+using System.Text.Json;
+
+namespace Massdex.SyncShark.Engine.Edge;
+
+/// <summary>Cli operations for the edge module. Parsing and help are driven from the keyed catalog so spellings
+/// such as --keep, --yes and the first-sync values never live in code.</summary>
+public static class Cli
+{
+    /// <summary>Exit code a definite pre-send host absence reports; a read renders HostNotRunning, a mutation may start the host.</summary>
+    public const int HostAbsentExitCode = 3;
+
+    /// <summary>A usage error (unknown command, missing or invalid option).</summary>
+    public const int UsageExitCode = 2;
+
+    private const int LogBufferBytes = 64 * 1024;
+
+    private static readonly Lazy<Catalog> CatalogData = new(LoadCatalog, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    internal static Catalog Catalog => CatalogData.Value;
+
+    /// <summary>Use ResourceNames.LogDirectory for detached log reads. Confirmed host absence renders HostNotRunning for a non-log read; never start the host on a read.</summary>
+    public static async Task<int> RunAsync(string[] args, ILogFiles files, TextWriter output, TextWriter error, CancellationToken ct)
+    {
+        var invocation = Parse(args);
+        if (invocation is null)
+        {
+            foreach (var line in Help()) error.WriteLine(line);
+            return UsageExitCode;
+        }
+
+        // A detached log read never reaches the host.
+        if (invocation.CommandKey == CommandKeys.Logs)
+            return await ReadLogAsync(invocation, files, output, ct).ConfigureAwait(false);
+
+        var code = await new HostClient().SendAsync(args, output, ct).ConfigureAwait(false);
+        // A read served by the host reports a definite absence as HostNotRunning; a mutation lets HostClient act on it.
+        return IsRead(invocation.CommandKey) && code == HostAbsentExitCode ? RenderHostAbsent(output) : code;
+    }
+
+    /// <summary>Help operation on the supplied facts. Every catalog usage appears verbatim in one line.</summary>
+    public static IReadOnlyList<string> Help()
+    {
+        var pad = new string(' ', 2);
+        var lines = new List<string>(Catalog.Commands.Count);
+        foreach (var row in Catalog.Commands)
+            lines.Add(row.Effect.Length == 0 ? row.Usage : string.Concat(row.Usage, pad, row.Effect));
+        return lines;
+    }
+
+    /// <summary>Parses one invocation against the catalog; null when unknown, incomplete or invalid.</summary>
+    public static CliInvocation? Parse(string[] args)
+    {
+        if (args.Length == 0) return null;
+        var catalog = Catalog;
+
+        CommandRow? match = null;
+        var matchedWords = 0;
+        foreach (var row in catalog.Commands)
+        {
+            var words = row.Command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length > args.Length || words.Length < matchedWords) continue;
+            var matches = true;
+            for (var index = 0; index < words.Length; index++)
+                if (!string.Equals(words[index], args[index], StringComparison.Ordinal)) { matches = false; break; }
+            if (matches) { match = row; matchedWords = words.Length; }
+        }
+        if (match is null) return null;
+
+        var required = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var key in match.OptionKeys)
+            if (IsRequired(match.Usage, catalog.Options[key].Flag)) required.Add(key);
+
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var flags = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = matchedWords; index < args.Length; index++)
+        {
+            var token = args[index];
+            OptionRow? option = null;
+            foreach (var candidate in catalog.Options.Values)
+                if (string.Equals(candidate.Flag, token, StringComparison.Ordinal)) { option = candidate; break; }
+            if (option is null || !match.OptionKeys.Contains(option.Key, StringComparer.Ordinal)) return null;
+
+            if (option.TakesValue)
+            {
+                if (index + 1 >= args.Length) return null;
+                var value = args[++index];
+                if (option.Values.Count > 0 && !option.Values.Contains(value, StringComparer.Ordinal)) return null;
+                values[option.Key] = value;
+            }
+            else
+            {
+                flags.Add(option.Key);
+            }
+        }
+
+        foreach (var key in required)
+            if (!values.ContainsKey(key) && !flags.Contains(key)) return null;
+        return new CliInvocation(match.Key, values, flags);
+    }
+
+    /// <summary>Renders a definitely absent host for a non-log read and reports a non-zero exit.</summary>
+    public static int RenderHostAbsent(TextWriter output)
+    {
+        output.WriteLine(Text.Get(TextKey.HostNotRunning));
+        return HostAbsentExitCode;
+    }
+
+    private static async Task<int> ReadLogAsync(CliInvocation invocation, ILogFiles files, TextWriter output, CancellationToken ct)
+    {
+        var pair = invocation.Value(OptionKeys.Pair);
+        var run = invocation.Value(OptionKeys.Run);
+        if (pair is null || run is null) return UsageExitCode;
+
+        var folder = ResourceNames.LogDirectory(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+        var path = files.Resolve(folder, pair, run);
+        if (path is null)
+        {
+            WriteLogMissing(output, pair, run);
+            return 0;
+        }
+
+        var status = files.Read(path, (line, _) => output.WriteLine(line), LogBufferBytes, ct, out _);
+        if (status == ILogFiles.ReadStatus.Found) return 0;
+        if (status == ILogFiles.ReadStatus.NotFound) { WriteLogMissing(output, pair, run); return 0; }
+        output.WriteLine(Text.Get(TextKey.HumanLogUnreadable));
+        return 0;
+    }
+
+    private static void WriteLogMissing(TextWriter output, string pair, string run) =>
+        output.WriteLine(Text.Get(TextKey.HumanLogNotFound, (TextArg.Pair, pair), (TextArg.Run, run)));
+
+    private static bool IsRead(string key) =>
+        key == CommandKeys.Status || key == CommandKeys.Notices || key == CommandKeys.PairsList ||
+        key == CommandKeys.PairsExclusions || key == CommandKeys.IgnoresList;
+
+    // Required options are the declared flags that appear in the usage outside any [optional] group.
+    private static bool IsRequired(string usage, string flag)
+    {
+        var index = usage.IndexOf(flag, StringComparison.Ordinal);
+        if (index < 0) return false;
+        var before = index - 1;
+        while (before >= 0 && usage[before] == ' ') before--;
+        return before < 0 || usage[before] != '[';
+    }
+
+    private static Catalog LoadCatalog()
+    {
+        using var document = CliCatalogResource.Load(typeof(Cli).Assembly, ResourceNames.Cli);
+        var root = document.RootElement;
+
+        var options = new Dictionary<string, OptionRow>(StringComparer.Ordinal);
+        foreach (var element in root.GetProperty("options").EnumerateArray())
+        {
+            var key = element.GetProperty("key").GetString() ?? throw new InvalidDataException(ResourceNames.Cli);
+            var flag = element.GetProperty("flag").GetString() ?? throw new InvalidDataException(ResourceNames.Cli);
+            var takesValue = element.GetProperty("takesValue").GetBoolean();
+            var values = element.GetProperty("values").EnumerateArray()
+                .Select(v => v.GetString() ?? throw new InvalidDataException(ResourceNames.Cli)).ToArray();
+            options.Add(key, new OptionRow(key, flag, takesValue, values));
+        }
+
+        var commands = new List<CommandRow>();
+        foreach (var element in root.GetProperty("commands").EnumerateArray())
+        {
+            var command = element.GetProperty("command").GetString() ?? throw new InvalidDataException(ResourceNames.Cli);
+            var usage = element.GetProperty("usage").GetString() ?? throw new InvalidDataException(ResourceNames.Cli);
+            var effect = element.GetProperty("effect").GetString() ?? throw new InvalidDataException(ResourceNames.Cli);
+            var key = element.GetProperty("key").GetString() ?? throw new InvalidDataException(ResourceNames.Cli);
+            var optionKeys = element.GetProperty("options").EnumerateArray()
+                .Select(v => v.GetString() ?? throw new InvalidDataException(ResourceNames.Cli)).ToArray();
+            commands.Add(new CommandRow(command, usage, effect, key, optionKeys));
+        }
+
+        var firstRun = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var property in root.GetProperty("firstRunPolicies").EnumerateObject())
+            firstRun[property.Name] = property.Value.GetString() ?? throw new InvalidDataException(ResourceNames.Cli);
+
+        return new Catalog(commands, options, firstRun);
+    }
+
+    internal sealed record CommandRow(string Command, string Usage, string Effect, string Key, IReadOnlyList<string> OptionKeys);
+
+    internal sealed record OptionRow(string Key, string Flag, bool TakesValue, IReadOnlyList<string> Values);
+
+    internal sealed record Catalog(IReadOnlyList<CommandRow> Commands, IReadOnlyDictionary<string, OptionRow> Options,
+        IReadOnlyDictionary<string, string> FirstRunPolicies);
+}
+
+/// <summary>One parsed invocation: its catalog key and the option values and flags it named.</summary>
+public sealed class CliInvocation
+{
+    internal CliInvocation(string commandKey, IReadOnlyDictionary<string, string> values, IReadOnlySet<string> flags)
+    {
+        CommandKey = commandKey;
+        Values = values;
+        Flags = flags;
+    }
+
+    /// <summary>The catalog key of the matched command.</summary>
+    public string CommandKey { get; }
+
+    internal IReadOnlyDictionary<string, string> Values { get; }
+
+    internal IReadOnlySet<string> Flags { get; }
+
+    /// <summary>The value of the named option, or null when absent.</summary>
+    public string? Value(string optionKey) => Values.TryGetValue(optionKey, out var value) ? value : null;
+
+    /// <summary>Whether the named flag option was supplied.</summary>
+    public bool Flag(string optionKey) => Flags.Contains(optionKey);
+}
+
+/// <summary>Stable catalog keys of the approved commands. Help and parsing read them from the catalog.</summary>
+internal static class CommandKeys
+{
+    public const string PairsList = "PairsList";
+    public const string PairsAdd = "PairsAdd";
+    public const string PairsRemove = "PairsRemove";
+    public const string PairsBind = "PairsBind";
+    public const string PairsExclude = "PairsExclude";
+    public const string PairsInclude = "PairsInclude";
+    public const string PairsExclusions = "PairsExclusions";
+    public const string IgnoresList = "IgnoresList";
+    public const string IgnoresSet = "IgnoresSet";
+    public const string HostStart = "HostStart";
+    public const string HostStop = "HostStop";
+    public const string Status = "Status";
+    public const string Pause = "Pause";
+    public const string Resume = "Resume";
+    public const string Repair = "Repair";
+    public const string Notices = "Notices";
+    public const string Resolve = "Resolve";
+    public const string Logs = "Logs";
+    public const string AccountsConnect = "AccountsConnect";
+    public const string AccountsDisconnect = "AccountsDisconnect";
+}
+
+/// <summary>Stable catalog keys of the command options.</summary>
+internal static class OptionKeys
+{
+    public const string Account = "Account";
+    public const string Choice = "Choice";
+    public const string FirstSync = "FirstSync";
+    public const string Ignored = "Ignored";
+    public const string Issue = "Issue";
+    public const string Keep = "Keep";
+    public const string Local = "Local";
+    public const string Name = "Name";
+    public const string Pair = "Pair";
+    public const string Path = "Path";
+    public const string Rel = "Rel";
+    public const string Reviewed = "Reviewed";
+    public const string Rules = "Rules";
+    public const string Run = "Run";
+    public const string ShowFiles = "ShowFiles";
+    public const string Side = "Side";
+    public const string Yes = "Yes";
+}
