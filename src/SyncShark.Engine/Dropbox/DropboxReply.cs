@@ -237,17 +237,24 @@ public sealed partial class DropboxReply<T>
             sink(document.RootElement);
             return;
         }
-        var body = Encoding.UTF8.GetBytes(document.RootElement.GetRawText());
-        if (item.Selection!.Names.Length == DropboxEntries.Projection.Fields.Length)
+        if (item.Selection!.Names.Length == DropboxEntries.Projection.Fields.Length || document.RootElement.ValueKind != JsonValueKind.Object)
         {
-            Deliver(parent, body);
+            Deliver(parent, Encoding.UTF8.GetBytes(document.RootElement.GetRawText()));
             return;
         }
-        // Extra member fields sit beside the projected metadata, which keeps its own field names.
-        item.Slots![0] = body;
-        var names = item.Selection.Names.ToArray();
-        names[0] = "metadata";
-        Deliver(parent, Object(names, item.Slots));
+        // A flattened finish-batch entry keeps its metadata and the sibling failure union in wire shape.
+        Deliver(parent, Write(writer =>
+        {
+            writer.WriteStartObject();
+            foreach (var field in document.RootElement.EnumerateObject()) field.WriteTo(writer);
+            for (int i = DropboxEntries.Projection.Fields.Length; i < item.Selection.Names.Length; i++)
+                if (item.Slots![i] is { } extra)
+                {
+                    writer.WritePropertyName(item.Selection.Names[i]);
+                    writer.WriteRawValue(extra, skipInputValidation: true);
+                }
+            writer.WriteEndObject();
+        }));
     }
 
     private static void Deliver(Frame frame, byte[] value)

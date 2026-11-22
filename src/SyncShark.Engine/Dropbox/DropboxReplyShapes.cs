@@ -152,14 +152,19 @@ public static class DropboxReplyShapes
 
     /// <summary>Decode a batch launch token or a synchronous ordered result for the actual send.</summary>
     public static DropboxReply<(AcceptedJob? Accepted, JobReply Reply)> Submit(PairConfig pair, string route,
-        IReadOnlyList<JobMember> launch) => Of<(AcceptedJob?, JobReply)>(Batch(route, launch.Count), root =>
+        IReadOnlyList<JobMember> launch) => Of(Batch(route, launch.Count), root => Submit(root, pair, route, launch));
+
+    /// <summary>Interpret an already validated submit body using the same rules as the streaming decoder.</summary>
+    public static (AcceptedJob? Accepted, JobReply Reply) Submit(JsonElement root, PairConfig pair, string route,
+        IReadOnlyList<JobMember> launch)
     {
+        if (route is not (Create or Move or Delete or Upload)) throw new ArgumentOutOfRangeException(nameof(route));
         var tag = Tag(root);
         if (route != Upload && tag == "async_job_id")
             return (new AcceptedJob(pair.PairId, route, NonEmpty(root, "async_job_id"), launch.ToArray()), new JobReply.Running());
         if (route == Upload ? tag is not null : tag != "complete") throw new JsonException();
         return (null, Terminal(root, pair, route, launch));
-    });
+    }
 
     /// <summary>Decode a check of an already accepted job against its saved selection and configured root.</summary>
     public static DropboxReply<JobReply> Job(PairConfig pair, AcceptedJob job) =>
@@ -194,8 +199,8 @@ public static class DropboxReplyShapes
     {
         try
         {
-            var metadata = Field(member, route == Move ? "success" : "metadata");
-            var tag = Tag(route == Upload ? metadata : member);
+            var metadata = route == Upload ? member : Field(member, route == Move ? "success" : "metadata");
+            var tag = Tag(member);
             if (tag == "failure") return Refusal(Field(member, "failure"), route, selected);
             if (tag != "success" || pair is null) return Unknown;
             var entry = route == Upload ? DropboxEntries.RequireLive(metadata, pair, null, "success") :

@@ -23,6 +23,9 @@ public static class DropboxReplyShapesChecks
         var (noToken, reply) = await Read(complete, DropboxReplyShapes.Submit(pair, create, launch));
         var members = ((JobReply.Terminal)reply).Members;
         Check.Require(noToken is null && members[0].Entry?.Path == "Child" && members[1].Failure == FailureDisposition.UnknownEffect, "Immediate result keeps actual spelling and isolates malformed member");
+        using var raw = System.Text.Json.JsonDocument.Parse(complete);
+        var direct = DropboxReplyShapes.Submit(raw.RootElement, pair, create, launch);
+        Check.Require(((JobReply.Terminal)direct.Reply).Members.SequenceEqual(members), "Raw submit and streaming submit disagree");
         var job = accepted!;
         var polled = (JobReply.Terminal)await Read(complete, DropboxReplyShapes.Job(pair, job));
         Check.Require(polled.Members.SequenceEqual(members), "Polling shares terminal attribution");
