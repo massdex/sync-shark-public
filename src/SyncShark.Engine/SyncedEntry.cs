@@ -6,8 +6,12 @@ namespace Massdex.SyncShark.Engine;
 /// DropboxKey = PathNames.DropboxKey(DropboxPath). They differ only for keep-both copies (D16).</summary>
 public sealed record SyncedEntry(string LocalKey, string LocalPath, string DropboxKey, string DropboxPath,
     bool IsFolder, string LocalId, long LocalSize, long LocalModifiedTicks, string DropboxId,
-    string DropboxContentHash, JournalPosition? LocalPublication = null)
+    string DropboxContentHash)
 {
+    /// <summary>Read with this binding from the saved PC publication columns, not from a serialized copy.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public JournalPosition? LocalPublished { get; init; }
+
     /// <summary>The stored path on a side; any non-local side selects the Dropbox path.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public string PathOn(Side side) => side == Side.Local ? LocalPath : DropboxPath;

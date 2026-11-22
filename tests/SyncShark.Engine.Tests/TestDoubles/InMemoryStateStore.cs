@@ -94,7 +94,7 @@ public sealed class InMemoryStateStore : IStore
         ct.ThrowIfCancellationRequested();
         Requests.Count(nameof(CommitAsync));
         if (before != null && !Records.Remove((pairId, before.LocalKey))) throw new InvalidDataException("Missing previous binding");
-        if (after != null) Records[(pairId, after.LocalKey)] = after with { LocalPublication = publication };
+        if (after != null) Records[(pairId, after.LocalKey)] = after with { LocalPublished = publication };
         if (spentDeletedKey!=null) spentDeleted[(pairId,spentDeletedKey)]=true;
         return Task.CompletedTask;
     }
@@ -299,11 +299,12 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested();var observed=scan.Where(x=>x.Key.Pair==pairId && x.Key.Scan==scanId).Select(x=>(x.Key.Side,Entry:x.Value));
         var sides=Records.Where(x=>x.Key.Pair==pairId).SelectMany(x=>new[]{(Side:Side.Local,Saved:x.Value),(Side:Side.Dropbox,Saved:x.Value)});
-        var present=observed.Select(x=>(x.Side,x.Entry.Id,x.Entry.IsFolder,x.Entry.Path)).ToHashSet();
-        var matched=sides.Select(x=>(x.Side,Id:x.Saved.IdOn(x.Side),x.Saved.IsFolder,Path:x.Saved.PathOn(x.Side))).Where(present.Contains).ToHashSet();
-        var bindings=sides.Where(x=>!matched.Contains((x.Side,x.Saved.IdOn(x.Side),x.Saved.IsFolder,x.Saved.PathOn(x.Side))))
+        var matched=sides.Where(x=>scan.TryGetValue((pairId,scanId,x.Side,x.Saved.KeyOn(x.Side)),out var entry) &&
+                entry.Id==x.Saved.IdOn(x.Side) && entry.IsFolder==x.Saved.IsFolder && entry.Path==x.Saved.PathOn(x.Side))
+            .Select(x=>(x.Side,x.Saved.KeyOn(x.Side))).ToHashSet();
+        var bindings=sides.Where(x=>!matched.Contains((x.Side,x.Saved.KeyOn(x.Side))))
             .ToLookup(x=>(x.Side,x.Saved.IdOn(x.Side),x.Saved.IsFolder),x=>x.Saved);
-        var candidates=from row in observed where row.Entry.Id.Length!=0 && !matched.Contains((row.Side,row.Entry.Id,row.Entry.IsFolder,row.Entry.Path))
+        var candidates=from row in observed where row.Entry.Id.Length!=0 && !matched.Contains((row.Side,PathNames.KeyFor(row.Side,row.Entry.Path)))
                        from saved in bindings[(row.Side,row.Entry.Id,row.Entry.IsFolder)]
                        where (scope==null || PathNames.IsSelfOrUnder(saved.LocalPath,scope.LocalPath) || PathNames.IsSelfOrUnder(saved.DropboxPath,scope.DropboxPath) || PathNames.IsSelfOrUnder(row.Entry.Path,row.Side==Side.Local?scope.LocalPath:scope.DropboxPath))
                        select new RenameCandidate(row.Side,row.Entry,saved);

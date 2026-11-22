@@ -95,9 +95,10 @@ public static class PathScopeChecks
         var rows=new List<Row>();await foreach(var row in store.CompareAsync(pair.PairId,second,null,(_,_) => (true,false),default)) rows.Add(row.Row);
         Check.Require(rows.Count==1 && rows[0].Local?.Path=="second","Clearing one acquisition changed another acquisition");
         var pc=Scenarios.ItemChecks.File(Side.Local,"old",1,"pc-id");var db=Scenarios.ItemChecks.File(Side.Dropbox,"original",1,"db-id");
-        var boundary=new JournalPosition(3,17);var binding=SyncedEntries.From(pc,db) with { LocalPublication=boundary };
-        await store.CommitAsync(pair.PairId,null,binding with { LocalPublication=null },boundary,null,default);
-        Check.Require((await store.FindAsync(pair.PairId,Side.Local,binding.LocalKey,default))?.LocalPublication==boundary,"Binding lost its publication boundary");
+        var boundary=new JournalPosition(3,17);var binding=SyncedEntries.From(pc,db) with { LocalPublished=boundary };
+        await store.CommitAsync(pair.PairId,null,binding with { LocalPublished=null },boundary,null,default);
+        Check.Require((await store.FindAsync(pair.PairId,Side.Local,binding.LocalKey,default))?.LocalPublished==boundary,"Binding lost its publication boundary");
+        Check.Require(SyncedEntries.Relink(binding,pc,db).LocalPublished==boundary && SyncedEntries.Relink(binding,pc with {Id="replacement"},db).LocalPublished==null,"Publication proof crossed PC identities");
         static async IAsyncEnumerable<Listed> Moved(Entry entry) { await Task.CompletedTask; yield return new Listed(entry.Path,entry); }
         await store.AddScanAsync(pair.PairId,second,Side.Local,Moved(pc with {Path="z/file"}),null,default);
         await store.AddScanAsync(pair.PairId,second,Side.Dropbox,Moved(db with {Path="a/file"}),null,default);

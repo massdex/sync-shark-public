@@ -29,6 +29,7 @@ public static class SyncedEntries
     public static SyncedEntry Relink(SyncedEntry synced, Entry local, Entry dropbox) => synced with
     {
         LocalPath = local.Path, LocalKey = PathNames.Key(local.Path), LocalId = local.Id,
+        LocalPublished = local.Id == synced.LocalId ? synced.LocalPublished : null,
         DropboxPath = dropbox.Path, DropboxKey = PathNames.DropboxKey(dropbox.Path), DropboxId = dropbox.Id
     };
 }
