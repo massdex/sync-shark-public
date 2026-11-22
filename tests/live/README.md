@@ -116,17 +116,18 @@ production bin.
 
 ## Live-arm map
 
-The plan's A-table assigns some arms to CI, some to this live driver and some to separately
-assigned staging/manual arms. This driver implements the arms that need live observation of true
-sync, the log view or the bin; the rest are proved by the offline CI cases or the approved
-staging/manual arms, with no new rehearsal added:
+The plan's A-table (its Live column) assigns live proof of each arm. This driver implements the
+live arms that need live observation of true sync, the log view or the bin. The remaining live arms
+are proved by the plan's separately assigned staging/manual arms; the offline CI cases cover the
+synthetic and decision parts only. No new rehearsal is added.
 
 - **This driver:** A02, A05, A07, A10, A11, A18, A19, A21, A26, A27, A28, A39, A44, A47, A48,
   A49, A50.
-- **Offline CI (scenario/case register):** A01, A03, A04, A06, A08, A09, A13, A14, A15, A22, A23,
-  A24, A29, A30, A32, A34, A35, A40, A41, A42, A46.
-- **Separately assigned staging/manual arms:** A17, A31, A33, A36-A38, A43, A45, and the
-  forced/large LIVE-01/02 arms.
+- **Separately assigned staging/manual arms (plan Live column, not this driver):** A01, A03, A04,
+  A06, A08, A09, A13, A14, A15, A17, A22, A23, A24, A29, A30, A31, A32, A34, A40, A41, A42, A43,
+  A45, A46, A33, A36-A38, and the forced/large LIVE-01/02 arms.
+- **Offline CI:** the synthetic and decision parts of every arm (for example A35 and A42's synthetic
+  cases), never the live observation itself.
 
 ## Result status and exit code
 
