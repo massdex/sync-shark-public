@@ -10,6 +10,6 @@ public static class AutoSync
     /// <summary>Pass each received feed footprint to Unfinished, independently of admission. Admits journal or feed input through the pair queue and settles one acquired page, including an empty page, without waiting for another source read. Save only Dropbox cursors here; give the queue local.SettleJournalAsync for PC pages so the per-volume reader saves the shared settled PC boundary.</summary>
     public static Task ApplyPageAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, WorkQueue queue, Side source, ChangePage page, ISide local, ISide dropbox, IStore store, CancellationToken ct) => throw new NotImplementedException();
 
-    /// <summary>ReadThroughAsync for the selected AutoSync operation.</summary>
-    public static Task ReadThroughAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, WorkQueue queue, ISide local, ISide dropbox, IStore store, (JournalPosition? Local,string? Dropbox) captured, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Signal attempted after finite reads and available attempts, before draining; this does not certify settlement.</summary>
+    public static Task ReadThroughAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, WorkQueue queue, ISide local, ISide dropbox, IStore store, (JournalPosition? Local,string? Dropbox) captured, Action attempted, CancellationToken ct) => throw new NotImplementedException();
 }

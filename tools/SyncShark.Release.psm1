@@ -167,281 +167,7 @@ function Resolve-SyncSharkDataRoot([string]$InstallationRoot, [switch]$AllowMiss
 
 function Resolve-SyncSharkRuntimeRoot([string]$Version,[string]$TestProductRoot='') {
     if($Version -cnotmatch '^\d+\.\d+\.\d+$'){throw 'An exact runtime version is required.'}
-    if($TestProductRoot){return Join-Path (Resolve-SyncSharkProductRoot $TestProductRoot) ('versions\'+$Version)}
-    Join-Path 'C:\Program Files\Massdex\SyncShark\versions' $Version
-}
-
-function Assert-SyncSharkProtectedRuntime([string]$Runtime) {
-    $path=Get-SyncSharkNormalizedPath $Runtime
-    if($path -ine (Resolve-SyncSharkRuntimeRoot ([IO.Path]::GetFileName($path)))){throw 'Protected runtime path changed.'}
-    $trusted=@('S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
-    function ProtectedAcl([string]$Item,[bool]$VolumeRoot=$false) {
-        $entry=Get-Item -LiteralPath $Item -Force
-        if(($entry.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Offline)) -ne 0){throw 'Protected code contains a reparse or offline item.'}
-        $acl=Get-Acl -LiteralPath $Item
-        if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trusted){throw 'Protected code has an ordinary-user owner.'}
-        $mask=0x500d0116L;if($entry.PSIsContainer){$mask=0x500d0156L};if($VolumeRoot){$mask=0x500d0040L}
-        foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
-            if($rule.AccessControlType -eq 'Allow' -and ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and
-                ([long]$rule.FileSystemRights -band $mask) -ne 0 -and $rule.IdentityReference.Value -notin $trusted){throw 'Protected code permits ordinary-user replacement.'}
-        }
-    }
-    for($directory=[IO.DirectoryInfo]$path;$null -ne $directory;$directory=$directory.Parent){ProtectedAcl $directory.FullName ($null -eq $directory.Parent)}
-    Assert-SyncSharkOrdinaryTree $path
-    foreach($item in Get-ChildItem -LiteralPath $path -Recurse -Force){ProtectedAcl $item.FullName}
-}
-
-function Invoke-SyncSharkRollbackReadiness {
-    param([string]$Active,[string]$Target,[scriptblock]$AssertPackage)
-    Assert-SyncSharkJunction $Active $Target
-    Assert-SyncSharkProtectedRuntime $Target
-    & $AssertPackage $Target
-    $check = Start-Process -FilePath (Join-Path $Target 'SyncShark.exe') -ArgumentList '--check-rollback-ready' -WindowStyle Hidden -PassThru
-    try {
-        if (-not $check.WaitForExit(30000)) { $check.Kill(); $check.WaitForExit(5000) | Out-Null; throw 'Rollback readiness did not complete. No state was changed.' }
-        if ($check.ExitCode -ne 0) { throw 'Prepare for Removal and safely Exit before rollback. Managed storage or Explorer registration remains.' }
-    }
-    finally { $check.Dispose() }
-}
-
-function Invoke-SyncSharkProtectedRuntime {
-    param([string]$SourceRuntime,[ValidateSet('RuntimeInstall','RuntimeRemove','RuntimeRollback')][string]$Operation,[switch]$RestoringUninstall)
-    $source=Get-SyncSharkNormalizedPath $SourceRuntime;$version=[IO.Path]::GetFileName($source)
-    $root=Resolve-SyncSharkProductRoot ''
-    if($version -cnotmatch '^\d+\.\d+\.\d+$' -or $source -ine (Join-Path $root ('versions\'+$version))){throw 'The protected setup source is not the exact retained version.'}
-    Assert-SyncSharkOrdinaryTree $source
-    if($Operation -ceq 'RuntimeInstall') {
-        $revision=[Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $source 'SyncShark.exe')).ProductVersion
-        if($revision -cnotmatch ('^'+[regex]::Escape($version)+'\+([0-9a-f]{40})$')){throw 'Frozen runtime revision required.'}
-        $retained=Join-Path $root ('replacement-staging\transactions\'+$version+'-'+$Matches[1].Substring(0,7)+'\Install-SyncShark.ps1')
-        $update=Read-SyncSharkUpdaterRelease $retained $revision
-        if($null -ne $update) {
-            $fixedWorker='C:\Program Files\Massdex\SyncShark\SyncSharkUpdater.exe'
-            $service=New-Object -ComObject 'Schedule.Service';$folder=$null;$task=$null
-            try {
-                $service.Connect();$folder=$service.GetFolder('\')
-                try {$task=$folder.GetTask('SyncSharkUpdater')} catch {
-                    $failure=$_.Exception;while($failure.InnerException){$failure=$failure.InnerException}
-                    if($failure.HResult -ne -2147024894){throw}
-                }
-                $route=Get-SyncSharkUpdaterInvocationRoute $task $update $fixedWorker $RestoringUninstall.IsPresent
-                if($route -ceq 'routine') {
-                    Invoke-SyncSharkUnattendedRuntime $source $retained $update $task
-                    return
-                }
-                # First enrollment or an exact partial enrollment reaches the
-                # attended repair boundary. A failed routine invocation never
-                # falls back to elevation. Protected setup revalidates all bytes.
-            } finally {
-                foreach($com in @($task,$folder,$service)){if($null -ne $com){[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com)}}
-            }
-        }
-    }
-    $helper=Join-Path $source 'SyncSharkDiscovery.exe'
-    $held=[IO.File]::Open($helper,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-    try {
-        $publisher=(Get-SyncSharkSignerIdentity).roles.publisher
-        Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $helper) `
-            @($publisher.thumbprints) $publisher.subject $publisher.subject `
-            @($publisher.spki)
-        # This is the per-user bootstrap copy, not the protected destination.
-        # Staging moves retain an owner-only ACL; Windows consent must be able
-        # to read its embedded icon before the elevated helper is started.
-        # Use the existing public-runtime-only SYSTEM RX boundary for every
-        # install/remove/rollback caller; never broaden private state access.
-        Set-SyncSharkRuntimeSystemReadAccess $source
-        # The helper authenticates the fixed retained signed installer as data;
-        # no caller-supplied path/script/hash can authorize an elevated effect.
-        $process=Start-Process -FilePath $helper -ArgumentList @($Operation,[string]$PID) -Verb RunAs -WindowStyle Hidden -PassThru
-        try {
-            if(-not $process.WaitForExit(240000)){throw 'Protected setup has not completed. Preserve its exact state; do not replay an unresolved operation.'}
-            if($process.ExitCode -ne 0){throw ('Protected setup failed with code 0x'+$process.ExitCode.ToString('X8')+'. Existing state is retained for recovery.')}
-        } finally {$process.Dispose()}
-    } finally {$held.Dispose()}
-}
-
-function Get-SyncSharkUpdaterInvocationRoute([object]$Task,[object]$Contract,[string]$Worker,[bool]$RestoringUninstall=$false) {
-    if($Worker -ine 'C:\Program Files\Massdex\SyncShark\SyncSharkUpdater.exe'){throw 'Unexpected fixed updater path.'}
-    $present=Test-Path -LiteralPath $Worker
-    if($null -ne $Task){Assert-SyncSharkUpdaterTaskForInvocation $Task ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)}
-    if($present) {
-        $item=Get-Item -LiteralPath $Worker -Force
-        if($item.PSIsContainer -or ($item.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Offline)) -or
-            $item.Length -ne $Contract.protectedUpdater.workerBytes -or (Get-SyncSharkSha256 $Worker) -cne $Contract.protectedUpdater.workerSha256){throw 'Foreign updater bytes cannot request repair.'}
-        $publisher=(Get-SyncSharkSignerIdentity).roles.publisher
-        Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $Worker) `
-            @($publisher.thumbprints) $publisher.subject $publisher.subject `
-            @($publisher.spki)
-    }
-    $journal='C:\Program Files\Massdex\SyncShark\discovery-setup.json'
-    $enrollment=$false
-    foreach($record in @($journal,($journal+'.new'))) {
-        if(-not (Test-Path -LiteralPath $record)){continue}
-        $item=Get-Item -LiteralPath $record -Force
-        if($item.PSIsContainer -or ($item.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Offline)) -or $item.Length -gt 65536){throw 'Invalid protected lifecycle journal.'}
-        $state=Get-Content -LiteralPath $record -Raw|ConvertFrom-Json
-        # Routing only: the signed attended helper independently validates the
-        # closed journal identity, exact hashes, source and current transaction.
-        $enrollment=$enrollment -or $state.Mode -ceq 'EnrollUpdater'
-    }
-    # Undo is an existing attended operation, not a new install transaction.
-    # Its switch selects the route only: protected setup still verifies the
-    # exact uninstall journal, retained runtime and held inactive pointer.
-    if($null -ne $Task -and $present -and -not $enrollment -and -not $RestoringUninstall){return 'routine'}
-    return 'attended'
-}
-
-function Read-SyncSharkUpdaterRelease([string]$Installer,[string]$ProductVersion) {
-    if((Get-Item -LiteralPath $Installer).Length -gt 1MB){throw 'Oversized signed updater contract.'}
-    $publisher=(Get-SyncSharkSignerIdentity).roles.publisher
-    Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $Installer) `
-        @($publisher.thumbprints) $publisher.subject $publisher.subject `
-        @($publisher.spki)
-    $header=Get-Content -LiteralPath $Installer -TotalCount 1
-    $prefix='# SyncSharkUpdateContract: '
-    if(-not $header.StartsWith($prefix,[StringComparison]::Ordinal) -or $header.Length -gt 16384){throw 'Missing signed updater contract.'}
-    $contract=$header.Substring($prefix.Length)|ConvertFrom-Json -Depth 12
-    if($contract.product -cne 'Massdex.SyncShark' -or ($contract.version+'+'+$contract.sourceRevision) -cne $ProductVersion){throw 'Signed updater release identity changed.'}
-    if($null -eq $contract.PSObject.Properties['protectedUpdater']){return $null}
-    $update=$contract.protectedUpdater
-    if($update.schemaVersion -ne 1 -or $update.userSid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -or
-        $update.workerSha256 -cnotmatch '^[0-9a-f]{64}$' -or $update.workerBytes -lt 1 -or $update.workerBytes -gt 16MB -or
-        $update.previousTreeSha256 -cnotmatch '^[0-9a-f]{64}$'){throw 'Invalid signed updater bindings.'}
-    return $contract
-}
-
-function Assert-SyncSharkUpdaterTaskForInvocation([object]$Task,[string]$UserSid) {
-    # Caller-side checks prevent invoking a foreign task. The protected worker
-    # independently validates its full policy, ACL and contract before any effect.
-    $text=[string]$Task.Xml
-    if($text.Length -gt 32768){throw 'Oversized updater task.'}
-    $settings=[Xml.XmlReaderSettings]::new();$settings.DtdProcessing=[Xml.DtdProcessing]::Prohibit;$settings.XmlResolver=$null
-    $reader=[Xml.XmlReader]::Create([IO.StringReader]::new($text),$settings)
-    try {$xml=[Xml.XmlDocument]::new();$xml.XmlResolver=$null;$xml.PreserveWhitespace=$true;$xml.Load($reader)}finally{$reader.Dispose()}
-    $ns=[Xml.XmlNamespaceManager]::new($xml.NameTable);$ns.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
-    function Value([string]$XPath) {
-        $nodes=$xml.SelectNodes($XPath,$ns)
-        if($nodes.Count -ne 1 -or $nodes[0].SelectNodes('*').Count){throw 'Ambiguous updater task value.'}
-        $nodes[0].InnerText
-    }
-    $principal=Value '/t:Task/t:Principals/t:Principal/t:UserId'
-    if($principal -notlike 'S-1-*'){$principal=([Security.Principal.NTAccount]::new($principal)).Translate([Security.Principal.SecurityIdentifier]).Value}
-    if($principal -cne $UserSid -or (Value '/t:Task/t:Principals/t:Principal/t:LogonType') -cne 'InteractiveToken' -or
-        (Value '/t:Task/t:Principals/t:Principal/t:RunLevel') -cne 'HighestAvailable' -or
-        $xml.SelectNodes('/t:Task/t:Actions/*',$ns).Count -ne 1 -or
-        (Value '/t:Task/t:Actions/t:Exec/t:Command') -ine 'C:\Program Files\Massdex\SyncShark\SyncSharkUpdater.exe' -or
-        (Value '/t:Task/t:Actions/t:Exec/t:WorkingDirectory') -ine 'C:\Program Files\Massdex\SyncShark' -or
-        $xml.SelectNodes('/t:Task/t:Actions/t:Exec/t:Arguments[string-length(.) != 0]',$ns).Count -ne 0 -or
-        $xml.SelectNodes('/t:Task/t:Triggers/*',$ns).Count -ne 0 -or (Value '/t:Task/t:Settings/t:Enabled') -cne 'true'){
-        throw 'Updater task identity, arguments or availability changed.'
-    }
-    $security=[Security.AccessControl.RawSecurityDescriptor]::new([string]$Task.GetSecurityDescriptor(7))
-    if($security.Owner.Value -cne 'S-1-5-32-544' -or $security.Group.Value -cne 'S-1-5-32-544' -or
-        ($security.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -eq 0 -or
-        $security.DiscretionaryAcl.Count -ne 3){throw 'Updater task protection changed.'}
-    $seen=@{}
-    foreach($ace in $security.DiscretionaryAcl) {
-        $sid=$ace.SecurityIdentifier.Value
-        if($seen.ContainsKey($sid) -or $ace.AceQualifier -ne 'AccessAllowed' -or $ace.AceFlags -ne 'None' -or $ace.IsCallback){throw 'Unexpected updater task permission.'}
-        $seen[$sid]=$true
-        if($sid -cin @('S-1-5-18','S-1-5-32-544')){if($ace.AccessMask -notin @(268435456,2032127)){throw 'Administrative updater task permission changed.'}}
-        elseif($sid -cne $UserSid -or $ace.AccessMask -notin @(-1610612736,1179817)){throw 'Updater task is not user read/execute only.'}
-    }
-}
-
-function Write-SyncSharkPendingSelector([string]$Pending,[string]$Selector) {
-    if([IO.Path]::GetFileName($Pending) -cne 'pending-update.json'){throw 'Unexpected pending selector destination.'}
-    Assert-SyncSharkOrdinaryTree (Split-Path $Pending -Parent) -RootOnly
-    $bytes=[Text.UTF8Encoding]::new($false,$true).GetBytes($Selector)
-    if($bytes.Length -lt 1 -or $bytes.Length -gt 1024){throw 'Invalid pending selector length.'}
-    $temporary=$Pending+'.new'
-    $matches=@{}
-    foreach($path in @($Pending,$temporary)) {
-        $matches[$path]=$false
-        if(Test-Path -LiteralPath $path) {
-            $item=Get-Item -LiteralPath $path -Force
-            if($item.PSIsContainer -or ($item.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Offline))){throw 'Unsafe pending selector object; preserved.'}
-            $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-            try {
-                if($stream.Length -gt 1024){throw 'Oversized pending selector; preserved.'}
-                $actual=[byte[]]::new([int]$stream.Length);$offset=0
-                while($offset -lt $actual.Length){$read=$stream.Read($actual,$offset,$actual.Length-$offset);if($read -eq 0){throw 'Pending selector truncated.'};$offset+=$read}
-                $matches[$path]=[Convert]::ToBase64String($actual) -ceq [Convert]::ToBase64String($bytes)
-            }finally{$stream.Dispose()}
-        }
-    }
-    $staged=Test-Path -LiteralPath $temporary
-    if($staged -and -not $matches[$temporary]){throw 'Pending selector staging differs from this exact request; preserved.'}
-    if($matches[$Pending]) {
-        if($staged){[IO.File]::Delete($temporary)}
-        return
-    }
-    if(-not $staged) {
-        $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-        try {$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
-    }
-    if(Test-Path -LiteralPath $Pending){[IO.File]::Replace($temporary,$Pending,[NullString]::Value)}else{[IO.File]::Move($temporary,$Pending)}
-}
-
-function Invoke-SyncSharkUnattendedRuntime([string]$Source,[string]$Installer,[object]$Contract,[object]$Task) {
-    $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-    if(([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
-        throw 'The user installation transaction must remain unelevated.'
-    }
-    $root=Resolve-SyncSharkProductRoot '';$worker='C:\Program Files\Massdex\SyncShark\SyncSharkUpdater.exe'
-    Assert-SyncSharkProtectedRuntime (Resolve-SyncSharkRuntimeRoot $Contract.previousVersion.Split('+')[0])
-    Assert-SyncSharkUpdaterTaskForInvocation $Task $identity.User.Value
-    $held=[IO.File]::Open($worker,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-    $running=$null
-    try {
-        if($held.Length -ne $Contract.protectedUpdater.workerBytes -or (Get-SyncSharkSha256 $worker) -cne $Contract.protectedUpdater.workerSha256){throw 'Accepted updater executable changed.'}
-        $publisher=(Get-SyncSharkSignerIdentity).roles.publisher
-        Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $worker) `
-            @($publisher.thumbprints) $publisher.subject $publisher.subject `
-            @($publisher.spki)
-        $instances=$Task.GetInstances(0)
-        try {if($instances.Count -ne 0){throw 'The updater is already running. Preserve the current transaction; do not replay it.'}}
-        finally{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($instances)}
-        $pending=Join-Path $root 'replacement-staging\pending-update.json'
-        Assert-SyncSharkOrdinaryTree (Split-Path $pending -Parent) -RootOnly
-        if(Test-Path -LiteralPath $pending){$item=Get-Item -LiteralPath $pending -Force;if($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Invalid pending update selector.'}}
-        $selector=[ordered]@{schemaVersion=1;version=$Contract.version;sourceRevision=$Contract.sourceRevision;installerSha256=(Get-SyncSharkSha256 $Installer)}|ConvertTo-Json -Compress
-        Write-SyncSharkPendingSelector $pending $selector
-        Assert-SyncSharkUpdaterTaskForInvocation $Task $identity.User.Value
-        $start=[DateTime]::Now;$running=$Task.Run($null)
-        $instance=[string]$running.InstanceGuid
-        if(-not $instance){throw 'The fixed updater returned no invocation identity; do not replay.'}
-        $deadline=[DateTime]::UtcNow.AddMinutes(11)
-        while($true) {
-            $instances=$Task.GetInstances(0);$active=$false
-            try {foreach($item in $instances){try {if([string]$item.InstanceGuid -ceq $instance){$active=$true}}finally{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($item)}}}
-            finally{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($instances)}
-            if(-not $active){break}
-            if([DateTime]::UtcNow -ge $deadline){throw 'Protected publication is still unresolved. It was not stopped or retried; keep the transaction for reconciliation.'}
-            Start-Sleep -Milliseconds 250
-        }
-        if($Task.LastRunTime -lt $start.AddSeconds(-1) -or $Task.LastTaskResult -ne 0){throw ('Protected publication failed or has no correlated result: '+$Task.LastTaskResult+'. No user-state switch was performed.')}
-        Assert-SyncSharkUpdaterTaskForInvocation $Task $identity.User.Value
-        $target=Resolve-SyncSharkRuntimeRoot $Contract.version
-        Assert-SyncSharkProtectedRuntime $target;Assert-SyncSharkTreeMatch $Source $target
-        $receiptPath='C:\Program Files\Massdex\SyncShark\updater-publication.json'
-        $receiptItem=Get-Item -LiteralPath $receiptPath -Force
-        if($receiptItem.Length -gt 4096 -or ($receiptItem.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Invalid protected publication readback.'}
-        $receipt=Get-Content -LiteralPath $receiptPath -Raw|ConvertFrom-Json -Depth 5
-        if($receipt.schemaVersion -ne 1 -or $receipt.product -cne 'Massdex.SyncShark' -or
-            $receipt.version -cne ($Contract.version+'+'+$Contract.sourceRevision) -or
-            $receipt.installerSha256 -cne (Get-SyncSharkSha256 $Installer) -or
-            $receipt.previousTreeSha256 -cne $Contract.protectedUpdater.previousTreeSha256 -or
-            $receipt.publishedTreeSha256 -cne (Get-SyncSharkTreeIdentity $target)){throw 'Publication evidence does not match the authenticated release.'}
-        if($Contract.protectedUpdater.discovery.enabled) {
-            foreach($entry in @(@('SyncSharkDiscovery.exe','afterWorkerSha256'),@('discovery-manifest.json','afterManifestSha256'))){
-                if((Get-SyncSharkSha256 (Join-Path 'C:\Program Files\Massdex\SyncShark' $entry[0])) -cne $Contract.protectedUpdater.discovery.($entry[1])){throw 'Discovery publication differs from its signed postimage.'}
-            }
-        }
-    } finally {
-        if($null -ne $running){[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($running)}
-        $held.Dispose()
-    }
+    Join-Path (Resolve-SyncSharkProductRoot $TestProductRoot) ('versions/'+$Version)
 }
 
 function Read-SyncSharkJournal([string]$Path, [string]$Operation, [string]$Version,
@@ -664,31 +390,6 @@ function Invoke-SyncSharkJournalStep([object]$Journal, [string]$JournalPath, [st
     Invoke-SyncSharkCrashPoint "$Step-after-journal" $CrashAfter
 }
 
-function Assert-SyncSharkExplorerReplacement {
-    param([object[]]$Existing,[string]$Runtime,[string]$ExpectedPreviousRuntime='')
-    $version=[IO.Path]::GetFileName($Runtime)
-    if($Existing.Count -gt 1 -or @($Existing | Where-Object {[string]$_.Version -ceq ($version+'.0')}).Count) {
-        throw 'The existing package at this version failed exact identity verification. Nothing was changed.'
-    }
-    if(@($Existing | Where-Object {$_.Publisher -cne 'CN=Massdex Sync Shark Code Signing v1, O=Massdex'}).Count) {
-        throw 'Another publisher owns the Explorer package identity. Nothing was changed.'
-    }
-    if($Existing.Count -eq 1) {
-        if(-not $ExpectedPreviousRuntime){throw 'An existing Explorer version requires the exact signed installer predecessor. Nothing was changed.'}
-        $previous=Get-SyncSharkNormalizedPath $ExpectedPreviousRuntime
-        $previousVersion=[IO.Path]::GetFileName($previous)
-        if($previousVersion -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
-            $previous -ine (Resolve-SyncSharkRuntimeRoot $previousVersion) -or $previous -ieq $Runtime -or
-            [string]$Existing[0].Version -cne ($previousVersion+'.0')) {
-            throw 'The existing Explorer package is not the exact admitted predecessor. Nothing was changed.'
-        }
-        # This read-only installed verifier checks the real WinRT external root,
-        # publisher, protected payload and package bytes before Add-AppxPackage.
-        Invoke-SyncSharkExplorerPackage $previous Verify
-    }
-}
-
-# The installed application's own state\instance.lock is the release transaction's
 # native exclusion object. The application holds it ReadWrite/ShareNone while it
 # runs, so a maintenance read lease both proves that no application instance is
 # live and refuses every later application start for the whole transaction. Read
@@ -871,102 +572,6 @@ function Invoke-SyncSharkAppRegistration {
         if ($null -ne $link -and [Runtime.InteropServices.Marshal]::IsComObject($link)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
         if ([Runtime.InteropServices.Marshal]::IsComObject($shell)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
     }
-}
-
-function Invoke-SyncSharkExplorerPackage {
-    param([string]$Runtime,[ValidateSet('Register','Remove','Verify','VerifyAbsent')][string]$Operation,
-        [switch]$ImmediatePredecessor,[string]$ExpectedPreviousRuntime='')
-    $root=Resolve-SyncSharkProductRoot ''
-    $path=Get-SyncSharkNormalizedPath $Runtime
-    $version=[IO.Path]::GetFileName($path)
-    if($version -cnotmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $path -ine (Resolve-SyncSharkRuntimeRoot $version)) {
-        throw 'Explorer lifecycle requires one exact installed product runtime.'
-    }
-    Assert-SyncSharkOrdinaryTree $path
-    Assert-SyncSharkProtectedRuntime $path
-    # Only the exact frozen predecessor may retain the old executable signer.
-    # The MSIX container role is separate and does not grant executable trust.
-    $coreRole=(Get-SyncSharkSignerIdentity).roles.publisher
-    $coreThumb=@($coreRole.thumbprints)
-    $coreSubject=$coreRole.subject
-    if($ImmediatePredecessor) {
-        throw 'The writable transition predecessor must not regain packaged COM registration.'
-    }
-    if($Operation -in @('Register','Remove')) {Assert-SyncSharkJunction (Join-Path $root 'active') $path}
-    if($Operation -eq 'Register') {
-        # Updating from the packaged app itself pins its old package in use.
-        # Reconcile an already-completed effect first, otherwise let Windows'
-        # existing per-user deployment cmdlet run from this un-packaged installer.
-        try { Invoke-SyncSharkExplorerPackage $path Verify -ImmediatePredecessor:$ImmediatePredecessor; return }
-        catch { } # A nonmatching registration must pass all input guards below.
-        if(@(Get-Process -Name SyncShark -ErrorAction SilentlyContinue).Count) {
-            throw 'Sync Shark must complete its safe Exit checkpoint before Explorer registration.'
-        }
-        # Reuse the live wrapper lease for this same resolved product root. A
-        # caller outside the maintenance wrapper keeps the exclusive lock; a
-        # reused lease is never disposed by this function.
-        $exclusion=Open-SyncSharkInstanceExclusion $root
-        $heldPackage=$null
-        $heldRuntime=$null
-        try {
-            $corePath=Join-Path $path 'SyncShark.Core.dll'
-            Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $corePath) `
-                $coreThumb $coreSubject $coreSubject `
-                @($coreRole.spki)
-            if(-not ('Massdex.SyncShark.PilotDirectoryLease' -as [type])) {Add-Type -Path $corePath}
-            $heldRuntime=[Massdex.SyncShark.PilotDirectoryLease]::OpenInstalledRuntime($path)
-            $packagePath=Join-Path $path 'SyncShark.msix'
-            $heldPackage=[IO.File]::Open($packagePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-            $packageRole=(Get-SyncSharkSignerIdentity).roles.package
-            Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $packagePath) `
-                @($packageRole.thumbprints) `
-                $packageRole.subject `
-                $packageRole.subject `
-                @($packageRole.spki)
-            $zip=[IO.Compression.ZipArchive]::new($heldPackage,[IO.Compression.ZipArchiveMode]::Read,$true)
-            try {
-                $entry=$zip.GetEntry('AppxManifest.xml')
-                if($null -eq $entry -or $entry.Length -gt 65536){throw 'Explorer package manifest is missing or oversized.'}
-                $xmlSettings=[Xml.XmlReaderSettings]::new()
-                $xmlSettings.DtdProcessing=[Xml.DtdProcessing]::Prohibit
-                $xmlSettings.XmlResolver=$null;$xmlSettings.MaxCharactersInDocument=65536
-                $input=$entry.Open();$reader=[Xml.XmlReader]::Create($input,$xmlSettings)
-                try {
-                    $document=[Xml.XmlDocument]::new();$document.XmlResolver=$null;$document.Load($reader)
-                    $identity=$document.DocumentElement.SelectSingleNode('*[local-name()="Identity"]')
-                    if($null -eq $identity -or $identity.GetAttribute('Name') -cne 'Massdex.SyncShark' -or
-                        $identity.GetAttribute('Publisher') -cne 'CN=Massdex Sync Shark Code Signing v1, O=Massdex' -or
-                        $identity.GetAttribute('Version') -cne ($version+'.0') -or
-                        $identity.GetAttribute('ProcessorArchitecture') -cne 'x64') {
-                        throw 'Explorer package identity does not match the exact installed product.'
-                    }
-                } finally {$reader.Dispose();$input.Dispose()}
-            } finally {$zip.Dispose()}
-            if($PSVersionTable.PSEdition -eq 'Core'){Import-Module Appx -UseWindowsPowerShell -WarningAction SilentlyContinue}
-            $existing=@(Get-AppxPackage -Name Massdex.SyncShark -ErrorAction Stop)
-            Assert-SyncSharkExplorerReplacement $existing $path $ExpectedPreviousRuntime
-            # No forced shutdown, deferred success, all-users, unsigned or trust option.
-            $heldRuntime.VerifyBinding()
-            Add-AppxPackage -Path $packagePath -ExternalLocation $path -ErrorAction Stop
-            $heldRuntime.VerifyBinding()
-        } finally {
-            if($null -ne $heldPackage){$heldPackage.Dispose()}
-            if($null -ne $heldRuntime){$heldRuntime.Dispose()}
-            if($exclusion.Owned){$exclusion.Stream.Dispose()}
-        }
-        Invoke-SyncSharkExplorerPackage $path Verify -ImmediatePredecessor:$ImmediatePredecessor
-        return
-    }
-    $argument=@{Register='--register-explorer-package';Remove='--remove-explorer-package';Verify='--check-explorer-package';VerifyAbsent='--check-no-explorer-package'}[$Operation]
-    $start=[Diagnostics.ProcessStartInfo]::new((Join-Path $path 'SyncShark.exe'))
-    $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardError=$true
-    [void]$start.ArgumentList.Add($argument)
-    $process=[Diagnostics.Process]::Start($start)
-    try {
-        $errors=$process.StandardError.ReadToEndAsync()
-        if(-not $process.WaitForExit(120000)) {throw 'Windows Explorer package operation did not finish; its state remains unverified. Do not switch the active version.'}
-        if($process.ExitCode -ne 0){throw ('Explorer package operation failed: '+$errors.GetAwaiter().GetResult().Trim())}
-    } finally {$process.Dispose()}
 }
 
 function Initialize-SyncSharkSignatureInspector {
@@ -1223,23 +828,12 @@ function Assert-SyncSharkSignatureObservation([object]$Observation, [string[]]$E
 }
 
 function Get-SyncSharkSignedMemberHashes([object]$Contract) {
-    $fields = [ordered]@{
-        signedCoreSha256 = 'SyncShark.Core.dll'
-        signedUiSha256 = 'SyncShark.dll'
-        signedExeSha256 = 'SyncShark.exe'
-        signedExplorerSha256 = 'SyncShark.Explorer.dll'
-        signedDiscoverySha256 = 'SyncSharkDiscovery.exe'
-        signedIdentityPackageSha256 = 'SyncShark.msix'
-    }
     $result = @{}
-    foreach ($field in $fields.Keys) {
-        $property = $Contract.PSObject.Properties[$field]
-        if ($null -eq $property -and $field -in @('signedExplorerSha256', 'signedDiscoverySha256', 'signedIdentityPackageSha256')) { continue }
-        if ($null -eq $property -or [string]$property.Value -cnotmatch '^[0-9a-f]{64}$') {
-            throw "The signed update contract has an invalid $field."
-        }
-        $result[$fields[$field]] = [string]$property.Value
+    foreach ($property in $Contract.signedMembers.PSObject.Properties) {
+        if ($property.Name -notmatch '^[^/\\:]+\.exe$' -or $property.Value -cnotmatch '^[0-9a-f]{64}$') { throw 'Invalid signed executable identity.' }
+        $result.Add($property.Name,[string]$property.Value)
     }
+    if ($result.Count -ne 2) { throw 'Expected a signed host and CLI.' }
     return $result
 }
 
@@ -1250,15 +844,9 @@ function Assert-SyncSharkExactPackage([string]$Root, [string]$ManifestPath, [str
     if ((Get-SyncSharkSha256 $ManifestPath) -cne $ExpectedManifestSha256) { throw 'Package manifest hash mismatch.' }
     Assert-SyncSharkOrdinaryTree $Root
     $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json -Depth 20
-    $versionedMembers = @('SyncShark.Core.dll', 'SyncShark.dll', 'SyncShark.exe')
-    $nativeMembers = @('SyncShark.Explorer.dll', 'SyncSharkDiscovery.exe', 'SyncShark.msix')
+    if ($SignedHashes.Count -ne 2) { throw 'Expected two executable pins.' }
     foreach ($name in $SignedHashes.Keys) {
-        if ($name -cnotin ($versionedMembers + $nativeMembers) -or $SignedHashes[$name] -cnotmatch '^[0-9a-f]{64}$') {
-            throw 'Unexpected signed member or invalid signed-member hash.'
-        }
-    }
-    foreach ($name in $versionedMembers) {
-        if (-not $SignedHashes.ContainsKey($name)) { throw "Missing signed-member identity: $name" }
+        if ($name -notmatch '^[^/\\:]+\.exe$' -or $SignedHashes[$name] -cnotmatch '^[0-9a-f]{64}$') { throw 'Invalid signed executable pin.' }
     }
     $expected = [ordered]@{}
     foreach ($member in $manifest.members) {
@@ -1268,11 +856,6 @@ function Assert-SyncSharkExactPackage([string]$Root, [string]$ManifestPath, [str
             throw 'The package manifest contains an invalid or duplicate member path.'
         }
         $expected[$path] = if ($SignedHashes.ContainsKey($path)) { $SignedHashes[$path] } else { [string]$member.sha256 }
-    }
-    foreach ($name in $nativeMembers) {
-        if ($expected.Contains($name) -and -not $SignedHashes.ContainsKey($name)) {
-            throw "The native component has no signed-member identity: $name"
-        }
     }
     foreach ($name in $SignedHashes.Keys) {
         if (-not $expected.Contains($name)) { throw "Signed component is absent from the manifest: $name" }
@@ -1292,23 +875,12 @@ function Assert-SyncSharkExactPackage([string]$Root, [string]$ManifestPath, [str
     }
     foreach ($name in $SignedHashes.Keys) {
         $path = Join-Path $Root $name
-        if ($name -cin $versionedMembers -and
+        if (
             [Diagnostics.FileVersionInfo]::GetVersionInfo($path).ProductVersion -cne $ExpectedVersion) {
             throw "Product version mismatch: $name"
         }
         $observation = if ($injected) { $injected.$name } else { Get-SyncSharkSignatureObservation $path }
-        if($name -ceq 'SyncShark.msix') {
-            # The existing package family is derived from this exact Publisher.
-            # Never let the executable signer or a shared public key substitute.
-            $packageRole=(Get-SyncSharkSignerIdentity).roles.package
-            Assert-SyncSharkSignatureObservation $observation `
-                @($packageRole.thumbprints) `
-                $packageRole.subject `
-                $packageRole.subject `
-                @($packageRole.spki)
-        } else {
-            Assert-SyncSharkSignatureObservation $observation $ExpectedThumbprint $ExpectedSubject $ExpectedIssuer $ExpectedSpkiSha256
-        }
+        Assert-SyncSharkSignatureObservation $observation $ExpectedThumbprint $ExpectedSubject $ExpectedIssuer $ExpectedSpkiSha256
     }
 }
 
@@ -1320,7 +892,5 @@ Export-ModuleMember -Function Get-SyncSharkSha256, Get-SyncSharkNormalizedPath,
     Get-SyncSharkAtomicReplacePolicy, Copy-SyncSharkTreeToStaging,
     Invoke-SyncSharkCrashPoint, Invoke-SyncSharkJournalStep, Get-SyncSharkSignatureObservation,
     Assert-SyncSharkSignatureObservation, Get-SyncSharkSignedMemberHashes, Assert-SyncSharkExactPackage,
-    Invoke-SyncSharkExplorerPackage, Set-SyncSharkRuntimeSystemReadAccess, Assert-SyncSharkRuntimeSystemReadAccess
-Export-ModuleMember -Function Resolve-SyncSharkRuntimeRoot, Assert-SyncSharkProtectedRuntime, Invoke-SyncSharkProtectedRuntime
-Export-ModuleMember -Function Read-SyncSharkUpdaterRelease, Resolve-SyncSharkDataRoot, Invoke-SyncSharkAppRegistration
-Export-ModuleMember -Function Invoke-SyncSharkWithInstanceMaintenanceLease, Invoke-SyncSharkRollbackReadiness, Enter-SyncSharkMaintenanceMutex
+    Resolve-SyncSharkDataRoot, Resolve-SyncSharkRuntimeRoot, Invoke-SyncSharkAppRegistration,
+    Invoke-SyncSharkWithInstanceMaintenanceLease, Enter-SyncSharkMaintenanceMutex

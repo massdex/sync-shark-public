@@ -3,6 +3,17 @@
 # The harness ends only stub processes whose image lies under its own fixture root, by PID.
 [CmdletBinding()]
 param([string]$Fixture = '') # comma-separated subset, e.g. 2,9
+# Check the shipped sources before creating any fixtures or launching a process.
+foreach ($entry in @{
+    'Deploy-SyncShark.ps1' = 'Restore-Launchers|Write-LauncherBackup|Invoke-StagedRestore|Restore-RunValues'
+    'Install-SyncShark.ps1.template' = 'install-journal|updater-publication|Assert-SyncSharkProtectedRuntime'
+    'Prepare-SyncSharkRelease.ps1' = 'Rollback-SyncShark|Assert-SyncSharkProtectedRuntime'
+}.GetEnumerator()) {
+    if ([IO.File]::ReadAllText((Join-Path $PSScriptRoot $entry.Key)) -match $entry.Value) {
+        throw "Retired release path in $($entry.Key): $($Matches[0])"
+    }
+}
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($env:SYNC_SHARK_RELEASE_TEST_MODE -cne '1') { throw 'Test mode is required.' }
@@ -23,7 +34,7 @@ static class Stub {
     static readonly string Data = Environment.GetEnvironmentVariable("SYNCSHARK_STUB_DATA");
     static readonly string Exe = Environment.ProcessPath;
     static readonly string Version = typeof(Stub).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>().InformationalVersion.Split('+')[0];
-    static readonly string Key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(Exe.ToUpperInvariant()))).Substring(0, 16);
+    static readonly string Key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetDirectoryName(Exe).ToUpperInvariant()))).Substring(0, 16);
     static string StopFile => Path.Combine(State, "stop-" + Key);
     static JsonElement B(string name) {
         var file = Path.Combine(State, "behavior.json");
@@ -36,6 +47,9 @@ static class Stub {
     static void Json(object data) => Console.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, command = "stub", ok = true, data, error = (object)null }));
     static int Main(string[] a) {
         var args = string.Join(" ", a);
+        bool legacy=Version=="0.3.75";
+        if (!legacy && Path.GetFileName(Exe)=="Sync Shark.exe") return args=="--notify-ready" ? Host() : 2;
+        if (legacy != args.StartsWith("--", StringComparison.Ordinal)) return 2;
         switch (args) {
             case "--core v2 --engine-host": return Host();
             case "--core v2 --engine-supervisor": return Wait(Flag("supervisorIgnoresStop"));
@@ -43,8 +57,8 @@ static class Stub {
             case "--cli engine host stop --yes": return Stop();
             case "--cli engine host status --json":
                 if (Flag("statusFail")) { Console.Error.WriteLine("stub: status refused"); return 1; }
-                Json(new { state = Hosts().Length > 0 ? "Watching" : "Unavailable", message = "stub" }); return 0;
-            case "--cli engine status --json": Json(new { pairs = new object[0] }); return 0;
+                Json(new { state = Hosts().Length > 0 ? "StatusWatching" : "StatusUnavailable", message = "stub" }); return 0;
+            case "--cli engine status --json": Json(new { items = new[] { new { pair = new { pairId="pair-a", enabled=true }, pendingPresent=Flag("pending") } } }); return 0;
             case "--cli engine pairs list --json": Json(new { pairs = new[] { new { id = "pair-a", enabled = true } } }); return 0;
             case "--cli engine settings list --json":
                 var root = B("recoveryRoot");
@@ -53,10 +67,11 @@ static class Stub {
             case "host start": return Start();
             case "host stop": return Stop();
             case "status":
+                if (Hosts().Length==0) { Console.WriteLine("The Sync Shark host is not running."); return 1; }
                 if (Flag("statusFail")) { Console.Error.WriteLine("stub: status refused"); return 1; }
                 Console.WriteLine("pair-a  Pair A  /Local <-> /Cloud  account acc  first run: NewestWins"); return 0;
             case "pairs list": Console.WriteLine("pair-a  Pair A  /Local <-> /Cloud  account acc  first run: NewestWins"); return 0;
-            default: return Wait(false);
+            default: return 2;
         }
     }
     static int Host() {
@@ -73,12 +88,12 @@ static class Stub {
         while (DateTime.UtcNow < end) { if (!ignoreStop && File.Exists(StopFile)) return 0; Thread.Sleep(50); }
         return 0;
     }
-    static Process Spawn(string args) => Process.Start(new ProcessStartInfo(Exe, args) { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden });
+    static Process Spawn(string args) => Process.Start(new ProcessStartInfo(args=="--notify-ready" ? Path.Combine(Path.GetDirectoryName(Exe),"Sync Shark.exe") : Exe, args) { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden });
     static int Start() {
         if (Flag("startFail")) { if (Flag("startLeavesSupervisor")) Spawn("--core v2 --engine-supervisor"); Console.Error.WriteLine("stub: start failed"); return 1; }
         if (Hosts().Length > 0) return 0;
         File.Delete(StopFile);
-        var p = Spawn("--core v2 --engine-host");
+        var p = Spawn(Version=="0.3.75" ? "--core v2 --engine-host" : "--notify-ready");
         var end = DateTime.UtcNow.AddSeconds(30);
         while (Hosts().Length == 0) { if (p.HasExited || DateTime.UtcNow > end) return 1; Thread.Sleep(20); }
         return 0;
@@ -94,7 +109,7 @@ static class Stub {
 }
 '@
 function Get-StubCache([string]$Version) {
-    $cache = Join-Path $base "deploy-stub-cache\$Version"
+    $cache = Join-Path $base "deploy-stub-cache\$Version-$([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($stubSource))))"
     if (Test-Path -LiteralPath (Join-Path $cache 'SyncShark.exe')) { return $cache }
     $project = Join-Path $base "deploy-stub-src\$Version"
     [void][IO.Directory]::CreateDirectory($project)
@@ -130,15 +145,29 @@ function New-StubBuild($Ctx, [string]$Name, [string]$Version, [string]$Previous,
     $root = Join-Path $Ctx.root "builds\$Name"; $out = Join-Path $root 'bin\out'
     [void][IO.Directory]::CreateDirectory($out)
     Copy-Item -Path (Join-Path (Get-StubCache $Version) '*') -Destination $out -Recurse
+    if ($Legacy) {
     foreach ($dll in 'SyncShark.Core.dll', 'SyncShark.Engine.dll', 'SyncShark.Explorer.dll') { Copy-Item -LiteralPath (Join-Path $out 'SyncShark.dll') -Destination (Join-Path $out $dll) }
     Copy-Item -LiteralPath (Join-Path $out 'SyncShark.exe') -Destination (Join-Path $out 'SyncSharkDiscovery.exe')
-    if (-not $Legacy) {
+    } else {
+        Copy-Item -LiteralPath (Join-Path $out 'syncshark.exe') -Destination (Join-Path $out 'Sync Shark.exe')
+        $installerDir=Join-Path $root "release-$Version/deploy-scripts"
+        [void][IO.Directory]::CreateDirectory($installerDir)
+        $contract=@{product='Massdex.SyncShark';version=$Version;sourceRevision=$commits[$Version];previousVersion=$Previous} | ConvertTo-Json -Compress
+        $body=@'
+param($PredecessorRuntime,$TestProductRoot)
+$root=Resolve-SyncSharkProductRoot $TestProductRoot
+$target=Join-Path $root ('versions/'+$contract.version)
+[void][IO.Directory]::CreateDirectory($target)
+Copy-Item -Path (Join-Path $j.candidate.outputDirectory '*') -Destination $target -Recurse
+New-Item -ItemType Junction -Path (Join-Path $root 'active') -Target $target | Out-Null
+'@
+        [IO.File]::WriteAllText((Join-Path $installerDir 'Install-SyncShark.ps1'),"# SyncSharkUpdateContract: $contract`n$body")
         [void][IO.Directory]::CreateDirectory((Join-Path $out 'tools'))
         foreach ($tool in 'SyncShark.Release.psm1', 'Deploy-SyncShark.ps1') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $tool) -Destination (Join-Path $out "tools\$tool") }
     }
     if ($Mutate) { & $Mutate $out }
     Write-Manifest $root $Name $Version $Previous $out -Legacy:$Legacy -Unlisted $Unlisted
-    $build = [ordered]@{ root = $root; out = $out; exe = (Join-Path $out 'SyncShark.exe'); script = (Join-Path $out 'tools\Deploy-SyncShark.ps1'); pv = "$Version+$($commits[$Version])" }
+    $build = [ordered]@{ root = $root; out = $out; exe = (Join-Path $out $(if ($Legacy) { 'SyncShark.exe' } else { 'Sync Shark.exe' })); script = (Join-Path $out 'tools\Deploy-SyncShark.ps1'); pv = "$Version+$($commits[$Version])" }
     $Ctx.builds[$Name] = $build
     Write-Observations $Ctx
     $build
@@ -149,7 +178,9 @@ function New-Observation { [ordered]@{ Status = 'Valid'; RawStatus = 'Valid'; Th
 function Write-Observations($Ctx) {
     $all = [ordered]@{}
     foreach ($build in $Ctx.builds.Values) {
-        foreach ($name in 'SyncShark.exe', 'SyncShark.dll', 'SyncShark.Core.dll', 'SyncShark.Engine.dll', 'SyncSharkDiscovery.exe', 'SyncShark.Explorer.dll') {
+        $installer=Join-Path $build.root ('release-'+$build.pv.Split('+')[0]+'/deploy-scripts/Install-SyncShark.ps1')
+        $all[(Get-SyncSharkNormalizedPath $installer)] = New-Observation
+        foreach ($name in 'Sync Shark.exe', 'SyncShark.exe', 'SyncShark.dll', 'SyncShark.Core.dll', 'SyncShark.Engine.dll', 'SyncSharkDiscovery.exe', 'SyncShark.Explorer.dll') {
             $path = Get-SyncSharkNormalizedPath (Join-Path $build.out $name)
             $all[$path] = if ($Ctx.overrides.Contains($path)) { $Ctx.overrides[$path] } else { New-Observation }
         }
@@ -174,10 +205,6 @@ function New-Context([int]$Number) {
     $old = New-StubBuild $ctx 'old-0375' '0.3.75' '0.3.74+0000000000000000000000000000000000000000' -Legacy
     $null = New-StubBuild $ctx 'new-0376' '0.3.76' $old.pv
     $ctx.old = $ctx.builds['old-0375']; $ctx.new = $ctx.builds['new-0376']
-    $attempt = 'deploy-attempt-20261105-000000-000-aaaaaaaa'
-    [void][IO.Directory]::CreateDirectory((Join-Path $old.root $attempt))
-    $backups = @($cli, $run | ForEach-Object { $bak = "$_.pre-0375-$attempt.bak"; Copy-Item -LiteralPath $_ -Destination $bak; $bak })
-    [IO.File]::WriteAllText((Join-Path $old.root "$attempt\launcher-recovery.json"), ([ordered]@{ previousExe = 'C:\previous\SyncShark.exe'; paths = @($cli, $run); backups = $backups } | ConvertTo-Json))
     $ctx
 }
 function Invoke-Tool($Ctx, [string[]]$Arguments, [string]$Crash = '', [string]$Script = '', [switch]$NoObservations) {
@@ -199,10 +226,7 @@ function Deploy($Ctx, [string]$Crash = '', $Build = $null, [switch]$NoObservatio
     Invoke-Tool $Ctx @('-Build', $Build.root, '-LauncherDir', $Ctx.launchers) $Crash $Build.script -NoObservations:$NoObservations
 }
 function Recover($Ctx, [string]$Crash = '') { Invoke-Tool $Ctx @('-Recover') $Crash }
-function CloseTx($Ctx, [string]$Disposition, [string]$Layout = '') {
-    $arguments = @('-Close', '-Disposition', $Disposition); if ($Layout) { $arguments += @('-Layout', $Layout) }
-    Invoke-Tool $Ctx $arguments
-}
+function CloseTx($Ctx, [string]$Disposition) { Invoke-Tool $Ctx @('-Close','-Disposition',$Disposition) }
 function Get-DeployRoot($Ctx) { Join-Path $Ctx.root 'replacement-staging\deploys' }
 function Get-Pointer($Ctx) { @(Get-ChildItem -LiteralPath (Get-DeployRoot $Ctx) -Filter 'active-*.json' -File -ErrorAction SilentlyContinue) }
 function Get-Journal($Ctx) {
@@ -213,7 +237,8 @@ function Get-JournalBytes($Ctx) { $j = Get-Journal $Ctx; Get-FileHash -LiteralPa
 function Set-Behavior($Ctx, [hashtable]$Behavior) { [IO.File]::WriteAllText((Join-Path $Ctx.state 'behavior.json'), ($Behavior | ConvertTo-Json -Depth 5)) }
 function Start-Host($Ctx, $Build) {
     $env:SYNCSHARK_STUB_STATE = $Ctx.state; $env:SYNCSHARK_STUB_DATA = $Ctx.data
-    & $Build.exe --cli engine host start --yes | Out-Null
+    if ((Split-Path -Leaf $Build.exe) -ceq 'Sync Shark.exe') { & (Join-Path $Build.out 'syncshark.exe') host start | Out-Null }
+    else { & $Build.exe --cli engine host start --yes | Out-Null }
     if ($LASTEXITCODE -ne 0) { throw "Stub host start failed: $($Build.exe)" }
 }
 function Start-Stub($Ctx, $Build, [string]$Arguments) {
@@ -235,8 +260,6 @@ function Get-DataId($Ctx) { Get-SyncSharkTreeIdentity $Ctx.data }
 function Get-LauncherHashes($Ctx) { (@('cli-common.ps1', 'run-apply.ps1') | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $Ctx.launchers $_)).Hash }) -join ',' }
 function Edit-Data($Ctx) { [IO.File]::AppendAllText((Join-Path $Ctx.data 'engine\state.db'), 'newer write') }
 function Flip-Byte([string]$Path) { $b = [IO.File]::ReadAllBytes($Path); $b[0] = $b[0] -bxor 0xFF; [IO.File]::WriteAllBytes($Path, $b) }
-function Get-Staging($Ctx, $J) { "$($Ctx.data).restore-staging-$($J.T)" }
-function Get-Failed($Ctx, $J) { "$($Ctx.data).failed-$($J.T)" }
 function Expect-Open($Ctx, [string]$Phase) { $j = Get-Journal $Ctx; Expect ($j.state -ceq 'open') 'journal open'; if ($Phase) { Expect (@($j.phases | ForEach-Object name) -contains $Phase) "phase $Phase reached" }; $j }
 function Expect-Closed($Ctx, [string]$Terminal) {
     $j = Get-Journal $Ctx
@@ -254,15 +277,6 @@ function Expect-NoChain($Build) { Expect (-not (Test-Path -LiteralPath (Join-Pat
 function Import-DeployFunctions {
     $ast = [Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
     $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] }, $false) | ForEach-Object { $_.Extent.Text }
-}
-# Restart-after-crash journal: launchers switched, host not running, data then changed so a staged restore is due.
-function New-RestoreDue([int]$Number) {
-    $ctx = New-Context $Number
-    $r = Deploy $ctx 'phase-launchers-switched'
-    Expect ($r.Exit -ne 0) 'deploy crashed'
-    $null = Expect-Open $ctx 'launchers-switched'
-    Edit-Data $ctx
-    $ctx
 }
 
 function Same-Path([string]$A, [string]$B) { (Get-SyncSharkNormalizedPath $A) -ieq (Get-SyncSharkNormalizedPath $B) }
@@ -284,10 +298,8 @@ F 37 'legacy predecessor + candidate shape accepted; unlisted module, missing me
     $r = Deploy $ctx
     $j = Expect-Closed $ctx 'healthy'
     $record = Get-Content -LiteralPath (Join-Path $ctx.new.root 'deploy-log.json') -Raw | ConvertFrom-Json -AsHashtable
-    $recovery = Get-Content -LiteralPath (Join-Path $ctx.new.root "deploy-attempt-$($j.T)\launcher-recovery.json") -Raw | ConvertFrom-Json -AsHashtable
     Expect ($record.terminal -ceq 'healthy' -and $record.hostWasRunning -and $record.started -and -not $record.Contains('runStarted')) 'deploy-log from the journal only'
-    Expect (@($recovery.backups).Count -eq 2 -and @($recovery.backups | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 2) '.bak files exist and are recorded'
-    Expect (@(Get-Stubs $ctx '--core v2 --engine-host' | Where-Object ExecutablePath -ieq $ctx.new.exe).Count -eq 1) 'new host running'
+    Expect (@(Get-Stubs $ctx '--notify-ready' | Where-Object ExecutablePath -ieq (Join-Path $ctx.root 'versions/0.3.76/Sync Shark.exe')).Count -eq 1) 'new host running'
     Expect (Test-Path -LiteralPath (Join-Path (Get-DeployRoot $ctx) 'DELETION-CANDIDATES.md')) 'candidates listed'
     Expect ($null -eq $j.snapshot.recoveryRoot) 'Recovery root absent when none is set'
     $variants = @(
@@ -302,30 +314,6 @@ F 37 'legacy predecessor + candidate shape accepted; unlisted module, missing me
         Expect ($r.Exit -ne 0 -and $r.Log -like $v.like) "$($v.name) refused ($($r.Log.Trim()))"
         Expect (@(Get-Pointer $fresh).Count -eq 0) "$($v.name) left no pointer"
     }
-}
-F 38 'two deploys in a row; .bak crash accepted; tampered .bak refused' {
-    $ctx = Use (New-Context 38)
-    Start-Host $ctx $ctx.old
-    $r = Deploy $ctx
-    $null = Expect-Closed $ctx 'healthy'
-    $next = New-StubBuild $ctx 'new-0377' '0.3.77' $ctx.new.pv
-    $r = Deploy $ctx '' $next
-    $j = Expect-Closed $ctx 'healthy'
-    Expect (Same-Path $j.predecessor.root $ctx.new.root) 'predecessor derived from the first deploy'
-    Expect (Test-Path -LiteralPath (Join-Path $next.root 'deploy-log.json')) 'second chain record'
-    $c = Use (New-Context 38)
-    $r = Deploy $c 'bak-renamed'
-    $j = Expect-Open $c ''
-    Expect ($null -ne $j.launchers[0].bak.intentUtc -and $null -eq $j.launchers[0].bak.done -and (Test-Path -LiteralPath $j.launchers[0].bak.path)) 'crash after rename, before done'
-    $r = Recover $c
-    $j = Expect-Closed $c 'compensated'
-    Expect ($null -ne $j.launchers[0].bak.done) 'recover accepted the matching .bak'
-    $t = Use (New-Context 38)
-    $r = Deploy $t 'bak-renamed'
-    $j = Get-Journal $t
-    [IO.File]::AppendAllText($j.launchers[0].bak.path, '# tampered')
-    $r = Recover $t
-    $null = Expect-NeedsOwner $t '*does not hold the journaled original bytes*'
 }
 F 24 'Run values read back equal to the snapshot; test mode never writes them (production write-back not exercised)' {
     $ctx = Use (New-Context 24)
@@ -360,62 +348,13 @@ F 1 'backup byte flipped: no data effect, refused' {
     Expect (@(@($j.errors) -like '*does not verify*').Count -gt 0) 'backup verification refused'
     Expect ((Get-DataId $ctx) -ceq $before -and (Get-LauncherHashes $ctx) -ceq $launchers) 'no data or launcher effect'
 }
-F 2 'crash after swap-1 (after done, and between rename and done): recover validates the missing leaf, runs swap-2' {
-    foreach ($crash in 'phase-swap-1', 'swap-1-renamed') {
-        $ctx = Use (New-RestoreDue 2)
-        $r = Recover $ctx $crash
-        $j = Expect-Open $ctx ''
-        Expect (-not (Test-Path -LiteralPath $ctx.data) -and (Test-Path -LiteralPath (Get-Failed $ctx $j))) "$crash left Data absent"
-        $r = Recover $ctx
-        $j = Expect-Closed $ctx 'restored'
-        Expect ((Get-DataId $ctx) -ceq $j.backup.manifestSha256 -and (Test-Path -LiteralPath (Get-Failed $ctx $j))) 'data restored, failed-T kept'
-        Expect (@($j.launchers | Where-Object { (Get-FileHash -LiteralPath $_.path).Hash.ToLowerInvariant() -cne $_.originalSha256 }).Count -eq 0) 'launchers on the old side'
-        Expect-NoChain $ctx.new
-    }
-    $ctx = Use (New-RestoreDue 2)
-    $r = Recover $ctx 'phase-swap-1'
-    $vol = Join-Path $ctx.root 'vol'; $real = Join-Path $ctx.root 'vol-real'
-    Rename-Item -LiteralPath $vol -NewName 'vol-real'
-    New-Item -ItemType Junction -Path $vol -Target $real | Out-Null
-    $r = Recover $ctx
-    $j = Expect-Open $ctx 'swap-1'
-    Expect (-not (@($j.phases | ForEach-Object name) -contains 'swap-2') -and @(Get-Pointer $ctx).Count -eq 1) 'reparse ancestor refused'
-    [IO.Directory]::Delete($vol)
-    Rename-Item -LiteralPath $real -NewName 'vol-moved'
-    $r = Recover $ctx
-    $j = Expect-Open $ctx 'swap-1'
-    Expect (-not (@($j.phases | ForEach-Object name) -contains 'swap-2')) 'missing ancestor refused'
-}
-F 9 'repeated -Recover on a restored journal after a newer write: no-op, the write survives' {
-    $ctx = Use (New-RestoreDue 9)
-    $r = Recover $ctx
-    $null = Expect-Closed $ctx 'restored'
-    [IO.File]::WriteAllText((Join-Path $ctx.data 'newer.txt'), 'newer')
-    $before = Get-DataId $ctx
-    $r = Recover $ctx
-    Expect ($r.Exit -eq 0 -and (Get-DataId $ctx) -ceq $before) 'nothing replayed'
-}
-F 3 'staging half-copied: recover re-verifies and completes' {
-    $ctx = Use (New-RestoreDue 3)
-    [IO.File]::WriteAllText((Join-Path $ctx.data 'engine\second.bin'), 'second file')
-    $r = Recover $ctx 'staging-file'
-    $j = Expect-Open $ctx ''
-    Expect ((Test-Path -LiteralPath (Get-Staging $ctx $j)) -and -not (@($j.phases | ForEach-Object name) -contains 'restore-staged')) 'staging partial'
-    $r = Recover $ctx
-    $j = Expect-Closed $ctx 'restored'
-    Expect ((Get-DataId $ctx) -ceq $j.backup.manifestSha256) 'data restored from the backup'
-}
-F 4 'one launcher switched: per-file restore; a foreign hash is refused' {
-    $ctx = Use (New-Context 4); $launchers = Get-LauncherHashes $ctx
-    $r = Deploy $ctx 'launcher-switched-0'
-    $r = Recover $ctx
-    $null = Expect-Closed $ctx 'compensated'
-    Expect ((Get-LauncherHashes $ctx) -ceq $launchers) 'launchers restored per file'
-    $ctx = Use (New-Context 4)
-    $r = Deploy $ctx 'launcher-switched-0'
-    [IO.File]::AppendAllText((Join-Path $ctx.launchers 'run-apply.ps1'), '# foreign edit')
-    $r = Recover $ctx
-    $null = Expect-NeedsOwner $ctx '*foreign launcher content*'
+F 48 'pending predecessor work leaves the host and active pointer untouched' {
+    $ctx=Use (New-Context 48)
+    Start-Host $ctx $ctx.old
+    Set-Behavior $ctx @{'0.3.75'=@{pending=$true}}
+    $r=Deploy $ctx
+    Expect ($r.Exit -ne 0 -and $r.Log -like '*Unfinished or unknown work*') 'pending work reported'
+    Expect (@(Get-Stubs $ctx '--core v2 --engine-host').Count -eq 1 -and !(Test-Path -LiteralPath (Join-Path $ctx.root 'active'))) 'no stop or switch'
 }
 F 5 'a supervisor with no host: refused' {
     $ctx = Use (New-Context 5)
@@ -425,17 +364,15 @@ F 5 'a supervisor with no host: refused' {
     $j = Expect-Closed $ctx 'refused'
     Expect (@(@($j.errors) -like '*supervisor is running with no host*').Count -gt 0 -and -not $j.stopRequested) 'refused before any stop'
 }
-F 6 'failure after start: new host stopped, needs-owner, no restore' {
+F 6 'failure after start leaves the candidate running' {
     $ctx = Use (New-Context 6)
     Start-Host $ctx $ctx.old
     Set-Behavior $ctx @{ '0.3.76' = @{ statusFail = $true } }
     $r = Deploy $ctx
     $j = Expect-NeedsOwner $ctx '*failure after start*'
-    Expect ($j.needsOwner.reason -like '*stopped gracefully*') 'new host stopped'
-    Expect (@($j.launchers | Where-Object { (Get-FileHash -LiteralPath $_.path).Hash.ToLowerInvariant() -cne $_.newSha256 }).Count -eq 0) 'launchers stay on the new build'
-    Expect (-not (Test-Path -LiteralPath (Get-Staging $ctx $j)) -and -not (Test-Path -LiteralPath (Get-Failed $ctx $j))) 'no restore'
+    Expect (@(Get-Stubs $ctx '--notify-ready').Count -eq 1) 'new host left running'
 }
-F 30 'live-new close reads no DB bytes; stop-refused without -Layout is refused' {
+F 30 'live-new closure verifies the installed host; a switched transaction cannot close as stop-refused' {
     $ctx = Use (New-Context 30)
     Start-Host $ctx $ctx.old
     Set-Behavior $ctx @{ '0.3.76' = @{ statusFail = $true } }
@@ -443,13 +380,12 @@ F 30 'live-new close reads no DB bytes; stop-refused without -Layout is refused'
     $null = Expect-NeedsOwner $ctx '*failure after start*'
     $r = CloseTx $ctx 'stop-refused'
     $j = Expect-NeedsOwner $ctx '*'
-    Expect (@($j.close)[-1].result -like '*-Layout*') 'missing layout refused, pointer kept'
+    Expect (@(Get-Pointer $ctx).Count -eq 1) 'open switch retained'
     Set-Behavior $ctx @{}
-    Start-Host $ctx $ctx.new
     $db = [IO.File]::Open((Join-Path $ctx.data 'engine\state.db'), 'Open', 'Read', 'None')
     try { $r = CloseTx $ctx 'live-new' } finally { $db.Dispose() }
     $j = Expect-Closed $ctx 'needs-owner-resolved'
-    Expect (@($j.close)[-1].label -ceq 'operational health only; full DB integrity unverified') 'labelled live closure'
+    Expect (@($j.close)[-1].result -ceq 'passed') 'labelled live closure'
 }
 F 7 'PID reuse: a stale creation time is re-enumerated, never stopped' {
     $ctx = Use (New-Context 7)
@@ -469,24 +405,6 @@ F 7 'PID reuse: a stale creation time is re-enumerated, never stopped' {
     Expect ($tracked.Count -eq 0 -and $script:calls -ge 3) 're-enumerated and dropped the stale record'
     Expect (-not $stub.HasExited) 'the stub was never stopped'
 }
-F 8 'pre-existing Data.failed-T: refused, data intact' {
-    $ctx = Use (New-RestoreDue 8); $before = Get-DataId $ctx
-    $j = Get-Journal $ctx
-    [void][IO.Directory]::CreateDirectory((Get-Failed $ctx $j))
-    $r = Recover $ctx
-    $j = Expect-NeedsOwner $ctx '*already exists*'
-    Expect ((Get-DataId $ctx) -ceq $before -and -not (Test-Path -LiteralPath (Get-Staging $ctx $j))) 'data intact, nothing staged'
-}
-F 10 'a foreign folder renamed into Data: file ID mismatch refused' {
-    $ctx = Use (New-RestoreDue 10)
-    $orig = Join-Path $ctx.root 'vol\Data-original'
-    Rename-Item -LiteralPath $ctx.data -NewName 'Data-original'
-    Copy-Item -LiteralPath $orig -Destination $ctx.data -Recurse
-    $before = Get-SyncSharkTreeIdentity $orig
-    $r = Recover $ctx
-    $null = Expect-NeedsOwner $ctx '*file ID changed*'
-    Expect ((Get-SyncSharkTreeIdentity $orig) -ceq $before) 'original untouched'
-}
 F 11 'UntrustedRoot+NotTimeValid, wrong root thumbprint and HashMismatch refused; UntrustedRoot alone accepted (R1)' {
     $ctx = Use (New-Context 11)
     $exe = Get-SyncSharkNormalizedPath $ctx.new.exe
@@ -505,17 +423,13 @@ F 11 'UntrustedRoot+NotTimeValid, wrong root thumbprint and HashMismatch refused
     $r = Deploy $ctx
     $null = Expect-Closed $ctx 'staged'
 }
-F 12 'capacity check refuses short free space, summing needs on one volume (unit, mocked free space; no end-to-end drop)' {
+F 12 'capacity check refuses insufficient backup space (unit, mocked free space; no end-to-end drop)' {
     foreach ($text in Import-DeployFunctions) { . ([scriptblock]::Create($text)) }
     $script:deployRoot = 'F:\deploys'; $script:dataTarget = 'F:\Data'
     function Get-FreeBytes { param([string]$Path) 1000 }
-    $refused = $false; try { Assert-Capacity 0 1001 } catch { $refused = $_.Exception.Message -like 'Not enough free space*' }
-    Expect $refused 'staging need above free space refused'
-    $refused = $false; try { Assert-Capacity 600 600 } catch { $refused = $true }
-    Expect $refused 'needs on one volume are summed'
-    Assert-Capacity 400 500
-    $script:dataTarget = 'C:\Data'
-    Assert-Capacity 900 900
+    $refused = $false; try { Assert-Capacity 1001 } catch { $refused = $_.Exception.Message -like 'Not enough free space*' }
+    Expect $refused 'short backup capacity refused'
+    Assert-Capacity 1000
 }
 F 13 'two generations running: refused' {
     $ctx = Use (New-Context 13)
@@ -525,22 +439,6 @@ F 13 'two generations running: refused' {
     $j = Expect-Closed $ctx 'refused'
     Expect (@(@($j.errors) -like '*More than one Sync Shark generation*').Count -gt 0) 'two generations refused'
 }
-F 14 'crash between creating staging and recording its ID: needs-owner, nothing adopted' {
-    $ctx = Use (New-RestoreDue 14); $before = Get-DataId $ctx
-    $r = Recover $ctx 'staging-created'
-    $r = Recover $ctx
-    $j = Expect-NeedsOwner $ctx '*no recorded ID*'
-    Expect ((Test-Path -LiteralPath (Get-Staging $ctx $j)) -and (Get-DataId $ctx) -ceq $before) 'staging kept, data intact'
-}
-F 15 'staging ID matches but its content differs before swap-1: needs-owner' {
-    $ctx = Use (New-RestoreDue 15); $before = Get-DataId $ctx
-    $r = Recover $ctx 'phase-restore-staged'
-    $j = Get-Journal $ctx
-    Flip-Byte (Join-Path (Get-Staging $ctx $j) 'engine\state.db')
-    $r = Recover $ctx
-    $null = Expect-NeedsOwner $ctx '*staging content differs*'
-    Expect ((Get-DataId $ctx) -ceq $before) 'data intact'
-}
 F 16 'a second deploy while the pointer exists: refused' {
     $ctx = Use (New-Context 16)
     $r = Deploy $ctx 'phase-snapshot'
@@ -548,23 +446,13 @@ F 16 'a second deploy while the pointer exists: refused' {
     Expect ($r.Exit -ne 0 -and $r.Log -like '*is open: run -Recover*') 'second deploy refused'
     Expect (@(Get-ChildItem -LiteralPath (Get-DeployRoot $ctx) -Directory).Count -eq 1) 'no second transaction'
 }
-F 17 'crash during start-pending: recover only joins and checks health, then closes' {
-    $ctx = Use (New-Context 17)
-    Start-Host $ctx $ctx.old
-    $r = Deploy $ctx 'phase-launchers-switched'
-    $r = Recover $ctx 'child-old-start-pid'
-    $j = Expect-Open $ctx 'start-pending'
-    $r = Recover $ctx
-    $null = Expect-Closed $ctx 'compensated'
-    Expect (@(Get-Stubs $ctx '--core v2 --engine-host' | Where-Object ExecutablePath -ieq $ctx.old.exe).Count -eq 1) 'old host running'
-}
 F 18 'crash after a child launched, before its PID was recorded: recover classifies by exe, args and creation time' {
     $ctx = Use (New-Context 18)
     Start-Host $ctx $ctx.old
     Set-Behavior $ctx @{ '0.3.75' = @{ stopDelayMs = 40000 } }
     $r = Deploy $ctx 'child-stop-launched'
     $r = Recover $ctx
-    $j = Expect-Closed $ctx 'compensated'
+    $j = Expect-NeedsOwner $ctx '*fix forward*'
     Expect (@($j.children | Where-Object { $_.purpose -ceq 'stop' })[0].exit -ceq 'joined') 'the unrecorded stop child was joined'
 }
 F 19 'killed run with a live, recorded stop child: -Recover joins it (the Ctrl+C journal state; a real Ctrl+C is not exercised)' {
@@ -573,30 +461,8 @@ F 19 'killed run with a live, recorded stop child: -Recover joins it (the Ctrl+C
     Set-Behavior $ctx @{ '0.3.75' = @{ stopDelayMs = 15000 } }
     $r = Deploy $ctx 'child-stop-pid'
     $r = Recover $ctx
-    $j = Expect-Closed $ctx 'compensated'
+    $j = Expect-NeedsOwner $ctx '*fix forward*'
     Expect (@($j.children | Where-Object { $_.purpose -ceq 'stop' })[0].exit -ceq 'joined') 'the recorded stop child was joined'
-}
-F 20 'start leaves only a supervisor: needs-owner; a new deploy refused; recover changes nothing' {
-    $ctx = Use (New-Context 20)
-    Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{ '0.3.76' = @{ startFail = $true; startLeavesSupervisor = $true; supervisorIgnoresStop = $true } }
-    $r = Deploy $ctx
-    $null = Expect-NeedsOwner $ctx '*failure after start*'
-    Expect (@(Get-Stubs $ctx '--core v2 --engine-supervisor').Count -eq 1) 'only the supervisor is left'
-    $r = Deploy $ctx
-    Expect ($r.Exit -ne 0 -and $r.Log -like '*is open: run -Recover*') 'new deploy refused'
-    $before = Get-JournalBytes $ctx
-    $r = Recover $ctx
-    Expect ($r.Exit -eq 2 -and (Get-JournalBytes $ctx) -ceq $before) 'recover made no change'
-}
-F 21 'failure before the backup with the host running: old host restarted, health checked, compensated' {
-    $ctx = Use (New-Context 21)
-    $elsewhere = [IO.Directory]::CreateDirectory((Join-Path $ctx.root 'elsewhere'))
-    New-Item -ItemType Junction -Path (Join-Path $ctx.data 'link') -Target $elsewhere.FullName | Out-Null
-    Start-Host $ctx $ctx.old
-    $r = Deploy $ctx
-    $j = Expect-Closed $ctx 'compensated'
-    Expect ($j.stopRequested -and @(Get-Stubs $ctx '--core v2 --engine-host' | Where-Object ExecutablePath -ieq $ctx.old.exe).Count -eq 1) 'old host restarted'
 }
 F 22 'WinVerifyTrust failure (unsigned stub) and a missing timestamp: refused' {
     $ctx = Use (New-Context 22)
@@ -616,31 +482,6 @@ F 23 'a host that never answers trusted status (crash loop): refused before any 
     $j = Expect-Closed $ctx 'refused'
     Expect (@(@($j.errors) -like '*trusted peer*').Count -gt 0 -and -not $j.stopRequested) 'refused before any stop'
 }
-F 25 'staging changed after swap-1: swap-2 re-check fails, Data absent, failed-T kept' {
-    $ctx = Use (New-RestoreDue 25)
-    $r = Recover $ctx 'phase-swap-1'
-    $j = Get-Journal $ctx
-    Flip-Byte (Join-Path (Get-Staging $ctx $j) 'engine\state.db')
-    $r = Recover $ctx
-    Expect ($r.Exit -ne 0) 'recover refused'
-    $j = Get-Journal $ctx
-    Expect ($j.state -ceq 'open' -and -not (@($j.phases | ForEach-Object name) -contains 'swap-2')) 'swap-2 never ran'
-    Expect (-not (Test-Path -LiteralPath $ctx.data) -and (Test-Path -LiteralPath (Get-Failed $ctx $j))) 'Data absent, failed-T kept'
-}
-F 26 'crash after old-start-intent while the old host writes: recover never restores again' {
-    $ctx = Use (New-Context 26)
-    Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{ '0.3.75' = @{ hostWrites = $true } }
-    $r = Deploy $ctx 'phase-launchers-switched'
-    Edit-Data $ctx
-    $r = Recover $ctx 'child-old-start-pid'
-    $written = Join-Path $ctx.data 'host-0.3.75.txt'
-    Wait-Until { Test-Path -LiteralPath $written } 'the old host write'
-    $r = Recover $ctx
-    $j = Expect-Closed $ctx 'restored'
-    Expect (Test-Path -LiteralPath $written) "the old host's write survived"
-    Expect (@($j.phases | Where-Object { $_.name -ceq 'swap-2' }).Count -eq 1) 'data restored exactly once'
-}
 F 27 'no pointer while a journal is open: needs-owner, not recreated' {
     $ctx = Use (New-Context 27)
     $r = Deploy $ctx 'phase-snapshot'
@@ -659,7 +500,7 @@ F 28 'malformed or journal-less pointer: needs-owner, untouched' {
     foreach ($content in '{ not json', ([ordered]@{ rootId = $rootId; T = $t; journalPath = (Join-Path $deploys "$t\journal.json"); installationRoot = $ctx.root; dataTarget = $ctx.data } | ConvertTo-Json)) {
         [IO.File]::WriteAllText($pointer, $content)
         $hash = (Get-FileHash -LiteralPath $pointer).Hash
-        foreach ($run in @({ Deploy $ctx }, { Recover $ctx }, { CloseTx $ctx 'pointer-unproven' 'none' })) {
+        foreach ($run in @({ Deploy $ctx }, { Recover $ctx }, { CloseTx $ctx 'pointer-unproven' })) {
             $r = & $run
             Expect ($r.Exit -ne 0 -and $r.Log -like '*needs-owner*' -and (Get-FileHash -LiteralPath $pointer).Hash -ceq $hash) 'refused, pointer untouched'
         }
@@ -712,7 +553,7 @@ F 35 'pointer naming another installation root or data target: refused on deploy
     $r = Deploy $ctx 'phase-snapshot'
     $pointer = @(Get-Pointer $ctx)[0].FullName
     $good = [IO.File]::ReadAllText($pointer)
-    $runs = @({ Deploy $ctx }, { Recover $ctx }, { CloseTx $ctx 'pointer-unproven' 'none' })
+    $runs = @({ Deploy $ctx }, { Recover $ctx }, { CloseTx $ctx 'pointer-unproven' })
     $p = $good | ConvertFrom-Json -AsHashtable; $p.installationRoot = Join-Path $ctx.root 'other'
     [IO.File]::WriteAllText($pointer, ($p | ConvertTo-Json)); $hash = (Get-FileHash -LiteralPath $pointer).Hash
     foreach ($run in $runs) { $r = & $run; Expect ($r.Exit -ne 0 -and $r.Log -like '*different installation root or data target*' -and (Get-FileHash -LiteralPath $pointer).Hash -ceq $hash) 'installationRoot mismatch refused' }
@@ -725,7 +566,7 @@ F 35 'pointer naming another installation root or data target: refused on deploy
     [IO.File]::WriteAllText((Join-Path $ctx.root 'product-root.txt'), $ctx.data)
     $j = Get-Journal $ctx; $journal = Join-Path (Get-DeployRoot $ctx) "$($j.T)\journal.json"
     Rename-Item -LiteralPath $journal -NewName 'journal.hidden'
-    $r = CloseTx $ctx 'pointer-unproven' 'none'
+    $r = CloseTx $ctx 'pointer-unproven'
     Expect ($r.Exit -ne 0 -and $r.Log -like '*no journal exists*') 'journal-less close refused'
     Rename-Item -LiteralPath (Join-Path (Get-DeployRoot $ctx) "$($j.T)\journal.hidden") -NewName 'journal.json'
 }
@@ -761,12 +602,8 @@ F 39 'escape: product-root.txt outside the test root is refused before any child
 F 40 'escape: launchers that start an exe outside the test root are refused before any child or write' {
     $ctx = Use (New-Context 40)
     $other = Use (New-Context 40)
-    $attempt = 'deploy-attempt-20261105-000000-000-bbbbbbbb'
     $paths = @('cli-common.ps1', 'run-apply.ps1' | ForEach-Object { Join-Path $ctx.launchers $_ })
     foreach ($path in $paths) { [IO.File]::WriteAllText($path, ([IO.File]::ReadAllText($path)).Replace($ctx.old.exe, $other.old.exe)) }
-    $backups = @($paths | ForEach-Object { $bak = "$_.pre-0375-$attempt.bak"; Copy-Item -LiteralPath $_ -Destination $bak; $bak })
-    [void][IO.Directory]::CreateDirectory((Join-Path $other.old.root $attempt))
-    [IO.File]::WriteAllText((Join-Path $other.old.root "$attempt\launcher-recovery.json"), ([ordered]@{ previousExe = 'C:\previous\SyncShark.exe'; paths = $paths; backups = $backups } | ConvertTo-Json))
     $before = Get-TreeStamp $other.root
     $r = Deploy $ctx
     Expect ($r.Exit -ne 0 -and $r.Log -like '*outside the test root*') 'refused'
@@ -782,16 +619,6 @@ F 41 'escape: a -Build reached through a junction to outside the test root is re
     $r = Deploy $ctx '' $build
     Expect ($r.Exit -ne 0 -and $r.Log -like '*passes through the reparse point*') 'refused'
     Expect (-not (Test-Path -LiteralPath (Join-Path $ctx.root 'replacement-staging')) -and (Get-TreeStamp $outside) -ceq $before) "nothing written inside or outside: $(Get-StampDiff $before $outside)"
-}
-F 42 'recover re-proves the stop: a host found running before compensation is needs-owner, nothing restored' {
-    $ctx = Use (New-Context 42)
-    Start-Host $ctx $ctx.old
-    $r = Deploy $ctx 'phase-stopped'
-    $launchers = Get-LauncherHashes $ctx
-    Start-Host $ctx $ctx.old
-    $r = Recover $ctx
-    $j = Expect-NeedsOwner $ctx '*stop is not proven*'
-    Expect ((Get-LauncherHashes $ctx) -ceq $launchers -and $null -eq $j.restore.decision -and -not (@($j.phases | ForEach-Object name) -contains 'start-pending')) 'no compensation step ran'
 }
 F 43 'Recovery root from LocalRecoveryRoot: inside the data folder refused (R4); unavailable store refused; elsewhere recorded' {
     $ctx = Use (New-Context 43); Write-ProductState $ctx (Join-Path $ctx.data 'recovery')
@@ -817,8 +644,7 @@ F 44 'chain publication fails after a durable success: nothing compensated; -Rec
     finally { $acl = [IO.FileSystemAclExtensions]::GetAccessControl($directory, 'Access'); [void]$acl.RemoveAccessRule($rule); [IO.FileSystemAclExtensions]::SetAccessControl($directory, $acl) }
     $j = Get-Journal $ctx
     Expect ($r.Exit -eq 2 -and $j.state -ceq 'open' -and $j.outcome -and $j.outcome.terminal -ceq 'healthy') 'success kept open for publication'
-    Expect (-not (@($j.phases | ForEach-Object name) -contains 'start-pending') -and @($j.launchers | Where-Object { $_.restore }).Count -eq 0) 'nothing compensated'
-    Expect (@(Get-Stubs $ctx '--core v2 --engine-host' | Where-Object ExecutablePath -ieq $ctx.new.exe).Count -eq 1) 'new host still running'
+    Expect (@(Get-Stubs $ctx '--notify-ready' | Where-Object ExecutablePath -ieq (Join-Path $ctx.root 'versions/0.3.76/Sync Shark.exe')).Count -eq 1) 'new host still running'
     $r = Recover $ctx
     $null = Expect-Closed $ctx 'healthy'
     Expect (Test-Path -LiteralPath (Join-Path $ctx.new.root 'deploy-log.json')) 'published by -Recover'
@@ -833,7 +659,7 @@ F 45 'a tampered module, or another build''s tools copy, is refused before any m
     $r = Invoke-Tool $ctx @('-Build', $build.root, '-LauncherDir', $ctx.launchers) '' $ctx.new.script
     Expect ($r.Exit -ne 0 -and $r.Log -like "*own outputDirectory\tools*" -and -not (Test-Path -LiteralPath $marker)) 'another build''s tools copy refused'
 }
-F 46 'backup and restore keep file and directory attributes and creation and last-write times' {
+F 46 'backup keeps file and directory attributes and creation and last-write times' {
     $ctx = Use (New-Context 46)
     $dir = Join-Path $ctx.data 'meta'; [void][IO.Directory]::CreateDirectory($dir)
     $file = Join-Path $dir 'keep.txt'; [IO.File]::WriteAllText($file, 'keep')
@@ -845,11 +671,6 @@ F 46 'backup and restore keep file and directory attributes and creation and las
     $r = Deploy $ctx 'phase-launchers-switched'
     $j = Get-Journal $ctx
     Expect ((Stamp (Join-Path $j.backup.path 'meta\keep.txt')) -ceq $expected.file -and (Stamp (Join-Path $j.backup.path 'meta')) -ceq $expected.dir -and (Stamp $j.backup.path) -ceq $expected.root) 'backup keeps metadata'
-    Edit-Data $ctx
-    $r = Recover $ctx
-    $null = Expect-Closed $ctx 'restored'
-    Expect ((Stamp $file) -ceq $expected.file -and (Stamp $dir) -ceq $expected.dir -and (Stamp $ctx.data) -ceq (Stamp $j.backup.path)) 'restore keeps metadata'
-    Expect ((Get-Item -LiteralPath $ctx.data -Force).CreationTimeUtc -eq [DateTime]::new(2005, 6, 7, 8, 9, 10, [DateTimeKind]::Utc)) 'restored data root keeps its creation time'
 }
 
 F 47 'bug #110: product-root.txt missing while the store exists elsewhere: refused before any effect, the recorded root named, the pointer not written' {

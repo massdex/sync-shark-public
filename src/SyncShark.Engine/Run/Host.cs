@@ -38,5 +38,5 @@ public sealed class Host
     /// <summary>Signal completion of host shutdown.</summary>
     public CancellationToken Stopping => throw new NotImplementedException();
     /// <summary>Open each pair’s sides asynchronously with its cancellation token.</summary>
-    public Host(Func<bool,CancellationToken,Task<IStore?>> openStore, Func<PairConfig,IStore,Func<PathScope>,Action<RunEvent>,CancellationToken,Task<(ISide Local,ISide Dropbox)>> sides, EngineSettings settings, ILogFiles logs, TimeProvider clock, Func<CancellationToken,Task<string>> connect, Func<string,CancellationToken,Task> disconnect) => throw new NotImplementedException();
+    public Host(Func<bool,CancellationToken,Task<IStore?>> openStore, Func<PairConfig,IStore,Func<PathScope>,Action<RunEvent>,CancellationToken,Task<(ISide Local,ISide Dropbox)>> sides, EngineSettings settings, ILogFiles logs, TimeProvider clock, Func<CancellationToken,Task<string>> connect, Func<string,CancellationToken,Task> disconnect, Func<string, DriveType, CancellationToken, Task>? trim = null, Action<PairConfig>? reserve = null) => throw new NotImplementedException();
 }

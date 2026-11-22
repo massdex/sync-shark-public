@@ -74,6 +74,7 @@ public static class Schema
          skip_cause TEXT
         ) STRICT;
         CREATE INDEX issue_member_issue ON issue_member(issue_id,side,path_key);
+        CREATE INDEX issue_member_scope ON issue_member(pair_id,side,path_key,issue_id);
         CREATE UNIQUE INDEX issue_member_skip ON issue_member(pair_id,side,path_key) WHERE skip_cause IS NOT NULL;
         """;
     /// <summary>Creates only the listing and deleted-name buffers on the attached scan store.</summary>

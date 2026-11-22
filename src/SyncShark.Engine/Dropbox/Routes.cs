@@ -11,8 +11,13 @@ public static class Routes
     /// <summary>The number of files the provider permits in one relocation.</summary>
     public static int RelocationFiles => throw new NotImplementedException();
 
-    /// <summary>Endpoint operation on the supplied facts.</summary>
-    public static Uri Endpoint(string name) => throw new NotImplementedException();
+    /// <summary>Resolve an endpoint without classifying an OAuth bootstrap URL as an API route.</summary>
+    public static Uri Endpoint(string name) => name switch
+    {
+        DropboxProtocol.AuthorizationPath => new UriBuilder(Uri.UriSchemeHttps, DropboxProtocol.AuthorizationHost) { Path = name }.Uri,
+        DropboxProtocol.TokenPath => new UriBuilder(Uri.UriSchemeHttps, DropboxProtocol.TokenHost) { Path = name }.Uri,
+        _ => throw new NotImplementedException()
+    };
 
     /// <summary>StyleOf for the selected Routes operation.</summary>
     public static Style StyleOf(string name) => throw new NotImplementedException();

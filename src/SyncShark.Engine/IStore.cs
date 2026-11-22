@@ -18,6 +18,8 @@ public interface IStore : IDisposable
     IAsyncEnumerable<Notice> NoticesAsync(string pairId, CancellationToken ct);
     /// <summary>Save by pair, path and kind with the members. An unrelated Failure cannot replace a PutBack notice. Within the same PutBack slot, the newest put-back failure at that path replaces its predecessor.</summary>
     Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct);
+    /// <summary>Change visibility only if the stored notice still matches the reviewed subject; return false on a stale or closed slot.</summary>
+    Task<bool> UpdateNoticeVisibilityAsync(string pairId, Notice expected, bool ignored, CancellationToken ct) => throw new NotImplementedException();
     Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct);
     Task<JournalPosition?> PositionAsync(string volume, CancellationToken ct);
     Task SavePositionAsync(string volume, JournalPosition position, CancellationToken ct);

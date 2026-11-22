@@ -1,8 +1,8 @@
 # One-process deploy of a Sync Shark build (DESIGN-ONE-DEPLOY-11A with its addenda).
 # Deploy:  pwsh -File <candidate outputDirectory>\tools\Deploy-SyncShark.ps1 -Build <candidate build root> -LauncherDir <launcher folder>
-# Recover: ... -Recover          Close a blocked transaction: ... -Close -Disposition <d> [-Layout old|new|none]
+# Recover: ... -Recover          Close a blocked transaction: ... -Close -Disposition <d>
 # Operating condition: no GUI, CLI, launcher or Repair use until the transaction is closed; refuse without effects otherwise.
-# Trust (coordinator ruling, review finding 6): the six product binaries carry the pinned Authenticode signature; every
+# Trust (coordinator ruling, review finding 6): the product binaries carry the pinned Authenticode signature; every
 # other file is covered by the manifest SHA256 tree check. Backups keep file and directory attributes and creation and
 # last-write times; ACLs are not copied (the data folder inherits its ACL). Launcher writes are temp then
 # File.Move(overwrite) rename-over (accepted amendment): the launchers are small .ps1 files whose metadata doesn't matter.
@@ -13,8 +13,7 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Recover')][switch]$Recover,
     [Parameter(Mandatory, ParameterSetName = 'Close')][switch]$Close,
     [Parameter(Mandatory, ParameterSetName = 'Close')]
-    [ValidateSet('restored-not-started', 'live-old', 'live-new', 'stop-refused', 'pointer-unproven')][string]$Disposition,
-    [Parameter(ParameterSetName = 'Close')][ValidateSet('old', 'new', 'none')][string]$Layout,
+    [ValidateSet('live-new', 'stop-refused', 'pointer-unproven')][string]$Disposition,
     [string]$TestProductRoot,
     [string]$VerificationObservationPath,
     [string]$CrashAfter = ''
@@ -59,7 +58,7 @@ $pauseLine = 'Pauses are not preserved across a deploy; re-pause pairs after.'
 $liveLabel = 'operational health only; full DB integrity unverified'
 $runKeyPath = 'Software\Microsoft\Windows\CurrentVersion\Run'
 $runNames = @('Sync Shark AutoSync', 'Sync Shark')
-$productBinaries = @('SyncShark.exe', 'SyncShark.dll', 'SyncShark.Core.dll', 'SyncShark.Engine.dll', 'SyncSharkDiscovery.exe', 'SyncShark.Explorer.dll')
+$legacyBinaries = @('SyncShark.exe', 'SyncShark.dll', 'SyncShark.Core.dll', 'SyncShark.Engine.dll', 'SyncSharkDiscovery.exe', 'SyncShark.Explorer.dll')
 $launcherSpecs = @(
     @{ name = 'cli-common.ps1'; pattern = '(?m)^(\s*\$Exe\s*=\s*'')([^'']*)('')' },
     @{ name = 'run-apply.ps1'; pattern = '(?m)(\[string\]\$Exe\s*=\s*'')([^'']*)('')' })
@@ -204,7 +203,7 @@ function Read-BuildManifest([string]$Root) {
     $manifest = Read-Json $path
     $out = Get-SyncSharkNormalizedPath ([string]$manifest.outputDirectory)
     [ordered]@{ root = (Get-SyncSharkNormalizedPath $Root); manifestPath = $path; manifestSha256 = $sha; outputDirectory = $out
-        exe = (Join-Path $out (if (Test-Path -LiteralPath (Join-Path $out 'Sync Shark.exe')) { 'Sync Shark.exe' } else { 'SyncShark.exe' })); cliExe = (if (Test-Path -LiteralPath (Join-Path $out 'syncshark.exe')) { Join-Path $out 'syncshark.exe' } else { $null }); productVersion = [string]$manifest.productVersion; version = [string]$manifest.version
+        exe = (Join-Path $out $(if (Test-Path -LiteralPath (Join-Path $out 'Sync Shark.exe')) { 'Sync Shark.exe' } else { 'SyncShark.exe' })); cliExe = $(if (Test-Path -LiteralPath (Join-Path $out 'syncshark.exe')) { Join-Path $out 'syncshark.exe' } else { $null }); productVersion = [string]$manifest.productVersion; version = [string]$manifest.version
         commit = [string]$manifest.commit; expectedPreviousVersion = [string]$manifest.expectedPreviousVersion; files = @($manifest.files) }
 }
 function Get-Observation([string]$Path) {
@@ -248,6 +247,7 @@ function Assert-Tree([System.Collections.IDictionary]$Side, [switch]$Legacy) {
         if (-not $(if ($Legacy) { $actual.ContainsKey($name) } else { $listed.ContainsKey($name) })) { throw "Missing runtime metadata: $name" }
     }
     $signer = (Get-SyncSharkSignerIdentity).roles.publisher
+    $productBinaries = if ($Legacy) { $legacyBinaries } else { @('Sync Shark.exe','syncshark.exe') }
     foreach ($name in $productBinaries) {
         if (-not $listed.ContainsKey($name.ToLowerInvariant())) { throw "Missing product binary: $name" }
         Assert-SyncSharkSignatureObservation (Get-Observation (Join-Path $out $name)) @($signer.thumbprints) $signer.subject $signer.subject @($signer.spki)
@@ -270,21 +270,6 @@ function Find-Predecessor([string[]]$LauncherPaths, [string]$ExpectedPreviousVer
     if ($null -eq $side) { throw "No predecessor build record found above $outDir." }
     if ($side.productVersion -cne $ExpectedPreviousVersion) { throw "Predecessor $($side.productVersion) is not the expected $ExpectedPreviousVersion." }
     if (-not (Same $exes[0] $side.exe)) { throw 'The launchers do not start the predecessor outputDirectory\SyncShark.exe.' }
-    $digits = $side.version.Replace('.', '')
-    $records = @(Get-ChildItem -LiteralPath $side.root -Directory -Filter 'deploy-attempt-*' -Force | Where-Object {
-        $file = Join-Path $_.FullName 'launcher-recovery.json'
-        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $false }
-        try { $record = Read-Json $file } catch { return $false }
-        $paths = @($record.paths); $backups = @($record.backups)
-        if ($paths.Count -ne 2 -or $backups.Count -ne 2) { return $false }
-        $ok = $true
-        for ($i = 0; $i -lt 2; $i++) {
-            $expected = [string]$paths[$i] + ".pre-$digits-$($_.Name).bak"
-            if (-not (Same $paths[$i] $LauncherPaths[$i]) -or -not (Same $backups[$i] $expected) -or
-                -not (Test-Path -LiteralPath $expected -PathType Leaf)) { $ok = $false }
-        }
-        $ok })
-    if ($records.Count -ne 1) { throw "Expected exactly one matching launcher recovery record in $($side.root) (found $($records.Count))." }
     $side
 }
 
@@ -366,11 +351,21 @@ function Invoke-NewCli([string]$Purpose, [string]$Exe, [string]$Arguments) {
     $result = Invoke-Child $Purpose $Exe $Arguments
     [pscustomobject]@{ Exit = $result.Exit; Out = $result.Out }
 }
+function Assert-FinishedWork {
+    $reply=Invoke-Cli 'unfinished-work' $script:journal.predecessor.exe 'engine status --json'
+    if ($reply.Exit -ne 0 -or !$reply.Json.ok -or $reply.Json.data.items -isnot [array]) { throw 'Unconfirmed predecessor status; not switching.' }
+    $pairs=foreach ($item in $reply.Json.data.items) {
+        if ($item.pendingPresent -isnot [bool] -or $item.pendingPresent) { throw "Unfinished or unknown work for $($item.pair.pairId); not switching." }
+        "$($item.pair.pairId)|$($item.pair.enabled)"
+    }
+    if ((($pairs | Sort-Object -CaseSensitive) -join ';') -cne $script:journal.snapshot.pairs) { throw 'Incomplete predecessor status.' }
+}
 function Get-PairsKeyText([string]$Out) {
-    (@($Out -split "`r?`n" | Where-Object { $_.Trim() } | ForEach-Object {
-        $text = $_.Trim(); $id = ($text -split '\s+')[0]
-        $enabled = if ($text -match '\(switched off\)') { 'False' } else { 'True' }; "$id|$enabled" }) |
-        Sort-Object -CaseSensitive) -join ';'
+    if ($Out.Trim() -ceq 'There are no pairs yet.') { return '' }
+    (@($Out.TrimEnd() -split "`r?`n" | ForEach-Object {
+        if ($_ -notmatch '^(?<id>\S+)  .+  .+ <-> .+  account .+  first run: \S+(?<off>  \(switched off\))?$') { throw 'Unrecognised candidate pair row.' }
+        "$($Matches.id)|$(-not $Matches['off'])"
+    }) | Sort-Object -CaseSensitive) -join ';'
 }
 function Join-Children {
     # -Recover joins every journaled child still alive; an intent with no PID is matched by exe, exact args and creation after the intent.
@@ -390,16 +385,13 @@ function Join-Children {
         Save-Journal
     }
 }
-function Stop-Running {
+function Stop-Running($ExpectedGeneration) {
     $generation = Get-Generation @(Get-Tracked $script:exes)
+    if ($generation -and (!$ExpectedGeneration -or !(Same $generation.Exe $ExpectedGeneration.Exe) -or !$generation.Engine -or ($generation.Tracked.CreatedTicks -join ',') -ne ($ExpectedGeneration.Tracked.CreatedTicks -join ','))) { throw 'Running generation changed before stop.' }
     if ($null -eq $generation) { return }
     $script:journal.stopRequested = Utc
     Save-Journal
-    if ($generation.Engine) {
-        $result = Invoke-Child 'stop' (Join-Path (Split-Path -Parent $generation.Exe) 'syncshark.exe') 'host stop'
-    } else {
-        $result = Invoke-Child 'stop' $generation.Exe '--cli autosync stop'
-    }
+    $result = Invoke-Child 'stop' $generation.Exe '--cli engine host stop --yes'
     if ($result.Exit -ne 0) { NeedsOwner "the stop exited $($result.Exit); the host may still be stopping." }
     Wait-Processes @($generation.Tracked | ForEach-Object Process)
     if (@(Get-Tracked $script:exes).Count) { throw 'A tracked Sync Shark process is running after the stop.' }
@@ -423,83 +415,25 @@ function Get-RunValues {
         }
     } finally { if ($key) { $key.Dispose() } }
 }
-function Format-RunValues($Values) { (@($Values) | ForEach-Object { "$($_.name)|$($_.present)|$($_.kind)|$($_.data)" }) -join "`n" }
-function Restore-RunValues([switch]$CompareOnly) {
-    # R5: the Run values end exactly as snapshotted; absent stays absent. Test mode never writes the registry.
-    $snapshot = $script:journal.snapshot.runValues
-    if ((Format-RunValues @(Get-RunValues)) -ceq (Format-RunValues $snapshot)) { return }
-    if ($CompareOnly) { throw 'The Run values differ from the snapshot.' }
-    if ($testMode) { NeedsOwner 'the Run values differ from the snapshot; test mode never writes the registry.' }
-    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($runKeyPath, $true)
+function Switch-Launcher {
+    # The house setup stages the complete version and atomically retargets active.
+    $j=$script:journal
+    $installer=Join-Path $j.candidate.root "release-$($j.candidate.version)/deploy-scripts/Install-SyncShark.ps1"
+    Assert-Isolated @($installer)
+    $held=[IO.File]::Open($installer,'Open','Read','Read')
     try {
-        foreach ($value in @($snapshot)) {
-            if (-not $value.present) { if ($null -ne $key.GetValue($value.name)) { $key.DeleteValue($value.name) } }
-            else { $key.SetValue($value.name, [string]$value.data, [Microsoft.Win32.RegistryValueKind]$value.kind) }
-        }
-    } finally { $key.Dispose() }
-    if ((Format-RunValues @(Get-RunValues)) -cne (Format-RunValues $snapshot)) { NeedsOwner 'the Run values could not be restored exactly.' }
-}
-function Write-Replace([string]$Path, [byte[]]$Bytes) {
-    # Temp then atomic rename-over, as the module's Write-SyncSharkJournal does. File.Replace (ReplaceFile) was measured
-    # failing 9/60 here on a freshly written temp (on-write scanning); rename-over failed 0/60.
-    $temporary = "$Path.deploy-$($script:T).tmp"
-    $stream = [IO.FileStream]::new($temporary, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::WriteThrough)
-    try { $stream.Write($Bytes, 0, $Bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
-    [IO.File]::Move($temporary, $Path, $true)
-}
-function Write-LauncherBackup([System.Collections.IDictionary]$Launcher) {
-    # ADDENDUM-4 edit 2: journal the intent, then temp, rename, read back, done. Recovery accepts only the exact journaled bytes.
-    $bak = $Launcher.bak
-    if ($bak.done) { return }
-    if (-not $bak.intentUtc) {
-        if (Test-Path -LiteralPath $bak.path) { NeedsOwner "a file with no journaled intent exists at $($bak.path)." }
-        $bak.intentUtc = Utc
-        Save-Journal
-    }
-    if (-not (Test-Path -LiteralPath $bak.path)) {
-        $temporary = "$($bak.path).$([Guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
-        [IO.File]::WriteAllBytes($temporary, [Convert]::FromBase64String($Launcher.originalBase64))
-        Crash 'bak-temp'
-        [IO.File]::Move($temporary, $bak.path)
-        Crash 'bak-renamed'
-    }
-    $item = Get-Item -LiteralPath $bak.path -Force
-    if ($item.PSIsContainer -or ([int]$item.Attributes -band $unsafeAttributes) -ne 0 -or (Get-SyncSharkSha256 $bak.path) -cne $bak.expectedSha256) {
-        NeedsOwner "the launcher backup $($bak.path) does not hold the journaled original bytes."
-    }
-    $bak.done = Utc
-    Save-Journal
-}
-function Switch-Launcher([System.Collections.IDictionary]$Launcher, [int]$Index) {
-    $Launcher.switchState = [ordered]@{ intentUtc = (Utc); done = $null }
-    Save-Journal
-    $current = Get-SyncSharkSha256 $Launcher.path
-    if ($current -ceq $Launcher.originalSha256) { Write-Replace $Launcher.path ([Convert]::FromBase64String($Launcher.newBase64)) }
-    elseif ($current -cne $Launcher.newSha256) { NeedsOwner "foreign launcher content in $($Launcher.path)." }
-    if ((Get-SyncSharkSha256 $Launcher.path) -cne $Launcher.newSha256) { throw "Launcher switch did not verify: $($Launcher.path)" }
-    Crash "launcher-switched-$Index"
-    $Launcher.switchState.done = Utc
-    Save-Journal
-}
-function Restore-Launchers {
-    # Per file by hash: original = done; new = write the original; anything else = needs-owner.
-    foreach ($launcher in @($script:journal.launchers)) {
-        if ($launcher.restore -and $launcher.restore.done) { continue }
-        $launcher.restore = [ordered]@{ intentUtc = (Utc); done = $null }
-        Save-Journal
-        $current = Get-SyncSharkSha256 $launcher.path
-        if ($current -ceq $launcher.newSha256) { Write-Replace $launcher.path ([Convert]::FromBase64String($launcher.originalBase64)) }
-        elseif ($current -cne $launcher.originalSha256) { NeedsOwner "foreign launcher content in $($launcher.path)." }
-        if ((Get-SyncSharkSha256 $launcher.path) -cne $launcher.originalSha256) { throw "Launcher restore did not verify: $($launcher.path)" }
-        $launcher.restore.done = Utc
-        Save-Journal
-    }
-}
-function Assert-Launchers([string]$Side) {
-    foreach ($launcher in @($script:journal.launchers)) {
-        $expected = if ($Side -eq 'new') { $launcher.newSha256 } else { $launcher.originalSha256 }
-        if ((Get-SyncSharkSha256 $launcher.path) -cne $expected) { throw "Launcher $($launcher.path) is not on the $Side side." }
-    }
+        $signer=(Get-SyncSharkSignerIdentity).roles.publisher
+        Assert-SyncSharkSignatureObservation (Get-Observation $installer) $signer.thumbprints $signer.subject $signer.subject $signer.spki
+        $header=[IO.File]::ReadLines($installer) | Select-Object -First 1
+        $prefix='# SyncSharkUpdateContract: '
+        if (!$header.StartsWith($prefix,[StringComparison]::Ordinal)) { throw 'Installer contract missing.' }
+        $contract=$header.Substring($prefix.Length) | ConvertFrom-Json
+        if ($contract.product -cne 'Massdex.SyncShark' -or ($contract.version+'+'+$contract.sourceRevision) -cne $j.candidate.productVersion -or $contract.previousVersion -cne $j.predecessor.productVersion) { throw 'Installer does not bind the selected builds.' }
+        Mark 'switch-requested'
+        if ($testMode) { & $installer -PredecessorRuntime $j.predecessor.outputDirectory -TestProductRoot $installationRoot }
+        else { & $installer -PredecessorRuntime $j.predecessor.outputDirectory }
+        Assert-SyncSharkJunction (Join-Path $installationRoot 'active') (Join-Path $installationRoot ('versions/'+$j.candidate.version))
+    } finally { $held.Dispose() }
 }
 function Assert-NoNewAutoSyncFailure {
     $since = Ticks $script:journal.snapshot.utc
@@ -514,20 +448,20 @@ function Assert-NoNewAutoSyncFailure {
         } finally { $reader.Dispose() }
     }
 }
-function Test-Health([string]$Side, [switch]$CompareOnly) {
-    $build = if ($Side -eq 'new') { $script:journal.candidate } else { $script:journal.predecessor }
-    $status = Invoke-Cli "$Side-host-status" $build.exe 'engine host status --json'
-    if ($status.Exit -ne 0 -or $null -eq $status.Json -or -not $status.Json.ok -or $status.Json.error -or
-        [string]$status.Json.data.state -in @('Off', 'Unavailable')) { throw "The $Side host did not report a healthy state." }
-    $hosts = @(Get-Tracked @($build.exe) | Where-Object Args -ceq '--core v2 --engine-host')
-    if ($hosts.Count -ne 1) { throw "Expected one pinned $Side host process (found $($hosts.Count))." }
-    if ([Diagnostics.FileVersionInfo]::GetVersionInfo($build.exe).ProductVersion -cne $build.productVersion) { throw "The $Side host runs the wrong version." }
-    $pairs = Invoke-Cli "$Side-pairs" $build.exe 'engine pairs list --json'
-    if ($pairs.Exit -ne 0 -or (Get-PairsKey $pairs.Json) -cne $script:journal.snapshot.pairs) { throw 'The pairs differ from the snapshot.' }
+function Test-Health {
+    $build=$script:journal.candidate
+    $installed=Join-Path $installationRoot ('versions/'+$build.version)
+    Assert-SyncSharkJunction (Join-Path $installationRoot 'active') $installed
+    $hostPath=Join-Path $installed (Split-Path -Leaf $build.exe)
+    $cli=Join-Path $installed (Split-Path -Leaf $build.cliExe)
+    $status=Invoke-NewCli 'new-status' $cli 'status'
+    if ($status.Exit -ne 0 -or !$status.Out.Trim()) { throw 'The installed host did not report status.' }
+    $hosts=@(Get-Tracked @($hostPath) | Where-Object { $_.Args -in @('','--notify-ready') })
+    if ($hosts.Count -ne 1 -or [Diagnostics.FileVersionInfo]::GetVersionInfo($hostPath).ProductVersion -cne $build.productVersion) { throw 'Expected one candidate host.' }
+    $pairs=Invoke-NewCli 'new-pairs' $cli 'pairs list'
+    if ($pairs.Exit -ne 0 -or (Get-PairsKeyText $pairs.Out) -cne $script:journal.snapshot.pairs) { throw 'The pairs differ from the snapshot.' }
     Assert-NoNewAutoSyncFailure
-    Restore-RunValues -CompareOnly:$CompareOnly
 }
-
 function Get-RecoveryRoot {
     # SyncTransferSettings.LocalRecoveryRoot (EnginePaths.cs:5) from <data>\state\sync-product-state-a|b.json, read the way
     # DualSlotJsonStore.cs does: schema 1, payload SHA256 over the Value text, highest valid generation wins.
@@ -565,30 +499,15 @@ function Measure-Data {
     $bytes
 }
 function Get-FreeBytes([string]$Path) { [IO.DriveInfo]::new([IO.Path]::GetPathRoot((Get-SyncSharkNormalizedPath $Path))).AvailableFreeSpace }
-function Assert-Capacity([long]$BackupNeed, [long]$StagingNeed) {
-    # ADDENDUM-3 edit 3: only bytes not yet written count; the two needs are summed only on one volume.
-    $need = @{}
-    foreach ($pair in @(@($script:deployRoot, $BackupNeed), @($script:dataTarget, $StagingNeed))) {
-        $volume = [IO.Path]::GetPathRoot((Get-SyncSharkNormalizedPath $pair[0])).ToUpperInvariant()
-        $need[$volume] = [long]$need[$volume] + [long]$pair[1]
-    }
-    foreach ($volume in $need.Keys) {
-        $free = Get-FreeBytes $volume
-        if ($free -lt $need[$volume]) { throw "Not enough free space on $volume (need $($need[$volume]) bytes, have $free)." }
-    }
+function Assert-Capacity([long]$BackupNeed) {
+    if ((Get-FreeBytes $script:deployRoot) -lt $BackupNeed) { throw "Not enough free space for the backup ($BackupNeed bytes)." }
 }
-function Copy-DataTree([string]$Source, [string]$Destination, [string]$CrashName, [switch]$Resume) {
+function Copy-DataTree([string]$Source, [string]$Destination, [string]$CrashName) {
     # Each file is read once and hashed while written. The held instance lock is read through its own handle.
     $sourceFiles = @(Get-ChildItem -LiteralPath $Source -File -Recurse -Force)
     [void][IO.Directory]::CreateDirectory($Destination)
     foreach ($directory in Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force) {
         [void][IO.Directory]::CreateDirectory((Join-Path $Destination ([IO.Path]::GetRelativePath($Source, $directory.FullName))))
-    }
-    if ($Resume) {
-        $known = @{}; foreach ($file in $sourceFiles) { $known[[IO.Path]::GetRelativePath($Source, $file.FullName).ToLowerInvariant()] = $true }
-        foreach ($file in Get-ChildItem -LiteralPath $Destination -File -Recurse -Force) {
-            if (-not $known.ContainsKey([IO.Path]::GetRelativePath($Destination, $file.FullName).ToLowerInvariant())) { NeedsOwner "unknown extra file in staging: $($file.FullName)" }
-        }
     }
     $buffer = [byte[]]::new(1MB)
     $entries = foreach ($file in $sourceFiles) {
@@ -596,9 +515,7 @@ function Copy-DataTree([string]$Source, [string]$Destination, [string]$CrashName
         $target = Join-Path $Destination $relative
         $isLock = $null -ne $script:lockStream -and (Same $file.FullName $script:lockPath)
         $reader = if ($isLock) { $script:lockStream.Position = 0; $script:lockStream } else { [IO.File]::Open($file.FullName, 'Open', 'Read', 'Read') }
-        if ($Resume -and (Test-Path -LiteralPath $target)) { [IO.File]::SetAttributes($target, [IO.FileAttributes]::Normal) }
-        $mode = if ($Resume) { [IO.FileMode]::Create } else { [IO.FileMode]::CreateNew }
-        $output = [IO.FileStream]::new($target, $mode, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $output = [IO.FileStream]::new($target,'CreateNew','Write','None')
         $hash = [Security.Cryptography.IncrementalHash]::CreateHash('SHA256')
         try {
             while (($read = $reader.Read($buffer, 0, $buffer.Length)) -gt 0) { $hash.AppendData($buffer, 0, $read); $output.Write($buffer, 0, $read) }
@@ -624,68 +541,6 @@ function Copy-Metadata($Item, [string]$Target) {
     $info.Attributes = if ($keep) { [IO.FileAttributes]$keep } elseif ($Item.PSIsContainer) { [IO.FileAttributes]::Directory } else { [IO.FileAttributes]::Normal }
 }
 function Format-Manifest($Entries) { (@($Entries) | ForEach-Object { '{0}|{1}|{2}' -f $_.path, $_.length, ([string]$_.sha256).ToLowerInvariant() } | Sort-Object -CaseSensitive) -join "`n" }
-function Move-Folder([string]$From, [string]$To) {
-    Assert-Fresh
-    try { [IO.Directory]::Move($From, $To) } catch { NeedsOwner "the rename $From -> $To failed (open handle?): $($_.Exception.Message)" }
-}
-function Assert-StagingReady {
-    # 6A 7.4 and 7A E1: the recorded staging ID and a re-streamed manifest equal to the backup.
-    $restore = $script:journal.restore
-    if ((Get-FileId $restore.staging) -cne $restore.stagingId) { NeedsOwner 'the staging folder is not the recorded one.' }
-    if ((Get-SyncSharkTreeIdentity $restore.staging) -cne $script:journal.backup.manifestSha256) { NeedsOwner 'the staging content differs from the backup manifest.' }
-}
-function Invoke-StagedRestore {
-    $restore = $script:journal.restore
-    $snapshotId = $script:journal.snapshot.dataFileId
-    if (-not $restore.stagingIntentUtc) {
-        Assert-Capacity 0 $script:journal.backup.bytes
-        if ((Test-Path -LiteralPath $restore.staging) -or (Test-Path -LiteralPath $restore.failed)) { NeedsOwner 'a staging or failed folder for this transaction already exists.' }
-        $restore.stagingIntentUtc = Utc
-        Save-Journal
-    }
-    if (-not $restore.stagingId) {
-        if (Test-Path -LiteralPath $restore.staging) { NeedsOwner 'the staging folder exists with no recorded ID; nothing unrecorded is adopted.' }
-        [void][IO.Directory]::CreateDirectory($restore.staging)
-        Crash 'staging-created'
-        $restore.stagingId = Get-FileId $restore.staging
-        Save-Journal
-    }
-    if (-not (Has 'restore-staged')) {
-        if ((Get-FileId $restore.staging) -cne $restore.stagingId) { NeedsOwner 'the staging folder is not the recorded one.' }
-        $present = 0L; foreach ($file in Get-ChildItem -LiteralPath $restore.staging -File -Recurse -Force) { $present += $file.Length }
-        Assert-Capacity 0 ([Math]::Max(0L, [long]$script:journal.backup.bytes - $present))
-        $null = Copy-DataTree $script:journal.backup.path $restore.staging 'staging-file' -Resume
-        if ((Get-SyncSharkTreeIdentity $restore.staging) -cne $script:journal.backup.manifestSha256) { NeedsOwner 'the staged copy does not verify against the backup manifest.' }
-        Mark 'restore-staged'
-    }
-    if (-not (Has 'swap-1')) {
-        if ((Test-Path -LiteralPath $script:dataTarget) -and (Get-FileId $script:dataTarget) -ceq $snapshotId -and -not (Test-Path -LiteralPath $restore.failed)) {
-            Assert-StagingReady
-            $restore.swap1IntentUtc = Utc
-            Save-Journal
-            Move-Folder $script:dataTarget $restore.failed
-            Crash 'swap-1-renamed'
-        } elseif (-not ($restore.swap1IntentUtc -and -not (Test-Path -LiteralPath $script:dataTarget) -and (Get-FileId $restore.failed) -ceq $snapshotId)) {
-            NeedsOwner 'unknown data state before swap-1.'
-        }
-        Mark 'swap-1'
-    }
-    if (-not (Has 'swap-2')) {
-        if (-not ((Test-Path -LiteralPath $script:dataTarget) -and (Get-FileId $script:dataTarget) -ceq $restore.stagingId)) {
-            if ((Test-Path -LiteralPath $script:dataTarget) -or (Get-FileId $restore.failed) -cne $snapshotId) { NeedsOwner 'unknown data state before swap-2.' }
-            Assert-StagingReady
-            $restore.swap2IntentUtc = Utc
-            Save-Journal
-            Move-Folder $restore.staging $script:dataTarget
-            Crash 'swap-2-renamed'
-        }
-        $script:journal.dataFileId = $restore.stagingId
-        Mark 'swap-2'
-    }
-    if ((Get-SyncSharkTreeIdentity $script:dataTarget) -cne $script:journal.backup.manifestSha256) { NeedsOwner 'the restored data does not match the backup manifest.' }
-}
-
-# ---- Journal, pointer, records ----
 function Has([string]$Phase) { @($script:journal.phases | Where-Object { $_.name -ceq $Phase }).Count -gt 0 }
 function Mark([string]$Phase) {
     $script:journal.phases = @($script:journal.phases) + @([ordered]@{ name = $Phase; utc = (Utc); ms = $script:phaseWatch.ElapsedMilliseconds })
@@ -762,15 +617,10 @@ function Get-Size([string]$Path) {
 }
 function Write-Candidates {
     # Report only; nothing is deleted.
-    $items = @($script:journal.launchers | ForEach-Object { $_.bak.path; Get-ChildItem -Path "$($_.bak.path).*.tmp" -File -Force -ErrorAction SilentlyContinue | ForEach-Object FullName })
+    $items=@()
     if ($script:journal.terminal -in @('healthy', 'staged')) { $items += $script:journal.predecessor.root }
     $items += @(Get-ChildItem -LiteralPath $script:deployRoot -Directory -Force | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'Data') } |
         Sort-Object Name | Select-Object -SkipLast 2 | ForEach-Object { Join-Path $_.FullName 'Data' })
-    if ($script:dataTarget) {
-        $leaf = Split-Path -Leaf $script:dataTarget
-        $items += @(Get-ChildItem -LiteralPath (Split-Path -Parent $script:dataTarget) -Directory -Force |
-            Where-Object { $_.Name -like "$leaf.failed-*" -or $_.Name -like "$leaf.restore-staging-*" } | ForEach-Object FullName)
-    }
     $lines = @("## Transaction $($script:T) ($($script:journal.terminal), $(Utc))")
     foreach ($item in @($items | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)) { $lines += "- $item ($(Get-Size $item) bytes)" }
     foreach ($value in @(Get-RunValues | Where-Object present)) {
@@ -782,21 +632,14 @@ function Write-Candidates {
 function Publish-Chain {
     # Ruling 5 / ADDENDUM-4 edit 3: only a successful candidate deploy, only journal values, atomic and read back.
     $j = $script:journal
-    $attempt = Join-Path $j.candidate.root "deploy-attempt-$($script:T)"
-    $backups = @($j.launchers | ForEach-Object { $_.bak.path })
-    $recovery = [ordered]@{ previousExe = $j.predecessor.exe; paths = @($j.launchers | ForEach-Object path); backups = $backups }
     $log = [ordered]@{ completedAtUtc = $j.outcome.utc; transaction = $script:T; commit = $j.candidate.commit; productVersion = $j.candidate.productVersion
-        previousVersion = $j.predecessor.productVersion; launcherTarget = $j.candidate.exe; launcherBackups = $backups
+        previousVersion = $j.predecessor.productVersion; launcherTarget = $j.candidate.exe
         backupPath = $j.backup.path; backupManifestSha256 = $j.backup.manifestSha256; manifestPath = $j.candidate.manifestPath
         phases = @($j.phases | ForEach-Object name); hostWasRunning = $j.snapshot.hostWasRunning; started = (Has 'started'); terminal = $j.outcome.terminal }
-    [void][IO.Directory]::CreateDirectory($attempt)
-    foreach ($pair in @(@((Join-Path $attempt 'launcher-recovery.json'), $recovery), @((Join-Path $j.candidate.root 'deploy-log.json'), $log))) {
-        Write-Record $pair[0] $pair[1] 'chain'
-        $expected = $pair[1] | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable -Depth 20 | ConvertTo-Json -Depth 20 -Compress
-        if ((Read-Json $pair[0] | ConvertTo-Json -Depth 20 -Compress) -cne $expected) {
-            throw "Chain record did not read back equal: $($pair[0])"
-        }
-    }
+    $path=Join-Path $j.candidate.root 'deploy-log.json'
+    Write-Record $path $log 'chain'
+    $expected=$log | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable -Depth 20 | ConvertTo-Json -Depth 20 -Compress
+    if ((Read-Json $path | ConvertTo-Json -Depth 20 -Compress) -cne $expected) { throw 'Deploy log readback mismatch.' }
 }
 function Close-Journal([string]$Terminal) {
     $script:journal.state = 'closed'; $script:journal.terminal = $Terminal; $script:journal.closedUtc = Utc
@@ -818,23 +661,10 @@ function Set-NeedsOwner([string]$Reason) {
     Save-Journal
     Write-Receipt
     Say "BLOCKED: $Reason"
-    Say "The pointer is kept. The deploy operator resolves the cause and runs -Close -Disposition <restored-not-started|live-old|live-new|stop-refused|pointer-unproven> [-Layout old|new|none]."
+    Say "The pointer is kept. The deploy operator resolves the cause and runs -Close -Disposition <live-new|stop-refused|pointer-unproven>."
     $script:exitCode = 2
 }
-function Test-Effect { [bool]$script:journal.stopRequested -or @($script:journal.launchers | Where-Object { $_.bak.intentUtc -or $_.switchState }).Count -gt 0 }
-
-# ---- Failure handling (6A steps 5-7, 7A E2) ----
-# No rollback (process-0302, D-1121-27): the old host is never restarted and no compensation runs; problems are fixed forward.
-function Stop-NewHost {
-    $tracked = @(Get-Tracked @($script:journal.candidate.exe))
-    if (-not $tracked.Count) { return 'nothing of the new build is running' }
-    $result = Invoke-Child 'new-stop' $script:journal.candidate.cliExe 'host stop'
-    if ($result.Exit -ne 0) { return "the new host stop exited $($result.Exit)" }
-    Wait-Processes @($tracked | ForEach-Object Process)
-    $left = @(Get-Tracked @($script:journal.candidate.exe))
-    if ($left.Count) { return "$($left.Count) new-build process(es) still running" }
-    'the new host stopped gracefully'
-}
+function Test-Effect { [bool]$script:journal.stopRequested -or (Has 'switch-requested') }
 function Resolve-Failure($ErrorRecord) {
     $message = $ErrorRecord.Exception.Message
     if ($script:lockStream) { $script:lockStream.Dispose(); $script:lockStream = $null }
@@ -848,8 +678,8 @@ function Resolve-Failure($ErrorRecord) {
             $script:exitCode = 2
             return
         }
-        if ($message -like 'NEEDS-OWNER:*') { Set-NeedsOwner $message.Substring(13); return }
-        if (Has 'started') { Set-NeedsOwner "failure after start: $message; $(Stop-NewHost). Data, launchers and the store move stay on the new build; fix forward, there is no rollback."; return }
+        if ($message -like 'BLOCKED:*') { Set-NeedsOwner $message; return }
+        if (Has 'started') { Set-NeedsOwner "failure after start: $message; the deploy did not stop the candidate. Fix forward."; return }
         if (-not (Test-Effect)) { Close-Journal 'refused'; return }
         Set-NeedsOwner "no rollback: $message. Nothing was compensated; fix forward."
     } catch {
@@ -868,53 +698,53 @@ function Invoke-Forward {
     $recoveryRoot = $j.snapshot.recoveryRoot
     if ($recoveryRoot) {
         Assert-Isolated @($recoveryRoot)
-        if (Test-Contains $script:dataTarget $recoveryRoot) { throw "The Recovery root $recoveryRoot is inside the data folder: stop and ask the owner (R4)." }
+        if (Test-Contains $script:dataTarget $recoveryRoot) { throw "The Recovery root $recoveryRoot is inside the data folder; refusing the overlapping backup." }
         foreach ($own in @($script:deployRoot, $script:txRoot, $j.backup.path)) { if ((Test-Contains $own $recoveryRoot) -or (Test-Contains $recoveryRoot $own)) { throw "The Recovery root $recoveryRoot overlaps $own." } }
     }
     Say $(if ($recoveryRoot) { "Recovery root: $recoveryRoot" } else { 'Recovery root: absent (no local Recovery location is set).' })
     $generation = Get-Generation @(Get-Tracked $script:exes)
-    if ($generation -and $generation.Engine) {
-        $peer = Invoke-NewCli 'trusted-status' (Join-Path (Split-Path -Parent $generation.Exe) 'syncshark.exe') 'status'
-        if ($peer.Exit -ne 0 -or [string]::IsNullOrWhiteSpace($peer.Out)) { throw 'The running host does not answer status as a trusted peer (R3).' }
+    if ($generation -and (!(Same $generation.Exe $j.predecessor.exe) -or !$generation.Engine)) { throw 'Unexpected running generation; not stopping it.' }
+    if ($generation) {
+        $peer=Invoke-Cli 'trusted-status' $generation.Exe 'engine host status --json'
+        if ($peer.Exit -ne 0 -or !$peer.Json.ok -or $peer.Json.data.state -cne 'StatusWatching') { throw 'Predecessor is not idle; leaving it running.' }
     }
     $j.snapshot.hostWasRunning = $null -ne $generation
     $pairs = Invoke-Cli 'snapshot-pairs' $j.predecessor.exe 'engine pairs list --json'
     if ($pairs.Exit -ne 0 -or $null -eq $pairs.Json) { throw 'engine pairs list failed.' }
     $j.snapshot.pairs = Get-PairsKey $pairs.Json
 
+    Assert-FinishedWork
     Mark 'snapshot'
     # Step 2: stop the running generation with its own CLI, then hold the instance lock.
-    Stop-Running
+    Stop-Running $generation
     $script:lockStream = [IO.File]::Open($script:lockPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    Assert-FinishedWork
     Mark 'stopped'
     # Step 3: backup.
     $bytes = Measure-Data
-    Assert-Capacity $bytes $bytes
+    Assert-Capacity $bytes
     $j.backup.bytes = $bytes; $j.backup.intentUtc = Utc
     Save-Journal
     $entries = Copy-DataTree $script:dataTarget $j.backup.path 'backup-file'
     if ((Format-Manifest $entries) -cne (Format-Manifest (Get-SyncSharkTreeManifest $j.backup.path))) { throw 'The backup copy does not verify against the bytes read.' }
     $j.backup.manifestSha256 = Get-SyncSharkTreeIdentity $j.backup.path
     Mark 'backup-verified'
+    Switch-Launcher
     $script:lockStream.Dispose(); $script:lockStream = $null
-    # Step 4: launchers (.bak first, then the switch).
-    foreach ($launcher in @($j.launchers)) { Write-LauncherBackup $launcher }
-    for ($i = 0; $i -lt $j.launchers.Count; $i++) { Switch-Launcher $j.launchers[$i] $i }
     Mark 'launchers-switched'
+    $installedCli=Join-Path (Join-Path $installationRoot ('versions/'+$j.candidate.version)) (Split-Path -Leaf $j.candidate.cliExe)
     # Step 5: start and health.
     if (-not $j.snapshot.hostWasRunning) {
-        $status = Invoke-NewCli 'new-status' $j.candidate.cliExe 'status'
-        $after = Invoke-NewCli 'new-pairs' $j.candidate.cliExe 'pairs list'
-        if ($status.Exit -ne 0 -or $after.Exit -ne 0 -or (Get-PairsKeyText $after.Out) -cne $j.snapshot.pairs) { throw 'The new build did not answer status and pairs equal to the snapshot.' }
-        Restore-RunValues
+        $status=Invoke-NewCli 'new-status' $installedCli 'status'
+        if ($status.Exit -eq 0 -or $status.Out.Trim() -cne 'The Sync Shark host is not running.') { throw 'Candidate did not report host absence.' }
         Say 'Staged: not live-verified (the host was not running before).'
         Complete-Success 'staged'
         return
     }
     Mark 'started'
-    $start = Invoke-Child 'new-start' $j.candidate.cliExe 'host start'
+    $start = Invoke-Child 'new-start' $installedCli 'host start'
     if ($start.Exit -ne 0) { throw "The new host start exited $($start.Exit)." }
-    Test-Health 'new'
+    Test-Health
     Complete-Success 'healthy'
 }
 function Invoke-Deploy {
@@ -942,33 +772,17 @@ function Invoke-Deploy {
     Assert-Isolated (@($Build, $LauncherDir) + $launcherPaths + @(Get-SidePaths $candidate) + @(Get-SidePaths $predecessor))
     Assert-Tree $candidate
     Assert-Tree $predecessor -Legacy
-    $script:exes = @($predecessor.exe, $candidate.exe)
+    $script:exes = @($predecessor.exe,$candidate.exe,(Join-Path (Join-Path $installationRoot ('versions/'+$candidate.version)) (Split-Path -Leaf $candidate.exe)))
 
     Set-Paths ('{0}-{1}' -f [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff'), [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(4)).ToLowerInvariant())
     $backupPath = Join-Path $script:txRoot 'Data'
-    $staging = "$($script:dataTarget).restore-staging-$($script:T)"; $failed = "$($script:dataTarget).failed-$($script:T)"
     foreach ($own in @($script:deployRoot, $backupPath, $script:txRoot)) {
-        foreach ($other in @($script:dataTarget, $staging, $failed)) {
+        foreach ($other in @($script:dataTarget)) {
             if ((Test-Contains $own $other) -or (Test-Contains $other $own)) { throw "Overlapping roots: $own and $other (ruling 3)." }
         }
     }
-    Assert-Isolated @($script:txRoot, $backupPath, $staging, $failed)
-    foreach ($path in @($script:txRoot, $staging, $failed)) { if (Test-Path -LiteralPath $path) { throw "Refusing: $path already exists." } }
-    $digits = $candidate.version.Replace('.', '')
-    $launchers = for ($i = 0; $i -lt 2; $i++) {
-        $path = $launcherPaths[$i]; $original = [IO.File]::ReadAllBytes($path)
-        $bom = $original.Length -ge 3 -and $original[0] -eq 0xEF -and $original[1] -eq 0xBB -and $original[2] -eq 0xBF
-        $encoding = [Text.UTF8Encoding]::new($bom)
-        $text = [IO.File]::ReadAllText($path)
-        $updated = [regex]::Replace($text, $launcherSpecs[$i].pattern, { param($m) $m.Groups[1].Value + $candidate.exe + $m.Groups[3].Value })
-        Assert-Parse $updated $path
-        $new = [byte[]]($encoding.GetPreamble() + $encoding.GetBytes($updated))
-        $bakPath = "$path.pre-$digits-deploy-attempt-$($script:T).bak"
-        if (Test-Path -LiteralPath $bakPath) { throw "A launcher backup already exists: $bakPath" }
-        [ordered]@{ path = $path; originalSha256 = (Get-BytesSha $original); originalBase64 = [Convert]::ToBase64String($original)
-            newSha256 = (Get-BytesSha $new); newBase64 = [Convert]::ToBase64String($new); switchState = $null; restore = $null
-            bak = [ordered]@{ path = $bakPath; expectedSha256 = (Get-BytesSha $original); intentUtc = $null; done = $null } }
-    }
+    Assert-Isolated @($script:txRoot, $backupPath)
+    foreach ($path in @($script:txRoot)) { if (Test-Path -LiteralPath $path) { throw "Refusing: $path already exists." } }
     [void][IO.Directory]::CreateDirectory($script:txRoot)
     $pointer = [ordered]@{ rootId = $script:rootId; T = $script:T; journalPath = $script:journalPath; createdUtc = (Utc)
         installationRoot = $installationRoot; dataTarget = $script:dataTarget }
@@ -977,28 +791,14 @@ function Invoke-Deploy {
     Crash 'pointer-created'
     $script:journal = [ordered]@{ schema = 1; revision = 0; T = $script:T; rootId = $script:rootId; installationRoot = $installationRoot; dataTarget = $script:dataTarget
         testMode = $testMode; state = 'open'; terminal = $null; closedUtc = $null; outcome = $null; needsOwner = $null; errors = @(); phases = @()
-        candidate = $candidate; predecessor = $predecessor; launcherDir = $LauncherDir; launchers = @($launchers); snapshot = $null; children = @()
+        candidate = $candidate; predecessor = $predecessor; launcherDir = $LauncherDir; snapshot = $null; children = @()
         stopRequested = $null; backup = [ordered]@{ path = $backupPath; bytes = $null; intentUtc = $null; manifestSha256 = $null }
-        restore = [ordered]@{ decision = $null; staging = $staging; failed = $failed; stagingIntentUtc = $null; stagingId = $null; swap1IntentUtc = $null; swap2IntentUtc = $null }
         dataFileId = (Get-FileId $script:dataTarget); close = @() }
     Write-Record $script:journalPath $script:journal 'journal'
     Say "Transaction $($script:T): $($candidate.productVersion) replaces $($predecessor.productVersion). $pauseLine"
     try { Invoke-Forward } catch { Resolve-Failure $_ }
 }
-function Resolve-RecoverTarget {
-    # FIX 4: only when the swap-1 intent is recorded and the identity proofs show the rename happened.
-    if ($script:dataTarget) { return }
-    $j = $script:journal
-    if (-not $j.restore.swap1IntentUtc -or (Test-Path -LiteralPath $j.dataTarget) -or (Get-FileId $j.restore.failed) -cne $j.snapshot.dataFileId -or
-        (Get-FileId $j.restore.staging) -cne $j.restore.stagingId -or (Get-SyncSharkTreeIdentity $j.restore.staging) -cne $j.backup.manifestSha256) {
-        $script:exitCode = 2
-        throw "needs-owner: the data target is unavailable ($($script:dataTargetError)) and the swap-2 proofs do not hold; nothing was changed."
-    }
-    $resolved = Resolve-SyncSharkDataRoot $installationRoot -AllowMissingLeaf
-    if (-not (Same $resolved $j.dataTarget)) { throw 'The resolved data target differs from the recorded one.' }
-    $script:dataTarget = $resolved
-}
-function Open-Transaction([switch]$AllowMissingData) {
+function Open-Transaction {
     $state = Get-PointerState
     if ($state.kind -ceq 'none') { Say 'No transaction is open.'; $script:exitCode = 0; return $null }
     if ($state.kind -ceq 'bad') {
@@ -1008,9 +808,8 @@ function Open-Transaction([switch]$AllowMissingData) {
     Set-Paths $state.T
     $script:journal = $state.journal
     $j = $script:journal
-    Assert-Isolated (@($script:txRoot, $j.dataTarget, $j.backup.path, $j.restore.staging, $j.restore.failed) + @(Get-SidePaths $j.candidate) +
-        @(Get-SidePaths $j.predecessor) + @($j.launchers | ForEach-Object { $_.path; $_.bak.path }))
-    if ($AllowMissingData) { Resolve-RecoverTarget } elseif ($null -eq $script:dataTarget) { throw $script:dataTargetError }
+    Assert-Isolated (@($script:txRoot,$j.dataTarget,$j.backup.path) + @(Get-SidePaths $j.candidate) + @(Get-SidePaths $j.predecessor))
+    if ($null -eq $script:dataTarget) { throw $script:dataTargetError }
     $script:lockPath = Join-Path $script:dataTarget 'state\instance.lock'
     $script:exes = @($script:journal.predecessor.exe, $script:journal.candidate.exe)
     if (-not (Same $script:journal.candidate.manifestPath $ownManifest.path)) { throw 'This script is not the journaled candidate''s own tools copy.' }
@@ -1024,20 +823,19 @@ function Open-Transaction([switch]$AllowMissingData) {
     $state
 }
 function Invoke-Recover {
-    $state = Open-Transaction -AllowMissingData
+    $state = Open-Transaction
     if ($null -eq $state) { return }
     $j = $script:journal
     if ($j.needsOwner) {
         Say "BLOCKED: $($j.needsOwner.reason)"
-        Say 'Recover changes nothing here. The deploy operator resolves the cause and runs -Close -Disposition <d> [-Layout old|new|none].'
+        Say 'Recover changes nothing here. The deploy operator resolves the cause and runs -Close -Disposition <d>.'
         $script:exitCode = 2
         return
     }
     try {
         Join-Children
-        foreach ($launcher in @($j.launchers)) { if ($launcher.bak.intentUtc -and -not $launcher.bak.done) { Write-LauncherBackup $launcher } }
         if ($j.outcome) { Complete-Success $j.outcome.terminal; return }
-        if (Has 'started') { Test-Health 'new'; Complete-Success 'healthy'; return }
+        if (Has 'started') { Test-Health; Complete-Success 'healthy'; return }
         if (-not (Test-Effect)) { Close-Journal 'refused'; return }
         Set-NeedsOwner 'no rollback: recovery left the transaction open with effects recorded; fix forward.'
     } catch { Resolve-Failure $_ }
@@ -1046,33 +844,13 @@ function Invoke-Close {
     $state = Open-Transaction
     if ($null -eq $state) { return }
     $j = $script:journal
-    $entry = [ordered]@{ disposition = $Disposition; layout = $(if ($Layout) { $Layout } else { $null }); intentUtc = (Utc); result = $null }
+    $entry = [ordered]@{ disposition = $Disposition; intentUtc = (Utc); result = $null }
     $j.close = @($j.close) + @($entry)
     Save-Journal
     try {
-        $side = switch ($Disposition) { 'live-old' { 'old' } 'live-new' { 'new' } 'restored-not-started' { 'restored' }
-            default { if (-not $Layout) { throw "-Layout old|new|none is required for $Disposition." }; if ($Layout -eq 'none') { 'none' } else { $Layout } } }
-        if ($side -eq 'restored') {
+        if ($Disposition -eq 'live-new') { Test-Health } else {
             Assert-StopProof
-            if (-not $j.backup.manifestSha256 -or (Get-SyncSharkTreeIdentity $script:dataTarget) -cne $j.backup.manifestSha256) { throw 'The data does not equal the backup manifest.' }
-            Assert-Launchers 'old'
-            Restore-RunValues -CompareOnly
-        } elseif ($side -eq 'none') {
-            Assert-StopProof
-            if (@($j.launchers | Where-Object { $_.restore -and $_.restore.intentUtc -and -not $_.restore.done }).Count) { throw 'A launcher restore has no done stamp.' }
-            $committed = if ((Has 'launchers-switched') -and -not @($j.launchers | Where-Object { $_.restore -and $_.restore.done }).Count) { 'new' } else { 'old' }
-            Assert-Launchers $committed
-            Restore-RunValues -CompareOnly
-        } else {
-            Say "Live closure: $liveLabel."
-            if ((Get-FileId $script:dataTarget) -cne $j.dataFileId) { throw 'The data folder is not the last recorded folder.' }
-            Assert-Launchers $side
-            Assert-Tree $(if ($side -eq 'new') { $j.candidate } else { $j.predecessor }) -Legacy:($side -eq 'old')
-            $build = if ($side -eq 'new') { $j.candidate } else { $j.predecessor }
-            $status = if ($side -eq 'new') { Invoke-NewCli "$side-close-status" $build.cliExe 'status' } else { Invoke-Cli "$side-close-status" $build.exe 'engine status --json' }
-            if ($status.Exit -ne 0) { throw 'status did not answer.' }
-            Test-Health $side -CompareOnly
-            $entry.label = $liveLabel
+            if (Has 'switch-requested') { throw 'Verify the switched candidate before closing.' }
         }
         $entry.result = 'passed'
         Close-Journal 'needs-owner-resolved'
