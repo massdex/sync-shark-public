@@ -29,7 +29,7 @@ public static class Schema
          kind INTEGER NOT NULL, cause TEXT NOT NULL, path TEXT NOT NULL, subject_json TEXT NOT NULL,
          at_ticks INTEGER NOT NULL, dismissed INTEGER NOT NULL DEFAULT 0,
          ignored INTEGER NOT NULL DEFAULT 0 CHECK(ignored IN (0,1)),
-         UNIQUE(pair_id,path,kind)) STRICT;
+         UNIQUE(pair_id,path,kind,cause)) STRICT;
         CREATE INDEX issue_path_key ON issue(pair_id, pathkey(path), kind);
         CREATE TABLE journal_position(
          volume_key TEXT PRIMARY KEY NOT NULL CHECK(length(volume_key)>0),

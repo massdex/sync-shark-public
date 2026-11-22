@@ -96,7 +96,7 @@ public static class RunLogChecks
         var error = new IOException(sentinel);
         var retry = Text.Get(TextKey.WaitSourceRetry, (TextArg.Seconds, "17.25"));
         var cooldown = Text.Get(TextKey.WaitTooManyRequests, (TextArg.Seconds, "23"));
-        var source = new RunEvent(RunEventKind.Wait, nameof(ISide.ReadChangesAsync), "", retry, "") { Side = Side.Dropbox, Error = error };
+        var source = new RunEvent(RunEventKind.Wait, nameof(ISide.ReadChangesAsync), "", retry, "") { Side = Side.Dropbox, Cause = TextKey.WaitSourceRetry, Error = error };
         var limit = new RunEvent(RunEventKind.Wait, "", "", cooldown, "") { Cause = TextKey.WaitTooManyRequests };
         var changed = new RunEvent(RunEventKind.Wait, "ItemSync", "item", sentinel, nameof(TextKey.FailChanged)) { Cause = TextKey.FailChanged, Error = error };
         bool OnceInBoth(RunEvent item, string sentence)

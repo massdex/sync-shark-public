@@ -116,9 +116,14 @@ public sealed class InMemoryStateStore : IStore
         return Task.CompletedTask;
     }
     /// <summary>CloseNotice operation on the supplied facts.</summary>
-    public Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct)
+    public Task<bool> CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); if (notices.TryGetValue((pairId,expected.Id),out var current) && current.Matches(expected)) notices.Remove((pairId,expected.Id)); return Task.CompletedTask;
+        ct.ThrowIfCancellationRequested();
+        lock (pairs)
+        {
+            var key = (pairId, expected.Id);
+            return Task.FromResult(notices.TryGetValue(key, out var current) && current.Matches(expected) && notices.Remove(key));
+        }
     }
     /// <summary>Position operation on the supplied facts.</summary>
     public Task<JournalPosition?> PositionAsync(string volume, CancellationToken ct)

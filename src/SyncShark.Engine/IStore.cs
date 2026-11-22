@@ -20,7 +20,7 @@ public interface IStore : IDisposable
     Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct);
     /// <summary>Change visibility only if the stored notice still matches the reviewed subject; return false on a stale or closed slot.</summary>
     Task<bool> UpdateNoticeVisibilityAsync(string pairId, Notice expected, bool ignored, CancellationToken ct) => throw new NotImplementedException();
-    Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct);
+    Task<bool> CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct);
     Task<JournalPosition?> PositionAsync(string volume, CancellationToken ct);
     Task SavePositionAsync(string volume, JournalPosition position, CancellationToken ct);
     Task<string?> CursorAsync(string pairId, CancellationToken ct);

@@ -43,6 +43,8 @@ public static class CheckRegistry
             new("Dropbox/DropboxReplyChecks", Dropbox.DropboxReplyChecks.RunAsync),
             new("Dropbox/DropboxReplyShapesChecks", Dropbox.DropboxReplyShapesChecks.RunAsync),
             new("Dropbox/account root", Dropbox.DropboxSideChecks.AccountRootAsync),
+            new("Dropbox/delete member origins", Dropbox.DropboxSideChecks.DeleteOriginsAsync),
+            new("Dropbox/quiet finite page with unchanged cursor", Dropbox.DropboxSideChecks.FinitePageAsync),
             new("Dropbox/DropboxSideChecks", Dropbox.DropboxSideChecks.RunAsync),
             new("Dropbox/DropboxWriterChecks", Dropbox.DropboxWriterChecks.RunAsync),
             new("Dropbox/invalid job token", Dropbox.FolderJobsChecks.InvalidTokenAsync),
@@ -84,7 +86,9 @@ public static class CheckRegistry
             new("Executor/NoticesChecks", Executor.NoticesChecks.RunAsync),
             new("Executor/dismiss choice matrix", Executor.ResolveChecks.DismissAsync),
             new("Executor/reviewed resolution endpoints", Executor.ResolveChecks.ReviewedEndpointsAsync),
+            new("Executor/resolution read failure", Executor.ResolveChecks.ReadFailureAsync),
             new("Executor/ResolveChecks", Executor.ResolveChecks.RunAsync),
+            new("Executor/open job retry", Executor.RetriesChecks.OpenJobAsync),
             new("Executor/RetriesChecks", Executor.RetriesChecks.RunAsync),
             new("Executor/UnfinishedChecks", Executor.UnfinishedChecks.RunAsync)
         ],
