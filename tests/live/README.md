@@ -1,128 +1,148 @@
 # Sync Shark live acceptance tests
 
-`Invoke-V2LiveTests.ps1` drives the shipped `syncshark.exe` command line (see
-[`CLI-CAPABILITIES.md`](../../CLI-CAPABILITIES.md)) against a real Dropbox test folder and a real
-local folder. It is a **live** test: it creates its own pair, forces the first comparison,
-mutates the local side with PowerShell and the remote side through the Dropbox HTTP API, forces
-another comparison, and asserts the outcome on **both sides**. It also checks the run logs: the
-current file is readable while the host writes it, and individual file operations appear only
-with `--show-files`.
+`Invoke-V2LiveTests.ps1` drives the candidate `syncshark.exe` command line (see
+[`CLI-CAPABILITIES.md`](../../CLI-CAPABILITIES.md)) against a real Dropbox **test root** and real
+local roots, on an **approved, isolated staging profile**. It is a live test, not part of the
+offline CI matrix, and it never runs against the installed product or production data.
 
-It is Windows PowerShell 5.1 compatible and does not run itself. Run it when you mean to exercise
-the test account. It is not part of the offline CI matrix.
+## Safety gate: an approved staging setup must prove isolation
 
-## How the new CLI is driven
+The product's data location is fixed (`%LOCALAPPDATA%\Massdex\SyncShark`), so a staging run needs
+its **own Windows profile** (its own `%LOCALAPPDATA%` and credentials) and roots on
+**volumes disjoint from production** (PLAN section 8). The script therefore refuses to write
+anything or launch the candidate until it reads a **staging proof** JSON (passed as
+`-StagingProof`) supplied by the approved staging setup, and every check passes:
 
-The command line prints plain text; there is no JSON envelope and there is no `dropbox` command
-group. The driver uses only the registered commands:
+- the candidate executable is under the staging root and is not the installed executable;
+- the process's `%LOCALAPPDATA%` is the staging profile, not the production profile;
+- the local base, report root and recovery root are under the staging root;
+- the local volume is disjoint from every production volume and recovery root;
+- the installed host is stopped (`installedHostStopped: true`) and no process with the installed
+  host's name is running (a matching host would receive the CLI's pipe commands);
+- the Dropbox test root, the test connection id and the Windows Credential Manager target are
+  supplied.
 
-| Step | Command |
-|---|---|
-| create the pair | `pairs add --name <name> --local <folder> --path <folder> --account <id> [--first-sync newest\|pc\|dropbox]` |
-| confirm the roots | `pairs bind --pair <id> --yes` |
-| force a comparison | `repair --pair <id>` |
-| inspect | `status [--pair <id>]`, `notices --pair <id>` |
-| control the host | `host start`, `host stop`, `pause [--pair <id>]`, `resume [--pair <id>]` |
-| read logs | `logs --pair <id> --run <id> [--show-files]` |
-| finish | `pairs remove --pair <id>` |
+If the proof is missing or any check fails, the script throws before its first write or CLI
+launch. It never falls back to the installed host, the production profile or product paths.
 
-`pairs add` prints the new pair id; where it does not, the driver reads `pairs list`. Pair ids
-and run ids are the 32-hex `N`-format identifiers, and a stored run is also found by name under the
-product's `logs` folder (`<pairId>-<runId>.log`). The host keeps the pairs running; `repair`
-returns when its pass has finished, so the driver asserts immediately afterwards.
+### Staging proof schema (neutral placeholders)
 
-Every command's exit code, stdout and stderr is written under `-ReportRoot`.
+```json
+{
+  "candidateExe": "<stagingRoot>/build/syncshark.exe",
+  "installedExe": "<installRoot>/Sync Shark.exe",
+  "installRoot": "<installRoot>",
+  "installedHostExeName": "Sync Shark",
+  "installedHostStopped": true,
+  "stagingRoot": "<approved staging root>",
+  "stagingLocalAppData": "<staging profile LocalAppData>",
+  "productionLocalAppData": "<production profile LocalAppData>",
+  "localBase": "<stagingRoot>/live/local",
+  "reportRoot": "<stagingRoot>/live/reports",
+  "recoveryRoot": "<stagingRoot>/live/recovery",
+  "remoteBase": "<isolated test root on the test account>",
+  "productionVolumes": ["<production volume>"],
+  "productionRecoveryRoots": ["<production recovery root>"],
+  "credentialTarget": "<test-credential target in Windows Credential Manager>",
+  "account": "<test connection id>"
+}
+```
 
-## Dropbox side: HTTP API with a test-account token
+No real account, connection id, personal name or user path belongs in this file or in the
+repository. The remote base is always the approved isolated test root; the script and this README
+use neutral placeholders only.
 
-Remote changes and checks use the Dropbox HTTP API v2 directly (there is no CLI provider group):
+## Credentials and networking
 
-| Call | Used for |
-|---|---|
-| `files/create_folder_v2` | create each scenario's own remote folder under `-RemoteBase` |
-| `files/upload` | create or edit a remote file |
-| `files/download` | read a remote file's content |
-| `files/get_metadata` | prove a remote path exists (or is absent) |
-| `files/delete_v2` | delete a remote path |
-| `files/move_v2` | move a remote path (move-vs-edit cases) |
-| `files/list_folder` + `.../continue` | list a remote folder recursively |
-| `files/list_revisions` | prove a replaced version survives in Dropbox history |
+- The Dropbox access token is read **only** from Windows Credential Manager, under the target named
+  by the proof, through the Win32 `CredRead` API. The token stays in the requesting process and is
+  never printed, logged or written to a report.
+- The injected proxy is bypassed for the script's own Dropbox requests
+  (`WebRequest.DefaultWebProxy` is cleared) and stripped from every child process's environment.
+  Both are restored when the script ends.
+- Command output is written to per-command report files under the report root; the thrown message
+  contains only the command, its exit code and the report path, never raw output or the token.
 
-The access token is read from the environment variable named by `-TokenVariable` (default
-`SYNCSHARK_LIVE_DROPBOX_TOKEN`). It is never written to a report or passed on a command line. Use a
-dedicated test account.
+## Test data
 
-## Prerequisites
+Each scenario gets a random-suffixed local folder (created without `-Force`) and a
+random-suffixed remote folder created with an **exclusive** create. If the remote folder already
+exists, the scenario fails; the driver **never adopts** an existing folder. Every file is written as
+exact bytes (no BOM, no added newline) and compared byte-for-byte on both sides, so a correctly
+propagated fixture can never fail on a trailing newline and a mismatch can never pass.
 
-- The new build under test (`syncshark.exe`) is installed or staged; pass its absolute path as
-  `-Exe`.
-- A Dropbox connection for the test account is signed in, and its exact connection id is passed as
-  `-Account`. The engine's own store keeps the connection.
-- `-RemoteBase` already exists under the test account; the script never creates or changes it.
-- The local volume has room for the scenario files and the engine's own recovery/bin locations.
-
-Each scenario's local and remote folders carry a random 8-hex suffix. A local folder is created
-without `-Force` and a remote folder with an exclusive create, so an existing folder is never
-adopted. A double quote in a path parameter is rejected by the argument quoting rules; keep paths
-free of embedded quotes.
+The pair is proved before it is bound, repaired or removed: the driver snapshots `pairs list` before
+and after `pairs add`, requires exactly one new id, and requires that id's line to name the exact
+fixture, local root, remote root and account. It never selects a pair by a display-name substring,
+and it removes only the proved id.
 
 ## Parameters
 
-| Parameter | Default | Meaning |
-|---|---|---|
-| `-Exe` | (required) | Absolute path to `syncshark.exe`. |
-| `-Account` | (required) | Retained Dropbox connection id for the test account. |
-| `-LocalBase` | `Join-Path $env:LOCALAPPDATA 'SyncSharkTests\live'` | Local root; each scenario gets a random-suffixed subfolder. |
-| `-RemoteBase` | `/Apps/Sync Shark/Testing/live` | Existing Dropbox root for scenario subfolders; never created or modified. |
-| `-Scenario` | `all` | Exact scenario name, a substring, or `all`. |
-| `-TokenVariable` | `SYNCSHARK_LIVE_DROPBOX_TOKEN` | Environment variable holding the test-account token. |
-| `-CommandTimeoutSeconds` | `180` | Timeout for quick commands. |
-| `-RunTimeoutSeconds` | `1800` | Timeout for `repair`. |
-| `-ReportRoot` | `<LocalBase>\_reports` | Where per-command output is written. |
-
-## Scenarios
-
-Every scenario runs end to end and asserts both sides:
-
-| Scenario | What it asserts |
+| Parameter | Meaning |
 |---|---|
-| `FirstSyncNewestWins` | A newer local file and an older remote file at the same path converge on the newer version on both sides; the replaced version stays in Dropbox history. |
-| `OneSidedEdits` | A local-only change uploads and a remote-only change downloads; both sides converge. |
-| `BothSidesEdited` | Both sides edited differently keep both versions (a notice is raised and both names exist on Dropbox). |
-| `EditVersusDelete` | A local edit against a remote delete restores the edit on Dropbox. |
-| `LocalMove` | A local rename propagates as a move on both sides. |
-| `LocalDelete` | A local delete propagates; untouched files stay. |
-| `LocalRootMissingNoDeletes` | A missing local root causes no deletes; remote content is unchanged, then the pair converges. |
-| `FolderDeleteEditedChild` | A removed local folder keeps a remotely-edited child and deletes the unchanged one. |
-| `HostReadsAndPause` | A host-down read reports the host is not running and never starts it; `logs` still reads files; `pause`/`resume` are reported. |
-| `LogsReadableAndPerFileSwitch` | The current log is readable while the host runs; per-file lines appear only with `--show-files` (A49). |
-| `BinRemovableWithWindowsBin` | On a **removable** volume, a removed file goes to the engine's own root `Recycle Bin`, not the Windows bin, even when a Windows bin also exists (R4; F111). |
+| `-StagingProof` | (required) Absolute path to the staging proof JSON above. |
+| `-Scenario` | Exact scenario name, a substring, or `all`. |
+| `-CommandTimeoutSeconds` | Timeout for quick commands (default 180). |
+| `-RunTimeoutSeconds` | Timeout for `repair` and the log-growth wait (default 1800). |
 
-`BinRemovableWithWindowsBin` is not applicable when `-LocalBase` is on a fixed drive; it records a
-note and skips that arm. Run it with `-LocalBase` on a removable volume that also has a Windows
-Recycle Bin to prove the removable-with-Windows-bin case that the registered A48 arm must not
-cover.
+## Scenarios implemented here
+
+| Scenario | What it proves |
+|---|---|
+| `A02CreateOneSide` | A one-sided create lands at the same path with contents. |
+| `A05EditOneSide` | An **existing-file** edit replaces the other copy in both directions. |
+| `A07EditBoth` | Different edits keep both versions and raise a notice. |
+| `A10DeleteOneSide` | A one-sided delete propagates; untouched files stay. |
+| `A11EditVersusDelete` | The edit survives a remote delete, is restored, and raises the notice. |
+| `A18MoveOneSide` | A one-sided move repeats as a move, not a delete and create. |
+| `A19MoveVersusEdit` | A move against a remote edit keeps both and raises the notice. |
+| `A21MoveVersusDelete` | The move survives a remote delete and raises the notice. |
+| `A26SafeSave` | `x.tmp` renamed over `x` is a replace (both sides end with the new bytes), not a delete and create. |
+| `A27CapitalRename` | A capitals-only PC rename propagates both ways. |
+| `A28ExcludeKeepAndInclude` | `exclude --keep` leaves both copies; `include` compares the path at once. |
+| `A28ExcludeNoKeep` | A no-keep exclusion warns with the recovery place, then removes with recovery. |
+| `A39InUse` | A locked item raises a failure notice, unrelated work continues, and the item heals on the next run. |
+| `A44ConcurrentDirections` | An upload and a download run in the same repair and both land. |
+| `A47HostReadsPauseStop` | Host-down `status` exits 3 with the message via the raw seam; `logs` reads; a state change starts the host; a second start attaches; pause/resume work. |
+| `A48RootBinRemovable` | On a **removable** volume that also has a Windows bin: delete on Dropbox, and the engine-removed PC copy lands in `<drive>\Recycle Bin` (not the Windows bin). |
+| `A48NativeBinFixed` | On a **fixed** volume with a Windows bin: the engine-removed PC copy is observable in the Windows Recycle Bin by its exact fixture name and staging path. |
+| `A49LogsWhileRunning` | The current run log is read **while the host is writing it** (observed growth), normal records are present, and per-file `Effect` lines appear only with `--show-files`. |
+| `A50NestedPairs` | The outer pair skips the inner pair root; both pairs work; removing the inner pair re-compares its subtree. |
+
+The bin arms classify as **NOT OBSERVED** (not PASS) when the staging volume does not have the
+required drive type or native-bin evidence: a leftover `$Recycle.Bin` directory is not proof that
+native recycling works. Each arm runs on a disjoint staging volume and never reads or writes a
+production bin.
+
+## Live-arm map
+
+The plan's A-table assigns some arms to CI, some to this live driver and some to separately
+assigned staging/manual arms. This driver implements the arms that need live observation of true
+sync, the log view or the bin; the rest are proved by the offline CI cases or the approved
+staging/manual arms, with no new rehearsal added:
+
+- **This driver:** A02, A05, A07, A10, A11, A18, A19, A21, A26, A27, A28, A39, A44, A47, A48,
+  A49, A50.
+- **Offline CI (scenario/case register):** A01, A03, A04, A06, A08, A09, A13, A14, A15, A22, A23,
+  A24, A29, A30, A32, A34, A35, A40, A41, A42, A46.
+- **Separately assigned staging/manual arms:** A17, A31, A33, A36-A38, A43, A45, and the
+  forced/large LIVE-01/02 arms.
 
 ## Result status and exit code
 
-- `PASS` - every attempted assertion passed; the reason lists any notes.
+- `PASS` - every attempted assertion passed.
 - `FAIL` - an assertion or unexpected error failed; counted.
+- `NOT OBSERVED` - the arm's required fixture (drive type or native bin) is absent; recorded, not
+  counted as a failure and never reported as a PASS.
 
-The script prints one line per scenario and a summary table, and exits with the number of
-failures (`0` means all passed).
+The script prints one line per scenario and a summary, and exits with the number of failures.
 
 ## Safety
 
-- The only deletions are the scenario's own local files inside its random-suffixed local folder and
-  its own files inside its random-suffixed remote folder. No permanent delete is used.
-- `-RemoteBase` is never created or modified; each scenario creates only its own subfolder.
-- The local scenario folder is created without `-Force`; an existing one is never adopted.
-- The token is read from the environment and never written to a report.
-- Child CLI processes run with proxy variables removed, so an agent-injected proxy cannot reach the
-  engine's transports.
-
-## Permitted auxiliary writes
-
-A live run is not limited to the scenario folders: the engine writes its own durable state,
-recovery, logs and (on a removable volume) its root `Recycle Bin`. These are the engine's normal
-product paths; the driver prints the local and remote bases and the report folder at startup.
+- Works only inside its random-suffixed disposable roots under the staging root; never creates or
+  modifies the supplied remote root itself.
+- Never reaches the installed host, a real pair, production folders, or a production drive's root
+  Recycle Bin; the staging proof must show the local volume is disjoint from production.
+- The token comes from Windows Credential Manager and is never printed or persisted.
+- Child processes run with proxy variables removed; the script's own requests bypass the proxy.
+- The only deletions are the scenario's own files; the pair is removed only by its proved id.

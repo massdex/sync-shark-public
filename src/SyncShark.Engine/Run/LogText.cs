@@ -13,7 +13,7 @@ public static class LogText
         Append(fields, value.Path);
         Append(fields, value.Detail);
         Append(fields, value.Outcome);
-        return string.Join(' ', fields);
+        return string.Join(" ", fields);
     }
 
     private static void Append(List<string> fields, string? value)
