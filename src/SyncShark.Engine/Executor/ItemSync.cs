@@ -4,7 +4,7 @@ namespace Massdex.SyncShark.Engine.Executor;
 public static class ItemSync
 {
     /// <summary>Resolve an unbound path through its nearest saved parent.</summary>
-    internal static Task<string> CounterpartAsync(PairConfig pair, Side side, string path, IStore store, CancellationToken ct) => throw new NotImplementedException();
+    public static Task<string> CounterpartAsync(PairConfig pair, Side side, string path, IStore store, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Report the typed failure for the selected subject through the ordinary failure writer.</summary>
     internal static Task ReportFailureAsync(PairConfig pair, IStore store, Action<RunEvent> events, ItemFailedException error, IssueSubject subject, string key, bool reproducible, Action<string, bool>? failed, CancellationToken ct, Action<Notice>? failedNotice = null) => throw new NotImplementedException();
     /// <summary>Only a matching acquired journal ID permits comparing a change USN to the saved PC publication. Use the supplied scope and attach the Dropbox clock sample only to rows needing a server-deletion decision.</summary>

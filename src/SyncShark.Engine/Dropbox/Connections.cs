@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -23,7 +22,6 @@ public sealed class Connections
     private const int MaximumAppendRecords = 100;
     private const string ConnectionPrefix = "connection-";
     private const int ConnectionHashLength = 24;
-    private const string StageFormat = "yyyyMMdd'T'HHmmss'Z'";
     private const string SetOperation = "set";
     private const string DeleteOperation = "delete";
     private const string RecoveryOperation = "recovery";
@@ -58,23 +56,25 @@ public sealed class Connections
         ArgumentNullException.ThrowIfNull(requiredConnectionIds, nameof(requiredConnectionIds));
         var source = FilePath(sourceRoot);
         var target = FilePath(productRoot);
-        var sourceSet = SourceSet(sourceRoot);
+        var sameRoot = SameRoot(sourceRoot, productRoot);
+        // One observation of this root when it is both source and product (no canonical candidate) is reused.
+        (ListShape Form, IReadOnlyList<string> Ids)? presented = sameRoot ? Resolve(productRoot) : null;
+        var sourceSet = presented is { Form: not ListShape.Canonical } observed ? observed.Ids : SourceSet(sourceRoot);
         var slotsAuthoritative = SlotsExist(sourceRoot);
         var appendSuppliesBytes = !slotsAuthoritative && File.Exists(source);
-        var sameRoot = SameRoot(sourceRoot, productRoot);
         var created = false;
         IReadOnlyList<string> actual;
         try
         {
             if (sameRoot)
             {
+                var resolved = presented!.Value;
                 if (File.Exists(target) || slotsAuthoritative)
                 {
                     // The value Read will expose must be the authoritative one; a divergence refuses before publication.
-                    var exposed = Resolve(productRoot).Ids;
-                    if (!exposed.SequenceEqual(sourceSet, StringComparer.Ordinal))
+                    if (!resolved.Ids.SequenceEqual(sourceSet, StringComparer.Ordinal))
                         throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-                    actual = exposed;
+                    actual = resolved.Ids;
                 }
                 else actual = sourceSet;
             }
@@ -136,7 +136,8 @@ public sealed class Connections
         Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
     private static string StagePath(string target) =>
-        target + "." + DateTime.UtcNow.ToString(StageFormat, CultureInfo.InvariantCulture) + ".new";
+        // A fresh stage id (the established 32-hex id form) keeps an abandoned same-second stage from blocking a retry.
+        target + "." + ResourceNames.NewId() + ".new";
 
     /// <summary>The one attempt-publication path: write this attempt's own stage, then move it create-only (or replace).</summary>
     private static bool Publish(string target, Action<FileStream> write, bool overwrite = false)
@@ -243,7 +244,14 @@ public sealed class Connections
                 !value.TryGetProperty("Present", out var present) ||
                 present.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                 return invalid;
-            if (!present.GetBoolean()) return new Slot(true, generation, false, default);
+            if (!present.GetBoolean())
+            {
+                // The predecessor's typed read still decodes a supplied value; a wrong-typed one invalidates this slot.
+                return value.TryGetProperty("Value", out var tombstone) && tombstone.ValueKind != JsonValueKind.Null &&
+                       !ValidBinding(tombstone)
+                    ? invalid
+                    : new Slot(true, generation, false, default);
+            }
             // The predecessor's typed payload must be structurally valid before this generation is considered.
             return value.TryGetProperty("Value", out var binding) && ValidBinding(binding)
                 ? new Slot(true, generation, true, binding.Clone())
@@ -364,9 +372,12 @@ public sealed class Connections
                 !record.TryGetProperty("PayloadSha256", out var hash) || hash.ValueKind != JsonValueKind.String)
                 return false;
             var kind = operation.GetString();
-            // The predecessor typed-decodes the whole record, including a supplied Value on a tombstone.
+            // The predecessor typed-decodes the whole envelope, including supplied Value and Recovery fields.
             if (record.TryGetProperty("Value", out var supplied) && supplied.ValueKind != JsonValueKind.Null &&
                 !ValidBinding(supplied))
+                return false;
+            if (record.TryGetProperty("Recovery", out var suppliedRecovery) &&
+                suppliedRecovery.ValueKind != JsonValueKind.Null && !ValidRecovery(suppliedRecovery))
                 return false;
             byte[] claimed;
             try { claimed = Convert.FromHexString(hash.GetString()!); }
@@ -386,11 +397,7 @@ public sealed class Connections
             }
             else if (kind == RecoveryOperation)
             {
-                // The predecessor requires a recovery record's named evidence file.
-                if (!record.TryGetProperty("Recovery", out var recovery) || recovery.ValueKind != JsonValueKind.Object ||
-                    !recovery.TryGetProperty("EvidenceFile", out var evidence) || evidence.ValueKind != JsonValueKind.String ||
-                    string.IsNullOrWhiteSpace(evidence.GetString()))
-                    return false;
+                if (!record.TryGetProperty("Recovery", out var recovery) || !ValidRecovery(recovery)) return false;
                 payload = recovery;
             }
             else return false;
@@ -435,8 +442,24 @@ public sealed class Connections
     private static bool TimeOrNull(JsonElement element, string name)
     {
         if (!element.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return true;
-        if (value.ValueKind != JsonValueKind.String) return false;
-        return DateTimeOffset.TryParse(value.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out _);
+        // The framework reader the predecessor used; prose spellings it rejects are rejected here too.
+        return value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out _);
+    }
+
+    /// <summary>The predecessor's typed recovery record: its named evidence and integer byte counts.</summary>
+    private static bool ValidRecovery(JsonElement recovery)
+    {
+        if (recovery.ValueKind != JsonValueKind.Object) return false;
+        if (!recovery.TryGetProperty("EvidenceFile", out var evidence) || evidence.ValueKind != JsonValueKind.String ||
+            string.IsNullOrWhiteSpace(evidence.GetString()))
+            return false;
+        if (!recovery.TryGetProperty("OriginalSha256", out var original) || original.ValueKind != JsonValueKind.String)
+            return false;
+        if (!recovery.TryGetProperty("ValidPrefixByteLength", out var prefix) || !prefix.TryGetInt32(out _)) return false;
+        if (!recovery.TryGetProperty("BadByteLength", out var badLength) || !badLength.TryGetInt32(out _)) return false;
+        if (!recovery.TryGetProperty("BadSha256", out var badSha) || badSha.ValueKind != JsonValueKind.String) return false;
+        if (!recovery.TryGetProperty("Outcome", out var outcome) || outcome.ValueKind != JsonValueKind.String) return false;
+        return true;
     }
 
     private static bool StringArrayOrNull(JsonElement element, string name)

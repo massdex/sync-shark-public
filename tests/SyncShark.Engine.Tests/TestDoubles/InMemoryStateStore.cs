@@ -116,9 +116,14 @@ public sealed class InMemoryStateStore : IStore
         return Task.CompletedTask;
     }
     /// <summary>CloseNotice operation on the supplied facts.</summary>
-    public Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct)
+    public Task<bool> CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); if (notices.TryGetValue((pairId,expected.Id),out var current) && current.Matches(expected)) notices.Remove((pairId,expected.Id)); return Task.CompletedTask;
+        ct.ThrowIfCancellationRequested();
+        lock (pairs)
+        {
+            var key = (pairId, expected.Id);
+            return Task.FromResult(notices.TryGetValue(key, out var current) && current.Matches(expected) && notices.Remove(key));
+        }
     }
     /// <summary>Position operation on the supplied facts.</summary>
     public Task<JournalPosition?> PositionAsync(string volume, CancellationToken ct)
@@ -295,9 +300,14 @@ public sealed class InMemoryStateStore : IStore
     }
     public Task ResetJournalAsync(string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();var ids=affectedPairs.Distinct(StringComparer.Ordinal).ToArray();
-        lock(pairs) { if(ids.Any(id=>!pairs.ContainsKey(id))) throw new InvalidDataException("Unknown volume member");
-            foreach(var id in ids) Owe(id,Side.Local,reason); positions[volume]=fresh; }
+        lock (pairs)
+        {
+            ct.ThrowIfCancellationRequested();
+            foreach (var pair in pairs.Values)
+                if (pair.Roots?.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) == volume)
+                    Owe(pair.PairId, Side.Local, reason);
+            positions[volume] = fresh;
+        }
         return Task.CompletedTask;
     }
     public Task ResetCursorAsync(string pairId, string fresh, string reason, CancellationToken ct)
