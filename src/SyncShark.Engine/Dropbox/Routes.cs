@@ -33,6 +33,19 @@ public static class Routes
     /// <summary>The absolute endpoint of a route from its host base and name.</summary>
     public static Uri Endpoint(string name) => Info(name).Endpoint;
 
+    /// <summary>The catalog route whose endpoint exactly matches, or null for a non-catalog (bootstrap) endpoint.</summary>
+    public static string? NameOf(Uri? endpoint)
+    {
+        if (endpoint is null) return null;
+        return Embedded.Value.NameByEndpoint.TryGetValue(endpoint, out var name) ? name : null;
+    }
+
+    /// <summary>Rejects a call whose route does not carry the expected style, before any request is built.</summary>
+    public static void RequireStyle(string name, Style style)
+    {
+        if (Info(name).RouteStyle != style) throw new ArgumentException(null, nameof(name));
+    }
+
     /// <summary>How the route carries its argument and content.</summary>
     public static Style StyleOf(string name) => Info(name).RouteStyle;
 
@@ -82,6 +95,7 @@ public static class Routes
         foreach (var host in root.GetProperty("hosts").EnumerateObject())
             hosts[host.Name] = host.Value.GetString() ?? string.Empty;
         var byName = new Dictionary<string, RouteInfo>(StringComparer.Ordinal);
+        var nameByEndpoint = new Dictionary<Uri, string>();
         foreach (var item in root.GetProperty("routes").EnumerateArray())
         {
             var name = item.GetProperty("name").GetString() ?? throw new InvalidDataException(ResourceNames.Routes);
@@ -114,11 +128,12 @@ public static class Routes
             var noAuth = string.Equals(item.GetProperty("auth").GetString(), "noauth", StringComparison.Ordinal);
             var voidArg = item.TryGetProperty("voidArg", out var voidElement) && voidElement.GetBoolean();
             var maxEntries = item.TryGetProperty("maxEntries", out var maxElement) ? maxElement.GetInt32() : (int?)null;
-            byName[name] = new RouteInfo(style, policy, special, noAuth, voidArg, maxEntries,
-                new Uri(hostBase + name, UriKind.Absolute));
+            var endpoint = new Uri(hostBase + name, UriKind.Absolute);
+            byName[name] = new RouteInfo(style, policy, special, noAuth, voidArg, maxEntries, endpoint);
+            nameByEndpoint[endpoint] = name;
         }
         var limits = root.GetProperty("limits");
-        return new Catalog(byName,
+        return new Catalog(byName, nameByEndpoint,
             limits.GetProperty("contentRequestMiB").GetInt64() * BytesPerMiB,
             limits.GetProperty("relocationFiles").GetInt32());
     }
@@ -126,6 +141,6 @@ public static class Routes
     private sealed record RouteInfo(Style RouteStyle, Policy RoutePolicy, Special? RouteSpecial, bool NoAuth,
         bool VoidArg, int? MaxEntries, Uri Endpoint);
 
-    private sealed record Catalog(IReadOnlyDictionary<string, RouteInfo> ByName, long ContentRequestBytes,
-        int RelocationFiles);
+    private sealed record Catalog(IReadOnlyDictionary<string, RouteInfo> ByName,
+        IReadOnlyDictionary<Uri, string> NameByEndpoint, long ContentRequestBytes, int RelocationFiles);
 }

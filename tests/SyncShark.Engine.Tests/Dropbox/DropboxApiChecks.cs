@@ -1,53 +1,118 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using Massdex.SyncShark.Engine.Dropbox;
+using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Dropbox;
 
 /// <summary>Contract checks for DropboxApi.</summary>
 public static class DropboxApiChecks
 {
-    /// <summary>Verifies route selection, storage usage, the server clock offset and the authenticated binding.</summary>
+    /// <summary>Verifies the single send owner's catalog guards before any request is built.</summary>
     public static async Task RunAsync()
     {
         var settings = SettingsParser.Load();
-
         var wire = new Wire();
         using var http = new HttpClient(wire);
         var api = new DropboxApi(http, TimeProvider.System, settings, _ => { });
-        Check.Require(api.ClockOffset is null, "a clock offset was claimed before any reply");
 
-        var (used, allocated) = await api.SpaceUsageAsync(CancellationToken.None);
-        Check.Require(used == 123 && allocated == 456, "storage usage was not read from the reply");
-        Check.Require(wire.Paths.Count == 1 &&
-            wire.Paths[0].EndsWith("/users/get_space_usage", StringComparison.Ordinal), "wrong storage-usage route");
-        Check.Require(wire.Methods[0] == HttpMethod.Post && wire.Bodies[0] == "{}",
-            "storage usage was not the void route call");
-        Check.Require(api.ClockOffset is { } recorded && recorded.Uncertainty >= TimeSpan.Zero,
-            "the server clock offset was not recorded");
+        // A wrong style is rejected before any request; a rejected call never reaches the transport.
+        await ExpectArgumentException(() => api.DownloadAsync("files/delete_v2", "{}", CancellationToken.None));
+        await ExpectArgumentException(() => api.CallJsonAsync("files/download", "{}", CancellationToken.None));
 
-        // The verified binding presents the refreshing token and namespace on ordinary routes only.
-        var bound = new Wire();
-        using var boundHttp = new HttpClient(bound);
-        var boundApi = new DropboxApi(boundHttp, TimeProvider.System, settings, _ => { },
-            _ => new ValueTask<string?>("token"), "namespace-id");
-        (await boundApi.CallJsonAsync("files/get_metadata", "{\"path\":\"/x\"}", CancellationToken.None)).Dispose();
-        Check.Require(bound.Authorizations.Count == 1 && bound.Authorizations[0] == "Bearer token",
-            "the access token was not presented");
-        Check.Require(bound.PathRoots.Count == 1 && bound.PathRoots[0].Contains("namespace-id", StringComparison.Ordinal),
-            "the namespace binding was not sent");
+        // The prepared path consults the catalog: content on a non-upload route, or none on an upload route, is refused.
+        using (var withContent = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/delete_v2"))
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        })
+        {
+            await ExpectArgumentException(() => api.SendAsync(withContent, CancellationToken.None));
+        }
+        using (var missingContent = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/upload")))
+        {
+            await ExpectArgumentException(() => api.SendAsync(missingContent, CancellationToken.None));
+        }
 
-        var account = new Wire();
-        using var accountHttp = new HttpClient(account);
-        var accountApi = new DropboxApi(accountHttp, TimeProvider.System, settings, _ => { },
-            _ => new ValueTask<string?>("token"), "namespace-id");
-        (await accountApi.CallJsonAsync("users/get_current_account", "{}", CancellationToken.None)).Dispose();
-        Check.Require(account.PathRoots.Count == 0, "the account read carried a path-root header");
+        Check.Require(wire.Paths.Count == 0, "a rejected call reached the transport");
+    }
 
+    /// <summary>INTEGRATION-CHECK (needs W10's real RateLimit, DropboxProtocol and DropboxErrors; R29). Passes at F1,
+    /// returns NOT IMPLEMENTED in the lane. Wired into the F1 harness when the registry adds it.</summary>
+    public static async Task SendPathAsync()
+    {
+        var settings = SettingsParser.Load();
+
+        // Clock: exact signed offset and full-RTT-plus-one-second uncertainty from a successful dated reply.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var rtt = TimeSpan.FromSeconds(5);
+        var serverDate = DateTimeOffset.UnixEpoch.AddSeconds(100);
+        var clockWire = new Wire
+        {
+            Clock = clock,
+            Advance = rtt,
+            Date = serverDate,
+            Body = "{\"used\":1,\"allocation\":{\".tag\":\"individual\",\"allocated\":2}}"
+        };
+        using (var clockHttp = new HttpClient(clockWire))
+        {
+            var clockApi = new DropboxApi(clockHttp, clock, settings, _ => { },
+                _ => new ValueTask<string?>("token"), "root-id");
+            var (used, allocated) = await clockApi.SpaceUsageAsync(CancellationToken.None);
+            Check.Require(used == 1 && allocated == 2, "individual space usage decode");
+            Check.Require(clockWire.Bodies.Count == 1 && clockWire.Bodies[0] == "null", "void wire body is not JSON null");
+            Check.Require(clockApi.ClockOffset is { } sample, "clock sample not recorded");
+            Check.Require(sample.Offset == serverDate - clock.GetUtcNow(), "clock offset wrong");
+            Check.Require(sample.Uncertainty == rtt + TimeSpan.FromSeconds(1), "clock uncertainty wrong");
+        }
+
+        // The prepared path uses the same binding: each account's own token, and the same verified root.
+        var preparedWire = new Wire { Body = "{}", Date = serverDate };
+        using (var preparedHttp = new HttpClient(preparedWire))
+        {
+            var preparedApi = new DropboxApi(preparedHttp, TimeProvider.System, settings, _ => { },
+                _ => new ValueTask<string?>("token-b"), "shared-root");
+            using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/delete_v2"))
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json")
+            };
+            using var response = await preparedApi.SendAsync(request, CancellationToken.None);
+            Check.Require(preparedWire.Authorizations.Count == 1 &&
+                preparedWire.Authorizations[0] == "Bearer token-b", "prepared path missing its token");
+            Check.Require(preparedWire.PathRoots.Count == 1 &&
+                preparedWire.PathRoots[0].Contains("shared-root", StringComparison.Ordinal), "prepared path missing its root");
+        }
+
+        // A refused prepared upload must leave the caller-owned source open (no request disposal closes it).
+        var caller = new TrackingStream(new byte[] { 1, 2, 3 });
+        var refusalWire = new Wire { Status = 409, Body = "{\"error_summary\":\"path/not_found\"}" };
+        using (var refusalHttp = new HttpClient(refusalWire))
+        {
+            var refusalApi = new DropboxApi(refusalHttp, TimeProvider.System, settings, _ => { },
+                _ => new ValueTask<string?>("token"), "root-id");
+            var upload = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/upload"))
+            {
+                Content = new StreamContent(caller)
+            };
+            upload.Content!.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            try
+            {
+                using var refusedResponse = await refusalApi.SendAsync(upload, CancellationToken.None);
+                throw new InvalidDataException("refusal accepted");
+            }
+            catch (HttpRequestException)
+            {
+            }
+            Check.Require(!caller.Disposed, "a refused send closed the caller-owned upload source");
+        }
+    }
+
+    private static async Task ExpectArgumentException(Func<Task> action)
+    {
         try
         {
-            await api.CallJsonAsync("files/does_not_exist", "{}", CancellationToken.None);
-            throw new InvalidDataException("unknown route accepted");
+            await action();
+            throw new InvalidDataException("a rejected call was accepted");
         }
         catch (ArgumentException)
         {
@@ -56,9 +121,13 @@ public static class DropboxApiChecks
 
     private sealed class Wire : HttpMessageHandler
     {
+        internal int Status { get; set; } = 200;
+        internal string Body { get; set; } = "{}";
+        internal DateTimeOffset? Date { get; set; }
+        internal TimeSpan Advance { get; set; }
+        internal FakeTimeProvider? Clock { get; set; }
         internal List<string> Paths { get; } = [];
         internal List<string> Bodies { get; } = [];
-        internal List<HttpMethod> Methods { get; } = [];
         internal List<string> Authorizations { get; } = [];
         internal List<string> PathRoots { get; } = [];
 
@@ -66,19 +135,39 @@ public static class DropboxApiChecks
             CancellationToken cancellationToken)
         {
             Paths.Add(request.RequestUri!.AbsolutePath);
-            Methods.Add(request.Method);
             var current = request.Content;
             Bodies.Add(current is null ? string.Empty : await current.ReadAsStringAsync(cancellationToken));
             if (request.Headers.Authorization is { } authorization)
                 Authorizations.Add(authorization.Scheme + " " + (authorization.Parameter ?? string.Empty));
             if (request.Headers.TryGetValues("Dropbox-API-Path-Root", out var roots)) PathRoots.AddRange(roots);
-            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            Clock?.Advance(Advance);
+            var response = new HttpResponseMessage((HttpStatusCode)Status)
             {
-                Content = new StringContent("{\"used\":123,\"allocation\":{\"allocated\":456},\"metadata\":{\".tag\":\"folder\"}}",
-                    Encoding.UTF8, "application/json")
+                Content = new StringContent(Body, Encoding.UTF8, "application/json")
             };
-            response.Headers.Date = DateTimeOffset.UnixEpoch;
+            if (Date is { } date) response.Headers.Date = date;
             return response;
+        }
+    }
+
+    private sealed class TrackingStream : MemoryStream
+    {
+        internal bool Disposed { get; private set; }
+
+        internal TrackingStream(byte[] bytes) : base(bytes, writable: false)
+        {
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            base.Dispose(disposing);
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            Disposed = true;
+            return base.DisposeAsync();
         }
     }
 }

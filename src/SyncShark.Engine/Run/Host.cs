@@ -31,4 +31,12 @@ public sealed class Host
     public Task ResolveAsync(string pairId,long id,string reviewed,ResolutionChoice choice,string? name,CancellationToken ct) => throw new NotImplementedException();
     public Task<string> ConnectAsync(CancellationToken ct) => throw new NotImplementedException();
     public Task DisconnectAsync(string connectionId,CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Notify the owning pair after a job has been saved.</summary>
+    public Task InstalledAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Supply the startup status and whether pair startup was refused.</summary>
+    public void SetStartupMessage(string message, bool refused) => throw new NotImplementedException();
+    /// <summary>Signal completion of host shutdown.</summary>
+    public CancellationToken Stopping => throw new NotImplementedException();
+    /// <summary>Open each pair’s sides asynchronously with its cancellation token.</summary>
+    public Host(Func<bool,CancellationToken,Task<IStore?>> openStore, Func<PairConfig,IStore,Func<PathScope>,Action<RunEvent>,CancellationToken,Task<(ISide Local,ISide Dropbox)>> sides, EngineSettings settings, ILogFiles logs, TimeProvider clock, Func<CancellationToken,Task<string>> connect, Func<string,CancellationToken,Task> disconnect) => throw new NotImplementedException();
 }

@@ -11,181 +11,170 @@ public sealed class DropboxApi
     private const long BytesPerMiB = 1024L * 1024L;
     private const int ErrorBodyMaxBytes = 64 * 1024;
     private const int LongpollMaxSeconds = 480;
-    private const string GetCurrentAccount = "users/get_current_account";
+    private const int DateResolutionSeconds = 1;
+    private const string BootstrapAccountRoute = "users/get_current_account";
+    private const string SpaceUsageRoute = "users/get_space_usage";
+    private const string LongpollRoute = "files/list_folder/longpoll";
 
     private readonly HttpClient _transport;
     private readonly TimeProvider _clock;
-    private readonly EngineSettings _settings;
-    private readonly Action<RunEvent> _events;
     private readonly Func<CancellationToken, ValueTask<string?>>? _accessToken;
     private readonly string? _pathRootNamespaceId;
-    private RateLimit? _limiter;
-    private (TimeSpan Offset, TimeSpan Uncertainty)? _clockOffset;
-    private TimeSpan? _longpollFloor;
+    private readonly Lazy<RateLimit> _limiter;
+    private volatile ClockSample? _clockOffset;
 
-    /// <summary>Uses the transport and clock supplied by the composition root for requests and response timing.
-    /// The token source and namespace id, when supplied, bind authenticated requests to one verified account.</summary>
+    private sealed record ClockSample(TimeSpan Offset, TimeSpan Uncertainty);
+
+    /// <summary>Uses the transport and clock supplied by the composition root for requests and response timing,
+    /// and builds the single transport limiter from settings.InitialLimiterLevel, settings.Backoff and the sink.</summary>
     public DropboxApi(HttpClient transport, TimeProvider clock, EngineSettings settings, Action<RunEvent> events,
         Func<CancellationToken, ValueTask<string?>>? accessToken = null, string? pathRootNamespaceId = null)
+        : this(transport, clock, accessToken, pathRootNamespaceId,
+            new Lazy<RateLimit>(() => new RateLimit(settings.InitialLimiterLevel, settings.Backoff, events),
+                LazyThreadSafetyMode.ExecutionAndPublication))
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(events);
+    }
+
+    private DropboxApi(HttpClient transport, TimeProvider clock,
+        Func<CancellationToken, ValueTask<string?>>? accessToken, string? pathRootNamespaceId, Lazy<RateLimit> limiter)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(clock);
-        ArgumentNullException.ThrowIfNull(settings);
-        ArgumentNullException.ThrowIfNull(events);
+        ArgumentNullException.ThrowIfNull(limiter);
         _transport = transport;
         _clock = clock;
-        _settings = settings;
-        _events = events;
         _accessToken = accessToken;
         _pathRootNamespaceId = pathRootNamespaceId;
+        _limiter = limiter;
     }
 
-    /// <summary>Latest successful reply offset and its measured uncertainty; no extra request.</summary>
-    public (TimeSpan Offset, TimeSpan Uncertainty)? ClockOffset => _clockOffset;
+    /// <summary>One account-scoped binding (events, credential and verified namespace) that shares this host's
+    /// single limiter, so all pair clients use one RateLimit (W24).</summary>
+    public DropboxApi CreateAccountScope(Action<RunEvent> events,
+        Func<CancellationToken, ValueTask<string?>>? accessToken, string? pathRootNamespaceId)
+    {
+        ArgumentNullException.ThrowIfNull(events);
+        return new DropboxApi(_transport, _clock, accessToken, pathRootNamespaceId, _limiter);
+    }
 
-    /// <summary>Send the supplied prepared request and record the server clock from its Date header.</summary>
+    /// <summary>Latest successful dated reply clock sample (signed offset and measured uncertainty).</summary>
+    public (TimeSpan Offset, TimeSpan Uncertainty)? ClockOffset
+    {
+        get
+        {
+            var sample = _clockOffset;
+            return sample is null ? null : (sample.Offset, sample.Uncertainty);
+        }
+    }
+
+    /// <summary>Send a prepared request through the single catalog-validated owner: a known route gets its
+    /// credential and verified path root and its policy/style checked; a non-catalog (bootstrap/OAuth) endpoint is
+    /// sent without credentials. The caller owns the request and its content.</summary>
     public async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var started = _clock.GetTimestamp();
-        var response = await _transport
-            .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        RecordClock(response, started);
-        return response;
+        var name = Routes.NameOf(request.RequestUri);
+        if (name is null) return await SendPreparedAsync(request, null, ct).ConfigureAwait(false);
+        if (Routes.PolicyOf(name) == Routes.Policy.Denied) throw new ArgumentException(null, nameof(request));
+        var expectedContent = Routes.StyleOf(name) == Routes.Style.Upload;
+        if ((request.Content is not null) != expectedContent) throw new ArgumentException(null, nameof(request));
+        await using var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
+        var success = false;
+        try
+        {
+            var response = await SendPreparedAsync(request, name, ct).ConfigureAwait(false);
+            success = true;
+            return response;
+        }
+        finally
+        {
+            _limiter.Value.TransferFinished(success);
+        }
     }
 
-    /// <summary>Read Dropbox storage usage using the account route from the route catalog.</summary>
+    /// <summary>Read Dropbox storage usage using the account route; the void body is the provider's JSON null.</summary>
     public async Task<(long Used, long Allocated)> SpaceUsageAsync(CancellationToken ct)
     {
-        using var response = await SendRouteAsync("users/get_space_usage", "{}", null, ct).ConfigureAwait(false);
-        await using var stream = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-        var used = document.RootElement.GetProperty("used").GetInt64();
-        var allocated = document.RootElement.GetProperty("allocation").GetProperty("allocated").GetInt64();
+        Routes.RequireStyle(SpaceUsageRoute, Routes.Style.Rpc);
+        using var document = await SendJsonAsync(SpaceUsageRoute, "{}", ct).ConfigureAwait(false);
+        var root = document.RootElement;
+        var allocation = root.GetProperty("allocation");
+        var team = allocation.TryGetProperty(".tag", out var tag) &&
+            string.Equals(tag.GetString(), "team", StringComparison.Ordinal);
+        var used = team ? allocation.GetProperty("used").GetInt64() : root.GetProperty("used").GetInt64();
+        var allocated = allocation.GetProperty("allocated").GetInt64();
+        if (used < 0 || allocated < 0) throw new InvalidDataException(Text.Get(TextKey.FailureDetail));
         return (used, allocated);
     }
 
-    /// <summary>Sends one JSON route call and returns its parsed reply; the caller owns the document.</summary>
-    public async Task<JsonDocument> CallJsonAsync(string route, string argumentJson, CancellationToken ct)
+    /// <summary>Sends one JSON route call that fully consumes its bounded reply; the caller owns the document.</summary>
+    public Task<JsonDocument> CallJsonAsync(string route, string argumentJson, CancellationToken ct)
     {
-        using var response = await SendRouteAsync(route, argumentJson, null, ct).ConfigureAwait(false);
-        await using var stream = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
+        Routes.RequireStyle(route, Routes.Style.Rpc);
+        return SendJsonAsync(route, argumentJson, ct);
     }
 
-    /// <summary>Waits on one cursor; a returned backoff is installed as the floor for this source's next longpoll.</summary>
+    /// <summary>Waits on one cursor; the returned backoff is the source's own floor, applied by the feed owner.</summary>
     public async Task<bool> LongpollAsync(string cursor, CancellationToken ct)
     {
+        Routes.RequireStyle(LongpollRoute, Routes.Style.Rpc);
         var argument = JsonSerializer.Serialize(new { cursor, timeout = LongpollMaxSeconds });
-        if (_longpollFloor is { } floor && floor > TimeSpan.Zero)
-            await Task.Delay(floor, _clock, ct).ConfigureAwait(false);
-        using var response = await SendRouteAsync("files/list_folder/longpoll", argument, null, ct)
-            .ConfigureAwait(false);
-        await using var stream = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-        var root = document.RootElement;
-        var changes = root.TryGetProperty("changes", out var changesElement) && changesElement.GetBoolean();
-        _longpollFloor = root.TryGetProperty("backoff", out var backoffElement) &&
-            backoffElement.TryGetDouble(out var seconds) && seconds > 0
-                ? TimeSpan.FromSeconds(seconds) : null;
-        return changes;
+        using var document = await SendJsonAsync(LongpollRoute, argument, ct).ConfigureAwait(false);
+        return document.RootElement.TryGetProperty("changes", out var changes) && changes.GetBoolean();
     }
 
-    /// <summary>Reads one list page into the caller-opened spool and seals it as an attempt page (R26: the page
-    /// decoder opens its own delete-on-close spool and hands it here; this module never calls Local).</summary>
-    public async Task<DropboxPage> ReadPageAsync(string route, string argumentJson, PairConfig pair, Stream spool,
+    /// <summary>Reads one list page body and decodes it through W11's streaming page decoder, which opens and owns
+    /// its own delete-on-close spool (R26/R28). No page envelope is buffered here.</summary>
+    public async Task<DropboxPage> ReadPageAsync(string route, string argumentJson, PairConfig pair,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(pair);
-        ArgumentNullException.ThrowIfNull(spool);
-        using var response = await SendRouteAsync(route, argumentJson, null, ct).ConfigureAwait(false);
-        await using var content = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        // shortcut: whole-page buffered decode, upgrade to a streaming spool when the page decoder lands in DropboxReplyShapes.
-        using var document = await JsonDocument.ParseAsync(content, cancellationToken: ct).ConfigureAwait(false);
-        var root = document.RootElement;
-        var cursor = root.TryGetProperty("cursor", out var cursorElement) ? cursorElement.GetString() ?? string.Empty
-            : string.Empty;
-        var hasMore = root.TryGetProperty("has_more", out var hasMoreElement) && hasMoreElement.GetBoolean();
+        Routes.RequireStyle(route, Routes.Style.Rpc);
+        var request = BuildRequest(route, argumentJson);
+        await using var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
+        var success = false;
         try
         {
-            var decoder = new DropboxEntries();
-            var writer = new BinaryWriter(spool, Encoding.UTF8, leaveOpen: true);
-            try
-            {
-                if (root.TryGetProperty("entries", out var entries) && entries.ValueKind == JsonValueKind.Array)
-                    foreach (var element in entries.EnumerateArray())
-                        DropboxPage.WriteEntry(writer, decoder.Decode(element, pair));
-                writer.Flush();
-            }
-            finally
-            {
-                writer.Dispose();
-            }
-            return await DropboxPage.SealAsync(spool, cursor, hasMore, ct).ConfigureAwait(false);
+            using var response = await SendPreparedAsync(request, route, ct).ConfigureAwait(false);
+            await using var body = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            var page = await DropboxReply.ReadAsync(body, DropboxReplyShapes.Page(pair), ct).ConfigureAwait(false);
+            success = true;
+            return page;
         }
-        catch
+        finally
         {
-            await spool.DisposeAsync().ConfigureAwait(false);
-            throw;
+            request.Dispose();
+            _limiter.Value.TransferFinished(success);
         }
     }
 
-    /// <summary>Streams one download reply; EOF is not staging success and the caller owns the returned stream.</summary>
+    /// <summary>Streams one download reply; the returned body owns the response and the transfer slot until its
+    /// terminal outcome, and EOF is not staging success.</summary>
     public async Task<Stream> DownloadAsync(string route, string argumentJson, CancellationToken ct)
     {
-        var response = await SendRouteAsync(route, argumentJson, null, ct).ConfigureAwait(false);
+        Routes.RequireStyle(route, Routes.Style.Download);
+        if (Routes.PolicyOf(route) != Routes.Policy.Read) throw new ArgumentException(null, nameof(route));
+        var request = BuildRequest(route, argumentJson);
+        var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
+        HttpResponseMessage? response = null;
         try
         {
+            response = await SendPreparedAsync(request, route, ct).ConfigureAwait(false);
             var content = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            return new ResponseStream().Open(response, content, ct, null);
+            return new ResponseStream().Open(response, content, ct, outcome =>
+            {
+                _limiter.Value.TransferFinished(outcome == ResponseStream.BodyOutcome.Completed);
+                Release(permit);
+            });
         }
         catch
         {
-            response.Dispose();
+            response?.Dispose();
+            _limiter.Value.TransferFinished(false);
+            Release(permit);
             throw;
-        }
-    }
-
-    /// <summary>Sends one upload route with the supplied content and returns its parsed reply.</summary>
-    public async Task<JsonDocument> UploadAsync(string route, string argumentJson, Stream body, CancellationToken ct)
-    {
-        ArgumentNullException.ThrowIfNull(body);
-        using var response = await SendRouteAsync(route, argumentJson, body, ct).ConfigureAwait(false);
-        await using var stream = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-    }
-
-    /// <summary>Waits through the shared transport limiter, created from the settings on first use.</summary>
-    public Task WaitAsync(TimeSpan delay, CancellationToken ct) =>
-        (_limiter ??= new RateLimit(_settings.InitialLimiterLevel, _settings.Backoff, _events))
-        .WaitAsync(delay, _clock, ct);
-
-    private async Task<HttpResponseMessage> SendRouteAsync(string route, string argumentJson, Stream? body,
-        CancellationToken ct)
-    {
-        var request = BuildRequest(route, argumentJson, body);
-        try
-        {
-            string? token = null;
-            if (!Routes.IsNoAuth(route) && _accessToken is { } source)
-                token = await source(ct).ConfigureAwait(false);
-            if (token is not null)
-            {
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                if (!string.Equals(route, GetCurrentAccount, StringComparison.Ordinal) &&
-                    _pathRootNamespaceId is { } pathRoot)
-                    request.Headers.Add("Dropbox-API-Path-Root", PathRootJson(pathRoot));
-            }
-            var response = await SendAsync(request, ct).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-            {
-                using (response)
-                {
-                    var detail = await ReadErrorAsync(response, ct).ConfigureAwait(false);
-                    throw new HttpRequestException(detail, null, response.StatusCode);
-                }
-            }
-            return response;
         }
         finally
         {
@@ -193,7 +182,30 @@ public sealed class DropboxApi
         }
     }
 
-    private static HttpRequestMessage BuildRequest(string route, string argumentJson, Stream? body)
+    /// <summary>Waits through the shared transport limiter.</summary>
+    public Task WaitAsync(TimeSpan delay, CancellationToken ct) => _limiter.Value.WaitAsync(delay, _clock, ct);
+
+    private async Task<JsonDocument> SendJsonAsync(string route, string argumentJson, CancellationToken ct)
+    {
+        var request = BuildRequest(route, argumentJson);
+        await using var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
+        var success = false;
+        try
+        {
+            using var response = await SendPreparedAsync(request, route, ct).ConfigureAwait(false);
+            await using var stream = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            var document = DropboxProtocol.Parse(stream);
+            success = true;
+            return document;
+        }
+        finally
+        {
+            request.Dispose();
+            _limiter.Value.TransferFinished(success);
+        }
+    }
+
+    private static HttpRequestMessage BuildRequest(string route, string argumentJson)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint(route))
         {
@@ -202,42 +214,116 @@ public sealed class DropboxApi
         };
         if (Routes.StyleOf(route) == Routes.Style.Rpc)
         {
-            request.Content = new StringContent(argumentJson, Encoding.UTF8, "application/json");
+            var payload = Routes.VoidArg(route) ? "null" : argumentJson;
+            request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
         }
         else
         {
             request.Headers.Add("Dropbox-API-Arg", Routes.ArgHeader(argumentJson));
-            if (Routes.StyleOf(route) == Routes.Style.Upload)
-            {
-                ArgumentNullException.ThrowIfNull(body);
-                var upload = new StreamContent(body);
-                upload.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-                request.Content = upload;
-            }
         }
         return request;
     }
 
-    private void RecordClock(HttpResponseMessage response, long startedTimestamp)
+    private async Task<HttpResponseMessage> SendPreparedAsync(HttpRequestMessage request, string? route,
+        CancellationToken ct)
     {
-        if (response.Headers.Date is not { } serverDate) return;
-        var elapsed = _clock.GetElapsedTime(startedTimestamp);
-        _clockOffset = (serverDate - _clock.GetUtcNow(), elapsed / 2);
+        var started = _clock.GetTimestamp();
+        await ApplyBindingAsync(request, route, ct).ConfigureAwait(false);
+        var response = await _transport
+            .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            try { await ThrowFailureAsync(response, route, ct).ConfigureAwait(false); }
+            finally { response.Dispose(); }
+            throw new InvalidOperationException(nameof(SendPreparedAsync));
+        }
+        RecordClock(response, started);
+        return response;
     }
 
-    private static async Task<string> ReadErrorAsync(HttpResponseMessage response, CancellationToken ct)
+    private async ValueTask ApplyBindingAsync(HttpRequestMessage request, string? route, CancellationToken ct)
     {
+        if (route is null || Routes.IsNoAuth(route)) return;
+        var bootstrap = string.Equals(route, BootstrapAccountRoute, StringComparison.Ordinal);
+        string? token = null;
+        if (_accessToken is { } source) token = await source(ct).ConfigureAwait(false);
+        if (token is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        if (bootstrap) return;
+        if (token is null) throw new InvalidOperationException(nameof(_accessToken));
+        if (_pathRootNamespaceId is null) throw new InvalidOperationException(nameof(_pathRootNamespaceId));
+        request.Headers.Add("Dropbox-API-Path-Root", PathRootJson(_pathRootNamespaceId));
+    }
+
+    // The approved uncertainty is the full measured round trip plus the Date header's one-second resolution; only a
+    // successful dated reply replaces the sample, and the sample is published as one reference (never a split tuple).
+    private void RecordClock(HttpResponseMessage response, long started)
+    {
+        if (response.Headers.Date is not { } serverDate) return;
+        var uncertainty = _clock.GetElapsedTime(started) + TimeSpan.FromSeconds(DateResolutionSeconds);
+        _clockOffset = new ClockSample(serverDate - _clock.GetUtcNow(), uncertainty);
+    }
+
+    private async Task ThrowFailureAsync(HttpResponseMessage response, string? route, CancellationToken ct)
+    {
+        var retryAfter = ParseRetryAfter(response);
+        JsonElement failure = default;
         try
         {
             await using var stream = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            var buffer = new byte[ErrorBodyMaxBytes];
-            var read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
-            return read > 0 ? Encoding.UTF8.GetString(buffer, 0, read) : Text.Get(TextKey.DropboxRefused);
+            var text = await ReadBoundedTextAsync(stream, ct).ConfigureAwait(false);
+            if (text.Length > 0)
+            {
+                try
+                {
+                    using var document = JsonDocument.Parse(text);
+                    if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                        document.RootElement.TryGetProperty("error", out var error))
+                        failure = error.Clone();
+                }
+                catch (JsonException) { }
+            }
         }
-        catch (Exception error) when (error is IOException or HttpRequestException)
+        catch (Exception read) when (read is IOException or HttpRequestException) { }
+        var wait = DropboxProtocol.ProviderWait(retryAfter, failure);
+        _limiter.Value.SlowDown();
+        var exception = new HttpRequestException(Text.Get(TextKey.DropboxRefused), null, response.StatusCode);
+        exception.Data["Route"] = route ?? string.Empty;
+        exception.Data["RetryAfterTicks"] = wait?.Ticks ?? 0L;
+        exception.Data["Dispatched"] = true;
+        if (failure.ValueKind != JsonValueKind.Undefined) exception.Data["Failure"] = failure;
+        throw exception;
+    }
+
+    private TimeSpan? ParseRetryAfter(HttpResponseMessage response)
+    {
+        var retry = response.Headers.RetryAfter;
+        if (retry is null) return null;
+        if (retry.Delta is { } delta) return delta > TimeSpan.Zero ? delta : TimeSpan.Zero;
+        if (retry.Date is { } date)
         {
-            return Text.Get(TextKey.DropboxRefused);
+            var remaining = date - _clock.GetUtcNow();
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
         }
+        return null;
+    }
+
+    private static async Task<string> ReadBoundedTextAsync(Stream stream, CancellationToken ct)
+    {
+        var buffer = new byte[ErrorBodyMaxBytes];
+        var total = 0;
+        while (total < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(total, buffer.Length - total), ct).ConfigureAwait(false);
+            if (read == 0) break;
+            total += read;
+        }
+        return total == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, total);
+    }
+
+    private static void Release(IAsyncDisposable permit)
+    {
+        try { permit.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+        catch (Exception) { }
     }
 
     private static string PathRootJson(string namespaceId) => JsonSerializer.Serialize(

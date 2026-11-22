@@ -6,10 +6,10 @@ namespace Massdex.SyncShark.Engine.Tests.Dropbox;
 /// <summary>Contract checks for ResponseStream.</summary>
 public static class ResponseStreamChecks
 {
-    /// <summary>Verifies body completion, source failure and caller cancellation are reported once.</summary>
+    /// <summary>Verifies body completion, failure, pending cancellation, abandonment and cleanup.</summary>
     public static async Task RunAsync()
     {
-        // Completion: reading to EOF reports Completed once; disposal releases the inner stream and the response.
+        // Completion: reading to EOF reports Completed once; disposal releases the source.
         var inner = new TrackingStream(new byte[] { 1, 2, 3 });
         var completed = new List<ResponseStream.BodyOutcome>();
         await using (var body = new ResponseStream().Open(new HttpResponseMessage(HttpStatusCode.OK), inner,
@@ -42,24 +42,49 @@ public static class ResponseStreamChecks
         Check.Require(failed.Count == 1 && failed[0] == ResponseStream.BodyOutcome.Failed,
             "source failure was not reported");
 
-        // Caller cancellation: it surfaces and is reported as Cancelled, not Failed.
-        using var cancelled = new CancellationTokenSource();
-        cancelled.Cancel();
-        var outcomes = new List<ResponseStream.BodyOutcome>();
+        // Cancellation while a body read is pending surfaces and is reported as Cancelled, not Failed.
+        using var pendingCancel = new CancellationTokenSource();
+        var pendingOutcomes = new List<ResponseStream.BodyOutcome>();
         await using (var body = new ResponseStream().Open(new HttpResponseMessage(HttpStatusCode.OK),
-            new MemoryStream(new byte[] { 1 }), cancelled.Token, outcomes.Add))
+            new BlockingStream(), pendingCancel.Token, pendingOutcomes.Add))
         {
+            var reading = body.ReadAsync(new byte[4]).AsTask();
+            pendingCancel.Cancel();
             try
             {
-                await body.ReadAsync(new byte[4]);
-                throw new InvalidDataException("cancellation swallowed");
+                await reading;
+                throw new InvalidDataException("pending cancellation swallowed");
             }
             catch (OperationCanceledException)
             {
             }
         }
-        Check.Require(outcomes.Count == 1 && outcomes[0] == ResponseStream.BodyOutcome.Cancelled,
-            "caller cancellation was not reported");
+        Check.Require(pendingOutcomes.Count == 1 && pendingOutcomes[0] == ResponseStream.BodyOutcome.Cancelled,
+            "pending cancellation was not reported as cancelled");
+
+        // Disposing before EOF abandons the body: never Completed, source released.
+        var abandonedInner = new TrackingStream(new byte[] { 1, 2, 3 });
+        var abandoned = new List<ResponseStream.BodyOutcome>();
+        await using (var body = new ResponseStream().Open(new HttpResponseMessage(HttpStatusCode.OK),
+            abandonedInner, CancellationToken.None, abandoned.Add))
+        {
+            _ = await body.ReadAsync(new byte[] { 0 }.AsMemory());
+        }
+        Check.Require(abandoned.Count == 1 && abandoned[0] == ResponseStream.BodyOutcome.Abandoned,
+            "an abandoned body was not reported as abandoned");
+        Check.Require(abandonedInner.Disposed, "abandoning the body did not release the source");
+
+        // A source-dispose failure must not stop the response being released (one cleanup path).
+        var responseContent = new TrackingContent();
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = responseContent };
+        var thrown = new List<ResponseStream.BodyOutcome>();
+        await using (var body = new ResponseStream().Open(response, new ThrowingDisposeStream(),
+            CancellationToken.None, thrown.Add))
+        {
+        }
+        Check.Require(responseContent.Disposed, "response content survived a source-dispose failure");
+        Check.Require(thrown.Count == 1 && thrown[0] == ResponseStream.BodyOutcome.Abandoned,
+            "a source-dispose failure did not end the body as abandoned");
     }
 
     private sealed class TrackingStream : MemoryStream
@@ -110,5 +135,87 @@ public static class ResponseStreamChecks
         public override void SetLength(long value) => throw new NotSupportedException();
 
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class BlockingStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private sealed class ThrowingDisposeStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing) => throw new IOException();
+
+        public override ValueTask DisposeAsync() => throw new IOException();
+    }
+
+    private sealed class TrackingContent : HttpContent
+    {
+        internal bool Disposed { get; private set; }
+
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context) =>
+            Task.CompletedTask;
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return true;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            base.Dispose(disposing);
+        }
     }
 }

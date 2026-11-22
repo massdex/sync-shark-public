@@ -9,4 +9,7 @@ public sealed class Connections
     public Action? Verify(string sourceRoot, string productRoot, IReadOnlyList<string> requiredConnectionIds) => throw new NotImplementedException();
     /// <summary>Save operation on the supplied facts.</summary>
     public void Save(string productRoot, IReadOnlyList<string> connections) => throw new NotImplementedException();
+
+    /// <summary>CreateConnectionId for the selected Connections operation.</summary>
+    public static string CreateConnectionId(string accountId) => throw new NotImplementedException();
 }

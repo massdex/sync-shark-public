@@ -2,17 +2,20 @@ using System.Buffers;
 
 namespace Massdex.SyncShark.Engine.Dropbox;
 
-/// <summary>Owns a download response and forwards source failures to its existing staging attempt.</summary>
+/// <summary>Owns a download response and forwards source failures to its existing staging attempt.
+/// EOF is not validated staging success; the transfer owner verifies size and hash.</summary>
 public sealed class ResponseStream
 {
-    /// <summary>How one response body ended: a complete read, the caller's cancellation, or a source failure.</summary>
-    public enum BodyOutcome { Completed, Cancelled, Failed }
+    /// <summary>How one response body ended: a complete read, the caller's cancellation, a source failure,
+    /// or an abandoned body released before EOF (never counted as success).</summary>
+    public enum BodyOutcome { Completed, Cancelled, Failed, Abandoned }
 
     /// <summary>Opens the body over the response; disposing the returned stream releases both.</summary>
     public Stream Open(HttpResponseMessage response, Stream content) =>
         Open(response, content, CancellationToken.None, null);
 
-    /// <summary>Opens the body and reports its completion, cancellation or failure exactly once.</summary>
+    /// <summary>Opens the body and reports exactly one terminal outcome (its completion, cancellation,
+    /// failure, or abandonment on dispose), invoked outside source-read classification.</summary>
     public Stream Open(HttpResponseMessage response, Stream content, CancellationToken callerToken,
         Action<BodyOutcome>? ended)
     {
@@ -100,7 +103,6 @@ public sealed class ResponseStream
             return ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
         }
 
-        // One read: a failed read reports its classified outcome once; EOF is not validated staging success.
         public override async ValueTask<int> ReadAsync(Memory<byte> buffer,
             CancellationToken cancellationToken = default)
         {
@@ -133,6 +135,7 @@ public sealed class ResponseStream
             }
         }
 
+        // One terminal notification; set the guard before invoking so a throwing callback cannot re-run it.
         private void End(BodyOutcome outcome)
         {
             if (Interlocked.Exchange(ref _endedOnce, 1) == 0) _ended?.Invoke(outcome);
@@ -140,7 +143,8 @@ public sealed class ResponseStream
 
         private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
-        /// <summary>Releases the body and then the response even if the inner stream fails to close.</summary>
+        // One cleanup path: a source-dispose failure never blocks response release; an abandoned body
+        // (disposed before EOF) ends as Abandoned so it is never credited as success.
         protected override void Dispose(bool disposing)
         {
             try
@@ -148,7 +152,9 @@ public sealed class ResponseStream
                 if (disposing && Interlocked.Exchange(ref _disposed, 1) == 0)
                 {
                     try { _content.Dispose(); }
-                    finally { _response.Dispose(); }
+                    catch (Exception) { }
+                    try { _response.Dispose(); }
+                    finally { End(BodyOutcome.Abandoned); }
                 }
             }
             finally
@@ -163,11 +169,13 @@ public sealed class ResponseStream
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             try
             {
-                await _content.DisposeAsync().ConfigureAwait(false);
+                try { await _content.DisposeAsync().ConfigureAwait(false); }
+                catch (Exception) { }
+                try { _response.Dispose(); }
+                finally { End(BodyOutcome.Abandoned); }
             }
             finally
             {
-                _response.Dispose();
                 GC.SuppressFinalize(this);
             }
         }
