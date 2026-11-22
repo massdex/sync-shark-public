@@ -1,0 +1,8 @@
+namespace Massdex.SyncShark.Engine.Tests.Executor;
+
+/// <summary>Contract checks for Effects.</summary>
+public static class EffectsChecks
+{
+    /// <summary>Verifies the Effects contract through the module surface.</summary>
+    public static Task RunAsync() => throw new NotImplementedException();
+}
