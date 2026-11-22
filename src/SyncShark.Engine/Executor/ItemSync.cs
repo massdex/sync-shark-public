@@ -18,9 +18,26 @@ public static class ItemSync
         var other=PathNames.Other(change.Side);
         var mapped=saved?.PathOn(other) ?? await CounterpartAsync(pair,change.Side,path,store,ct);
         var endpoints=change.Side==Side.Local ? new Scope(path,mapped) : new Scope(mapped,path);
-        var pcTask=local.ReadOneAsync(endpoints.LocalPath,ct); var dbTask=dropbox.ReadOneAsync(endpoints.DropboxPath,ct);
-        await Task.WhenAll(pcTask,dbTask);
-        var pc=await pcTask; var db=await dbTask;
+        Entry? pc, db;
+        try
+        {
+            var pcTask=local.ReadOneAsync(endpoints.LocalPath,ct); var dbTask=dropbox.ReadOneAsync(endpoints.DropboxPath,ct);
+            await Task.WhenAll(pcTask,dbTask);
+            pc=await pcTask; db=await dbTask;
+        }
+        catch(ItemFailedException error) when(error.Disposition!=FailureDisposition.TemporaryNoEffect)
+        {
+            // A refused observation is not absence. Keep the binding and the exact acquired subject.
+            var items=new List<NoticeItem>();
+            if(saved!=null) { items.Add(new(Side.Local,saved.LocalPath,saved.LocalId)); items.Add(new(Side.Dropbox,saved.DropboxPath,saved.DropboxId)); }
+            if(change.Id is {Length:>0} id) items.Add(new(change.Side,path,id));
+            var subject=IssueSubject.FromDistinct(items,change.Side) with {Holder=error.Holder,Move=error.Move};
+            await new Notices().RaiseAsync(store,pair.PairId,new Notice(0,NoticeKind.Failure,error.Cause,error.Path,subject,DateTimeOffset.UtcNow,false),ct);
+            bool reproducible=saved is {IsFolder:false} && error.Disposition==FailureDisposition.Permanent && change.Id==saved.IdOn(change.Side) && change.OldPath==null && change.ConsumeHeld==null && heldInput?.Invoke(endpoints).Any(x=>x.ConsumeHeld!=null)!=true;
+            failed?.Invoke(key,reproducible);
+            if(!reproducible) throw;
+            return;
+        }
         bool Matches(Notice n) => n.Subject.Items.Any(i=>i.Id==(i.Side==Side.Local?pc:db)?.Id);
         var tie=notices.FirstOrDefault(n=>n.Kind==NoticeKind.Tie && Matches(n));
         var historical=notices.FirstOrDefault(n=>n.Kind==NoticeKind.Failure && n.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && Matches(n));
