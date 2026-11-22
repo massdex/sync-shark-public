@@ -5,8 +5,10 @@ public interface IStore : IDisposable
 {
     IAsyncEnumerable<PairConfig> PairsAsync(CancellationToken ct);
     Task<PairConfig?> PairAsync(string pairId, CancellationToken ct);
-    Task SavePairAsync(PairConfig pair, CancellationToken ct);
-    Task<bool> RemovePairAsync(string pairId, CancellationToken ct);
+    /// <summary>Publishes configuration and each distinct returned footprint at its owner in one transaction, advancing the existing Repair revision even if the same scope was already owed.</summary>
+    Task SavePairAsync(PairConfig pair, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null);
+    /// <summary>Removes an eligible pair and publishes each returned scope to its surviving owner atomically. Refusal changes neither.</summary>
+    Task<bool> RemovePairAsync(string pairId, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null);
     Task<SyncedEntry?> FindAsync(string pairId, Side side, string key, CancellationToken ct);
     IAsyncEnumerable<SyncedEntry> ByIdAsync(string pairId, Side side, string id, CancellationToken ct);
     IAsyncEnumerable<SyncedEntry> DescendantsAsync(string pairId, Side side, string key, CancellationToken ct);
@@ -19,13 +21,16 @@ public interface IStore : IDisposable
     Task<string?> CursorAsync(string pairId, CancellationToken ct);
     Task SaveCursorAsync(string pairId, string cursor, CancellationToken ct);
     Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct);
-    Task FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct);
+    /// <summary>Read the existing source revision and whole-pair reason before acquisition; mapped scopes use the owner's Dropbox source row.</summary>
+    Task<(long Revision, string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct);
+    /// <summary>Call only on completed comparison. Compare the original revision and retire only the matching scope, or the whole-pair reason when scope is null. A stale completion does nothing.</summary>
+    Task<bool> FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct, Scope? scope = null);
     Task SaveJobAsync(AcceptedJob job, CancellationToken ct);
     IAsyncEnumerable<AcceptedJob> JobsAsync(string pairId, CancellationToken ct);
     Task SettleJobAsync(AcceptedJob job, CancellationToken ct);
     Task ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct);
     Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(string pairId, CancellationToken ct);
-    Task DisarmAsync(string pairId, RemovalSelection expected, CancellationToken ct);
+    Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct);
     Task AddScanAsync(string pairId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct);
     IAsyncEnumerable<Row> CompareAsync(string pairId, Scope? scope, CancellationToken ct);
     Task ClearScanAsync(string pairId, CancellationToken ct);

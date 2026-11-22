@@ -68,21 +68,22 @@ public abstract record JobReply
 /// never as "not supplied"; Local copies it unchanged into the pending note.</summary>
 public sealed record RemovalSelection(RemovalProof Proof, SyncedEntry? Saved);
 
-/// <summary>Authoritative proof of the exact losing file the Executor selected for local removal.
-/// VolumeId and ContentHash describe those selected bytes, never the incoming stage; a folder has no
-/// file-hash removal proof and stays with the folder-removal owner.
+/// <summary>Authoritative proof of the exact losing entry the Executor selected for local removal.
+/// VolumeId and ContentHash describe those selected bytes, never the incoming stage; a folder carries its selected identity and binding, not a file digest.
 /// Local identity text is invariant decimal: Expected.Id exactly as LocalListing wrote it and VolumeId from the
 /// volume serial. LocalBin compares both ordinally with the held file, so another spelling fails closed.</summary>
-public sealed record RemovalProof(Entry Expected, string VolumeId, string ContentHash)
+public sealed record RemovalProof(Entry Expected, string VolumeId, string? ContentHash)
 {
     public Entry Expected { get; init; } = RequireEntry(Expected);
     public string VolumeId { get; init; } = RequireId(VolumeId, nameof(VolumeId));
-    public string ContentHash { get; init; } = RequireId(ContentHash, nameof(ContentHash));
+    public string? ContentHash { get; init; } = Expected.IsFolder
+        ? ContentHash is null ? null : throw new ArgumentException(nameof(ContentHash))
+        : global::Massdex.SyncShark.Engine.ContentHash.IsValid(ContentHash ?? string.Empty) ? ContentHash : throw new ArgumentException(nameof(ContentHash));
 
     private static Entry RequireEntry(Entry expected)
     {
         if (expected is null) throw new ArgumentNullException(nameof(Expected));
-        if (expected.IsFolder || string.IsNullOrWhiteSpace(expected.Id))
+        if (string.IsNullOrWhiteSpace(expected.Id))
             throw new ArgumentException(null, nameof(Expected));
         return expected;
     }
@@ -113,6 +114,9 @@ public sealed record RemovalResult(RemovalOutcome Outcome, string? OperationId, 
     /// <summary>The recycled folder's contents at their original paths, read lazily from the shell's
     /// receipt; null when no folder receipt exists.</summary>
     public IAsyncEnumerable<Listed>? Recycled { get; init; }
+
+    /// <summary>Observed identity and binding of the actual bin item, including a substitute. Never persisted as a receipt or used as proof of the selected victim.</summary>
+    public IdentityLocation? RecycledVictim { get; init; }
 
     internal static Entry? CompleteObservation(Entry selected, string? hash) =>
         hash is null ? null : selected with { ContentHash = hash };

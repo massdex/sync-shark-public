@@ -29,16 +29,42 @@ public sealed class InMemoryStateStore : IStore
         return Task.FromResult(pairs.GetValueOrDefault(pairId));
     }
     /// <summary>SavePair operation on the supplied facts.</summary>
-    public Task SavePairAsync(PairConfig pair, CancellationToken ct)
+    public Task SavePairAsync(PairConfig pair, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null)
     {
         ct.ThrowIfCancellationRequested();
-        pairs[pair.PairId] = pair; return Task.CompletedTask;
+        lock (pairs)
+        {
+            ValidateOwners(returnedScopes, pair.PairId, null);
+            pairs[pair.PairId] = pair with { OwedScopes = pairs.GetValueOrDefault(pair.PairId)?.OwedScopes };
+            PublishScopes(returnedScopes);
+        }
+        return Task.CompletedTask;
     }
     /// <summary>RemovePair operation on the supplied facts.</summary>
-    public Task<bool> RemovePairAsync(string pairId, CancellationToken ct)
+    public Task<bool> RemovePairAsync(string pairId, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null)
     {
         ct.ThrowIfCancellationRequested();
-        if (armed.ContainsKey(pairId) || jobs.Keys.Any(k=>k.Pair==pairId) || notices.Any(x=>x.Key.Pair==pairId && x.Value.Kind==NoticeKind.Failure)) return Task.FromResult(false); return Task.FromResult(pairs.Remove(pairId));
+        lock (pairs)
+        {
+            if (armed.ContainsKey(pairId) || jobs.Keys.Any(k=>k.Pair==pairId) || notices.Any(x=>x.Key.Pair==pairId && x.Value.Kind==NoticeKind.Failure)) return Task.FromResult(false);
+            ValidateOwners(returnedScopes, null, pairId);
+            if (!pairs.Remove(pairId)) return Task.FromResult(false);
+            PublishScopes(returnedScopes);
+            return Task.FromResult(true);
+        }
+    }
+    private void ValidateOwners(IReadOnlyList<(string Owner, Scope Scope)>? scopes,string? adding,string? removing)
+    {
+        if (scopes?.Any(x=>x.Owner==removing || x.Owner!=adding && !pairs.ContainsKey(x.Owner))==true) throw new InvalidDataException("Unknown returned scope owner");
+    }
+    private void PublishScopes(IReadOnlyList<(string Owner, Scope Scope)>? scopes)
+    {
+        if (scopes==null) return;
+        foreach(var group in scopes.GroupBy(x=>x.Owner))
+        {
+            var pair=pairs[group.Key];pairs[group.Key]=pair with { OwedScopes=(pair.OwedScopes??[]).Union(group.Select(x=>x.Scope)).ToArray() };
+            var key=(group.Key,Side.Dropbox);var old=repairs.GetValueOrDefault(key);repairs[key]=(old.Revision+1,old.Reason);
+        }
     }
     /// <summary>Find operation on the supplied facts.</summary>
     public Task<SyncedEntry?> FindAsync(string pairId, Side side, string key, CancellationToken ct)
@@ -105,13 +131,27 @@ public sealed class InMemoryStateStore : IStore
     public Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var revision=repairs.GetValueOrDefault((pairId,side)).Revision+1; repairs[(pairId,side)]=(revision,reason); return Task.FromResult(revision);
+        lock(pairs) { var revision=repairs.GetValueOrDefault((pairId,side)).Revision+1; repairs[(pairId,side)]=(revision,reason); return Task.FromResult(revision); }
     }
     /// <summary>FinishRepair operation on the supplied facts.</summary>
-    public Task FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct)
+    public Task<(long Revision,string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested(); lock(pairs) return Task.FromResult(repairs.GetValueOrDefault((pairId,side)));
+    }
+    public Task<bool> FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct, Scope? scope = null)
     {
         ct.ThrowIfCancellationRequested();
-        if(repairs.TryGetValue((pairId,side),out var owed) && owed.Revision==revision) repairs[(pairId,side)]=(revision,null); return Task.CompletedTask;
+        lock(pairs)
+        {
+            if(!repairs.TryGetValue((pairId,side),out var owed) || owed.Revision!=revision) return Task.FromResult(false);
+            if(scope is null) repairs[(pairId,side)]=(revision,null);
+            else
+            {
+                if(side!=Side.Dropbox || !pairs.TryGetValue(pairId,out var pair) || pair.OwedScopes?.Contains(scope)!=true) return Task.FromResult(false);
+                pairs[pairId]=pair with { OwedScopes=pair.OwedScopes.Where(x=>x!=scope).ToArray() };
+            }
+            return Task.FromResult(true);
+        }
     }
     /// <summary>SaveJob operation on the supplied facts.</summary>
     public Task SaveJobAsync(AcceptedJob job, CancellationToken ct)
@@ -144,10 +184,10 @@ public sealed class InMemoryStateStore : IStore
         return Task.FromResult<(RemovalSelection Victim, StageProof? Stage)?>(armed.TryGetValue(pairId,out var value) ? value : null);
     }
     /// <summary>Disarm operation on the supplied facts.</summary>
-    public Task DisarmAsync(string pairId, RemovalSelection expected, CancellationToken ct)
+    public Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if(armed.TryGetValue(pairId,out var note) && note.Victim==expected) armed.Remove(pairId); return Task.CompletedTask;
+        if(armed.TryGetValue(pairId,out var note) && note.Victim==expected && note.Stage==expectedStage) armed.Remove(pairId); return Task.CompletedTask;
     }
     /// <summary>AddScan operation on the supplied facts.</summary>
     public async Task AddScanAsync(string pairId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct)

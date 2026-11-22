@@ -13,4 +13,8 @@ public sealed class Host
     public Task ResumeAsync(string? pairId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Whether this pair may start work under the global and per-pair pause settings.</summary>
     public bool IsPaused(string pairId) => throw new NotImplementedException();
+
+    /// <summary>The composition root supplies the store and resolves the two adapters on each configured pair.</summary>
+    public Host(IStore store, Func<PairConfig,(ISide Local,ISide Dropbox)> sides, EngineSettings settings, ILogFiles logs, TimeProvider clock) => throw new NotImplementedException();
+
 }

@@ -37,4 +37,7 @@ public sealed class DropboxSide : ISide
     public Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>ReadJob operation on the supplied facts.</summary>
     public Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
+
+    public DropboxSide(PairConfig pair, DropboxApi api, Dispatcher dispatcher) => throw new NotImplementedException();
+
 }

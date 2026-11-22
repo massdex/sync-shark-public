@@ -14,4 +14,29 @@ public static class PathScopeChecks
         Check.Require(!scope.Excludes("innermost/file", null, false), "Unrelated sibling");
         return Task.CompletedTask;
     }
+    /// <summary>A stale completion, an unrelated scope and an uncompleted full-pair Repair all keep their independent debt.</summary>
+    public static async Task MatchingRevisionAsync()
+    {
+        using var store=new TestDoubles.InMemoryStateStore();
+        var pair=Scenarios.ItemChecks.Pair(); var a=new Scope("Held","Mapped");var b=new Scope("Other","Other");
+        await store.SavePairAsync(pair,default,[(pair.PairId,a),(pair.PairId,a),(pair.PairId,b)]);
+        var original=await store.ReadRepairAsync(pair.PairId,Side.Dropbox,default);
+        var edited=(await store.PairAsync(pair.PairId,default))!;
+        Check.Require(edited.OwedScopes!.Count==2,"Scope set is not distinct");
+        await store.SavePairAsync(edited,default,[(pair.PairId,a)]);
+        Check.Require(!await store.FinishRepairAsync(pair.PairId,Side.Dropbox,original.Revision,default,a),"Old comparison consumed reissued scope");
+        var current=await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default);
+        Check.Require(await store.FinishRepairAsync(pair.PairId,Side.Dropbox,current,default,a),"Matching completion refused");
+        Check.Require((await store.PairAsync(pair.PairId,default))!.OwedScopes!.SequenceEqual([b]),"Wrong mapped footprint cleared");
+        Check.Require((await store.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason=="requested","Scoped completion cleared whole-pair debt");
+    }
+    public static Task FolderProofAsync()
+    {
+        var folder=Scenarios.ItemChecks.File(Side.Local,"victim",0,"folder-id",true);
+        var note=new RemovalSelection(new(folder,"volume",null),null);
+        Check.Require(note.Proof.Expected==folder && note.Proof.ContentHash==null,"Folder selection fabricated file proof");
+        try { _=new RemovalProof(folder with { IsFolder=false },"volume",null); }
+        catch(ArgumentException) { return Task.CompletedTask; }
+        throw new InvalidDataException("File victim accepted without content proof");
+    }
 }

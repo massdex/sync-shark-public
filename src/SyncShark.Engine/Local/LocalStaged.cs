@@ -7,4 +7,9 @@ public sealed class LocalStaged : IStaged
     public bool ConsumesSourceOnPublish => throw new NotImplementedException();
     /// <summary>Dispose operation on the supplied facts.</summary>
     public ValueTask DisposeAsync() => throw new NotImplementedException();
+
+    /// <summary>Exact held stage version used for create-only publication.</summary>
+    public StageProof Proof => throw new NotImplementedException();
+    public LocalStaged(string path, StageProof proof, Stream held) => throw new NotImplementedException();
+
 }

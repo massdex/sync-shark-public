@@ -28,29 +28,89 @@ public static class DependencyChecks
             var path = Path.GetRelativePath(input.Root, tree.FilePath).Replace(Path.DirectorySeparatorChar, '/');
             var parts = path.Split('/');
             var module = parts[0] == "apps" ? parts[1] : parts.Length == 3 ? "Contracts" : parts[2];
-            var model = compilation.GetSemanticModel(tree);
-            foreach (var node in tree.GetRoot().DescendantNodes().OfType<SimpleNameSyntax>())
+            var expectedNamespace = module switch
             {
-                var symbol = model.GetSymbolInfo(node).Symbol;
-                var type = symbol as INamedTypeSymbol ?? symbol?.ContainingType;
-                if (type == null) continue;
-                var name = type.ContainingNamespace.ToDisplayString();
-                const string prefix = "Massdex.SyncShark.Engine";
-                if (name != prefix && !name.StartsWith(prefix + ".", StringComparison.Ordinal)) continue;
-                var other = name == prefix ? "Contracts" : name[(prefix.Length + 1)..];
-                bool allowed = module == other || other == "Contracts" || (module, other) switch
-                {
-                    ("Executor", "Planner") => true,
-                    ("Run", "Planner" or "Executor") => true,
-                    ("Edge", "Run") => true,
-                    ("SyncShark", _) => true,
-                    ("SyncShark.Cli", "Edge") => type.Name == "Cli",
-                    ("SyncShark.Cli", "Local") => type.Name == "LogFiles",
-                    _ => false
-                };
-                Check.Require(allowed, $"{path}: {module} references {type.ToDisplayString()}");
-            }
+                "SyncShark" => "Massdex.SyncShark", "SyncShark.Cli" => "Massdex.SyncShark.Cli",
+                "Contracts" => Prefix, _ => Prefix + "." + module
+            };
+            var names = tree.GetRoot().DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>().Select(n => n.Name.ToString()).ToArray();
+            Check.Require(names.Length==1 && names[0]==expectedNamespace, $"{path}: expected namespace {expectedNamespace}");
+            var violation = Violations(compilation, tree, module, Path.GetFileNameWithoutExtension(path)).FirstOrDefault();
+            Check.Require(violation is null, $"{path}: {violation}");
+        }
+        // Each probe is resolved by the same compiler and checked by the production traversal above.
+        (string Module,string File,string Code,bool Allowed)[] probes = [
+            ("Planner","Decide","_ = DateTimeOffset.UtcNow;",false),
+            ("Planner","TimeRules","_ = DateTimeOffset.UnixEpoch;",true),
+            ("Planner","Decide","_ = typeof(Massdex.SyncShark.Engine.SettingsParser);",false),
+            ("Planner","Moves","_ = System.IO.File.Exists(null);",false),
+            ("Planner","Moves","_ = typeof(Massdex.SyncShark.Engine.Executor.ItemSync);",false),
+            ("Storage","Store","_ = typeof(Massdex.SyncShark.Engine.Dropbox.Routes);",false),
+            ("Storage","Store","_ = typeof(Microsoft.Data.Sqlite.SqliteConnection);",true),
+            ("Contracts","PairConfig","_ = typeof(Massdex.SyncShark.Engine.Storage.Store);",false),
+            ("Local","LocalSide","_ = typeof(Microsoft.Data.Sqlite.SqliteConnection);",false),
+            ("Local","LocalSide","_ = typeof(Massdex.SyncShark.Engine.Local.InUse);",true),
+            ("Local","RecycleBin","_ = typeof(Massdex.SyncShark.Engine.Local.VolumeSpace);",false),
+            ("Executor","Effects","_ = typeof(Massdex.SyncShark.Engine.Dropbox.DropboxSide);",false),
+            ("Executor","Effects","_ = typeof(Massdex.SyncShark.Engine.Planner.Moves);",true),
+            ("Run","Host","_ = typeof(Massdex.SyncShark.Engine.Planner.Moves);",false),
+            ("Run","Host","_ = typeof(Massdex.SyncShark.Engine.Edge.Commands);",false),
+            ("Run","Host","_ = typeof(Massdex.SyncShark.Engine.Storage.Store);",false),
+            ("Run","RunLog","_ = System.IO.File.OpenRead(null!);",false),
+            ("Run","RunLog","_ = typeof(Massdex.SyncShark.Engine.ILogFiles);",true),
+            ("Local","LogFiles","_ = System.IO.File.OpenRead(null!);",true),
+            ("Edge","Commands","_ = typeof(Massdex.SyncShark.Engine.Executor.Resolve);",false),
+            ("Dropbox","SignIn","_ = new HttpClient().GetAsync(string.Empty);",false),
+            ("Dropbox","DropboxApi","_ = new HttpClient().GetAsync(string.Empty);",true),
+            ("Dropbox","FolderJobs","_ = typeof(Massdex.SyncShark.Engine.Planner.Moves);",false),
+            ("SyncShark.Cli","Program","_ = typeof(Massdex.SyncShark.Engine.Local.LogFiles);",true),
+            ("SyncShark.Cli","Program","_ = typeof(Massdex.SyncShark.Engine.Local.LocalSide);",false),
+            ("SyncShark.Cli","Program","_ = typeof(Massdex.SyncShark.Engine.Edge.Commands);",false),
+            ("SyncShark","Other","_ = typeof(Massdex.SyncShark.Engine.Storage.Store);",false),
+            ("SyncShark","Program","_ = typeof(Massdex.SyncShark.Engine.Storage.StoreMove);",true),
+            ("SyncShark","Program","_ = typeof(Massdex.SyncShark.Engine.Planner.Decide);",false)
+        ];
+        foreach(var (module,file,code,allowed) in probes)
+        {
+            var tree=CSharpSyntaxTree.ParseText("class Probe { static void Use() { "+code+" } }");
+            var fixture=compilation.AddSyntaxTrees(tree);
+            Check.Require(!fixture.GetSemanticModel(tree).GetDiagnostics().Any(d=>d.Severity==DiagnosticSeverity.Error),"Invalid dependency fixture: "+code);
+            Check.Require(!Violations(fixture,tree,module,file).Any()==allowed,$"{module}/{file}: wrong outcome for {code}");
         }
         return Task.CompletedTask;
+    }
+
+    private const string Prefix = "Massdex.SyncShark.Engine";
+    private static IEnumerable<string> Violations(CSharpCompilation compilation,SyntaxTree tree,string module,string file)
+    {
+        var model=compilation.GetSemanticModel(tree);
+        foreach(var node in tree.GetRoot().DescendantNodes().OfType<SimpleNameSyntax>())
+        {
+            var symbol=model.GetSymbolInfo(node).Symbol;
+            if(symbol is IAliasSymbol alias) symbol=alias.Target;
+            var type=symbol as INamedTypeSymbol ?? symbol?.ContainingType;
+            if(type is null) continue;
+            var space=type.ContainingNamespace.ToDisplayString(); var member=symbol!.Name; var name=type.Name;
+            bool violates = false;
+            if(space==Prefix || space.StartsWith(Prefix+".",StringComparison.Ordinal))
+            {
+                var other=space==Prefix?"Contracts":space[(Prefix.Length+1)..];
+                bool allowed=module switch
+                {
+                    "SyncShark.Cli" => file=="Program" && (other,name) is ("Edge","Cli") or ("Local","LogFiles") or ("Contracts","ILogFiles"),
+                    "SyncShark" => file=="Program" && (other,name) is ("Storage","Store" or "StoreMove") or ("Dropbox","Connections" or "DropboxSide" or "DropboxApi" or "CredentialStore" or "SignIn") or ("Local","LocalSide" or "RecycleBin" or "LogFiles") or ("Run","Host") or ("Edge","HostServer" or "Commands") or ("Contracts",_),
+                    _ => module==other || other=="Contracts" || (module,other) is ("Executor","Planner") or ("Run","Planner" or "Executor") or ("Edge","Run")
+                };
+                violates=!allowed || (other,name)==("Planner","Moves") && module!="Executor" && (module,file)!=("Planner","Moves") ||
+                    other=="Local" && name is "InUse" or "VolumeSpace" && file!=name && (module,file)!=("Local","LocalSide") ||
+                    module=="Planner" && name=="SettingsParser";
+            }
+            else if(space.StartsWith("Microsoft.Data.Sqlite",StringComparison.Ordinal) || space=="SQLitePCL") violates=module!="Storage";
+            else if(space=="System.Net.Http" && name is "HttpClient" or "HttpMessageInvoker" && (member.Contains("Async",StringComparison.Ordinal) || member=="Send")) violates=(module,file)!=("Dropbox","DropboxApi");
+            else if(space=="System.IO" && name is "File" or "Directory" or "FileInfo" or "DirectoryInfo" or "FileStream" or "DriveInfo" or "FileSystemWatcher")
+                violates=module is not ("Local" or "Storage") && (module,file)!=("Dropbox","Connections");
+            else if(module=="Planner" && (name=="TimeProvider" || name is "DateTime" or "DateTimeOffset" && member is "Now" or "UtcNow" or "Today" || name=="Stopwatch")) violates=true;
+            if(violates) yield return type.ToDisplayString()+"."+member;
+        }
     }
 }

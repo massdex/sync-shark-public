@@ -8,9 +8,9 @@ public sealed class Store : IStore
     /// <summary>Pair operation on the supplied facts.</summary>
     public Task<PairConfig?> PairAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>SavePair operation on the supplied facts.</summary>
-    public Task SavePairAsync(PairConfig pair, CancellationToken ct) => throw new NotImplementedException();
+    public Task SavePairAsync(PairConfig pair, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null) => throw new NotImplementedException();
     /// <summary>RemovePair operation on the supplied facts.</summary>
-    public Task<bool> RemovePairAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
+    public Task<bool> RemovePairAsync(string pairId, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null) => throw new NotImplementedException();
     /// <summary>Find operation on the supplied facts.</summary>
     public Task<SyncedEntry?> FindAsync(string pairId, Side side, string key, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>ById operation on the supplied facts.</summary>
@@ -36,7 +36,8 @@ public sealed class Store : IStore
     /// <summary>OweRepair operation on the supplied facts.</summary>
     public Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>FinishRepair operation on the supplied facts.</summary>
-    public Task FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct) => throw new NotImplementedException();
+    public Task<(long Revision, string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct) => throw new NotImplementedException();
+    public Task<bool> FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct, Scope? scope = null) => throw new NotImplementedException();
     /// <summary>SaveJob operation on the supplied facts.</summary>
     public Task SaveJobAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Jobs operation on the supplied facts.</summary>
@@ -48,7 +49,7 @@ public sealed class Store : IStore
     /// <summary>Armed operation on the supplied facts.</summary>
     public Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Disarm operation on the supplied facts.</summary>
-    public Task DisarmAsync(string pairId, RemovalSelection expected, CancellationToken ct) => throw new NotImplementedException();
+    public Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>AddScan operation on the supplied facts.</summary>
     public Task AddScanAsync(string pairId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Compare operation on the supplied facts.</summary>
@@ -57,4 +58,8 @@ public sealed class Store : IStore
     public Task ClearScanAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Dispose operation on the supplied facts.</summary>
     public void Dispose() => throw new NotImplementedException();
+
+    /// <summary>Opens the selected store image; read-only access never creates one.</summary>
+    public Store(string path, bool readOnly) => throw new NotImplementedException();
+
 }
