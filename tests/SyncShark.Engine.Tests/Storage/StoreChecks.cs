@@ -1,0 +1,59 @@
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Massdex.SyncShark.Engine.Storage;
+using Microsoft.Data.Sqlite;
+
+namespace Massdex.SyncShark.Engine.Tests.Storage;
+
+/// <summary>Checks the published store contract and its open-existing boundary.</summary>
+public static class StoreChecks
+{
+    /// <summary>Every Store operation documents its behavior, and probing an absent image cannot create it.</summary>
+    public static async Task RunAsync()
+    {
+        var root = new DirectoryInfo(Environment.GetEnvironmentVariable("GITHUB_WORKSPACE") ?? Environment.CurrentDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "SyncShark.sln"))) root = root.Parent;
+        if (root is null) throw new DirectoryNotFoundException("Source checkout not found.");
+        var source = File.ReadAllText(Path.Combine(root.FullName, "src", "SyncShark.Engine", "Storage", "Store.cs"));
+        foreach (var method in CSharpSyntaxTree.ParseText(source).GetRoot().DescendantNodes().OfType<BaseMethodDeclarationSyntax>())
+        {
+            if (!method.Modifiers.Any(token => token.RawKind == (int)SyntaxKind.PublicKeyword)) continue;
+            var summary = method.GetLeadingTrivia().ToFullString();
+            if (!summary.Contains("<summary>", StringComparison.Ordinal) ||
+                summary.Contains("operation on the supplied facts", StringComparison.Ordinal))
+                throw new InvalidDataException($"Missing behavior summary: {method.GetFirstToken().GetLocation().GetLineSpan().StartLinePosition.Line + 1}");
+        }
+        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        foreach (var readOnly in new[] { true, false })
+        {
+            try { using var store = new Store(path, readOnly, null!); }
+            catch (SqliteException) when (!File.Exists(path)) { continue; }
+            throw new InvalidDataException("Opening an absent store did not fail without creating it.");
+        }
+        var directory = Directory.CreateTempSubdirectory();
+        try
+        {
+            if (await Store.OpenAsync(directory.FullName, false, null!, default) != null || directory.EnumerateFileSystemInfos().Any())
+                throw new InvalidDataException("An ordinary open created store files.");
+            var image = Path.Combine(directory.FullName, "sample.sqlite");
+            var cs = new SqliteConnectionStringBuilder { DataSource = image, Pooling = false }.ToString();
+            using (var db = new SqliteConnection(cs))
+            {
+                db.Open();
+                db.CreateFunction("pathkey", (string path) => PathNames.Key(path), isDeterministic:true);
+                using var sql = db.CreateCommand();
+                sql.CommandText = Schema.Create + $"PRAGMA user_version={Schema.Version};INSERT INTO pair(pair_id,def_json) VALUES('p','{{}}');";
+                sql.ExecuteNonQuery();
+            }
+            using (var store = new Store(image, false, SettingsParser.Load()))
+                await Task.WhenAll(new[] { "A", "B" }.Select(key => Task.Run(() => store.CommitAsync("p",null,null,null,key,default))));
+            using var inspect = new SqliteConnection(cs);
+            inspect.Open();
+            inspect.CreateFunction("pathkey", (string path) => PathNames.Key(path), isDeterministic:true);
+            using var count = inspect.CreateCommand();
+            count.CommandText = "SELECT count(*) FROM discovery_deleted_delta WHERE spent=1";
+            if ((long)count.ExecuteScalar()! != 2) throw new InvalidDataException("Concurrent acknowledgements lost.");
+        }
+        finally { directory.Delete(recursive:true); }
+    }
+}
