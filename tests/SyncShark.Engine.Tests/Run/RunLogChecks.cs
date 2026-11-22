@@ -5,14 +5,17 @@ using Massdex.SyncShark.Engine.Run;
 namespace Massdex.SyncShark.Engine.Tests.Run;
 
 /// <summary>Contract checks for RunLog: the stored record is a UTC timestamp plus five reversible fields in six
-/// fixed columns; a literal backslash-n never collides with a control newline; a typed outcome survives; a failed
-/// write, flush or close still closes the writer exactly once; and the detached read needs only the file seam
-/// (F029, F054, M22).</summary>
+/// fixed columns; typed facts (stage end, count, failure name and message, cause) are projected into the record; a
+/// literal backslash-n never collides with a control newline; a failed write, flush or close stops writes and still
+/// closes the writer exactly once; the detached read needs only the file seam (F029, F054, M22).</summary>
 public static class RunLogChecks
 {
     public static Task RunAsync()
     {
         WritesCanonicalTimestampedRecord();
+        ProjectsTypedStageEnd();
+        ProjectsTypedFailure();
+        ProjectsTypedCause();
         EscapesLiteralBackslashDistinctFromControl();
         TypedOutcomeSurvives();
         DisposeClosesAfterWriteFailure();
@@ -29,6 +32,15 @@ public static class RunLogChecks
     private static EngineSettings Settings(int bufferCharacters = 4096) => new(
         string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
         30, FirstRunPolicy.NewestWins, 0, string.Empty, bufferCharacters, 512);
+
+    private static string[] WriteOne(RunEvent value)
+    {
+        var files = new FakeLogFiles();
+        var log = new RunLog(files, "logs/pair-run.log", Settings());
+        log.Write(value);
+        log.Dispose();
+        return files.Written[0].Split(RunLog.FieldSeparator);
+    }
 
     private static void WritesCanonicalTimestampedRecord()
     {
@@ -51,14 +63,33 @@ public static class RunLogChecks
             empty[5].Length == 0, "empty fields keep their column positions");
     }
 
+    private static void ProjectsTypedStageEnd()
+    {
+        var fields = WriteOne(new RunEvent(RunEventKind.Stage, "Reading both sides", string.Empty, string.Empty,
+            string.Empty) { Ended = true, Count = 42 });
+        Check.Require(fields[5] == "Ended", "a stage end is projected into the outcome, not lost");
+        Check.Require(fields[4].Contains("count=42", StringComparison.Ordinal),
+            "a stage count is projected into the record");
+    }
+
+    private static void ProjectsTypedFailure()
+    {
+        var fields = WriteOne(new RunEvent(RunEventKind.Failed, string.Empty, "alpha/report.txt", string.Empty,
+            string.Empty) { Error = new IOException("boom") });
+        Check.Require(fields[2] == "IOException", "a failure delivered only by Error names the exception type");
+        Check.Require(fields[4].Contains("boom", StringComparison.Ordinal), "a failure delivered only by Error keeps its reason");
+    }
+
+    private static void ProjectsTypedCause()
+    {
+        var fields = WriteOne(new RunEvent(RunEventKind.Issue, "Failure", "alpha/report.txt", "name rejected",
+            string.Empty) { Cause = TextKey.FailureDetail });
+        Check.Require(fields[5] == TextKey.FailureDetail.ToString(), "a typed cause becomes the record outcome");
+    }
+
     private static void EscapesLiteralBackslashDistinctFromControl()
     {
-        var files = new FakeLogFiles();
-        var log = new RunLog(files, "logs/pair-run.log", Settings());
-        log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "a\\nb", "a\nb", string.Empty));
-        log.Dispose();
-
-        var fields = files.Written[0].Split(RunLog.FieldSeparator);
+        var fields = WriteOne(new RunEvent(RunEventKind.Effect, "Uploaded", "a\\nb", "a\nb", string.Empty));
         var escapedLiteral = fields[3];
         var escapedControl = fields[4];
         Check.Require(escapedLiteral == "a\\\\nb", "a literal backslash-n is reversibly escaped");
@@ -72,13 +103,8 @@ public static class RunLogChecks
 
     private static void TypedOutcomeSurvives()
     {
-        var files = new FakeLogFiles();
-        var log = new RunLog(files, "logs/pair-run.log", Settings());
-        log.Write(new RunEvent(RunEventKind.Issue, "Failure", "alpha/report.txt", "name rejected",
+        var fields = WriteOne(new RunEvent(RunEventKind.Issue, "Failure", "alpha/report.txt", "name rejected",
             "FailDropboxNameRejected"));
-        log.Dispose();
-
-        var fields = files.Written[0].Split(RunLog.FieldSeparator);
         Check.Require(fields[1] == "Issue" && fields[5] == "FailDropboxNameRejected",
             "a representative typed outcome is stored unchanged");
     }
@@ -91,7 +117,8 @@ public static class RunLogChecks
         log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/other.txt", string.Empty, "Dropbox"));
         log.Dispose();
         Check.Require(files.Written.Count == 0, "a write failure stops further writes");
-        Check.Require(files.Writer is { DisposeCount: 1 }, "dispose still closes the writer exactly once");
+        Check.Require(files.Writer is { WriteAttempts: 1 }, "the failure was reached and the later write was not attempted");
+        Check.Require(files.Writer is { DisposeAttempts: 1 }, "dispose still closes the writer exactly once");
     }
 
     private static void DisposeClosesAfterFlushFailure()
@@ -100,7 +127,8 @@ public static class RunLogChecks
         var log = new RunLog(files, "logs/pair-run.log", Settings());
         log.Write(new RunEvent(RunEventKind.Stage, "Reading both sides", string.Empty, string.Empty, string.Empty));
         log.Dispose();
-        Check.Require(files.Writer is { DisposeCount: 1 }, "a failed flush does not strand the handle");
+        Check.Require(files.Writer is { FlushAttempts: 1 }, "the boundary flush was attempted");
+        Check.Require(files.Writer is { DisposeAttempts: 1 }, "a failed flush does not strand the handle");
     }
 
     private static void CloseFailureIsContained()
@@ -109,7 +137,7 @@ public static class RunLogChecks
         var log = new RunLog(files, "logs/pair-run.log", Settings());
         log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", string.Empty, "Dropbox"));
         log.Dispose();
-        Check.Require(files.Writer is { DisposeCount: 1 }, "a close failure is contained and counted once");
+        Check.Require(files.Writer is { DisposeAttempts: 1 }, "a close failure is contained and attempted once");
     }
 
     private static void DisposeIsIdempotent()
@@ -119,7 +147,7 @@ public static class RunLogChecks
         log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", string.Empty, "Dropbox"));
         log.Dispose();
         log.Dispose();
-        Check.Require(files.Writer is { DisposeCount: 1 }, "dispose closes the writer only once");
+        Check.Require(files.Writer is { DisposeAttempts: 1 }, "dispose closes the writer only once");
         Check.Require(files.Written.Count == 1, "dispose flushes the buffered record instead of stranding it");
     }
 
@@ -229,26 +257,30 @@ public static class RunLogChecks
     private sealed class CapturingWriter(FakeLogFiles owner) : TextWriter
     {
         private readonly StringBuilder _pending = new();
-        public int DisposeCount { get; private set; }
+        public int WriteAttempts { get; private set; }
+        public int FlushAttempts { get; private set; }
+        public int DisposeAttempts { get; private set; }
         public override Encoding Encoding => System.Text.Encoding.UTF8;
 
         public override void WriteLine(string? value)
         {
+            WriteAttempts++;
             if (owner.FailWrites) throw new IOException("write failure");
             _pending.Append(value).Append('\n');
         }
 
         public override void Flush()
         {
+            FlushAttempts++;
             if (owner.FailFlush) throw new IOException("flush failure");
             Publish();
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (DisposeCount == 0)
+            DisposeAttempts++;
+            if (DisposeAttempts == 1)
             {
-                DisposeCount++;
                 if (owner.FailClose) throw new IOException("close failure");
                 Publish();
             }
