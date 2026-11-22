@@ -5,9 +5,10 @@ namespace Massdex.SyncShark.Engine.Run;
 
 /// <summary>One run's log file. Writes the 0.3.95 stored record: a UTC round-trip timestamp plus the five
 /// canonical fields, always six tab-separated columns, each reversible-escaped so a data value can never split a
-/// record or collide with an escape. Important boundaries flush early. A failed write or flush stops further writes
-/// but keeps the writer, and <see cref="Dispose"/> closes it exactly once, so a disk-full flush cannot strand a
-/// handle (M22, F029). Reads are a detached entry point needing only the file seam, never a writer (F054).</summary>
+/// record or collide with an escape. Typed facts (a stage end, a count, a failure's type and reason, a cause, a
+/// notice or action) are projected into the record instead of being lost. Important boundaries flush early. A failed
+/// write or flush stops further writes but keeps the writer, and <see cref="Dispose"/> closes it exactly once
+/// (M22, F029). Reads are a detached entry point needing only the file seam, never a writer (F054).</summary>
 public sealed class RunLog : IDisposable
 {
     /// <summary>Separates the six record columns; the timestamp is first.</summary>
@@ -16,6 +17,8 @@ public sealed class RunLog : IDisposable
     public const int RecordFieldCount = 6;
     /// <summary>UTC round-trip timestamp format of the first column.</summary>
     public const string TimestampFormat = "O";
+    /// <summary>Outcome recorded for an ended stage.</summary>
+    public const string EndedOutcome = "Ended";
     private const string EscapeTab = "\\t";
     private const string EscapeReturn = "\\r";
     private const string EscapeNewLine = "\\n";
@@ -25,6 +28,11 @@ public sealed class RunLog : IDisposable
     private const int UnicodePrefixLength = 2;
     private const int UnicodeDigitCount = 4;
     private const int UnicodeEscapeLength = 5;
+    private const string CountFact = "count";
+    private const string TotalFact = "total";
+    private const string SideFact = "side";
+    private const char FactSeparator = '=';
+    private const string FactJoiner = "; ";
 
     private readonly object _gate = new();
     private readonly string _path;
@@ -97,52 +105,73 @@ public sealed class RunLog : IDisposable
         }
     }
 
+    /// <summary>Projects typed facts into the fields a record or a readable view shows, so a stage end, a count, a
+    /// failure or a cause delivered only in structured fields is never lost.</summary>
+    internal static RunEvent Present(RunEvent value)
+    {
+        var what = value.What;
+        if (what.Length == 0)
+        {
+            if (value.Notice is { } notice) what = notice.ToString();
+            else if (value.Action is { } action) what = action.ToString();
+            else if (value.Error is { } error) what = error.GetType().Name;
+        }
+        var detail = value.Detail;
+        if (detail.Length == 0 && value.Error is { } failure) detail = failure.GetBaseException().Message;
+        if (value.Count is { } count) detail = AppendFact(detail, CountFact, count.ToString(CultureInfo.InvariantCulture));
+        if (value.Total is { } total) detail = AppendFact(detail, TotalFact, total.ToString(CultureInfo.InvariantCulture));
+        if (value.Side is { } side) detail = AppendFact(detail, SideFact, side.ToString());
+        var outcome = value.Outcome;
+        if (outcome.Length == 0)
+        {
+            if (value.Cause is { } cause) outcome = cause.ToString();
+            else if (value.Ended) outcome = EndedOutcome;
+        }
+        return value with { What = what, Detail = detail, Outcome = outcome };
+    }
+
+    private static string AppendFact(string detail, string name, string value)
+    {
+        var fact = name + FactSeparator + value;
+        return detail.Length == 0 ? fact : detail + FactJoiner + fact;
+    }
+
     // One canonical record: UTC round-trip timestamp, then kind, what, path, detail and outcome, always six columns.
     private static string FormatRecord(RunEvent value)
     {
+        var item = Present(value);
         var fields = new[]
         {
             DateTimeOffset.UtcNow.ToString(TimestampFormat, CultureInfo.InvariantCulture),
-            EscapeField(value.Kind.ToString()),
-            EscapeField(value.What),
-            EscapeField(value.Path),
-            EscapeField(value.Detail),
-            EscapeField(value.Outcome)
+            EscapeField(item.Kind.ToString()),
+            EscapeField(item.What),
+            EscapeField(item.Path),
+            EscapeField(item.Detail),
+            EscapeField(item.Outcome)
         };
         return string.Join(FieldSeparator, fields);
     }
 
     /// <summary>Reversibly escapes a stored field: backslash, tab, return, newline and other control characters, so a
     /// literal `\n` and a real newline stay distinct and any record round-trips.</summary>
-    public static string EscapeField(string value)
-    {
-        if (value.Length == 0) return value;
-        var first = 0;
-        while (first < value.Length && !NeedsEscape(value[first])) first++;
-        if (first == value.Length) return value;
-        var escaped = new StringBuilder(value.Length);
-        escaped.Append(value.AsSpan(0, first));
-        for (var index = first; index < value.Length; index++)
-        {
-            var character = value[index];
-            escaped.Append(NeedsEscape(character) ? EscapeChar(character) : character);
-        }
-        return escaped.ToString();
-    }
+    public static string EscapeField(string value) => EscapeValue(value, escapeBackslash: true);
 
     /// <summary>Escapes control characters for a human view, leaving a Windows path's own backslashes readable.</summary>
-    public static string EscapeDisplay(string value)
+    public static string EscapeDisplay(string value) => EscapeValue(value, escapeBackslash: false);
+
+    private static string EscapeValue(string value, bool escapeBackslash)
     {
         if (value.Length == 0) return value;
         var first = 0;
-        while (first < value.Length && !char.IsControl(value[first])) first++;
+        while (first < value.Length && !NeedsEscape(value[first], escapeBackslash)) first++;
         if (first == value.Length) return value;
         var escaped = new StringBuilder(value.Length);
         escaped.Append(value.AsSpan(0, first));
         for (var index = first; index < value.Length; index++)
         {
             var character = value[index];
-            escaped.Append(char.IsControl(character) ? EscapeChar(character) : character);
+            if (NeedsEscape(character, escapeBackslash)) escaped.Append(EscapeChar(character));
+            else escaped.Append(character);
         }
         return escaped.ToString();
     }
@@ -182,7 +211,8 @@ public sealed class RunLog : IDisposable
         return true;
     }
 
-    private static bool NeedsEscape(char value) => char.IsControl(value) || value == '\\';
+    private static bool NeedsEscape(char value, bool escapeBackslash) =>
+        char.IsControl(value) || (escapeBackslash && value == '\\');
 
     private static string EscapeChar(char value) => value switch
     {
