@@ -178,7 +178,7 @@ public sealed class DropboxErrors
         return null;
     }
 
-    // Except for explicit contention, a delete refusal names a cause, not an effect. A selected-id miss is absence only.
+    // A selected-id miss proves absence, not that our delete caused it.
     private static Classified DeleteMember(JsonElement failure)
     {
         var tag = UnionTag(failure);
@@ -186,6 +186,7 @@ public sealed class DropboxErrors
             failure.TryGetProperty(DropboxProtocol.PathLookup, out var lookup) &&
             UnionTag(lookup) is { } lookupTag && IsNotFoundTag(lookupTag))
             return new Classified(TextKey.FailChanged, FailureDisposition.UnknownEffect, false, Absent: true);
+        if (tag == DropboxProtocol.TooManyFiles) return Refused(TextKey.FailDropboxTooManyFiles);
         if (tag == DropboxProtocol.TooManyWriteOperations) return Contention();
         var cause = TextKey.DropboxRefused;
         if (tag == DropboxProtocol.PathWrite &&
