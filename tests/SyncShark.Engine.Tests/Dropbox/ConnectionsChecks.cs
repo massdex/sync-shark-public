@@ -151,7 +151,7 @@ public static class ConnectionsChecks
         return path;
     }
 
-    private static string LegacySet(string[] ids)
+    private static string LegacySet(params string[] ids)
     {
         var binding = Binding(ids);
         return JsonSerializer.Serialize(new Dictionary<string, object?>
