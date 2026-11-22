@@ -1,0 +1,12 @@
+using Massdex.SyncShark.Engine.Edge;
+
+namespace Massdex.SyncShark.Engine.Tests.Edge;
+
+public static class HostClientChecks
+{
+    public static async Task RunAsync()
+    {
+        var result = await new HostClient(Guid.NewGuid().ToString("N")).SendAsync(["status"], TextWriter.Null, TextWriter.Null, default);
+        Check.Require(result == (null, false), "An absent host did not return definite pre-send absence");
+    }
+}
