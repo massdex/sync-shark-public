@@ -9,26 +9,26 @@ using System.Text.Json;
 namespace Massdex.SyncShark.Engine.Dropbox;
 
 /// <summary>Full-account Dropbox sign-in: opens the browser, receives the loopback return, exchanges the code and reads
-/// the account (all HTTP through <see cref="DropboxApi"/> and the approved endpoint catalog), checks the granted scope
+/// the account (all HTTP through <see cref="DropboxApi"/> and the approved endpoint data), checks the granted scope
 /// envelope, then saves the refresh token through <see cref="CredentialStore"/> before returning the connection id.
-/// Browser pages carry the catalog receipt copy, never a success claim, and never reflect callback values.</summary>
+/// One bounded attempt covers receipt, exchange and account read; browser pages carry the catalog receipt copy, never a
+/// success claim, and never reflect callback values.</summary>
 public sealed class SignIn
 {
     /// <summary>The registered Dropbox application key.</summary>
     public const string ClientId = "fxzcfcfkv6f7gt6";
 
+    // The one registered loopback callback fact, as 0.3.95 registered it.
+    private const string RegisteredCallback = "http://127.0.0.1:47821/oauth/dropbox/callback/";
+    private const string AccountRoute = "users/get_current_account";
     private const int MaximumJsonBytes = 1024 * 1024;
     private const int MaximumCallbackBytes = 16 * 1024;
     private const int MaximumCallbackLineBytes = 4096;
     private const string BearerScheme = "Bearer";
     private const string OAuthScope = "offline";
-    private const string AuthorizationRoute = "oauth2/authorize";
-    private const string TokenRoute = "oauth2/token";
-    private const string AccountRoute = "users/get_current_account";
 
     /// <summary>Every coordinator uses the same registered loopback callback.</summary>
-    public static Uri RedirectUri { get; } =
-        new UriBuilder(Uri.UriSchemeHttp, "127.0.0.1", 47821, "/oauth/dropbox/callback/").Uri;
+    public static Uri RedirectUri { get; } = new(RegisteredCallback);
 
     /// <summary>The full-account permission envelope the registered application requests and requires.</summary>
     public static readonly IReadOnlyList<string> RequiredScopes =
@@ -56,16 +56,15 @@ public sealed class SignIn
 
     /// <summary>The first-bind form of <see cref="ConnectAsync"/>: also returns the verified account and namespace ids,
     /// so a caller can build the pair's saved root identity before one exists. The refresh token is saved first.</summary>
-    public async Task<(string ConnectionId, string AccountId, string RootNamespaceId, string HomeNamespaceId)>
+    public Task<(string ConnectionId, string AccountId, string RootNamespaceId, string HomeNamespaceId)>
         ConnectAccountAsync(DropboxApi api, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(api, nameof(api));
-        if (!await AuthorizationGate.WaitAsync(0, ct)) throw new InvalidOperationException(Text.Get(TextKey.SignInReturnRetry));
-        try
+        return RunAuthorizationAttemptAsync(ct, AuthorizationBound, async attempt =>
         {
             var redirect = RedirectUri;
             var (verifier, challenge, state) = CreatePkceFlow();
-            var code = await ReceiveCallbackAsync(redirect, redirect.AbsolutePath, state, ct, AuthorizationBound,
+            var code = await ReceiveCallbackAsync(redirect, redirect.AbsolutePath, state, attempt,
                 () => StartBrowser(BuildAuthorizationUri(ClientId, redirect, challenge, state)));
             var token = await TokenAsync(api.SendAsync, new Dictionary<string, string>
             {
@@ -74,16 +73,36 @@ public sealed class SignIn
                 ["client_id"] = ClientId,
                 ["redirect_uri"] = redirect.AbsoluteUri,
                 ["code_verifier"] = verifier
-            }, connectionId: null, ct);
+            }, connectionId: null, attempt);
             if (string.IsNullOrWhiteSpace(token.RefreshToken))
                 throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
             if (!GrantAccepted(token.Scopes)) throw new InvalidDataException(Text.Get(TextKey.SignInReturnRetry));
-            var account = await AccountAsync(api.SendAsync, token.AccessToken, ct);
+            var account = await AccountAsync(api.SendAsync, token.AccessToken, attempt);
             if (token.AccountId is not null && !string.Equals(token.AccountId, account.AccountId, StringComparison.Ordinal))
                 throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
             var connectionId = Connections.CreateConnectionId(account.AccountId);
             new CredentialStore().Save(connectionId, token.RefreshToken!);
             return (connectionId, account.AccountId, account.RootNamespaceId, account.HomeNamespaceId);
+        });
+    }
+
+    /// <summary>Runs one authorization flow under the one-flow gate and the predecessor's bound. The bound covers the
+    /// whole attempt (receipt, exchange and account read); an expired bound ends it with a retryable timeout and frees
+    /// the gate for the next attempt.</summary>
+    public static async Task<T> RunAuthorizationAttemptAsync<T>(CancellationToken ct, TimeSpan bound,
+        Func<CancellationToken, Task<T>> attempt)
+    {
+        ArgumentNullException.ThrowIfNull(attempt, nameof(attempt));
+        if (!await AuthorizationGate.WaitAsync(0, ct)) throw new InvalidOperationException(Text.Get(TextKey.SignInReturnRetry));
+        try
+        {
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            bounded.CancelAfter(bound);
+            try { return await attempt(bounded.Token); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException(Text.Get(TextKey.SignInReturnRetry));
+            }
         }
         finally { AuthorizationGate.Release(); }
     }
@@ -105,7 +124,7 @@ public sealed class SignIn
         return (verifier, challenge, Base64Url(RandomNumberGenerator.GetBytes(32)));
     }
 
-    /// <summary>The authorization page URL for one flow from the approved endpoint catalog, requesting offline access.</summary>
+    /// <summary>The authorization page URL for one flow from the approved endpoint data, requesting offline access.</summary>
     public static Uri BuildAuthorizationUri(string clientId, Uri redirectUri, string challenge, string state)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientId, nameof(clientId));
@@ -120,7 +139,7 @@ public sealed class SignIn
             ["token_access_type"] = OAuthScope,
             ["scope"] = string.Join(' ', RequiredScopes)
         };
-        return new Uri(Routes.Endpoint(AuthorizationRoute).AbsoluteUri + "?" +
+        return new Uri(Routes.Endpoint(DropboxProtocol.AuthorizationPath).AbsoluteUri + "?" +
                        string.Join('&', query.Select(item => Uri.EscapeDataString(item.Key) + "=" + Uri.EscapeDataString(item.Value))));
     }
 
@@ -128,7 +147,7 @@ public sealed class SignIn
     public static string ParseCallbackTarget(string target, string expectedPath, string expectedState)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(target, nameof(target));
-        var uri = new Uri("http://127.0.0.1" + target);
+        var uri = new Uri(RedirectUri.GetLeftPart(UriPartial.Authority) + target);
         if (!uri.AbsolutePath.Equals(expectedPath, StringComparison.Ordinal))
             throw new InvalidDataException(Text.Get(TextKey.SignInReturnRetry));
         var query = ParseQuery(uri.Query);
@@ -156,35 +175,39 @@ public sealed class SignIn
             .SetEquals(RequiredScopes);
     }
 
-    /// <summary>Receives one loopback return on the fixed callback: starts listening, opens the browser through
-    /// <paramref name="browser"/>, verifies the return and writes the receipt page. A bound ends an abandoned attempt
-    /// with a retryable timeout so the fixed port and the one-flow gate are free for the next attempt.</summary>
+    /// <summary>Receives one loopback return on the fixed callback: starts listening, optionally opens the browser,
+    /// verifies the return and serves the receipt page. A malformed or incomplete request serves the retry page when the
+    /// socket is still writable. The supplied token bounds the whole attempt.</summary>
     public static async Task<string> ReceiveCallbackAsync(Uri redirectUri, string expectedPath, string expectedState,
-        CancellationToken ct, TimeSpan? bound = null, Action? browser = null)
+        CancellationToken ct, Action? browser = null)
     {
         ArgumentNullException.ThrowIfNull(redirectUri, nameof(redirectUri));
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedPath, nameof(expectedPath));
         var listener = new TcpListener(IPAddress.Loopback, redirectUri.Port);
         try { listener.Start(1); }
         catch (SocketException) { throw new InvalidOperationException(Text.Get(TextKey.SignInReturnRetry)); }
-        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        if (bound is { } limit) attempt.CancelAfter(limit);
         try
         {
-            using var registration = attempt.Token.Register(listener.Stop);
+            using var registration = ct.Register(listener.Stop);
             browser?.Invoke();
-            var client = await AcceptAsync(listener, attempt.Token);
+            var client = await AcceptAsync(listener, ct);
             try
             {
                 var stream = client.GetStream();
                 try
                 {
+                    string target;
+                    try { target = await ReadCallbackTargetAsync(stream, ct); }
+                    catch
+                    {
+                        await TryWriteRetryAsync(stream);
+                        throw;
+                    }
                     string code;
-                    var target = await ReadCallbackTargetAsync(stream, attempt.Token);
                     try { code = ParseCallbackTarget(target, expectedPath, expectedState); }
                     catch
                     {
-                        await WritePageAsync(stream, AcknowledgementPage(received: false), ct);
+                        await TryWriteRetryAsync(stream);
                         throw;
                     }
                     await WritePageAsync(stream, AcknowledgementPage(received: true), ct);
@@ -193,10 +216,6 @@ public sealed class SignIn
                 finally { await stream.DisposeAsync(); }
             }
             finally { client.Dispose(); }
-        }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested && bound is not null)
-        {
-            throw new TimeoutException(Text.Get(TextKey.SignInReturnRetry));
         }
         finally { listener.Stop(); }
     }
@@ -244,8 +263,9 @@ public sealed class SignIn
     }
 
     /// <summary>Disconnect: removes the connection's own credential, and the fixed legacy credential only once it is
-    /// proven (by the account it opens) to belong to this connection. A credential that cannot be reached now is left
-    /// alone and the removal fails forward, so another account's credential is never deleted.</summary>
+    /// proven (by the account it opens) to belong to this connection. The host/composition owner must call this for a
+    /// disconnect; a credential that cannot be reached now is left alone and the removal fails forward, so another
+    /// account's credential is never deleted and no pair is left with a usable legacy credential.</summary>
     public static async Task DisconnectAsync(
         Func<string, CancellationToken, Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)>> verify,
         CredentialStore credentials, string connectionId, CancellationToken ct)
@@ -277,7 +297,7 @@ public sealed class SignIn
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
         IReadOnlyDictionary<string, string> form, string? connectionId, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint(TokenRoute))
+        using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint(DropboxProtocol.TokenPath))
         {
             Content = new FormUrlEncodedContent(form)
         };
@@ -322,7 +342,8 @@ public sealed class SignIn
             RequiredIdentity(rootInfo, "home_namespace_id"));
     }
 
-    private static void RequireOwnedConnection(string connectionId, string accountId)
+    /// <summary>The one acceptance rule for an opened account: its identity must derive the requested connection id.</summary>
+    internal static void RequireOwnedConnection(string connectionId, string accountId)
     {
         if (Connections.CreateConnectionId(accountId) != connectionId)
             throw new InvalidOperationException(Text.Get(TextKey.RootDropboxScopeChanged));
@@ -397,6 +418,13 @@ public sealed class SignIn
         if (parts.Length != 3 || parts[0] != "GET" || parts[2] != "HTTP/1.1")
             throw new InvalidDataException(Text.Get(TextKey.SignInReturnRetry));
         return parts[1];
+    }
+
+    // Best effort for a return that cannot be verified: a closed or unwritable socket simply ends the attempt.
+    private static async Task TryWriteRetryAsync(Stream stream)
+    {
+        try { await WritePageAsync(stream, AcknowledgementPage(received: false), CancellationToken.None); }
+        catch (Exception error) when (error is IOException or SocketException or ObjectDisposedException) { }
     }
 
     private static async Task WritePageAsync(Stream stream, string html, CancellationToken ct)
@@ -480,10 +508,10 @@ public sealed class RefreshingAccessTokenSource
             var refresh = _credentials.Read(_connectionId);
             if (string.IsNullOrWhiteSpace(refresh)) throw new DropboxCredentialUnavailableException(_connectionId);
             var account = await SignIn.OpenVerifiedAsync(_send, _connectionId, refresh, ct);
+            SignIn.RequireOwnedConnection(_connectionId, account.AccountId);
             if (!string.Equals(account.AccountId, _expected.AccountId, StringComparison.Ordinal) ||
                 !string.Equals(account.RootNamespaceId, _expected.RootNamespaceId, StringComparison.Ordinal) ||
-                !string.Equals(account.HomeNamespaceId, _expected.HomeNamespaceId, StringComparison.Ordinal) ||
-                Connections.CreateConnectionId(account.AccountId) != _connectionId)
+                !string.Equals(account.HomeNamespaceId, _expected.HomeNamespaceId, StringComparison.Ordinal))
                 throw new InvalidOperationException(Text.Get(TextKey.RootDropboxScopeChanged));
             _accessToken = account.AccessToken;
             _refreshAtUtc = account.ExpiresUtc.AddMinutes(-5);

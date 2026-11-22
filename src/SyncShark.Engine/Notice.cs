@@ -15,9 +15,17 @@ public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path
     [JsonIgnore]
     public IReadOnlyList<ResolutionChoice>? Choices { get; init; }
 
+    /// <summary>Number of links in the notice display projection.</summary>
+    [JsonIgnore]
+    public int? LinkCount { get; init; }
+    /// <summary>Top folders in the notice display projection.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<string>? LinkFolders { get; init; }
+
     /// <summary>Exact resolution identity, excluding visibility and read-projection metadata.</summary>
     public bool Matches(Notice expected) =>
-        this with { Subject = expected.Subject, Ignored = expected.Ignored, Reviewed = expected.Reviewed, Choices = expected.Choices } == expected &&
+        this with { Subject = expected.Subject, Ignored = expected.Ignored, Reviewed = expected.Reviewed, Choices = expected.Choices,
+            LinkCount = expected.LinkCount, LinkFolders = expected.LinkFolders } == expected &&
         Subject.Incoming == expected.Subject.Incoming && Subject.HasSameItems(expected.Subject) &&
         Subject.FirstRunDeletion == expected.Subject.FirstRunDeletion;
 
