@@ -42,7 +42,9 @@ jobs:
           & dotnet tests/SyncShark.Engine.Tests/bin/Release/net8.0-windows/SyncShark.Engine.Tests.dll $env:GITHUB_WORKSPACE $inventory | Tee-Object -Variable results
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           . ./tools/ci/LaneSelection.ps1
-          if ((Get-RunKind $env:GITHUB_REF) -eq 'full' -and $env:GITHUB_REF -notlike 'refs/heads/ci/int-prep-*' -and $results -match '^NOT IMPLEMENTED ') { throw 'Integration requires all registered checks to pass.' }
+          $integration = (Get-RunKind $env:GITHUB_REF) -eq 'full' -and $env:GITHUB_REF -notlike 'refs/heads/ci/int-prep-*'
+          "RATCHET_REQUIRED=$($integration.ToString().ToLowerInvariant())" >> $env:GITHUB_ENV
+          if ($integration -and $results -match '^NOT IMPLEMENTED ') { throw 'Integration requires all registered checks to pass.' }
       - name: Bind literal evidence to candidate and pinned public source
         shell: pwsh
         env:
@@ -63,13 +65,21 @@ jobs:
           path: ${{ runner.temp }}/literal-sites.jsonl
           if-no-files-found: error
           retention-days: 7
-      - name: Ratchet engineering-spec debt
+      - name: Test ratchet enforcement and negative controls
+        shell: pwsh
+        run: python -I tools/ci/test-spec-ratchet.py
+      - name: Compare candidate to pinned release
+        id: ratchet
+        continue-on-error: ${{ env.RATCHET_REQUIRED == 'false' }}
         shell: pwsh
         env:
           RATCHET_LIVE_TAG: ${{ vars.RATCHET_LIVE_TAG }}
           RATCHET_LIVE_COMMIT: ${{ vars.RATCHET_LIVE_COMMIT }}
         run: |
-          python -I tools/ci/test-spec-ratchet.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -I tools/ci/check-spec-ratchet.py --literal-sites "$env:RUNNER_TEMP/literal-sites.jsonl"
           exit $LASTEXITCODE
+      - name: Record release comparison outcome
+        if: always()
+        shell: pwsh
+        run: |
+          "Pinned release comparison: ${{ steps.ratchet.outcome }}; required for integration: $env:RATCHET_REQUIRED" >> $env:GITHUB_STEP_SUMMARY

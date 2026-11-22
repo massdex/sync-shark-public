@@ -84,7 +84,7 @@ public static class FolderChecks
                             await db.OpenAsync(ct);db.CreateFunction<string,string>("pathkey",PathNames.Key,isDeterministic:true);
                             using var cmd=db.CreateCommand();cmd.CommandText=global::Massdex.SyncShark.Engine.Storage.Schema.Create;
                             await cmd.ExecuteNonQueryAsync(ct);
-                            cmd.CommandText=$"PRAGMA user_version={global::Massdex.SyncShark.Engine.Storage.Schema.Version}; INSERT INTO journal_position VALUES('orphan',1,2)";await cmd.ExecuteNonQueryAsync(ct);
+                            cmd.CommandText=$"PRAGMA user_version={(global::Massdex.SyncShark.Engine.Storage.Schema.Version)}; INSERT INTO journal_position VALUES('orphan',1,2)";await cmd.ExecuteNonQueryAsync(ct);
                         }
                         abandoned=File.ReadAllBytes(stage);throw boundary;
                     }

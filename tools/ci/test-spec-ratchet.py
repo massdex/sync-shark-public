@@ -623,8 +623,7 @@ class ReviewNegativeControls(unittest.TestCase):
             RatchetChecks(test).run(result)
         self.assertEqual([], result.errors, 'A broken fixture is not negative evidence')
         self.assertTrue(result.failures, 'The regression did not detect the removed rule')
-        for case, failure in result.failures:
-            print('NEGATIVE CONTROL:', name, '|', case.id(), '\n' + failure)
+        print('EXPECTED MUTATION REJECTED:', name, '|', test)
 
     def test_missing_verdict_control(self):
         self.rejected_mutation(ratchet, 'size_review', lambda *args: 0,

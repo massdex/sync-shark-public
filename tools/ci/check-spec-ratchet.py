@@ -481,7 +481,7 @@ def compare_rows(current, old, connection, verdicts=None, register_failures=0):
         print('INFO file delta', ' | '.join(json.loads(original)), '{:+d}'.format(delta))
     while a is not None or b is not None:
         if b is None or (a is not None and json.dumps(a[0]) < json.dumps(b[0])):
-            print('NEW', ' | '.join(a[0]), a[1])
+            print('NEW', ' | '.join(a[0]), a[1], '| candidate:', a[2][0])
             failures += size_review(a, connection, verdicts, True)
             totals[a[0][1]] += 1
             a = next(current, None)
@@ -492,7 +492,7 @@ def compare_rows(current, old, connection, verdicts=None, register_failures=0):
         else:
             totals[a[0][1]] += 1
             if a[1] > b[1]:
-                print('GROWN', ' | '.join(a[0]), str(b[1]) + ' -> ' + str(a[1]))
+                print('GROWN', ' | '.join(a[0]), str(b[1]) + ' -> ' + str(a[1]), '| candidate:', a[2][0])
             failures += size_review(a, connection, verdicts, a[1] > b[1])
             if a[1] < b[1]:
                 print('improved', ' | '.join(a[0]), str(b[1]) + ' -> ' + str(a[1]))

@@ -39,6 +39,10 @@ public static class LiteralsChecks
         Check.Require(Offends("class A { void M() => throw new Exception(\"Unavailable\"); }","A.cs"),"Single-word failure escaped");
         Check.Require(Offends("class A { void M() => writer.WriteAsync(\"Retry\"); }","A.cs",words,context) && Offends("class A { void M() => writer.WriteLineAsync(\"Retry\"); }","A.cs",words,context),"Async output escaped");
         Check.Require(!Offends("class A { void M() => writer.WriteLineAsync(Text.Get(key)); }","A.cs",words,context),"Catalog-backed async output rejected");
+        var schemaText="namespace Example; static class Schema { public const string Create=\"CREATE TABLE item(id INTEGER)\"; }";
+        var schemaPath="src/SyncShark.Engine/Storage/Schema.cs";
+        bool Permits(string code,string path)=>Sites(code,path).Select(x=>JsonSerializer.SerializeToElement(x)).Single().GetProperty("permitted").GetBoolean();
+        Check.Require(Permits(schemaText,schemaPath) && !Permits(schemaText,"src/SyncShark.Engine/Run/Schema.cs") && !Permits(schemaText.Replace("CREATE TABLE item(id INTEGER)","Retry this file"),schemaPath),"DDL owner or content scope was lost");
         var sibling=context.AddSyntaxTrees(CSharpSyntaxTree.ParseText("class Labels { public static readonly string Retry=\"Retry this item\"; }"));
         Check.Require(Offends("class A { void M() => Console.WriteLine(Labels.Retry); }","A.cs",words,sibling),"Sibling constant escaped");
         var trees=new[]{"src","apps"}.SelectMany(folder=>Directory.EnumerateFiles(Path.Combine(input.Root,folder),"*.cs",SearchOption.AllDirectories))
@@ -114,7 +118,12 @@ public static class LiteralsChecks
             token.Value is not string text || text.Length == 0) return null;
         // Schema SQL owns its const fragments; other owners cannot hide sentences.
         var owner = OwnerOf(token.Parent, relativePath);
-        if (owner is not null && (owner == "StateSchema" || !text.Contains(' '))) return null;
+        if (owner == "Schema")
+        {
+            var sql=text.TrimStart();
+            if (MemberOf(token.Parent)=="Pragmas" ? sql.StartsWith("PRAGMA ",StringComparison.OrdinalIgnoreCase) : sql.StartsWith("CREATE TABLE ",StringComparison.OrdinalIgnoreCase)) return null;
+        }
+        else if (owner is not null && (owner == "StateSchema" || !text.Contains(' '))) return null;
         if (relativePath == DropboxEntriesFile &&
             token.Parent is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.Utf8StringLiteralExpression) &&
             literal.Parent is ArrowExpressionClauseSyntax { Parent: PropertyDeclarationSyntax })
@@ -135,6 +144,7 @@ public static class LiteralsChecks
         ["EngineSettings"] = "src/SyncShark.Engine/EngineSettings.cs",
         ["SettingsParser"] = "src/SyncShark.Engine/SettingsParser.cs",
         ["DropboxListing"] = "src/SyncShark.Engine/Dropbox/DropboxListing.cs",
+        ["Schema"] = "src/SyncShark.Engine/Storage/Schema.cs",
         ["StateSchema"] = "src/SyncShark.Engine/Storage/StateSchema.cs",
         ["DropboxProtocol"] = "src/SyncShark.Engine/Dropbox/DropboxProtocol.cs",
         ["DropboxEntries"] = DropboxEntriesFile,
@@ -164,6 +174,7 @@ public static class LiteralsChecks
     // Narrow exemptions follow each member's owner; other constants there remain offences.
     private static readonly Dictionary<string, IReadOnlySet<string>> MemberOwners = new(StringComparer.Ordinal)
     {
+        ["Schema"] = new HashSet<string>(StringComparer.Ordinal) { "Pragmas", "Create", "CreateScan" },
         ["EngineSettings"] = new HashSet<string>(StringComparer.Ordinal) { "AtomicReplaceDelayMultiplier" },
         ["SettingsParser"] = new HashSet<string>(StringComparer.Ordinal)
             { "MaximumAtomicReplaceAttempts", "MaximumAtomicReplaceInitialDelayMilliseconds" },
