@@ -1,0 +1,10 @@
+# Documented defaults: https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1501
+# See sibling CA1502, CA1505 and CA1506 reference pages for their defaults.
+CA1501: 5
+CA1502: 25
+CA1505: 10
+CA1506(Type): 95
+CA1506(Method): 40
+CA1506(Field): 40
+CA1506(Property): 40
+CA1506(Event): 40
