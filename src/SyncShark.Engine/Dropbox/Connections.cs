@@ -188,7 +188,7 @@ public sealed class Connections
                 return new Slot(true, false, 0, false, default);
             if (!present.GetBoolean()) return new Slot(true, true, generation, false, default);
             return value.TryGetProperty("Value", out var binding) && binding.ValueKind == JsonValueKind.Object
-                ? new Slot(true, true, generation, true, binding)
+                ? new Slot(true, true, generation, true, binding.Clone())
                 : new Slot(true, false, 0, false, default);
         }
         catch (Exception error) when (error is JsonException or FormatException or InvalidOperationException or ArgumentException)
