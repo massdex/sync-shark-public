@@ -47,6 +47,8 @@ public sealed class DropboxErrors
         {
             DropboxProtocol.GetMetadata when IsStructuredNotFound(failure) => Refused(TextKey.DropboxRefused) with { Absent = true },
             DropboxProtocol.Download when IsStructuredNotFound(failure) => Refused(TextKey.FailChanged),
+            DropboxProtocol.ListFolderContinue when UnionTag(failure) == DropboxProtocol.TagReset =>
+                Refused(TextKey.DropboxRefused) with { CursorReset = true },
             _ when IsJobCheckRoute(route) && UnionTag(failure) == DropboxProtocol.InvalidAsyncJobId =>
                 new Classified(TextKey.FailDropboxDeleteJobInvalid, FailureDisposition.Permanent, false),
             DropboxProtocol.Delete => DeleteMember(failure),
