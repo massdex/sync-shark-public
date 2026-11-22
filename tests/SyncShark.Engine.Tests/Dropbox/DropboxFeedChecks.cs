@@ -27,9 +27,9 @@ public static class DropboxFeedChecks
             "A fresh continuation step was reported as a repeat.");
         Check.Require(cycle.Repeats("x", "c"), "A retained checkpoint repeat was not detected.");
 
-        var roots = new RootIdentity("T:\Pair A", "/Pair A", "connection-a", new DirectoryIdentity(1, 2, null),
+        var roots = new RootIdentity(@"T:\Pair A", "/Pair A", "connection-a", new DirectoryIdentity(1, 2, null),
             new DropboxRootIdentity("account", "ns-root", "ns-home", "folder"));
-        var pair = new PairConfig("pair-a", "Pair A", "T:\Pair A", "/Pair A", "connection-a", [], [],
+        var pair = new PairConfig("pair-a", "Pair A", @"T:\Pair A", "/Pair A", "connection-a", [], [],
             FirstRunPolicy.NewestWins, true, null, roots);
         var wire = new DropboxStubHandler();
         var clock = new TestDoubles.FakeTimeProvider(DateTimeOffset.UnixEpoch);
