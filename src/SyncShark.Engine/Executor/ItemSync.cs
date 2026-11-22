@@ -184,7 +184,8 @@ public static class ItemSync
         {
             var mark=row.Context.ProtectedContents;
             if(mark is null && row.Context.UnreadableCause is null) throw new InventoryIncompleteException(nameof(RowContext.ProtectedContents),null);
-            action=FolderDeletes.For(row,mark==true,row.Context.UnreadableCause);
+            action=FolderDeletes.For(row,mark==true,row.Context.UnreadableCause,pair.FirstRun,now,dirty);
+            row=action.Row;
         }
         if(action.Kind==ActionKind.None) return FinishDecision(action,failed);
         if(addOnly && !(action.Kind==ActionKind.Record || action.Kind is (ActionKind.Upload or ActionKind.EnsureDropboxFolder) && row.Dropbox==null || action.Kind is (ActionKind.Download or ActionKind.EnsureLocalFolder) && row.Local==null)) return true;
