@@ -115,8 +115,9 @@ public sealed class RunLog : IDisposable
             if (value.Notice is { } notice) what = notice.ToString();
             else if (value.Action is { } action) what = action.ToString();
         }
-        var detail = value.Detail;
-        if (value.Error is { } failure) detail = FailureReason(failure);
+        // Failed.Detail can be Exception.Message even when the producer supplies no Exception.
+        var detail = value.Error is { } failure ? FailureReason(failure) :
+            value.Kind == RunEventKind.Failed && value.Cause.HasValue ? string.Empty : value.Detail;
         if (value.Cause is { } reason)
         {
             var named = Text.Get(reason, (TextArg.Path, value.Path), (TextArg.Message, string.Empty));
@@ -124,8 +125,13 @@ public sealed class RunLog : IDisposable
         }
         if (value.Count is { } count) detail = AppendFact(detail, CountFact, count.ToString(CultureInfo.InvariantCulture));
         if (value.Total is { } total) detail = AppendFact(detail, TotalFact, total.ToString(CultureInfo.InvariantCulture));
-        if (value.Side is { } side) detail = AppendFact(detail, SideFact, side.ToString());
         var outcome = value.Error is null ? value.Outcome : string.Empty;
+        if (value.Side is { } side)
+        {
+            // Effect detail is an endpoint. Completed records carry the receiving side in outcome.
+            if (value.Kind != RunEventKind.Effect) detail = AppendFact(detail, SideFact, side.ToString());
+            else if (IsCommittedEffect(outcome)) outcome = side.ToString();
+        }
         if (outcome.Length == 0)
         {
             if (value.Cause is { } cause) outcome = cause.ToString();
@@ -133,6 +139,9 @@ public sealed class RunLog : IDisposable
         }
         return value with { What = what, Detail = detail, Outcome = outcome };
     }
+
+    internal static bool IsCommittedEffect(string outcome) => outcome is nameof(Side.Local) or nameof(Side.Dropbox)
+        or nameof(Executor.EffectOutcome.Applied) or nameof(RemovalOutcome.Published) or nameof(RemovalOutcome.Removed);
 
     // Exceptions may contain credentials, headers or response bodies. Only typed facts cross the log boundary.
     private static string FailureReason(Exception error)

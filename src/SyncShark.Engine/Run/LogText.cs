@@ -19,7 +19,9 @@ public static class LogText
             case RunEventKind.Effect: return EffectText(value, clock);
             case RunEventKind.ProviderRequest:
                 // Completed requests are diagnostics, not sync results.
-                return value.Outcome.Length == 0 ? Text.Get(TextKey.HumanStageActive, (TextArg.Time, clock)) : string.Empty;
+                if (value.Outcome.Length != 0) return string.Empty;
+                var active = Text.Get(TextKey.HumanStageActive, (TextArg.Time, clock));
+                return value.Detail.Length == 0 ? active : active + Environment.NewLine + Text.Get(TextKey.HumanIndent) + RunLog.EscapeDisplay(value.Detail);
             case RunEventKind.Wait:
                 return AttentionText(value, clock, TextKey.HumanWaitLabel, null) + Environment.NewLine + Text.Get(TextKey.HumanWaitActivity);
             case RunEventKind.Failed:
@@ -49,7 +51,10 @@ public static class LogText
         var ended = item.Ended || item.Outcome == RunLog.EndedOutcome;
         var heading = Text.Get(TextKey.HumanStageHeading, (TextArg.Time, clock), (TextArg.Name, name));
         var builder = new StringBuilder(heading);
-        if (ended)
+        if (item.Outcome == nameof(RunEventKind.Failed))
+            builder.AppendLine().Append(Text.Get(TextKey.HumanStageInterrupted, (TextArg.Indent, Text.Get(TextKey.HumanIndent)),
+                (TextArg.Name, name), (TextArg.Elapsed, Text.Get(TextKey.HumanNotMeasured))));
+        else if (ended)
         {
             var count = item.Count?.ToString(CultureInfo.InvariantCulture);
             if (count is not null && item.Total is { } total) count += "/" + total.ToString(CultureInfo.InvariantCulture);
@@ -73,15 +78,13 @@ public static class LogText
             "Replaced" => ActionKind.ReplaceKind, _ => ActionKind.None,
         });
         var side = item.Side ?? (EnumNames.TryExact<Side>(item.Outcome, out var endSide) ? endSide : (Side?)null);
-        var committed = item.Outcome.Length == 0 || item.Outcome is nameof(Side.Local) or nameof(Side.Dropbox) ||
-            item.Outcome is nameof(Executor.EffectOutcome.Applied) or nameof(RemovalOutcome.Published) or nameof(RemovalOutcome.Removed);
-        var card = committed ? CardText(action) : null;
+        var card = RunLog.IsCommittedEffect(item.Outcome) ? CardText(action) : null;
         var heading = card is { } known ? Text.Get(TextKey.HumanCardHeading, (TextArg.Time, clock),
             (TextArg.Label, Text.Get(TextKey.HumanOkLabel)), (TextArg.Operation, Text.Get(known.Operation))) :
             Text.Get(TextKey.HumanStageHeading, (TextArg.Time, clock), (TextArg.Name, RunLog.EscapeDisplay(item.What)));
         var builder = new StringBuilder(heading);
         var move = action is ActionKind.MoveLocal or ActionKind.MoveDropbox or ActionKind.MoveUnlinked;
-        if (move || action == ActionKind.KeepBoth)
+        if (card.HasValue && (move || action == ActionKind.KeepBoth))
         {
             AppendLine(builder, move ? TextKey.HumanCardFrom : TextKey.HumanCardOriginal, TextArg.Path, item.Detail);
             AppendLine(builder, move ? TextKey.HumanCardTo : TextKey.HumanCardCopy, TextArg.Path, item.Path);
