@@ -165,12 +165,13 @@ public static class DropboxProtocol
     }
 
     /// <summary>The provider wait encoded by a reply, or null when it supplied none: the larger of a
-    /// nonnegative Retry-After header and a nonnegative RateLimitError.retry_after applies.
+    /// nonnegative Retry-After header and a nonnegative envelope.error.retry_after applies.
     /// A missing or malformed value selects no wait, not a default.</summary>
-    public static TimeSpan? ProviderWait(TimeSpan? retryAfter, JsonElement error)
+    public static TimeSpan? ProviderWait(TimeSpan? retryAfter, JsonElement envelope)
     {
         var header = retryAfter is { } supplied && supplied >= TimeSpan.Zero ? supplied : (TimeSpan?)null;
-        if (error.ValueKind != JsonValueKind.Object ||
+        if (envelope.ValueKind != JsonValueKind.Object || !envelope.TryGetProperty(Error, out var error) ||
+            error.ValueKind != JsonValueKind.Object ||
             !error.TryGetProperty(RetryAfter, out var value) ||
             value.ValueKind != JsonValueKind.Number ||
             !value.TryGetInt64(out var seconds) ||
