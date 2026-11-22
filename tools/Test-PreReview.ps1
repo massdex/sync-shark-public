@@ -671,6 +671,18 @@ function Assert-True {
 }
 
 function Invoke-OwnershipSelfTest {
+        $sampleRegistry = @'
+["dependencies"] = [
+    new("Layout/Dependencies", Dependency.Run),
+["in-progress"] = [
+    new("Waiting check", Waiting.Run),
+["absent"] = [
+    new("Missing check", Missing.Run),
+["broken"] = [
+    new("Failed check", Failed.Run),
+'@
+        $sample = Get-RunnerEvidence -Registry $sampleRegistry -Output "PASS Layout/Dependencies`nNOT IMPLEMENTED Waiting check`nFAIL Failed check: assertion"
+        Assert-True ($sample['layout'] -ceq 'success' -and $sample['dependencies'] -ceq 'success' -and $sample['in-progress'] -ceq 'not-implemented' -and $sample['absent'] -ceq 'missing' -and $sample['broken'] -ceq 'failure') 'Named runner outcomes are not interchangeable'
         $tree = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
         $realGroups = (Get-CheckRegistryIndex -Text ([IO.File]::ReadAllText("$tree/tests/SyncShark.Engine.Tests/CheckRegistry.cs"))).Groups
         $live = @(Get-GroupList -Path "$tree/tools/ci/live-groups.txt")

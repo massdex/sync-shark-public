@@ -86,6 +86,13 @@ public static class PathScopeChecks
         Check.Require(await store.DeletedNameAsync(pair.PairId,null,key,default) && (await store.DeletedHistoryAsync(pair.PairId,default)).Cursor=="terminal","History names or acquisition cursor lost");
         var rows=new List<Row>();await foreach(var row in store.CompareAsync(pair.PairId,second,null,(_,_) => (true,false),default)) rows.Add(row.Row);
         Check.Require(rows.Count==1 && rows[0].Local?.Path=="second","Clearing one acquisition changed another acquisition");
+        var pc=Scenarios.ItemChecks.File(Side.Local,"old",1,"pc-id");var db=Scenarios.ItemChecks.File(Side.Dropbox,"original",1,"db-id");
+        var binding=SyncedEntries.From(pc,db);await store.CommitAsync(pair.PairId,null,binding,null,null,default);
+        static async IAsyncEnumerable<Listed> Moved(Entry entry) { await Task.CompletedTask; yield return new Listed(entry.Path,entry); }
+        await store.AddScanAsync(pair.PairId,second,Side.Local,Moved(pc with {Path="z/file"}),null,default);
+        await store.AddScanAsync(pair.PairId,second,Side.Dropbox,Moved(db with {Path="a/file"}),null,default);
+        var moves=new List<RenameCandidate>();await foreach(var move in store.RenamesAsync(pair.PairId,second,null,default))moves.Add(move);
+        Check.Require(moves.Count==2 && moves.All(m=>m.Synced==binding) && moves.Select(m=>m.Side).SequenceEqual(new[]{Side.Local,Side.Dropbox}),"Rename projection lost or split a binding’s two sides");
         await store.CommitAsync(pair.PairId,null,null,null,spentDeletedKey:key,ct:default);
         Check.Require(!await store.DeletedNameAsync(pair.PairId,null,key,default),"Unbound first-run history was not spent");
     }

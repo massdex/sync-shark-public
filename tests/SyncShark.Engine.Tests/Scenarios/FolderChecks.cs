@@ -157,7 +157,7 @@ public static class FolderChecks
     public static Task A48UnrelatedVolumeNotTrimmedAsync() => throw new NotImplementedException();
     public static Task A48LongDowntimeRecoverBeforeTrimAsync() => throw new NotImplementedException();
     public static Task A48UnavailableHistoryAsync() => throw new NotImplementedException();
-    public static Task A48NoPositiveNoBinDiscriminatorAsync() => throw new NotImplementedException();
+    public static Task A48UnknownDriveUsesShellOrAbortAsync() => throw new NotImplementedException();
     public static Task A48StampBeforeNonreplacingMoveAsync() => throw new NotImplementedException();
     public static Task A50NewInnerRootEffectiveBeforeNextEntryAsync() => throw new NotImplementedException();
     public static Task A50ExclusionEffectiveBeforeNextEntryAsync() => throw new NotImplementedException();

@@ -388,7 +388,7 @@ public static class CheckRegistry
             new("A48 unrelated volume not trimmed", Scenarios.FolderChecks.A48UnrelatedVolumeNotTrimmedAsync),
             new("A48 long downtime recover before trim", Scenarios.FolderChecks.A48LongDowntimeRecoverBeforeTrimAsync),
             new("A48 unavailable history", Scenarios.FolderChecks.A48UnavailableHistoryAsync),
-            new("A48 no positive no bin discriminator", Scenarios.FolderChecks.A48NoPositiveNoBinDiscriminatorAsync),
+            new("A48 unknown drive uses shell or abort", Scenarios.FolderChecks.A48UnknownDriveUsesShellOrAbortAsync),
             new("A48 stamp before nonreplacing move", Scenarios.FolderChecks.A48StampBeforeNonreplacingMoveAsync),
             new("A50 new inner root effective before next entry", Scenarios.FolderChecks.A50NewInnerRootEffectiveBeforeNextEntryAsync),
             new("A50 exclusion effective before next entry", Scenarios.FolderChecks.A50ExclusionEffectiveBeforeNextEntryAsync),
