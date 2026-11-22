@@ -93,6 +93,7 @@ public static class CheckRegistry
             new("Executor/ResolveChecks", Executor.ResolveChecks.RunAsync),
             new("Executor/open job retry", Executor.RetriesChecks.OpenJobAsync),
             new("Executor/RetriesChecks", Executor.RetriesChecks.RunAsync),
+            new("Executor/stale recovery stage", Executor.UnfinishedChecks.StaleStageAsync),
             new("Executor/UnfinishedChecks", Executor.UnfinishedChecks.RunAsync)
         ],
         ["cli"] = [
@@ -133,6 +134,7 @@ public static class CheckRegistry
             new("Planner/TimeRulesChecks", Planner.TimeRulesChecks.RunAsync)
         ],
         ["run"] = [
+            new("Run/reset behind held page", Run.AutoSyncChecks.ResetBehindHeldPageAsync),
             new("Run/AutoSyncChecks", Run.AutoSyncChecks.RunAsync),
             new("Run/host retry", Run.HostChecks.RetryAtHostAsync),
             new("Run/host trim", Run.HostChecks.TrimAtHostAsync),
@@ -140,6 +142,8 @@ public static class CheckRegistry
             new("Run/LogTextChecks", Run.LogTextChecks.RunAsync),
             new("Run/MonitorChecks", Run.MonitorChecks.RunAsync),
             new("Run/PairRunnerChecks", Run.PairRunnerChecks.RunAsync),
+            new("Run/retained repair attempt", Run.RepairChecks.RetainedAttemptAsync),
+            new("Run/covered repair hop", Run.RepairChecks.CoveredHopAsync),
             new("Run/RepairChecks", Run.RepairChecks.RunAsync),
             new("Run/RunLogChecks", Run.RunLogChecks.RunAsync),
             new("Run/StatusChecks", Run.StatusChecks.RunAsync),

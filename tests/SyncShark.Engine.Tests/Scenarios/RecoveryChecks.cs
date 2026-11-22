@@ -13,7 +13,9 @@ public static class RecoveryChecks
         internal FakeSide Pc { get; }
         internal PathScope Paths { get; }
         internal PairState() { Paths=new(Pair,[Pair],DriveType.Fixed);Pc=new FakeSide(Side.Local,async proof=>(await Store.ArmedAsync(Pair.PairId,default))?.Stage==proof); }
-        internal WorkQueue Queue { get; } = new();
+        internal PairRunner Runner { get; } = new();
+        internal WorkQueue Queue { get; private set; } = null!;
+        internal async Task StartAsync() => Queue=await ItemChecks.StartQueueAsync(Pair,Paths,Pc,Cloud,Store,Runner);
         internal FakeSide Cloud { get; } = new(Side.Dropbox);
         internal InMemoryStateStore Store { get; } = new();
         internal async Task<SyncedEntry> LinkAsync(string path, byte value)
@@ -22,7 +24,7 @@ public static class RecoveryChecks
             Pc.Seed(pc,[value]); Cloud.Seed(cloud,[value]); var row=SyncedEntries.From(pc,cloud);
             await Store.CommitAsync(Pair.PairId,null,row,null,null,default); return row;
         }
-        internal async Task InitializeAsync() { await Store.SavePairAsync(Pair,default); await Store.FinishRepairAsync(Pair.PairId,(0,await Store.OweRepairAsync(Pair.PairId,Side.Dropbox,"requested",default)),"{}",default); }
+        internal async Task InitializeAsync() { await Store.SavePairAsync(Pair,default); await StartAsync(); await Store.FinishRepairAsync(Pair.PairId,(0,await Store.OweRepairAsync(Pair.PairId,Side.Dropbox,"requested",default)),"{}",default); }
         internal Task CompareAsync() => Repair.RunAsync(Pair,ItemChecks.Settings,_=>{},Paths,Queue,Pc,Cloud,Store,null,null,default);
         internal void VerifyLinks()
         {
@@ -71,7 +73,7 @@ public static class RecoveryChecks
     }
     public static async Task RepeatRepairAsync()
     {
-        using var x=new PairState();await x.Store.SavePairAsync(x.Pair,default);
+        using var x=new PairState();await x.Store.SavePairAsync(x.Pair,default);await x.StartAsync();
         x.Pc.Seed(ItemChecks.File(Side.Local,"steady",1,"steady-id"),[1]);x.Pc.Seed(ItemChecks.File(Side.Local,"edit",1,"edit-id"),[1]);
         await x.CompareAsync();x.VerifyLinks();Check.Require(x.Store.Records.Count==2 && (await x.Store.RepairStateAsync(x.Pair.PairId,default)).FirstRepairDone,"First Repair did not link both files");
         var before=x.Cloud.Items["steady"];long writes=x.Cloud.Requests[nameof(ISide.PublishAsync)];long commits=x.Store.Requests[nameof(IStore.CommitAsync)];
@@ -93,7 +95,7 @@ public static class RecoveryChecks
         using var x=new PairState(); await x.InitializeAsync(); await x.LinkAsync("unrelated",1);
         var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","token",[new("selected","gone",null)]);
         await x.Store.SaveJobAsync(job,default); x.Cloud.JobReplies[job.JobId]=new Queue<JobReply>([new JobReply.Running()]);
-        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         var pending=new List<AcceptedJob>();await foreach(var p in x.Store.JobsAsync(x.Pair.PairId,default)) pending.Add(p);
         Check.Require(pending.Single()==job && x.Cloud.Requests[nameof(ISide.ReadJobAsync)]==1 && x.Store.OpenNotices.Count==0,"Running token lost or repeatedly polled");
         x.VerifyLinks(); Check.Require(x.Pc.Items.Count==1 && x.Cloud.Items.Count==1 && x.Store.Records.Count==1,"Quiet job modified unrelated data");
@@ -108,7 +110,7 @@ public static class RecoveryChecks
         x.Pc.History.Add((previous,new byte[]{1}));
         var actual=staged.Proof!;
         await x.Store.ArmAsync(x.Pair.PairId,new(new(previous,"volume",previous.ContentHash),saved),new(actual.Path,actual.VolumeId,actual.FileId,actual.Size,incoming.ContentHash),default);
-        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         Check.Require(x.Pc.Requests[nameof(ISide.ReopenStageAsync)]>0 && (await x.Store.ArmedAsync(x.Pair.PairId,default)!=null || x.Store.OpenNotices.Any(n=>n.Kind==NoticeKind.Failure)),"Altered stage was neither verified nor retained for recovery");
         Check.Require(!x.Pc.Items.Values.Any(v=>v.Entry.Path=="item" && v.Bytes.SequenceEqual(new byte[]{3})) && x.Cloud.Items["item"].Bytes.SequenceEqual(new byte[]{2}),"Altered stage published or incoming bytes destroyed");
         Check.Require(!x.Store.Records.Values.Any(v=>v.LocalId==actual.FileId && v.DropboxContentHash==incoming.ContentHash),"Unverified stage linked");
@@ -116,7 +118,7 @@ public static class RecoveryChecks
     }
     public static async Task FirstDeletedAsync(bool folder, bool measured)
     {
-        using var x=new PairState();await x.Store.SavePairAsync(x.Pair,default);
+        using var x=new PairState();await x.Store.SavePairAsync(x.Pair,default);await x.StartAsync();
         const string path="formerly-deleted";var entry=ItemChecks.File(Side.Local,path,1,"pc",folder);x.Pc.Seed(entry,folder?[]:[1]);
         x.Cloud.Seed(ItemChecks.File(Side.Dropbox,"unrelated",1,"other"),[1]);
         x.Pc.Seed(ItemChecks.File(Side.Local,"unrelated",1,"pc-other"),[1]);
@@ -201,7 +203,7 @@ public static class RecoveryChecks
         var roots=new RootIdentity(x.Pair.LocalRoot,x.Pair.DropboxRoot,x.Pair.ConnectionId,new(1,1,null),new("account","namespace","home","saved"));
         var pair=x.Pair with { Roots=roots };await x.Store.SavePairAsync(pair,default);
         var observed=roots with { Dropbox=roots.Dropbox with { FolderId="other" } };
-        bool ready=await new PairRunner().CheckRootsAsync(pair,observed,pair.Drive,x.Store,default);
+        bool ready=await x.Runner.CheckRootsAsync(pair,observed,pair.Drive,x.Store,default);
         Check.Require(!ready && (await x.Store.PairAsync(pair.PairId,default))?.Roots==roots && x.Store.OpenNotices.Single().Kind==NoticeKind.RootIdentity,"Different folder silently rebound");
         x.VerifyLinks();Check.Require(x.Pc.Items.Count==1 && x.Cloud.Items.Count==1 && x.Store.Records.Count==1,"Root refusal changed data");
     }
@@ -376,7 +378,7 @@ public static class RecoveryChecks
         try { await x.Pc.PublishAsync(reopened,null,null,default); throw new InvalidDataException("Overwrote a reused name"); } catch(PathOccupiedException) { }
         Check.Require(x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{3}),"Occupant changed");x.Pc.Items.Remove("item");
         var pcPublishes=x.Pc.Requests[nameof(ISide.PublishAsync)];var cloudPublishes=x.Cloud.Requests[nameof(ISide.PublishAsync)];
-        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         Check.Require(x.Pc.Requests[nameof(ISide.PublishAsync)]==pcPublishes && x.Cloud.Requests[nameof(ISide.PublishAsync)]==cloudPublishes && x.Pc.Items.Count==0 && x.Cloud.Items.Count==0,"Replay resurrected the deleted source");
         Check.Require(await x.Store.ArmedAsync(x.Pair.PairId,default)==null && !x.Store.Records.Values.Any(v=>v.LocalId==staged.Proof!.FileId),"Replay retained the armed note or linked the discarded stage");
         Check.Require(x.Pc.History.Single().Entry==old && x.Cloud.History.Single().Entry==source && x.Cloud.History.Single().Bytes.SequenceEqual(new byte[]{2}),"Replay lost a retained version");
@@ -395,7 +397,7 @@ public static class RecoveryChecks
         var member=new JobMember(binding.DropboxId,"old",move?"new":null);var job=new AcceptedJob(x.Pair.PairId,move?"files/move_batch/check":"files/delete_batch/check","token",[member]);
         await x.Store.SaveJobAsync(job,default);x.Cloud.Items.Remove("old");if(move) x.Cloud.Seed(original.Entry with {Path="new"},original.Bytes);else x.Cloud.History.Add(original);
         var successor=ItemChecks.File(Side.Dropbox,"old",2,"successor");x.Cloud.Seed(successor,[2]);x.Cloud.JobReplies[job.JobId]=new([new JobReply.Invalid()]);
-        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         Check.Require(x.Cloud.Requests[nameof(ISide.ReadJobAsync)]==1 && x.Cloud.Requests[nameof(ISide.ReadByIdAsync)]>0 && x.Cloud.Items["old"].Entry==successor && x.Cloud.Items["old"].Bytes.SequenceEqual(new byte[]{2}) && x.Cloud.Mutations.All(id=>id!=successor.Id),"Restart failed to check the token and selected identity, or mutated a successor");
     }
     public static Task A42LostMoveReplyAsync() => LostReplyAsync(true);
@@ -443,7 +445,7 @@ public static class RecoveryChecks
             await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies[path]=new([new JobReply.Running()]);
         }
         var received=new Change(Side.Dropbox,ChangeKind.Deleted,"selected/child",null,null,null,false,false);
-        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,received,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,received,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         var pending=new List<AcceptedJob>();await foreach(var token in x.Store.JobsAsync(x.Pair.PairId,default)) pending.Add(token);
         Check.Require(pending.Count==2 && pending.Any(j=>j.JobId=="selected" && j.Launch.Single().Path=="selected") && x.Cloud.Requests[nameof(ISide.ReadJobAsync)]==1 && x.Cloud.Requests[nameof(ISide.DeleteAsync)]==0,"Running job was settled, resent or polled more than once");
         Check.Require(x.Cloud.JobReplies["selected"].Count==0 && x.Cloud.JobReplies["unrelated"].Count==1,"Path-only news must check exactly the overlapping saved job");

@@ -28,7 +28,9 @@ public static class ReconciliationChecks
         if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(
             ItemChecks.File(Side.Local, Original, 1, Side.Local.ToString()), ItemChecks.File(Side.Dropbox, Original, 1, Side.Dropbox.ToString())),null,null,default);
         var before=new[]{local,remote}.SelectMany(side=>side.Items.Values.Select(v=>(Side:side,v.Entry,v.Bytes))).ToArray();
-        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(), local, remote, store, null,null, default);
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,local,remote,store);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue, local, remote, store, null,null, default);
         foreach(var item in before.Where(x=>!x.Side.Items.Values.Any(v=>v.Entry.Id==x.Entry.Id && v.Bytes.SequenceEqual(x.Bytes))))
             Check.Require(item.Side.History.Any(v=>v.Entry==item.Entry && v.Bytes.SequenceEqual(item.Bytes)),"Displaced version is not recoverable");
         if(expectMove) Check.Require(remote.Items["renamed"].Entry.Id==before.Single(x=>x.Side==remote).Entry.Id && remote.Requests[nameof(ISide.MoveAsync)]==1 && remote.Requests[nameof(ISide.DeleteAsync)]==0 && remote.Requests[nameof(ISide.PublishAsync)]==0,"Counterpart recreated instead of moved");
@@ -89,7 +91,8 @@ public static class ReconciliationChecks
     public static Task A03FourEndpointNoticeAsync() => throw new NotImplementedException();
     public static async Task A05SameIdSizeMtimeWriteAfterPublicationAsync()
     {
-        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);var queue=new WorkQueue();using var store=new InMemoryStateStore();var local=new FakeSide(Side.Local);var remote=new FakeSide(Side.Dropbox);
+        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);using var store=new InMemoryStateStore();var local=new FakeSide(Side.Local);var remote=new FakeSide(Side.Dropbox);
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,local,remote,store);
         var before=ItemChecks.File(Side.Local,"file",1,"pc");var db=ItemChecks.File(Side.Dropbox,"file",1,"db");
         var after=ItemChecks.File(Side.Local,"file",2,before.Id) with { Modified=before.Modified };
         local.Seed(after,[2]);remote.Seed(db,[1]);await store.CommitAsync(pair.PairId,null,SyncedEntries.From(before,db),new(1,10),null,default);

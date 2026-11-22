@@ -8,7 +8,7 @@ public sealed class PairRunner
     /// <summary>Checks the observed binding against the saved roots before admitting work for the pair.</summary>
     public Task<bool> CheckRootsAsync(PairConfig pair, RootIdentity? observed, DriveEvidence? observedDrive, IStore store, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Complete one finite catch-up before startup trim; the live loop is started separately.</summary>
-    public Task CatchUpAsync(PairConfig pair, (JournalPosition? Local,string? Dropbox) captured, EngineSettings settings, Action<RunEvent> events, PathScope paths, WorkQueue queue, ISide local, ISide dropbox, IStore store, CancellationToken ct) => throw new NotImplementedException();
+    public Task CatchUpAsync(PairConfig pair, (JournalPosition? Local,string? Dropbox) captured, EngineSettings settings, Action<RunEvent> events, PathScope paths, WorkQueue queue, ISide local, ISide dropbox, IStore store, Action attempted, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>The unfinished-job owner shared with this pair’s queue.</summary>
     public Executor.Unfinished Unfinished => throw new NotImplementedException();
 }

@@ -8,7 +8,7 @@ public sealed class NoticeTable
     public IAsyncEnumerable<Notice> NoticesAtAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, string pathKey, CancellationToken ct) => throw new NotImplementedException();
 
     /// <summary>Upsert the (pair, path, kind) slot and its members atomically; preserve a different kind’s subject and visibility.</summary>
-    public Task SaveNoticeAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Notice notice, CancellationToken ct) => throw new NotImplementedException();
+    public Task<(bool Applied, (long Id, string Path, NoticeKind Kind, TextKey Cause, string SubjectJson)? Prior)> SaveNoticeAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Notice notice, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Change visibility only while the stored notice matches the reviewed subject.</summary>
     public Task<bool> UpdateNoticeVisibilityAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Notice expected, bool ignored, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Close only the exact expected notice and update its members in the same transaction.</summary>
@@ -20,5 +20,5 @@ public sealed class NoticeTable
     /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>
     public Task<Notice?> NoticeAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, long id, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Save the notice in the caller’s existing transaction.</summary>
-    public Task SaveNoticeAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, Notice notice, CancellationToken ct) => throw new NotImplementedException();
+    public Task<(bool Applied, (long Id, string Path, NoticeKind Kind, TextKey Cause, string SubjectJson)? Prior)> SaveNoticeAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, Notice notice, CancellationToken ct) => throw new NotImplementedException();
 }

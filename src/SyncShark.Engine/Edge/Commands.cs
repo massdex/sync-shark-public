@@ -31,7 +31,7 @@ public sealed class Commands
                 case CommandKeys.PairsAdd: return await PairsAddAsync(invocation, host, output, ct).ConfigureAwait(false);
                 case CommandKeys.PairsRemove: return await PairsRemoveAsync(invocation, host, output, ct).ConfigureAwait(false);
                 case CommandKeys.PairsBind: return await PairsBindAsync(invocation, host, output, ct).ConfigureAwait(false);
-                case CommandKeys.PairsExclude: return await PairsExcludeAsync(invocation, host, output, ct).ConfigureAwait(false);
+                case CommandKeys.PairsExclude: return await PairsExcludeAsync(invocation, host, output, error, ct).ConfigureAwait(false);
                 case CommandKeys.PairsInclude: return await PairsIncludeAsync(invocation, host, ct).ConfigureAwait(false);
                 case CommandKeys.PairsExclusions: return await PairsExclusionsAsync(invocation, host, output, ct).ConfigureAwait(false);
                 case CommandKeys.IgnoresList: return await IgnoresListAsync(invocation, host, output, ct).ConfigureAwait(false);
@@ -98,7 +98,7 @@ public sealed class Commands
         return Cli.SuccessExitCode;
     }
 
-    private static async Task<int> PairsExcludeAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
+    private static async Task<int> PairsExcludeAsync(CliInvocation invocation, Run.Host host, TextWriter output, TextWriter error, CancellationToken ct)
     {
         var pairId = invocation.Value(OptionKeys.Pair);
         var sideText = invocation.Value(OptionKeys.Side);
@@ -109,9 +109,14 @@ public sealed class Commands
         var confirmed = invocation.Flag(OptionKeys.Yes);
         var result = await host.SetExclusionAsync(pairId, exclusion, include: false, confirmed, ct).ConfigureAwait(false);
 
-        if (result.Applied) output.WriteLine(RenderExclusionApplied(rel));
-        else if (result.Cause is { } cause) { output.WriteLine(Text.Get(cause, (TextArg.Path, rel))); return Cli.TransientExitCode; }
-        else if (confirmed) { output.WriteLine(Text.Get(TextKey.WaitItemRetry)); return Cli.TransientExitCode; }
+        if (result.Outcome == Executor.ExclusionOutcome.Applied) output.WriteLine(RenderExclusionApplied(rel));
+        else if (result.Outcome is { } outcome)
+        {
+            error.WriteLine(result.Cause is { } cause ? Text.Get(cause, (TextArg.Path, rel)) :
+                outcome == Executor.ExclusionOutcome.Pending ? Text.Get(TextKey.WaitItemRetry) : outcome.ToString());
+            return Cli.TransientExitCode;
+        }
+        else if (result.Cause is { } previewCause) { error.WriteLine(Text.Get(previewCause, (TextArg.Path, rel))); return Cli.TransientExitCode; }
         else output.WriteLine(RenderExclusionPreview(rel, side, result.CopyFiles, result.CopyBytes,
                 result.RemoveFiles, result.RemoveBytes, result.RecoveryPlace ?? string.Empty));
         return Cli.SuccessExitCode;
