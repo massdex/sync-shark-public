@@ -12,9 +12,6 @@ public sealed class DropboxListing
     private const string ListFolderContinue = "files/list_folder/continue";
     private const string ListFolderGetLatestCursor = "files/list_folder/get_latest_cursor";
     private const string GetMetadata = "files/get_metadata";
-    private const string EntriesName = "entries";
-    private const string CursorName = "cursor";
-    private const string HasMoreName = "has_more";
     private const int ListPageMaximum = 2000;
 
     /// <summary>Read operation on the supplied facts.</summary>
@@ -177,58 +174,40 @@ public sealed class DropboxListing
         }
     }
 
-    /// <summary>Reads one sparse change page; a 409 on the continuation is a cursor reset, and CaughtUp requires
-    /// has_more=false with a usable cursor.</summary>
+    /// <summary>Reads one sparse change page through the sealed page decoder (no whole page in memory); a continuation
+    /// reset propagates, and CaughtUp requires has_more=false with a usable cursor.</summary>
     public async Task<ChangePage> ReadChangePageAsync(DropboxApi api, PairConfig pair, string cursor,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(api);
         ArgumentNullException.ThrowIfNull(pair);
-        JsonDocument body;
-        HttpStatusCode status;
+        DropboxPage page;
         try
         {
-            (status, body) = await ReadReplyAsync(api, ListFolderContinue, new { cursor }, ct).ConfigureAwait(false);
+            page = await api.ReadPageAsync(ListFolderContinue, JsonSerializer.Serialize(new { cursor }), pair, ct)
+                .ConfigureAwait(false);
         }
-        catch (Exception error) when (error is HttpRequestException or JsonException)
+        catch (ListingCursorResetException) { throw; }
+        catch (Exception error) when (error is not (OperationCanceledException or NotImplementedException))
         {
+            // A non-reset refusal stays on the ordinary incomplete/retry path, never a fabricated source end.
             throw Incomplete(pair.DropboxRoot, error);
         }
-        using (body)
+        await using (page)
         {
-            if (status != HttpStatusCode.OK)
+            var changes = new List<Change>();
+            foreach (var listed in page.ReadEntries())
             {
-                if (IsCursorReset(status))
-                    throw new ListingCursorResetException(Incomplete(pair.DropboxRoot, new JsonException()));
-                throw Incomplete(pair.DropboxRoot, Refusal(Classify(status, body.RootElement,
-                    ListFolderContinue, expectedIsNull: false)));
-            }
-            var root = body.RootElement;
-            if (root.ValueKind != JsonValueKind.Object ||
-                !root.TryGetProperty(EntriesName, out var entries) || entries.ValueKind != JsonValueKind.Array ||
-                !root.TryGetProperty(CursorName, out var cursorElement) || cursorElement.ValueKind != JsonValueKind.String ||
-                !root.TryGetProperty(HasMoreName, out var moreElement) || moreElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-                throw Incomplete(pair.DropboxRoot, new JsonException());
-            var decoder = new DropboxEntries();
-            var changes = new List<Change>(entries.GetArrayLength());
-            foreach (var element in entries.EnumerateArray())
-            {
-                Listed listed;
-                try { listed = decoder.Decode(element, pair); }
-                catch (Exception error) when (error is JsonException or InvalidDataException)
-                {
-                    throw Incomplete(pair.DropboxRoot, error);
-                }
+                ct.ThrowIfCancellationRequested();
                 var entry = listed.Entry;
                 changes.Add(entry is null
                     ? new Change(Side.Dropbox, ChangeKind.Deleted, listed.Path, null, null, null, false, false)
                     : new Change(Side.Dropbox, ChangeKind.Changed, listed.Path, null, entry.Id, entry, false, false));
             }
-            ct.ThrowIfCancellationRequested();
-            var next = cursorElement.GetString();
+            var next = page.Cursor;
             return new ChangePage(changes, next, null)
             {
-                CaughtUp = !moreElement.GetBoolean() && !string.IsNullOrWhiteSpace(next)
+                CaughtUp = !page.HasMore && !string.IsNullOrWhiteSpace(next)
             };
         }
     }
@@ -251,9 +230,6 @@ public sealed class DropboxListing
     /// <summary>True when the classifier marks the exact target as absent (a successful history/identity negative),
     /// never a generic refusal.</summary>
     public static bool IsAbsence(DropboxErrors.Classified classified) => classified.Absent;
-
-    /// <summary>True when a continuation refusal is Dropbox's cursor reset (a conflict on the continuation route).</summary>
-    public static bool IsCursorReset(HttpStatusCode status) => status == HttpStatusCode.Conflict;
 
     /// <summary>The entry as a proven native location for id; a mismatched identity is a failed read. The location is
     /// preserved intact even outside the current pair.</summary>
