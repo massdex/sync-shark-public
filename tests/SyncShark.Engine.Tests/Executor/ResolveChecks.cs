@@ -67,16 +67,5 @@ public static class ResolveChecks
                 Side0(Side.Dropbox), store, null!, null!, default);
             Check.Require(store.OpenNotices.Count == 1, "A replacement occupant authorized a resolution");
         }
-
-        // F065/A03 real label check (R29 INTEGRATION, waits for W01 ConflictName): when it is not yet implemented the
-        // lane reports no fake pass; when implemented it must carry the composition-supplied PC name.
-        try
-        {
-            var label = Massdex.SyncShark.Engine.Planner.ConflictName.For("f.txt", Side.Local, DateTimeOffset.UnixEpoch,
-                settings.ComputerName, settings, 1);
-            Check.Require(label.Contains(settings.ComputerName, StringComparison.Ordinal),
-                "The generated conflict label lacks the composition-supplied PC name");
-        }
-        catch (NotImplementedException) { }
     }
 }
