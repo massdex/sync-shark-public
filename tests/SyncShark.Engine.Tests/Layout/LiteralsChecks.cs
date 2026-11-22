@@ -37,7 +37,7 @@ public static class LiteralsChecks
     {
         var tree = CSharpSyntaxTree.ParseText(source);var root=tree.GetRoot(); SemanticModel? model=null;
         static bool Emits(InvocationExpressionSyntax call) => call.Expression is MemberAccessExpressionSyntax access && access.Name.Identifier.ValueText is "Write" or "WriteLine" or "LogInformation" or "LogWarning" or "LogError";
-        static bool Message(ExpressionSyntax expr) => expr.DescendantNodesAndSelf().Any(n=>n is InterpolatedStringTextSyntax part && part.TextToken.ValueText.Any(char.IsLetter) || n is LiteralExpressionSyntax literal && literal.Token.Value is string s && s.Any(char.IsLetter));
+        static bool Message(ExpressionSyntax expr) => expr.DescendantNodesAndSelf().Any(n=>n is InterpolatedStringTextSyntax part && part.TextToken.ValueText.Any(char.IsLetter) || n is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.StringLiteralExpression) && literal.Token.ValueText.Any(char.IsLetter));
         foreach(var call in root.DescendantNodes().OfType<InvocationExpressionSyntax>().Where(Emits))
             if(call.ArgumentList.Arguments.Any(a=>Message(a.Expression))) return true;
         foreach(var obj in root.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())
