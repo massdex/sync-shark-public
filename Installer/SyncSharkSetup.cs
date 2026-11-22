@@ -12,12 +12,7 @@ internal static class SyncSharkSetup
         string root = null;
         try
         {
-            if (args.Length == 2 && args[0] == "--wait-pid")
-            {
-                try { using (Process caller = Process.GetProcessById(int.Parse(args[1]))) caller.WaitForExit(); }
-                catch (ArgumentException) { }
-            }
-            else if (args.Length != 0) throw new ArgumentException(SetupMessages.Text("shell.arguments"));
+            if (args.Length != 0) throw new ArgumentException(SetupMessages.Text("shell.arguments"));
             root = Path.Combine(Path.GetTempPath(), "SyncShark-Setup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             foreach (string name in new[] { "payload.zip", "setup.ps1", "SetupFileSystem.cs", "SetupMessages.cs", "setup-strings.xml" })

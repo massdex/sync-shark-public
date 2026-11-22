@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.IO.Pipes;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -9,6 +10,26 @@ namespace Massdex.SyncShark.Engine.Edge;
 /// <summary>Sends one command to the authenticated host. Never replays a request.</summary>
 public sealed class HostClient(string? pipeName = null)
 {
+    /// <summary>Launch the sibling host only after definite absence and wait for its private readiness response.</summary>
+    public static async Task<int> StartAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, ResourceNames.HostExecutable)) {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true
+        };
+        start.ArgumentList.Add(HostServer.ReadyArgument);
+        using var child = Process.Start(start) ?? throw new IOException(nameof(Process.Start));
+        var line = await child.StandardOutput.ReadLineAsync(ct);
+        if (line == "1") return 0;
+        if (line != null) throw new InvalidDataException(nameof(HostServer.Ready));
+        await child.WaitForExitAsync(ct);
+        return child.ExitCode == 0 ? 1 : child.ExitCode;
+    }
+
+    /// <summary>Legacy one-writer entry; the two-writer command path retains terminal versus uncertain outcomes.</summary>
+    public async Task<int> SendAsync(string[] args, TextWriter output, CancellationToken ct) =>
+        (await SendAsync(args, output, Console.Error, ct)).ExitCode ?? 1;
+
     /// <summary>Null exit means definite pre-send absence; ReceivedExit distinguishes a command failure from a broken exchange.</summary>
     public async Task<(int? ExitCode, bool ReceivedExit)> SendAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct)
     {
@@ -16,7 +37,7 @@ public sealed class HostClient(string? pipeName = null)
         using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         try { await pipe.ConnectAsync(300, ct); } // Predecessor connection deadline; a busy pipe is not absence.
         catch (TimeoutException) {
-            if (!WaitNamedPipe(@"\.\pipe\" + name, 1) && Marshal.GetLastWin32Error() == 2) return (null, false);
+            if (!WaitNamedPipe(@"\\.\pipe\" + name, 1) && Marshal.GetLastWin32Error() == 2) return (null, false);
             throw;
         }
         if (!HostServer.Trusted(pipe)) throw new UnauthorizedAccessException();

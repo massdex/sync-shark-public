@@ -13,6 +13,15 @@ namespace Massdex.SyncShark.Engine.Edge;
 /// <summary>Owns the one local host address through shutdown and the last admitted command.</summary>
 public sealed class HostServer(string? pipeName = null) : IDisposable
 {
+    internal const string ReadyArgument = "--notify-ready";
+
+    /// <summary>Signal a waiting CLI launcher without making readiness depend on its continued presence.</summary>
+    public static void Ready(string[] args) {
+        if (args is not [ReadyArgument]) return;
+        try { Console.Out.WriteLine(1); Console.Out.Flush(); }
+        catch (IOException) { /* The initiating CLI exited. */ }
+    }
+
     internal static string PipeName {
         get {
             using var identity = WindowsIdentity.GetCurrent(); using var process = Process.GetCurrentProcess();
@@ -40,7 +49,9 @@ public sealed class HostServer(string? pipeName = null) : IDisposable
     public async Task ServeAsync(Run.Host host, CancellationToken ct)
     {
         var commands = new Commands();
-        await ServeAsync((args, output, error, token) => commands.ExecuteAsync(args, host, output, token), host.StopAsync, ct);
+        using var intake = CancellationTokenSource.CreateLinkedTokenSource(ct, host.Stopping);
+        await ServeAsync((args, output, error, token) => commands.ExecuteAsync(args, host, output, error, token),
+            token => host.Stopping.IsCancellationRequested ? Task.CompletedTask : host.StopAsync(token), intake.Token);
     }
     /// <summary>Serve one authenticated command per connection; the dispatcher owns command semantics.</summary>
     public async Task ServeAsync(Func<string[], TextWriter, TextWriter, CancellationToken, Task<int>> execute, Func<CancellationToken,Task> shutdown, CancellationToken ct)

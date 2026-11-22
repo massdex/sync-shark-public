@@ -11,9 +11,13 @@ public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Reviewed { get; init; }
 
+    /// <summary>Allowed resolutions projected for this read, not persisted with the notice.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<ResolutionChoice>? Choices { get; init; }
+
     /// <summary>Exact resolution identity, excluding visibility and read-projection metadata.</summary>
     public bool Matches(Notice expected) =>
-        this with { Subject = expected.Subject, Ignored = expected.Ignored, Reviewed = expected.Reviewed } == expected &&
+        this with { Subject = expected.Subject, Ignored = expected.Ignored, Reviewed = expected.Reviewed, Choices = expected.Choices } == expected &&
         Subject.Incoming == expected.Subject.Incoming && Subject.HasSameItems(expected.Subject) &&
         Subject.FirstRunDeletion == expected.Subject.FirstRunDeletion;
 

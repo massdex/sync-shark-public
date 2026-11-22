@@ -181,7 +181,9 @@ function Clear-SetupPreparation([string]$Root) {
     $path = Join-Path $Root 'versions\setup-transaction.jsonl'
     if ([SetupFileSystem]::Exists($path)) {
         $journal = [SetupFileSystem]::OpenJournal($path)
-        try { Restore-SetupTransaction $Root $journal } finally { $journal.Dispose() }
+        try { Restore-SetupTransaction $Root $journal }
+        catch { throw ([Massdex.SyncShark.SetupMessages]::Text('recovery.blocked', [object[]]@($_, $Root))) }
+        finally { $journal.Dispose() }
     }
     [IO.Directory]::CreateDirectory((Join-Path $Root 'versions\.staging')) | Out-Null
 }

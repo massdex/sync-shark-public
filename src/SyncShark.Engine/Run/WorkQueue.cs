@@ -9,4 +9,10 @@ public sealed class WorkQueue
     public Task AdmitAsync(PairConfig pair, Row? prepared, IReadOnlyList<RenameCandidate> bindingCandidates, Func<CancellationToken,Task> apply, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Read retained source evidence for the selected bilateral footprint in receipt order, including path-only reports. Release only with exact settlement.</summary>
     public IEnumerable<Change> Held(Scope footprint) => throw new NotImplementedException();
+    /// <summary>The unfinished-job owner bound by the pair runner.</summary>
+    public Executor.Unfinished Unfinished { get => throw new NotImplementedException(); internal set => throw new NotImplementedException(); }
+    /// <summary>Register a page and settle only contiguous source boundaries.</summary>
+    public Task AdmitAsync(PairConfig pair, ChangePage page, Func<Change, CancellationToken, Task> apply, Func<JournalPosition, CancellationToken, Task>? settleJournal, Func<string, CancellationToken, Task>? settleCursor, Func<Change, CancellationToken, Task>? received, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Keep a failed input outstanding.</summary>
+    public sealed class Unsettled : Exception { }
 }

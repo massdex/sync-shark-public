@@ -281,19 +281,6 @@ Assert ((Active-Version $changedInstall) -ceq '1.2.4') 'Corrected obstruction di
 Assert (-not [SetupFileSystem]::Exists($blockedJournal)) 'Corrected obstruction retained its recovery journal.'
 Assert (@([IO.Directory]::EnumerateFileSystemEntries($stagingPath)).Count -eq 0) 'Corrected obstruction retained preparation.'
 
-# The detached janitor must fail visibly and retain a log, rather than swallowing locked-file errors.
-$download = Join-Path $Root 'download'; [IO.Directory]::CreateDirectory($download) | Out-Null
-$locked = [IO.File]::Open((Join-Path $download 'locked.exe'), 'CreateNew', 'ReadWrite', 'None')
-try {
-    $env:SYNCSHARK_SETUP_DIR = $download
-    $env:SYNCSHARK_SETUP_PID = [int]::MaxValue
-    $env:SYNCSHARK_SETUP_CLEANUP_LOG = Join-Path $Root 'cleanup.log'
-    $env:SYNCSHARK_SETUP_RETAINED_MESSAGE = [Massdex.SyncShark.SetupMessages]::Text('cleanup.retained', [object[]]@('{0}','{1}'))
-    $env:SYNCSHARK_SETUP_LOG_MESSAGE = [Massdex.SyncShark.SetupMessages]::Text('cleanup.log', [object[]]@('{0}','{1}'))
-    $cleanup = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', ('"' + (Join-Path $repository 'Installer/cleanup.ps1') + '"')) -Wait -PassThru -RedirectStandardError (Join-Path $Root 'cleanup.stderr')
-    Assert ($cleanup.ExitCode -ne 0) 'Detached cleanup hid a retained download.'
-    Assert ([IO.File]::ReadAllText($env:SYNCSHARK_SETUP_CLEANUP_LOG).Contains($download)) 'Detached cleanup log omitted the retained path.'
-} finally { $locked.Dispose() }
 $manifest = [xml][IO.File]::ReadAllText((Join-Path $repository 'Installer/setup.manifest'))
 Assert ($manifest.assembly.trustInfo.security.requestedPrivileges.requestedExecutionLevel.level -ceq 'asInvoker') 'Setup elevation contract changed.'
 Assert ([IO.File]::ReadAllText((Join-Path $repository 'Installer/SyncSharkSetup.cs')).Contains('-ExecutionPolicy Bypass')) 'Setup lost process-scoped policy.'
@@ -301,8 +288,10 @@ $published = Join-Path $Root 'payload-1.2.2'
 foreach ($member in @('Sync Shark.dll','syncshark.dll','SyncShark.Engine.dll','Sync Shark.deps.json','Sync Shark.runtimeconfig.json','syncshark.deps.json','syncshark.runtimeconfig.json')) {
     [IO.File]::WriteAllText((Join-Path $published $member), 'synthetic build input')
 }
+[IO.File]::WriteAllText((Join-Path $published 'unused-helper.exe'), 'unshipped tool')
 $built = Join-Path $Root 'built-setup'
 & (Join-Path $repository 'tools/Build-SyncSharkSetup.ps1') -PublishedApp $published -OutputDirectory $built
+& (Join-Path $PSScriptRoot 'Test-SyncSharkSetupCleanupLaunch.ps1') -Setup (Join-Path $built 'SyncShark-Setup-v1.2.2.exe')
 $shell = Start-Process (Join-Path $built 'SyncShark-Setup-v1.2.2.exe') -ArgumentList '--fixture-invalid-argument' -PassThru -Wait -RedirectStandardError (Join-Path $Root 'shell.stderr')
 try {
     Assert ($shell.ExitCode -eq 1) 'Standalone setup shell accepted unknown arguments.'

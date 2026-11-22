@@ -298,31 +298,22 @@ function Restore-SyncSharkUninstalledRuntime {
     Write-SyncSharkJournal $Plan.journal $journal
 }
 
-function Invoke-SyncSharkUninstall {
-    param([string]$CurrentVersion, [int]$ParentProcessId)
-    $ErrorActionPreference='Stop'; Set-StrictMode -Version Latest
-    if ($ParentProcessId -le 0) { throw 'The installed application must request its own safe exit.' }
-    $plan = Get-SyncSharkUninstallPlan $CurrentVersion
-    $parent = Get-Process -Id $ParentProcessId -ErrorAction Stop
-    $expected = Join-Path $plan.target 'Sync Shark.exe'
-    $path = Get-SyncSharkNormalizedPath $parent.Path
-    if ($path -ine $expected -and $path -ine (Join-Path $plan.root 'active\Sync Shark.exe')) { throw 'The uninstall caller is not the installed application.' }
-    $script:SyncSharkReleaseReady=$true
-    [Console]::Out.WriteLine('{"ready":true}'); [Console]::Out.Flush()
-    if (-not $parent.WaitForExit(90000)) { throw 'The app did not complete its safe exit. Nothing was uninstalled.' }
+# ARP runs the same stop command as the CLI, after verifying the exact installed runtime.
+if ($MyInvocation.InvocationName -ne '.' -and $MyInvocation.MyCommand.Name -eq 'SyncShark.Uninstall.ps1') {
+    $ErrorActionPreference='Stop'
+    Import-Module (Join-Path $PSScriptRoot 'SyncShark.Release.psm1') -Force
+    $runtime = Split-Path -Parent $PSScriptRoot
+    $version = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $runtime 'Sync Shark.exe')).ProductVersion
+    $plan = Get-SyncSharkUninstallPlan $version
+    $running = @(Get-Process -Name 'Sync Shark' -ErrorAction SilentlyContinue)
+    if ($running.Count) {
+        foreach ($process in $running) {
+            if ($process.Path -ine (Join-Path $plan.target 'Sync Shark.exe') -and $process.Path -ine (Join-Path $runtime 'Sync Shark.exe')) { throw 'Unexpected host process. Nothing was uninstalled.' }
+        }
+        & (Join-Path $plan.target 'syncshark.exe') host stop
+        if ($LASTEXITCODE -ne 0) { throw 'The host did not confirm its safe stop. Nothing was uninstalled.' }
+        foreach ($process in $running) { $process.WaitForExit(); $process.Dispose() }
+    }
     if (@(Get-Process -Name 'Sync Shark' -ErrorAction SilentlyContinue).Count) { throw 'Sync Shark restarted. Nothing was uninstalled.' }
     Complete-SyncSharkUninstall $plan
-    Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class SyncSharkRemovalMessage { [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int MessageBox(IntPtr owner, string text, string caption, uint kind); }'
-    $answer = [SyncSharkRemovalMessage]::MessageBox([IntPtr]::Zero,
-        "Sync Shark is uninstalled. Your local and cloud files, saved accounts, settings and recovery records were kept. The exact app runtime is retained only for rollback.`n`nUndo uninstall and reopen Sync Shark? Sync remains paused until you resume it.", 'Sync Shark Uninstalled', 0x124)
-    if ($answer -eq 6) {
-        Restore-SyncSharkUninstalledRuntime $plan
-        Start-Process -FilePath (Join-Path $plan.root 'active\Sync Shark.exe') -WindowStyle Hidden
-    }
-}
-
-# ARP starts the installed app's safe uninstall action, never bypassing its exit/checkpoint.
-if ($MyInvocation.InvocationName -ne '.' -and $MyInvocation.MyCommand.Name -eq 'SyncShark.Uninstall.ps1') {
-    & (Join-Path (Split-Path -Parent $PSScriptRoot) 'syncshark.exe') app uninstall --yes
-    exit $LASTEXITCODE
 }

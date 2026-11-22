@@ -8,6 +8,7 @@
   <message key="recovery.foreign">Setup recovery found a foreign object; it was retained: {0}</message>
   <message key="journal.empty">Setup journal has no durable frame; retain it for recovery.</message>
   <message key="journal.invalid">Invalid setup transaction.</message>
+  <message key="recovery.blocked">Setup recovery is blocked: {0}. Keep {1} and run setup again after correcting the reported obstruction.</message>
   <message key="recovery.roots">Setup roots changed; recovery evidence retained.</message>
   <message key="recovery.active">Active launcher identity changed; recovery evidence retained.</message>
   <message key="recovery.committed">Committed launcher changed; recovery evidence retained.</message>
@@ -19,10 +20,6 @@
   <message key="install.success">Installed {0}. The running host was not stopped; the new version applies at the next start.</message>
   <message key="install.rollback">Setup failed: {0}. Exact rollback is blocked: {1}. Keep {2} and run setup again after correcting the reported obstruction.</message>
   <message key="preparation.retained">Retained setup preparation: {0}. Setup cannot remove it without proof of ownership.</message>
-  <message key="cleanup.start">Setup cleanup did not start.</message>
-  <message key="cleanup.scheduled">Setup download cleanup will run after setup exits. Retained-download failures are recorded in {0}.</message>
-  <message key="cleanup.retained">Setup download retained at {0}: {1}. Remove that folder after setup has exited.</message>
-  <message key="cleanup.log">Setup cleanup log could not be written at {0}: {1}</message>
   <message key="shell.arguments">Unsupported setup arguments.</message>
   <message key="shell.payload">Missing embedded setup payload.</message>
   <message key="shell.cleanup">Remove setup temporary folder {0}: {1}</message>

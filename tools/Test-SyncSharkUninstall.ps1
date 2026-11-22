@@ -21,6 +21,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $root 'vNext\state\recovery.txt'),'retained recovery')
     [IO.File]::WriteAllText((Join-Path $transaction 'install-journal.json'),(@{operation='install';version=$version;commit=$commit;status='complete';product_root=$root}|ConvertTo-Json))
     New-Item -ItemType Junction -Path $active -Target $target | Out-Null
+    foreach ($name in @('Sync Shark.exe','syncshark.exe')) { [IO.File]::WriteAllText((Join-Path $target $name), $name) }
     $settings=Get-SyncSharkTreeIdentity (Join-Path $root 'state'); $recovery=Get-SyncSharkTreeIdentity (Join-Path $root 'vNext\state')
     $plan=Get-SyncSharkUninstallPlan "$version+$commit" $root
     Check ($plan.tree -eq (Get-SyncSharkTreeIdentity $target)) 'Plan binds the exact current runtime before safe exit'
@@ -32,6 +33,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $target 'fixture.txt'),'exact disposable runtime')
     Complete-SyncSharkUninstall $plan
     Check (-not (Test-Path -LiteralPath $active) -and -not (Test-Path -LiteralPath $target)) 'Actual isolated uninstall removes the active pointer and installed runtime'
+    foreach ($name in @('Sync Shark.exe','syncshark.exe')) { Check ([IO.File]::ReadAllText((Join-Path $plan.retired $name)) -ceq $name) 'Both executables left the installed runtime intact in the receipt' }
     Check ((Get-SyncSharkTreeIdentity $plan.retired) -eq $plan.tree) 'One exact runtime is retained for undo without a second copy'
     Check ((Get-SyncSharkTreeIdentity (Join-Path $root 'state')) -eq $settings) 'Saved settings are byte-for-byte unchanged'
     Check ((Get-SyncSharkTreeIdentity (Join-Path $root 'vNext\state')) -eq $recovery) 'Recovery state is byte-for-byte unchanged'

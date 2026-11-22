@@ -56,7 +56,7 @@ $module=Get-Module SyncShark.Release
     $script:stopAfterMarker=$false
     Invoke-SyncSharkAppRegistration '1.2.3' Register
     Invoke-SyncSharkAppRegistration '1.2.3' Verify
-    if($script:registration.Count -ne 6 -or $script:link.Arguments -cne '--cli engine host start --yes' -or
+    if($script:registration.Count -ne 6 -or $script:link.Arguments -cne '' -or $script:link.TargetPath -ine 'D:\Product\active\Sync Shark.exe' -or
         $script:registration.UninstallString -notlike '* -ExecutionPolicy Bypass -File *active\tools\SyncShark.Uninstall.ps1*') {throw 'Registration contract differs'}
     Invoke-SyncSharkAppRegistration '1.2.4' Register
     Invoke-SyncSharkAppRegistration '1.2.4' Verify
@@ -71,7 +71,7 @@ $module=Get-Module SyncShark.Release
         try { Invoke-SyncSharkAppRegistration '1.2.5' $operation; throw 'Expected foreign shortcut refusal' }
         catch { if($_.Exception.Message -notlike '*Another application owns*'){throw} }
     }
-    $script:link.TargetPath='D:\Product\active\SyncShark.exe'
+    $script:link.TargetPath='D:\Product\active\Sync Shark.exe'
     $owner=$script:registration.SyncSharkOwner
     $script:registration.Remove('SyncSharkOwner')
     foreach($operation in @('Register','Remove')) {

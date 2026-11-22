@@ -8,9 +8,8 @@ $mutants = @(
     @('publication-proof', 'setup.ps1', '$publishedTree = Open-SetupTree $destination $manifest -RequireComplete', '$publishedTree = $null', 'Changed payload was published.'),
     @('first-rollback', 'setup.ps1', '$active.Delete(); $active = $null', '$active.Dispose(); $active = $null', 'First-install rollback retained the launcher.'),
     @('upgrade-rollback', 'setup.ps1', '$active.Retarget($candidate, $previous)', '$active.ReadJunction() | Out-Null', 'Interrupted switch lost the active launcher.'),
-    @('cleanup-report', 'cleanup.ps1', 'exit 1', 'exit 0', 'Detached cleanup hid a retained download.'),
     @('obstruction-journal', 'setup.ps1', 'catch { throw ([Massdex.SyncShark.SetupMessages]::Text(''install.rollback''', 'catch { $journal.Delete(); throw ([Massdex.SyncShark.SetupMessages]::Text(''install.rollback''', 'Persistent obstruction discarded its recovery journal.'),
-    @('obstruction-report', 'setup-strings.xml', 'run setup again after correcting the reported obstruction.', 'exit setup.', 'Missing retry trigger left an unreported automatic wait.'),
+    @('obstruction-report', 'setup-strings.xml', 'Keep {2} and run setup again after correcting the reported obstruction.', 'Keep {2} and exit setup.', 'Missing retry trigger left an unreported automatic wait.'),
     @('invoker', 'setup.manifest', 'asInvoker', 'requireAdministrator', 'Setup elevation contract changed.'),
     @('process-policy', 'SyncSharkSetup.cs', '-ExecutionPolicy Bypass', '-ExecutionPolicy RemoteSigned', 'Setup lost process-scoped policy.'),
     @('torn-frame', 'setup.ps1', '.GetString($bytes, 0, $end)', '.GetString($bytes)', 'Torn UTF-8 tail hid the durable journal frame.'),
@@ -30,10 +29,11 @@ foreach ($mutant in $mutants) {
     $tools = Join-Path $case 'tools'
     [IO.Directory]::CreateDirectory($installer) | Out-Null
     [IO.Directory]::CreateDirectory($tools) | Out-Null
-    foreach ($name in @('setup.ps1','SetupFileSystem.cs','SetupMessages.cs','setup-strings.xml','setup.manifest','SyncSharkSetup.cs','cleanup.ps1')) {
+    foreach ($name in @('setup.ps1','SetupFileSystem.cs','SetupMessages.cs','setup-strings.xml','setup.manifest','SyncSharkSetup.cs')) {
         Copy-Item -LiteralPath (Join-Path $repository ('Installer/' + $name)) -Destination $installer
     }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Build-SyncSharkSetup.ps1') -Destination $tools
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Test-SyncSharkSetupCleanupLaunch.ps1') -Destination $tools
     $fixture = Join-Path $tools 'Test-SyncSharkSetup.ps1'
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Test-SyncSharkSetup.ps1') -Destination $fixture
     $path = Join-Path $installer $mutant[1]

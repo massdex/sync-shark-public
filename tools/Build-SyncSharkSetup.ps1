@@ -14,6 +14,7 @@ $payload = Join-Path $work 'app'
 [IO.Directory]::CreateDirectory($payload) | Out-Null
 # Copy the published runtime, excluding unused native integrations, tools and symbols.
 Get-ChildItem -LiteralPath $PublishedApp -File -Recurse | Where-Object {
+    ($_.Extension -ine '.exe' -or $_.Name -in @('Sync Shark.exe','syncshark.exe')) -and
     $_.Name -notmatch '(?i)(Discovery|Explorer|Updater|Setup)' -and $_.Extension -ne '.pdb' -and
     $_.FullName.Substring($PublishedApp.Length + 1) -notmatch '^tools[\\/]'
 } | ForEach-Object {
