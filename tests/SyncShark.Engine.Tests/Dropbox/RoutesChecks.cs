@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Massdex.SyncShark.Engine.Dropbox;
 
 namespace Massdex.SyncShark.Engine.Tests.Dropbox;
@@ -50,12 +51,15 @@ public static class RoutesChecks
         Check.Require(Routes.NameOf(Routes.Endpoint("files/download")) == "files/download", "endpoint reverse lookup");
         Check.Require(Routes.NameOf(new Uri("https://example.invalid/none")) is null, "unknown endpoint named");
 
-        // ASCII round trip: a non-BMP code point is escaped and an escaped delimiter is preserved.
+        // ASCII round trip: the header is pure ASCII, escapes a non-BMP code point, and parses back to the same value.
         var tricky = "{\"path\":\"/a\\\"b/😀\"}";
         var trickyHeader = Routes.ArgHeader(tricky);
         Check.Require(trickyHeader.All(character => character <= '~'), "non-ASCII character left in header");
-        Check.Require(trickyHeader.Contains("\\\"", StringComparison.Ordinal), "escaped quote lost");
         Check.Require(trickyHeader.Contains("\\uD83D", StringComparison.OrdinalIgnoreCase), "non-BMP code point not escaped");
+        using var originalArg = JsonDocument.Parse(tricky);
+        using var roundTrippedArg = JsonDocument.Parse(trickyHeader);
+        Check.Require(roundTrippedArg.RootElement.GetProperty("path").GetString() ==
+            originalArg.RootElement.GetProperty("path").GetString(), "argument header round trip changed the value");
 
         try
         {
