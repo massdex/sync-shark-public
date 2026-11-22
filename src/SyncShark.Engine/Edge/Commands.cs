@@ -179,7 +179,8 @@ public sealed class Commands
 
     private static async Task<int> StatusAsync(CliInvocation invocation, Run.Host host, TextWriter output, CancellationToken ct)
     {
-        output.WriteLine(await host.StatusAsync(invocation.Value(OptionKeys.Pair), ct).ConfigureAwait(false));
+        var status = await host.StatusAsync(invocation.Value(OptionKeys.Pair), ct).ConfigureAwait(false);
+        output.WriteLine(status);
         return Cli.SuccessExitCode;
     }
 
