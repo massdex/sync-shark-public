@@ -267,13 +267,14 @@ public static class DropboxErrorsChecks
         foreach (var (status, body, absent) in new[]
         {
             (HttpStatusCode.Conflict, historyReply, true),
+            (HttpStatusCode.Conflict, Reply(string.Empty, Tagged(DropboxProtocol.Path, "not_found_extra")), false),
             (HttpStatusCode.NotFound, historyReply, false),
             (HttpStatusCode.Conflict, SummaryOnly(DropboxProtocol.PathNotFound), false),
             (HttpStatusCode.Conflict, MixedEnvelope(null), false),
             (HttpStatusCode.Conflict, historyMiss, false)
         }) Check.Require(errors.Classify(status, body, DropboxProtocol.ListRevisions, false,
                 new(true, true, false, false)).Absent == absent,
-            "Only an enveloped 409 path/not_found proves no retained history");
+            $"Only an enveloped 409 path/not_found proves no retained history: {(int)status} {body}");
         Check.Require(errors.Classify(HttpStatusCode.Conflict, Reply(string.Empty,
                 Tagged(DropboxProtocol.Path, "not_found")), DropboxProtocol.GetMetadata, false, default).Absent,
             "The exact structured path/not_found is absence");

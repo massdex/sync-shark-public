@@ -254,7 +254,7 @@ public sealed class DropboxErrors
     /// <summary>True when a lookup tag is the provider's bare not_found token, the documented suffix of path/not_found.</summary>
     private static bool IsNotFoundTag(string? tag) =>
         tag is not null &&
-        tag.AsSpan().SequenceEqual(DropboxProtocol.PathNotFound.AsSpan(DropboxProtocol.Path.Length + 1));
+        tag.StartsWith("not_found", StringComparison.Ordinal);
 
     /// <summary>True only for the exact structured 409 path/not_found union; a summary prefix or a malformed payload is
     /// never absence (M14/BC21).</summary>
