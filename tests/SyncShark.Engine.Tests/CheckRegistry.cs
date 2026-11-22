@@ -32,6 +32,7 @@ public static class CheckRegistry
             new("Dropbox/deferred create", Dropbox.DispatcherChecks.DeferredCreateAsync),
             new("Dropbox/DispatcherChecks", Dropbox.DispatcherChecks.RunAsync),
             new("Dropbox/DropboxApiChecks", Dropbox.DropboxApiChecks.RunAsync),
+            new("Dropbox/authenticated send path", Dropbox.DropboxApiChecks.SendPathAsync),
             new("Dropbox/DropboxEntriesChecks", Dropbox.DropboxEntriesChecks.RunAsync),
             new("Dropbox/DropboxErrorsChecks", Dropbox.DropboxErrorsChecks.RunAsync),
             new("Dropbox/DropboxFeedChecks", Dropbox.DropboxFeedChecks.RunAsync),
@@ -66,6 +67,9 @@ public static class CheckRegistry
         ["executor"] = [
             new("Executor/CaseRenameChecks", Executor.CaseRenameChecks.RunAsync),
             new("Executor/EffectsChecks", Executor.EffectsChecks.RunAsync),
+            new("Executor/mapped exclusion protection", Executor.ExclusionsChecks.MappedProtectionAsync),
+            new("Executor/exclusion copy estimate", Executor.ExclusionsChecks.CopyEstimateAsync),
+            new("Executor/exclusion read failure", Executor.ExclusionsChecks.ReadFailureAsync),
             new("Executor/ExclusionsChecks", Executor.ExclusionsChecks.RunAsync),
             new("Executor/FolderDeleteChecks", Executor.FolderDeleteChecks.RunAsync),
             new("Executor/FolderMergeChecks", Executor.FolderMergeChecks.RunAsync),
@@ -73,6 +77,8 @@ public static class CheckRegistry
             new("Executor/ItemSyncChecks", Executor.ItemSyncChecks.RunAsync),
             new("Executor/KeepBothChecks", Executor.KeepBothChecks.RunAsync),
             new("Executor/NoticesChecks", Executor.NoticesChecks.RunAsync),
+            new("Executor/dismiss choice matrix", Executor.ResolveChecks.DismissAsync),
+            new("Executor/reviewed resolution endpoints", Executor.ResolveChecks.ReviewedEndpointsAsync),
             new("Executor/ResolveChecks", Executor.ResolveChecks.RunAsync),
             new("Executor/RetriesChecks", Executor.RetriesChecks.RunAsync),
             new("Executor/UnfinishedChecks", Executor.UnfinishedChecks.RunAsync)

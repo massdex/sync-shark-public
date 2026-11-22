@@ -17,7 +17,7 @@ public static class LogTextChecks
         RenderTypedFailure();
         RenderTypedStageEnd();
         RenderEffectAsReadable();
-        var move = LogText.Format(new RunEvent(RunEventKind.Effect, "", "new.txt", "old.txt", "") { Action = ActionKind.MoveLocal });
+        var move = LogText.Format(new RunEvent(RunEventKind.Effect, "", "new.txt", "old.txt", nameof(RemovalOutcome.Published)) { Action = ActionKind.MoveLocal });
         Check.Require(move.Contains(Text.Get(TextKey.HumanCardFrom, (TextArg.Path, "old.txt"))) &&
             move.Contains(Text.Get(TextKey.HumanCardTo, (TextArg.Path, "new.txt"))), "a move shows its two endpoints");
         var stop = LogText.Format(new RunEvent(RunEventKind.Failed, "", "", "", "") { Error = new OperationCanceledException() });
@@ -26,7 +26,34 @@ public static class LogTextChecks
         Check.Require(notice.Contains(Text.Get(TextKey.FailDropboxNameRejected, (TextArg.Path, "item"))), "a cause alone supplies a readable reason");
         var provider = LogText.Format(new RunEvent(RunEventKind.ProviderRequest, "", "", "arbitrary body", "done"));
         Check.Require(provider.Length == 0, "a completed provider diagnostic is not a user outcome");
+        CheckRecordedFacts();
         return Task.CompletedTask;
+    }
+
+    private static void CheckRecordedFacts()
+    {
+        const string sentinel = "synthetic exception detail";
+        var failed = LogText.Format(new RunEvent(RunEventKind.Failed, nameof(NoticeKind.Failure), "item", sentinel, nameof(NoticeKind.Failure)) { Cause = TextKey.ReadLocalFailed });
+        bool safe = !failed.Contains(sentinel) && failed.Contains(Text.Get(TextKey.ReadLocalFailed, (TextArg.Path, "item"), (TextArg.Message, string.Empty)));
+        bool neutral = true;
+        foreach (var action in new[] { ActionKind.MoveLocal, ActionKind.KeepBoth })
+            foreach (var outcome in new[] { nameof(RemovalOutcome.Pending), nameof(RemovalOutcome.Unknown), "Refused" })
+            {
+                var text = LogText.Format(new RunEvent(RunEventKind.Effect, action.ToString(), "target", "source", outcome));
+                neutral &= text.Contains(outcome) && !text.Contains(Text.Get(TextKey.HumanOkLabel)) &&
+                    !new[] { TextKey.HumanCardFrom, TextKey.HumanCardTo, TextKey.HumanCardOriginal, TextKey.HumanCardCopy }
+                        .Any(key => text.Contains(Text.Get(key, (TextArg.Path, string.Empty))));
+            }
+        var at = DateTimeOffset.UnixEpoch;
+        var waiting = LogText.Format(new RunEvent(RunEventKind.ProviderRequest, "", "", "activity
+continued", ""), at);
+        bool activity = waiting.Contains(Text.Get(TextKey.HumanStageActive, (TextArg.Time, "00:00:00"))) && waiting.Contains(@"activity
+continued");
+        var stage = LogText.Format(new RunEvent(RunEventKind.Stage, nameof(TextKey.StageRows), "", "last progress", nameof(RunEventKind.Failed)), at);
+        bool interrupted = stage.Contains(Text.Get(TextKey.HumanStageInterrupted, (TextArg.Indent, Text.Get(TextKey.HumanIndent)),
+            (TextArg.Name, Text.Get(TextKey.StageRows)), (TextArg.Elapsed, Text.Get(TextKey.HumanNotMeasured)))) && stage.Contains("last progress");
+        Check.Require(safe && neutral && activity && interrupted,
+            $"readable safe failure={safe}; neutral pending endpoints={neutral}; activity retained={activity}; stage interrupted={interrupted}");
     }
 
     private static void EveryKindRenders()

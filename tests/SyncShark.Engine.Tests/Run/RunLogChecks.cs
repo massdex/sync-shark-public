@@ -5,7 +5,7 @@ using Massdex.SyncShark.Engine.Run;
 namespace Massdex.SyncShark.Engine.Tests.Run;
 
 /// <summary>Contract checks for RunLog: the stored record is a UTC timestamp plus five reversible fields in six
-/// fixed columns; typed facts (stage end, count, failure name and message, cause) are projected into the record; a
+/// fixed columns; typed facts (stage end, count, failure name and safe reason/code, cause) are projected into the record; a
 /// literal backslash-n never collides with a control newline; a failed write, flush or close stops writes and still
 /// closes the writer exactly once; the detached read needs only the file seam (F029, F054, M22).</summary>
 public static class RunLogChecks
@@ -16,6 +16,7 @@ public static class RunLogChecks
         ProjectsTypedStageEnd();
         ProjectsTypedFailure();
         ProjectsTypedCause();
+        CheckFailureAndMoveRecords();
         EscapesLiteralBackslashDistinctFromControl();
         TypedOutcomeSurvives();
         DisposeClosesAfterWriteFailure();
@@ -86,6 +87,27 @@ public static class RunLogChecks
         var fields = WriteOne(new RunEvent(RunEventKind.Issue, "Failure", "alpha/report.txt", "name rejected",
             string.Empty) { Cause = TextKey.FailureDetail });
         Check.Require(fields[5] == TextKey.FailureDetail.ToString(), "a typed cause becomes the record outcome");
+    }
+
+    private static void CheckFailureAndMoveRecords()
+    {
+        const string sentinel = "synthetic exception detail";
+        var failed = new RunEvent(RunEventKind.Failed, nameof(NoticeKind.Failure), "item", sentinel, nameof(NoticeKind.Failure)) { Cause = TextKey.ReadLocalFailed };
+        var reason = Text.Get(TextKey.ReadLocalFailed, (TextArg.Path, failed.Path), (TextArg.Message, string.Empty));
+        var record = WriteOne(failed);
+        var safe = record[4].Contains(reason, StringComparison.Ordinal) && !string.Join(" ", record).Contains(sentinel, StringComparison.Ordinal);
+        const string source = @"older; side=Local\item";
+        var moved = new RunEvent(RunEventKind.Effect, nameof(ISide.MoveAsync), "new", source, nameof(RemovalOutcome.Published)) { Side = Side.Dropbox };
+        var fields = WriteOne(moved);
+        for (int i = 1; i < fields.Length; ++i) Check.Require(RunLog.TryUnescape(fields[i], out fields[i]), "stored move fields decode");
+        var lines = LogText.Format(new RunEvent(Enum.Parse<RunEventKind>(fields[1]), fields[2], fields[3], fields[4], fields[5]),
+            DateTimeOffset.Parse(fields[0], CultureInfo.InvariantCulture)).Split(Environment.NewLine);
+        var exactMove = fields[4] == source && fields[5] == nameof(Side.Dropbox) &&
+            lines.Contains(Text.Get(TextKey.HumanCardFrom, (TextArg.Path, source))) && lines.Contains(Text.Get(TextKey.HumanCardTo, (TextArg.Path, "new"))) &&
+            lines.Contains(Text.Get(TextKey.HumanCardSide, (TextArg.Side, Text.Get(TextKey.HumanSideDropbox))));
+        var pending = WriteOne(moved with { Outcome = nameof(RemovalOutcome.Pending) });
+        var pendingIntact = pending[5] == nameof(RemovalOutcome.Pending) && pending[4] == RunLog.EscapeField(source);
+        Check.Require(safe && exactMove && pendingIntact, $"stored safe failure={safe}; exact committed move={exactMove}; pending receipt intact={pendingIntact}");
     }
 
     private static void EscapesLiteralBackslashDistinctFromControl()
