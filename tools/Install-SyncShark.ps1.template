@@ -1,0 +1,37 @@
+# SyncSharkUpdateContract: __SIGNED_UPDATE_CONTRACT__
+# Windows, PowerShell 7.4+. The signed house setup owns version publication.
+[CmdletBinding()]
+param([string]$PredecessorRuntime,[string]$TestProductRoot)
+if ($TestProductRoot) { throw 'The signed house setup cannot be launched in fixture mode.' }
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$version = '__RELEASE_VERSION__'
+$expectedVersion = '__RELEASE_VERSION__+__COMMIT_FULL__'
+$expectedPreviousVersion = '__PREVIOUS_PRODUCT_VERSION__'
+$expectedPreviousTreeIdentity = '__PREVIOUS_TREE_SHA256__'
+$contract = ([IO.File]::ReadLines($PSCommandPath) | Select-Object -First 1).Substring(('# SyncSharkUpdateContract: ').Length) | ConvertFrom-Json
+$module = Join-Path $PSScriptRoot 'SyncShark.Release.psm1'
+if ((Get-FileHash -LiteralPath $module).Hash -ine $contract.moduleSha256) { throw 'Release module differs from the signed contract.' }
+Import-Module $module -Force
+$root = Resolve-SyncSharkProductRoot ''
+$previous = if ($PredecessorRuntime) { $PredecessorRuntime } else { Join-Path $root 'versions/__PREVIOUS_RELEASE_VERSION__' }
+$active = Join-Path $root 'active'
+if (Test-Path -LiteralPath $active) { Assert-SyncSharkJunction $active $previous }
+Assert-SyncSharkOrdinaryTree $previous
+$previousHost=Join-Path $previous $contract.hostExecutable
+if (-not [IO.File]::Exists($previousHost)) { $previousHost=Join-Path $previous 'SyncShark.exe' }
+if ([Diagnostics.FileVersionInfo]::GetVersionInfo($previousHost).ProductVersion -cne $expectedPreviousVersion -or
+    (Get-SyncSharkTreeIdentity $previous) -cne $expectedPreviousTreeIdentity) { throw 'Predecessor differs from the exact release pins.' }
+$signer=(Get-SyncSharkSignerIdentity).roles.publisher
+$release=Split-Path -Parent $PSScriptRoot
+$payloadRoot=Join-Path $release 'house-stage/app'
+if (![IO.Directory]::Exists($payloadRoot)) { $payloadRoot=Join-Path $release 'package/signed-candidate' }
+Assert-SyncSharkExactPackage $payloadRoot (Join-Path $release 'package/payload-manifest.json') $contract.manifestSha256 $expectedVersion (Get-SyncSharkSignedMemberHashes $contract) $signer.thumbprints $signer.subject $signer.subject $signer.spki '' $false
+$setup=Join-Path $PSScriptRoot "SyncShark-Setup-v$version.exe"
+$held=[IO.File]::Open($setup,'Open','Read','Read')
+try {
+    if ((Get-SyncSharkSha256 $setup) -cne $contract.setupSha256) { throw 'House setup differs from its signed pin (__COMMIT_SHORT__).' }
+    Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $setup) $signer.thumbprints $signer.subject $signer.subject $signer.spki
+    & $setup
+    if ($LASTEXITCODE -ne 0) { throw "House setup exited $LASTEXITCODE." }
+} finally { $held.Dispose() }
