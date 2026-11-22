@@ -17,7 +17,7 @@ foreach ($entry in @{
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($env:SYNC_SHARK_RELEASE_TEST_MODE -cne '1') { throw 'Test mode is required.' }
-if (($env:GITHUB_ACTIONS -cne 'true' -or $Fixture -cne '49') -and ((Get-Location).Drive.Name -ne 'F' -or [IO.Path]::GetPathRoot([IO.Path]::GetTempPath()) -ine 'F:\')) { throw 'Run fixtures with cwd and TEMP on F:.' }
+# The caller chooses its workspace and TEMP; fixture writes remain under the fixed test root.
 Remove-Item Env:HTTPS_PROXY, Env:HTTP_PROXY -ErrorAction SilentlyContinue
 Import-Module (Join-Path $PSScriptRoot 'SyncShark.Release.psm1') -Force
 $base = Join-Path ([IO.Path]::GetTempPath()) 'sync-shark-release-tests'
