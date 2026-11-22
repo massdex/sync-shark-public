@@ -4,6 +4,10 @@ namespace Massdex.SyncShark.Engine.Local;
 public sealed class LocalSide : ISide
 {
     /// <inheritdoc/>
+    public (TimeSpan Offset, TimeSpan Uncertainty)? ClockOffset => throw new NotImplementedException();
+    /// <inheritdoc/>
+    public Task<DeletionEvidence> DeletedAsync(string path, CancellationToken ct) => throw new NotImplementedException();
+    /// <inheritdoc/>
     public Side Side => throw new NotImplementedException();
     /// <summary>ReadAll operation on the supplied facts.</summary>
     public IAsyncEnumerable<Listed> ReadAllAsync(string under, ListOptions options, CancellationToken ct) => throw new NotImplementedException();

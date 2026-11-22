@@ -11,4 +11,6 @@ public sealed class Host
     public Task PauseAsync(string? pairId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Resume operation on the supplied facts.</summary>
     public Task ResumeAsync(string? pairId, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Whether this pair may start work under the global and per-pair pause settings.</summary>
+    public bool IsPaused(string pairId) => throw new NotImplementedException();
 }

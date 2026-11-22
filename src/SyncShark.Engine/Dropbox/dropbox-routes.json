@@ -13,7 +13,8 @@
       "style": "rpc",
       "auth": "user",
       "scope": "files.content.write",
-      "policy": "write"
+      "policy": "write",
+      "maxEntries": 10000
     },
     {
       "name": "files/create_folder_batch/check",
@@ -38,7 +39,8 @@
       "style": "rpc",
       "auth": "user",
       "scope": "files.content.write",
-      "policy": "write"
+      "policy": "write",
+      "maxEntries": 1000
     },
     {
       "name": "files/delete_batch/check",
@@ -130,7 +132,8 @@
       "style": "rpc",
       "auth": "user",
       "scope": "files.content.write",
-      "policy": "write"
+      "policy": "write",
+      "maxEntries": 1000
     },
     {
       "name": "files/move_v2",
@@ -173,7 +176,8 @@
       "auth": "user",
       "scope": "files.content.write",
       "policy": "write",
-      "special": "upload-session"
+      "special": "upload-session",
+      "maxEntries": 1000
     },
     {
       "name": "files/upload_session/start",
@@ -193,5 +197,9 @@
       "policy": "read",
       "voidArg": true
     }
-  ]
+  ],
+  "limits": {
+    "contentRequestMiB": 150,
+    "relocationFiles": 10000
+  }
 }

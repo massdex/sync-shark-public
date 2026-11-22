@@ -3,6 +3,13 @@ namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 /// <summary>A synthetic endpoint; unscripted effects fail rather than manufacture a passing result.</summary>
 public sealed class FakeSide(Side side) : ISide
 {
+    public Dictionary<string,DeletionEvidence> DeletedHistory { get; } = new(PathNames.Comparer);
+    public (TimeSpan Offset, TimeSpan Uncertainty)? ClockOffset { get; set; }
+    public Task<DeletionEvidence> DeletedAsync(string path, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(DeletedAsync));
+        return Task.FromResult(DeletedHistory.GetValueOrDefault(path) ?? new DeletionEvidence.NoRetainedHistory(path));
+    }
     /// <inheritdoc/>
     public Side Side => side;
     public RequestCounters Requests { get; } = new();
@@ -10,6 +17,8 @@ public sealed class FakeSide(Side side) : ISide
     public void Seed(Entry entry, byte[] bytes) => Items.Add(entry.Path, (entry, bytes.ToArray()));
     public List<(Entry Entry, byte[] Bytes)> History { get; } = [];
     private int nextId;
+    public Dictionary<string,Exception> RecycleRefusals { get; } = new(PathNames.Comparer);
+    public Dictionary<string,Exception> ReadFailures { get; } = new(PathNames.Comparer);
     public Queue<ChangePage> Pages { get; } = [];
     public Dictionary<string, Queue<JobReply>> JobReplies { get; } = [];
     public Dictionary<(string Id,string Revision,string Hash), Recovery> Recoverable { get; } = [];
@@ -35,6 +44,7 @@ public sealed class FakeSide(Side side) : ISide
             foreach (var item in Items.Values.OrderBy(v => v.Entry.Path, StringComparer.Ordinal))
             {
                 ct.ThrowIfCancellationRequested();
+                if (ReadFailures.TryGetValue(item.Entry.Path,out var error)) throw error;
                 if (item.Entry.Path != under && (under.Length == 0 || PathNames.IsSelfOrUnder(item.Entry.Path, under)) &&
                     (options.Recursive || PathNames.Same(PathNames.Parent(item.Entry.Path), under))) yield return new(item.Entry.Path, item.Entry);
             }
@@ -44,6 +54,7 @@ public sealed class FakeSide(Side side) : ISide
     public Task<Entry?> ReadOneAsync(string path, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReadOneAsync));
+        if (ReadFailures.TryGetValue(path,out var error)) throw error;
         return Task.FromResult(Items.TryGetValue(path, out var value) ? value.Entry : null);
     }
     /// <summary>OpenRead operation on the supplied facts.</summary>
@@ -88,6 +99,7 @@ public sealed class FakeSide(Side side) : ISide
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(DeleteAsync)); var old = Current(expected);
+        if (RecycleRefusals.TryGetValue(expected.Path, out var failure)) throw failure;
         foreach (var child in Items.Values.Where(v => expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray()) { History.Add(child); Items.Remove(child.Entry.Path); }
         History.Add(old); Items.Remove(expected.Path); return Task.FromResult(new RemovalResult(RemovalOutcome.Removed, null, null, null));
     }

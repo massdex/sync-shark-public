@@ -13,7 +13,12 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $catalogPath = Join-Path $repositoryRoot 'src/SyncShark.Engine/Dropbox/dropbox-routes.json'
 if (-not $OutputPath) { $OutputPath = $catalogPath }
-$used = @((Get-Content -LiteralPath $catalogPath -Raw | ConvertFrom-Json).routes.name)
+$current = Get-Content -LiteralPath $catalogPath -Raw | ConvertFrom-Json
+$used = @($current.routes.name)
+$limitsByRoute = @{}
+foreach ($route in $current.routes) {
+    if ($null -ne $route.maxEntries) { $limitsByRoute[$route.name] = $route.maxEntries }
+}
 if ($used.Count -eq 0) { throw 'The engine route catalog is empty.' }
 $specRepository = 'dropbox/dropbox-api-spec'
 
@@ -82,6 +87,7 @@ try {
                   elseif ($r.scope -match '\.read$' -or $special -eq 'async-check') { 'read' }
                   else { 'write' }
         $o = [ordered]@{ name = $r.route; host = $r.host; style = $r.style; auth = $r.auth; scope = $r.scope; policy = $policy }
+        if ($limitsByRoute.ContainsKey($r.route)) { $o.maxEntries = $limitsByRoute[$r.route] }
         if ($special) { $o.special = $special }
         if ($r.argVoid -eq 'True') { $o.voidArg = $true }
         if ($r.deprecated -eq 'True') { $o.deprecated = $true }
@@ -92,6 +98,7 @@ try {
         source = 'github.com/dropbox/dropbox-api-spec'; specCommit = $SpecCommit
         hosts = [ordered]@{ api = 'https://api.dropboxapi.com/2/'; content = 'https://content.dropboxapi.com/2/'; notify = 'https://notify.dropboxapi.com/2/' }
         routes = @($routes | Sort-Object name)
+        limits = $current.limits
     }
     $json = $doc | ConvertTo-Json -Depth 5
     [IO.File]::WriteAllText($OutputPath, $json.Replace("`r`n", "`n") + "`n", (New-Object Text.UTF8Encoding $false))

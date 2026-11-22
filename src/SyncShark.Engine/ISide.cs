@@ -33,6 +33,10 @@ public interface ISide
     Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct);
     /// <summary>Reads the next change page and the provider boundary it covers.</summary>
     Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct);
+    /// <summary>The latest observed provider clock offset and its uncertainty; null without a measurement.</summary>
+    (TimeSpan Offset, TimeSpan Uncertainty)? ClockOffset { get; }
+    /// <summary>Substantiated deleted-history evidence for the first comparison; a lookup failure is not absence.</summary>
+    Task<DeletionEvidence> DeletedAsync(string path, CancellationToken ct);
     /// <summary>Recovers attributable file bytes or folder scope; a substitute is never the selected version.</summary>
     Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct);
     /// <summary>Observes a returned job without submitting its members again.</summary>

@@ -5,4 +5,6 @@ public sealed class DropboxApi
 {
     /// <summary>Send operation on the supplied facts.</summary>
     public Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Uses the transport and clock supplied by the composition root for requests and response timing.</summary>
+    public DropboxApi(HttpClient transport, TimeProvider clock) => throw new NotImplementedException();
 }

@@ -5,4 +5,6 @@ public sealed class Dispatcher
 {
     /// <summary>Submit operation on the supplied facts.</summary>
     public Task<JobReply> SubmitAsync(string route, IReadOnlyList<JobMember> ready, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Writes through the single HTTP owner.</summary>
+    public Dispatcher(DropboxApi api) => throw new NotImplementedException();
 }
