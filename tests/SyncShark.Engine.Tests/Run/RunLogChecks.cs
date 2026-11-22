@@ -186,13 +186,15 @@ public static class RunLogChecks
             _pending.Clear();
         }
 
-        public override void Dispose()
+        protected override void Dispose(bool disposing)
         {
-            if (Disposed) return;
-            Disposed = true;
-            owner.Publish(_pending.ToString());
-            _pending.Clear();
-            base.Dispose();
+            if (!Disposed)
+            {
+                Disposed = true;
+                owner.Publish(_pending.ToString());
+                _pending.Clear();
+            }
+            base.Dispose(disposing);
         }
     }
 }
