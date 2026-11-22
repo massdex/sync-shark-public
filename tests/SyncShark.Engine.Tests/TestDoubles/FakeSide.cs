@@ -10,6 +10,9 @@ public sealed class FakeSide(Side side) : ISide
     public void Seed(Entry entry, byte[] bytes) => Items.Add(entry.Path, (entry, bytes.ToArray()));
     public List<(Entry Entry, byte[] Bytes)> History { get; } = [];
     private int nextId;
+    public Queue<ChangePage> Pages { get; } = [];
+    public Dictionary<string, Queue<JobReply>> JobReplies { get; } = [];
+    public Dictionary<(string Id,string Revision,string Hash), Recovery> Recoverable { get; } = [];
     private sealed record Stage(string Path, byte[] Bytes, Entry Source) : IStaged
     {
         public bool ConsumesSourceOnPublish => false;
@@ -112,9 +115,21 @@ public sealed class FakeSide(Side side) : ISide
         var folder = Folder(path); Seed(folder, []); return Task.FromResult(folder);
     }
     /// <summary>ReadChanges operation on the supplied facts.</summary>
-    public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct) => throw new InvalidOperationException("Unscripted endpoint operation");
+    public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReadChangesAsync));
+        return Task.FromResult(Pages.Dequeue());
+    }
     /// <summary>Recover operation on the supplied facts.</summary>
-    public Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct) => throw new InvalidOperationException("Unscripted endpoint operation");
+    public Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(RecoverAsync));
+        return Task.FromResult(Recoverable.GetValueOrDefault((actual.Entry.Id,version.Revision,version.ContentHash)));
+    }
     /// <summary>ReadJob operation on the supplied facts.</summary>
-    public Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct) => throw new InvalidOperationException("Unscripted endpoint operation");
+    public Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReadJobAsync));
+        return Task.FromResult(JobReplies[job.JobId].Dequeue());
+    }
 }

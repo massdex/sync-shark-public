@@ -22,6 +22,8 @@ public static class ReconciliationChecks
         var pair = ItemChecks.Pair() with { FirstRun = policy, IgnoreRules = ignores ?? [], Exclusions = exclusions ?? [] };
         var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
         using var store = new InMemoryStateStore(); Seed(local,pc); Seed(remote,cloud);
+        await store.SavePairAsync(pair, default);
+        if (baseline) store.MarkFirstRepairDone(pair.PairId);
         if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(
             ItemChecks.File(Side.Local, Original, 1, Side.Local.ToString()), ItemChecks.File(Side.Dropbox, Original, 1, Side.Dropbox.ToString())), null, default);
         await Repair.RunAsync(pair, local, remote, store, null, default);
