@@ -67,4 +67,6 @@ public sealed class LocalSide : ISide
     public Task<(string? Cursor,JournalPosition? Position)> BoundaryAsync(CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Publish a change to journal membership.</summary>
     public Task SetMembershipAsync(PairConfig member, bool paused, bool removed, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Create sides and reserve volume membership on their shared journal reader.</summary>
+    public static Func<PairConfig, Func<PathScope>, EngineSettings, IStore, LocalSide> Factory(out Action<PairConfig> reserve) => throw new NotImplementedException();
 }

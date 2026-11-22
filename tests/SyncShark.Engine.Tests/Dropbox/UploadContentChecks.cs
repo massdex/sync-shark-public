@@ -3,6 +3,8 @@ namespace Massdex.SyncShark.Engine.Tests.Dropbox;
 /// <summary>Contract checks for UploadContent.</summary>
 public static class UploadContentChecks
 {
+    /// <summary>Check upload replacement order through the module interface.</summary>
+    public static Task ReplacementOrderAsync() => throw new NotImplementedException();
     /// <summary>Verifies the UploadContent contract through the module surface.</summary>
     public static Task RunAsync() => throw new NotImplementedException();
     /// <summary>Read and seek only within the selected upload window.</summary>

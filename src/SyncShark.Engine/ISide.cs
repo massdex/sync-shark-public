@@ -74,13 +74,22 @@ public abstract record Recovery
 /// <summary>A returned job and its original wire-ordered subjects.</summary>
 public sealed record AcceptedJob(string PairId, string Route, string JobId, IReadOnlyList<JobMember> Launch);
 /// <summary>Selected identity and path footprint for moves/deletes; creates carry a name only.</summary>
-public sealed record JobMember(string? Id, string Path, string? Destination);
+public sealed record JobMember(string? Id, string Path, string? Destination)
+{
+    /// <summary>Request a new name rather than adopting an existing folder.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ExclusiveCreate { get; init; }
+}
 /// <summary>A provider observation; an invalid job does not imply any particular member outcome.</summary>
 public abstract record JobReply
 {
     public sealed record Running : JobReply;
     public sealed record Invalid : JobReply;
-    public sealed record Terminal(IReadOnlyList<(Entry? Entry, TextKey? Cause, FailureDisposition? Failure)> Members) : JobReply;
+    public sealed record Terminal(IReadOnlyList<(Entry? Entry, TextKey? Cause, FailureDisposition? Failure)> Members) : JobReply
+    {
+        /// <summary>Zero-based indices into Members whose selected ID was observed absent, not proof this request removed it. Reindex when projecting a subset.</summary>
+        public IReadOnlySet<int> AbsentOrdinals { get; init; } = System.Collections.Frozen.FrozenSet<int>.Empty;
+    }
 }
 
 /// <summary>The Executor's selected losing proof together with the exact saved binding it was selected against,

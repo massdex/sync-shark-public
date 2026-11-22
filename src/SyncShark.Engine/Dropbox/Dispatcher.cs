@@ -9,4 +9,8 @@ public sealed class Dispatcher
     public Dispatcher(DropboxApi api, IStore store, Func<AcceptedJob, Task>? installed = null) => throw new NotImplementedException();
     /// <summary>Submit one pair-bound batch member with its selected identity and create intent.</summary>
     public Task<(AcceptedJob? Accepted, JobReply MemberReply)> SubmitAsync(PairConfig pair, string route, JobMember member, string? expectedRevision, bool exclusiveCreate, DropboxStaged? upload, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Project one ordered member and its absence evidence into a singleton reply.</summary>
+    public static JobReply.Terminal MemberReply(JobReply.Terminal batch, int ordinal) => throw new NotImplementedException();
+    /// <summary>Resolve an ensure-folder clash for the selected member without resubmitting it.</summary>
+    public Task<JobReply.Terminal> ResolveCreateClashAsync(PairConfig pair, JobMember member, JobReply.Terminal reply, CancellationToken ct) => throw new NotImplementedException();
 }

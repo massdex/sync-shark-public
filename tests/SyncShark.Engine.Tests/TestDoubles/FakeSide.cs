@@ -24,6 +24,8 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     /// <summary>Content-only faults leave listing and metadata reads intact.</summary>
     public Dictionary<string,Exception> PublishFailures { get; } = new(PathNames.Comparer);
     public Dictionary<string,Exception> ContentFailures { get; } = new(PathNames.Comparer);
+    /// <summary>Script an uncertain or refused move without changing the selected entry.</summary>
+    public Queue<RemovalResult> MoveOutcomes { get; } = new();
     public Queue<ChangePage> Pages { get; } = [];
     public Dictionary<string, Queue<JobReply>> JobReplies { get; } = [];
     public Dictionary<(string Id,string Revision,string Hash), Recovery> Recoverable { get; } = [];
@@ -137,7 +139,13 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     /// <summary>Move operation on the supplied facts.</summary>
     public Task<RemovalResult> MoveAsync(Entry expected, string newPath, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(MoveAsync)); Mutations.Add(expected.Id);var old = Current(expected);
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(MoveAsync)); Mutations.Add(expected.Id);Current(expected);
+        if (MoveOutcomes.TryDequeue(out var scripted))
+        {
+            if (scripted.Outcome is not (RemovalOutcome.NoEffect or RemovalOutcome.Unknown))
+                throw new InvalidOperationException("Script only refused or uncertain moves; successful moves must update the endpoint.");
+            return Task.FromResult(scripted);
+        }
         if (!PathNames.Same(expected.Path, newPath) && Items.ContainsKey(newPath)) throw new PathOccupiedException(newPath);
         var moving = Items.Values.Where(v => v.Entry.Path == expected.Path || expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray();
         foreach (var v in moving) Items.Remove(v.Entry.Path);

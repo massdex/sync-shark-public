@@ -12,10 +12,13 @@ public sealed class JournalReader
     /// <summary>Attach for the selected JournalReader operation.</summary>
     public void Attach(PairConfig pair,IStore store,Func<PathScope> scope, Func<ulong,bool,CancellationToken,(string? Path,IReadOnlyList<string>? Links)> locate,Func<string,Entry?> entry) => throw new NotImplementedException();
     /// <summary>Membership for the selected JournalReader operation.</summary>
-    public void Membership(PairConfig pair,bool paused,bool removed=false) => throw new NotImplementedException();
+    public Task Membership(PairConfig pair,bool paused,bool removed=false) => throw new NotImplementedException();
     /// <summary>ReadPageAsync for the selected JournalReader operation.</summary>
     public Task<ChangePage> ReadPageAsync(PairConfig pair,JournalPosition? position,JournalPosition? end,EngineSettings settings,CancellationToken ct) => throw new NotImplementedException();
 }
+
+/// <summary>The journal observed a change to the bound root itself.</summary>
+public sealed class JournalRootChangedException(string root) : ChangedUnderneathException(root);
 
 /// <summary>Classifies the result of one native USN journal page read.</summary>
 public enum NtfsUsnPageStatus
