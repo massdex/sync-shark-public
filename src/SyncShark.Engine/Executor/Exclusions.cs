@@ -13,5 +13,3 @@ public sealed class Exclusions
 /// <summary>Expected effects of applying the exclusion.</summary>
 public sealed record ExcludePreview(Side Side, string Path, int CopyFiles, long CopyBytes, int RemoveFiles,
     long RemoveBytes, TextKey RecoveryPlace, bool BlockedByProtected);
-/// <summary>Whether the exclusion settled.</summary>
-public enum ExclusionOutcome { Applied, Pending, Refused }

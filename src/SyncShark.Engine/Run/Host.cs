@@ -23,7 +23,7 @@ public sealed class Host
     public Task<TextKey?> RemovePairAsync(string pairId,CancellationToken ct) => throw new NotImplementedException();
     public Task BindAsync(string pairId,CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Preview includes the recovery place for the selected removal side, using its existing observation: the managed root-bin path, or Text.Get for the Windows bin or Dropbox history. No removal means no recovery place.</summary>
-    public Task<(Executor.ExclusionOutcome? Outcome,long CopyFiles,long CopyBytes,long RemoveFiles,long RemoveBytes,string? RecoveryPlace,TextKey? Cause)> SetExclusionAsync(string pairId,Exclusion exclusion,bool include,bool confirmed,CancellationToken ct) => throw new NotImplementedException();
+    public Task<(ExclusionOutcome? Outcome,long CopyFiles,long CopyBytes,long RemoveFiles,long RemoveBytes,string? RecoveryPlace,TextKey? Cause)> SetExclusionAsync(string pairId,Exclusion exclusion,bool include,bool confirmed,CancellationToken ct) => throw new NotImplementedException();
     public Task SetIgnoresAsync(string pairId,IReadOnlyList<string> rules,CancellationToken ct) => throw new NotImplementedException();
     public Task RepairAsync(string pairId,CancellationToken ct) => throw new NotImplementedException();
     public Task<string> StatusAsync(string? pairId,CancellationToken ct) => throw new NotImplementedException();

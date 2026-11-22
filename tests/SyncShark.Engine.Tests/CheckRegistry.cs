@@ -70,6 +70,8 @@ public static class CheckRegistry
         ["executor"] = [
             new("Executor/CaseRenameChecks", Executor.CaseRenameChecks.RunAsync),
             new("Executor/EffectsChecks", Executor.EffectsChecks.RunAsync),
+            new("Executor/foreign destination", Executor.EffectsChecks.ForeignDestinationAsync),
+            new("Executor/recycle evidence", Executor.EffectsChecks.RecycleEvidenceAsync),
             new("Executor/mapped exclusion protection", Executor.ExclusionsChecks.MappedProtectionAsync),
             new("Executor/exclusion copy estimate", Executor.ExclusionsChecks.CopyEstimateAsync),
             new("Executor/exclusion read failure", Executor.ExclusionsChecks.ReadFailureAsync),
@@ -643,6 +645,9 @@ public static class CheckRegistry
             new("Storage/RecordTableChecks", Storage.RecordTableChecks.RunAsync),
             new("Storage/ScanTableChecks", Storage.ScanTableChecks.RunAsync),
             new("Storage/StoreChecks", Storage.StoreChecks.RunAsync),
+            new("Storage/root commit touches", Storage.StoreChecks.RootCommitTouchesAsync),
+            new("Storage/notice freshness", Storage.StoreChecks.NoticeFreshnessAsync),
+            new("Storage/reset visibility", Storage.StoreChecks.ResetVisibilityAsync),
             new("Storage/StoreMoveChecks", Storage.StoreMoveChecks.RunAsync)
         ],
         ["literals"] = [

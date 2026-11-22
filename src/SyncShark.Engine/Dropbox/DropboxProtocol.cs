@@ -20,8 +20,8 @@ public static class DropboxProtocol
     /// <summary>Parse operation on the supplied facts.</summary>
     public static System.Text.Json.JsonDocument Parse(Stream response) => throw new NotImplementedException();
 
-    /// <summary>ProviderWait for the selected DropboxProtocol operation.</summary>
-    public static TimeSpan? ProviderWait(TimeSpan? retryAfter, System.Text.Json.JsonElement error) => throw new NotImplementedException();
+    /// <summary>Compare the header wait with error.retry_after from the whole reply envelope; use default for a header-only reply.</summary>
+    public static TimeSpan? ProviderWait(TimeSpan? retryAfter, System.Text.Json.JsonElement envelope) => throw new NotImplementedException();
     /// <summary>ProviderConstraintFor for the selected DropboxProtocol operation.</summary>
     internal static ProviderConstraint? ProviderConstraintFor( string accountId, TimeSpan? wait, long startedTimestamp) => throw new NotImplementedException();
     /// <summary>LongpollConstraintFor for the selected DropboxProtocol operation.</summary>

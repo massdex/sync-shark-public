@@ -109,11 +109,11 @@ public sealed class Commands
         var confirmed = invocation.Flag(OptionKeys.Yes);
         var result = await host.SetExclusionAsync(pairId, exclusion, include: false, confirmed, ct).ConfigureAwait(false);
 
-        if (result.Outcome == Executor.ExclusionOutcome.Applied) output.WriteLine(RenderExclusionApplied(rel));
+        if (result.Outcome == ExclusionOutcome.Applied) output.WriteLine(RenderExclusionApplied(rel));
         else if (result.Outcome is { } outcome)
         {
             error.WriteLine(result.Cause is { } cause ? Text.Get(cause, (TextArg.Path, rel)) :
-                outcome == Executor.ExclusionOutcome.Pending ? Text.Get(TextKey.WaitItemRetry) : outcome.ToString());
+                outcome == ExclusionOutcome.Pending ? Text.Get(TextKey.WaitItemRetry) : outcome.ToString());
             return Cli.TransientExitCode;
         }
         else if (result.Cause is { } previewCause) { error.WriteLine(Text.Get(previewCause, (TextArg.Path, rel))); return Cli.TransientExitCode; }
