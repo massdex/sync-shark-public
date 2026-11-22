@@ -7,6 +7,8 @@ public static class ResolveChecks
     public static Task DismissAsync() => throw new NotImplementedException();
     /// <summary>Check reviewed resolution endpoints at integration.</summary>
     public static Task ReviewedEndpointsAsync() => throw new NotImplementedException();
+    /// <summary>Check resolution read failure at integration.</summary>
+    public static Task ReadFailureAsync() => throw new NotImplementedException();
     /// <summary>Verifies the Resolve contract through the module surface.</summary>
     public static Task RunAsync() => throw new NotImplementedException();
 }

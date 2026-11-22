@@ -177,14 +177,17 @@ public static class SignInChecks
             Check.Require(store.ReadOwn(connectionOwner) is null && store.ReadLegacy() == "legacy-fixture",
                 "An HTTP timeout aborted the local disconnect or removed the unproven fixed entry");
 
-            // An interrupted response body (IOException) is the same offline outcome.
+            // An interrupted response body (IOException) is the same offline outcome, with its own own-target fixture.
+            store.Save(connectionOwner, "own-io");
             await SignIn.DisconnectAsync((_, _) => throw new IOException(), store, connectionOwner, default);
-            Check.Require(store.ReadLegacy() == "legacy-fixture",
-                "An interrupted response body removed the unproven fixed entry");
+            Check.Require(store.ReadOwn(connectionOwner) is null && store.ReadLegacy() == "legacy-fixture",
+                "An interrupted response body aborted the local disconnect or removed the unproven fixed entry");
 
+            // An offline send is the same offline outcome, again with its own own-target fixture.
+            store.Save(connectionOwner, "own-http");
             await SignIn.DisconnectAsync((_, _) => throw new HttpRequestException(Text.Get(TextKey.SignInReturnRetry)),
                 store, connectionOwner, default);
-            Check.Require(store.ReadLegacy() == "legacy-fixture",
+            Check.Require(store.ReadOwn(connectionOwner) is null && store.ReadLegacy() == "legacy-fixture",
                 "An offline legacy owner aborted the local disconnect or removed the unproven fixed entry");
 
             // Caller cancellation is not swallowed: nothing is removed.

@@ -3,6 +3,12 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// <summary>Dropbox provider facts as named constants and the sole provider-wait applicability decoder</summary>
 public static class DropboxProtocol
 {
+    public const string ListFolder = "files/list_folder";
+    public const string ListFolderContinue = "files/list_folder/continue";
+    public const string ListFolderGetLatestCursor = "files/list_folder/get_latest_cursor";
+    public const string GetMetadata = "files/get_metadata";
+    public const string ListRevisions = "files/list_revisions";
+    public const int ListPageMaximum = 2000;
     internal const string AuthorizationPath = "oauth2/authorize";
     internal const string TokenPath = "oauth2/token";
     internal const string AuthorizationHost = "www.dropbox.com";

@@ -20,7 +20,7 @@ public interface IStore : IDisposable
     Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct);
     /// <summary>Change visibility only if the stored notice still matches the reviewed subject; return false on a stale or closed slot.</summary>
     Task<bool> UpdateNoticeVisibilityAsync(string pairId, Notice expected, bool ignored, CancellationToken ct) => throw new NotImplementedException();
-    Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct);
+    Task<bool> CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct);
     Task<JournalPosition?> PositionAsync(string volume, CancellationToken ct);
     Task SavePositionAsync(string volume, JournalPosition position, CancellationToken ct);
     Task<string?> CursorAsync(string pairId, CancellationToken ct);
@@ -61,7 +61,7 @@ public interface IStore : IDisposable
 
     /// <summary>Indexed exact-path notice lookup; no whole-pair notice scan on the item path.</summary>
     IAsyncEnumerable<Notice> NoticesAtAsync(string pairId, string pathKey, CancellationToken ct);
-    /// <summary>On lost journal continuity only, install the fresh volume boundary and increment the Local Repair revision/reason of every affected pair in one transaction.</summary>
+    /// <summary>On lost journal continuity only, install the fresh volume boundary and increment the Local Repair revision/reason of every durably bound member of that volume in one transaction; select members at commit, not from the caller snapshot.</summary>
     Task ResetJournalAsync(string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct);
     /// <summary>On Dropbox reset only, install its fresh cursor and increment that pair’s Dropbox Repair revision/reason in one transaction.</summary>
     Task ResetCursorAsync(string pairId, string fresh, string reason, CancellationToken ct);

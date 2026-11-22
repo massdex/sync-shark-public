@@ -358,7 +358,8 @@ public static class RecoveryChecks
     public static async Task A42ReplaceMissingTargetValidStageAsync()
     {
         using var x=new PairState();await x.InitializeAsync();var saved=await x.LinkAsync("item",1);
-        var old=x.Pc.Items["item"].Entry;var source=ItemChecks.File(Side.Dropbox,"different-source-spelling",2,"incoming");
+        var old=x.Pc.Items["item"].Entry;var source=ItemChecks.File(Side.Dropbox,saved.DropboxPath,2,saved.DropboxId);
+        x.Cloud.Items[source.Path]=(source,[2]);
         await using var staged=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{2}),source,old,default);
         var victim=new RemovalSelection(new(old,"volume",old.ContentHash),saved);
         var abandoned=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{9}),source,old,default);var unused=abandoned.Proof!;
@@ -368,16 +369,18 @@ public static class RecoveryChecks
         await x.Store.ArmAsync(x.Pair.PairId,victim,staged.Proof,default);await staged.DisposeAsync();
         await foreach(var row in x.Pc.ReadAllAsync("",new ListOptions(true,true),default)) Check.Require(row.Path!=staged.Proof!.Path,"Armed stage leaked into user listing");
         Check.Require(await x.Pc.ReadOneAsync(staged.Proof!.Path,default)==null,"Armed stage visible as a user file");
-        await x.Pc.DeleteAsync(old,victim,default);x.Cloud.Items.Clear();
+        await x.Pc.DeleteAsync(old,victim,default);await x.Cloud.DeleteAsync(source,null,default);
         var note=(await x.Store.ArmedAsync(x.Pair.PairId,default))!.Value;
         await using var reopened=await x.Pc.ReopenStageAsync(note.Victim,note.Stage!,default);
         var occupant=ItemChecks.File(Side.Local,"item",3,"replacement");x.Pc.Seed(occupant,[3]);
         try { await x.Pc.PublishAsync(reopened,null,null,default); throw new InvalidDataException("Overwrote a reused name"); } catch(PathOccupiedException) { }
         Check.Require(x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{3}),"Occupant changed");x.Pc.Items.Remove("item");
+        var pcPublishes=x.Pc.Requests[nameof(ISide.PublishAsync)];var cloudPublishes=x.Cloud.Requests[nameof(ISide.PublishAsync)];
         await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
-        var committed=await x.Store.FindAsync(x.Pair.PairId,Side.Local,PathNames.Key("item"),default);
-        Check.Require(committed?.LocalId==staged.Proof!.FileId && x.Pc.Items["item"].Entry.Id==staged.Proof.FileId && await x.Store.ArmedAsync(x.Pair.PairId,default)==null,"Stage not settled against the published file identity");
-        Check.Require(x.Pc.Items["item"].Entry.Modified==source.Modified && x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{2}) && x.Pc.History.Single().Entry==old,"Replay did not preserve the selected versions and stamped time");
+        Check.Require(x.Pc.Requests[nameof(ISide.PublishAsync)]==pcPublishes && x.Cloud.Requests[nameof(ISide.PublishAsync)]==cloudPublishes && x.Pc.Items.Count==0 && x.Cloud.Items.Count==0,"Replay resurrected the deleted source");
+        Check.Require(await x.Store.ArmedAsync(x.Pair.PairId,default)==null && !x.Store.Records.Values.Any(v=>v.LocalId==staged.Proof!.FileId),"Replay retained the armed note or linked the discarded stage");
+        Check.Require(x.Pc.History.Single().Entry==old && x.Cloud.History.Single().Entry==source && x.Cloud.History.Single().Bytes.SequenceEqual(new byte[]{2}),"Replay lost a retained version");
+        try { await x.Pc.ReopenStageAsync(note.Victim,note.Stage!,default);throw new InvalidDataException("Discarded stage remained available after replay"); } catch(ChangedUnderneathException) { }
         Check.Require(!x.Cloud.Items.ContainsKey(staged.Proof!.Path) && !x.Store.Records.Values.Any(v=>v.LocalPath==staged.Proof.Path || v.DropboxPath==staged.Proof.Path),"Stage synced as a user file");
     }
     public static Task A42SameIdSizeAlteredStageAsync() => throw new NotImplementedException();

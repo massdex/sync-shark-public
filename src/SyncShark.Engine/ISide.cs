@@ -31,6 +31,8 @@ public interface ISide
     Task<RemovalResult> EnsureFolderAsync(string path, CancellationToken ct);
     /// <summary>Removes the selected file or folder. Dropbox addresses the selected identity through Dispatcher; Local rechecks the held victim. An accepted but Running request is not removal.</summary>
     Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct);
+    /// <summary>Pass the originating action through deletion so an accepted job retains its removal policy.</summary>
+    Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, ActionKind origin, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Moves expected to newPath (the destination must be free; case-only allowed).</summary>
     Task<RemovalResult> MoveAsync(Entry expected, string newPath, CancellationToken ct);
     /// <summary>Locate the selected identity; null denotes proven absence, not unavailable evidence.</summary>
