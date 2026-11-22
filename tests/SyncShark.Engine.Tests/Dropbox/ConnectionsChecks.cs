@@ -39,6 +39,49 @@ public static class ConnectionsChecks
                 SlotWithBinding(root, 'b', 2, TypedTimeBinding(second));
                 Expect(connections.Read(root).SequenceEqual(new[] { first }), "A wrong-typed higher slot generation was selected");
             });
+            Case(failures, "valid framework date after a valid set", () =>
+            {
+                var root = Root(scratch, "validDateAppend");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root), LegacySet(first) + LegacyRecord(1, "set", DatedBinding(second), null));
+                Expect(connections.Read(root).SequenceEqual(new[] { second }), "A valid framework date did not replace the earlier set");
+            });
+            Case(failures, "valid framework date in a higher slot", () =>
+            {
+                var root = Root(scratch, "validDateSlot");
+                Slot(root, 'a', 1, present: true, new[] { first });
+                SlotWithBinding(root, 'b', 2, DatedBinding(second));
+                Expect(connections.Read(root).SequenceEqual(new[] { second }), "A valid framework date in a higher slot was not selected");
+            });
+            Case(failures, "set with a blank recovery evidence applies", () =>
+            {
+                var root = Root(scratch, "setBlankEvidence");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root), LegacySet(first) + LegacyRecord(1, "set", BindingJson(second, "acct-b"), RecoveryJson("")));
+                Expect(connections.Read(root).SequenceEqual(new[] { second }), "A set supplying a blank-evidence recovery was rejected");
+            });
+            Case(failures, "set with null ancillary recovery fields applies", () =>
+            {
+                var root = Root(scratch, "setNullAncillary");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root),
+                    LegacySet(first) + LegacyRecord(1, "set", BindingJson(second, "acct-b"), RecoveryJson("e.json", nullAncillary: true)));
+                Expect(connections.Read(root).SequenceEqual(new[] { second }), "A set supplying null ancillary recovery fields was rejected");
+            });
+            Case(failures, "retained record with an unknown capability applies", () =>
+            {
+                var root = Root(scratch, "retainedUnknownCapability");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root), LegacySet(first) + LegacyRecord(1, "set", RetainedUnknownCapability(second), null));
+                Expect(connections.Read(root).SequenceEqual(new[] { second }), "An unknown capability field invalidated the retained record");
+            });
+            Case(failures, "retained record with a wrong-typed known capability is rejected", () =>
+            {
+                var root = Root(scratch, "retainedWrongCapability");
+                Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
+                File.WriteAllText(ListFile(root), LegacySet(first) + LegacyRecord(1, "set", RetainedWrongKnownCapability(second), null));
+                Expect(connections.Read(root).SequenceEqual(new[] { first }), "A wrong-typed known capability was accepted");
+            });
             Case(failures, "wrong-typed retained record", () =>
             {
                 var root = Root(scratch, "typedRetainedAppend");
@@ -119,8 +162,11 @@ public static class ConnectionsChecks
                 var target = Root(scratch, "appendExtraSet");
                 Directory.CreateDirectory(Path.GetDirectoryName(ListFile(target))!);
                 File.WriteAllText(ListFile(target), LegacySet(second, third)); // every required id present, set differs
+                var bytes = File.ReadAllBytes(ListFile(target));
                 Expect(Refuses(() => connections.Verify(source, target, new[] { second })),
                     "A slot-only source accepted a target whose set differs (required id was present)");
+                Expect(File.ReadAllBytes(ListFile(target)).AsSpan().SequenceEqual(bytes),
+                    "A slot-only refusal overwrote the conflicting target");
             });
 
             // In place: the value Read exposes must equal the authoritative set; the required id is on both sides.
@@ -315,9 +361,14 @@ public static class ConnectionsChecks
                     File.WriteAllText(path, "abandoned");
                     abandoned.Add(path);
                 }
-                Expect(connections.Verify(source, target, new[] { first }) is not null,
-                    "An abandoned same-second stage blocked the next attempt");
-                Expect(abandoned.All(File.Exists), "An abandoned prior attempt's stage was removed or reused");
+                var published = false;
+                var collision = string.Empty;
+                try { published = connections.Verify(source, target, new[] { first }) is not null; }
+                catch (Exception error) { collision = " (" + error.Message + ")"; }
+                Expect(published, "An abandoned same-second stage blocked the next attempt" + collision);
+                Expect(connections.Read(target).SequenceEqual(new[] { first }), "The published target membership is missing");
+                Expect(abandoned.All(File.Exists) && abandoned.All(file => File.ReadAllText(file) == "abandoned"),
+                    "An abandoned prior attempt's stage was removed or changed");
             });
             Case(failures, "predecessor append validation and valid prefix", () =>
             {
@@ -436,6 +487,17 @@ public static class ConnectionsChecks
             ["AdditionalConnections"] = Array.Empty<object>()
         });
 
+    private static readonly string ValidDate = JsonSerializer.SerializeToElement(DateTimeOffset.UnixEpoch).GetString()!;
+
+    private static string DatedBinding(string explicitId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["ConnectionId"] = explicitId,
+            ["AccountId"] = "acct-dated",
+            ["ConnectedUtc"] = ValidDate,
+            ["AdditionalConnections"] = Array.Empty<object>()
+        });
+
     private static string TypedRetainedBinding(string explicitId) =>
         JsonSerializer.Serialize(new Dictionary<string, object?>
         {
@@ -443,6 +505,44 @@ public static class ConnectionsChecks
             ["AccountId"] = "acct-typed",
             ["RetainedConnections"] = new[] { new Dictionary<string, object?> { ["ConnectionId"] = 123 } }
         });
+
+    private static string RetainedUnknownCapability(string explicitId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["ConnectionId"] = explicitId,
+            ["AccountId"] = "acct-typed",
+            ["RetainedConnections"] = new[]
+            {
+                ProviderRecord(new Dictionary<string, object?>
+                {
+                    ["ContentRead"] = true,
+                    ["FutureCapability"] = "ignored"
+                })
+            }
+        });
+
+    private static string RetainedWrongKnownCapability(string explicitId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["ConnectionId"] = explicitId,
+            ["AccountId"] = "acct-typed",
+            ["RetainedConnections"] = new[] { ProviderRecord(new Dictionary<string, object?> { ["ContentRead"] = "yes" }) }
+        });
+
+    private static Dictionary<string, object?> ProviderRecord(Dictionary<string, object?> capabilities) => new()
+    {
+        ["ConnectionId"] = "retained-fixture",
+        ["Provider"] = "dropbox",
+        ["AccountId"] = "retained-account",
+        ["RootNamespaceId"] = "retained-root",
+        ["HomeNamespaceId"] = "retained-home",
+        ["DisplayName"] = "Retained",
+        ["Email"] = "retained@example.invalid",
+        ["AccountType"] = "basic",
+        ["CredentialReference"] = "retained-target",
+        ["IsActive"] = false,
+        ["Capabilities"] = capabilities
+    };
 
     /// <summary>Writes one 0.3.95 alternating slot with the predecessor's record shape and payload hash.</summary>
     private static string Slot(string root, char slot, long generation, bool present, string[] ids, string? hash = null) =>
@@ -491,15 +591,15 @@ public static class ConnectionsChecks
     private static string LegacyRecovery(string? evidenceFile) =>
         LegacyRecord(1, "recovery", null, evidenceFile is null ? "{}" : RecoveryJson(evidenceFile));
 
-    private static string RecoveryJson(string evidenceFile, bool wrongByteCount = false) =>
+    private static string RecoveryJson(string evidenceFile, bool wrongByteCount = false, bool nullAncillary = false) =>
         JsonSerializer.Serialize(new Dictionary<string, object?>
         {
             ["EvidenceFile"] = evidenceFile,
-            ["OriginalSha256"] = new string('0', 64),
+            ["OriginalSha256"] = nullAncillary ? null : new string('0', 64),
             ["ValidPrefixByteLength"] = 0,
             ["BadByteLength"] = wrongByteCount ? "12" : 0,
-            ["BadSha256"] = new string('0', 64),
-            ["Outcome"] = "tombstone"
+            ["BadSha256"] = nullAncillary ? null : new string('0', 64),
+            ["Outcome"] = nullAncillary ? null : "tombstone"
         });
 
     private static string LegacyRecord(object schema, string operation, string? valueJson, string? recoveryJson,
