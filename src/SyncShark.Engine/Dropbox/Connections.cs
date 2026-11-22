@@ -250,8 +250,9 @@ public sealed class Connections
     private static ListShape ListForm(string path)
     {
         if (!File.Exists(path)) return ListShape.Absent;
-        if (new FileInfo(path).Length is 0 or > MaximumStateBytes) return ListShape.Append;
+        if (new FileInfo(path).Length > MaximumStateBytes) return ListShape.Append;
         var bytes = File.ReadAllBytes(path);
+        if (bytes.Length == 0) return ListShape.Canonical; // our empty canonical list
         foreach (var line in TerminatedLines(bytes))
         {
             if (line.Length == 0) continue;
@@ -262,8 +263,8 @@ public sealed class Connections
             }
             catch (JsonException) { return ListShape.Append; }
         }
-        // An existing file with no non-empty terminated line is our empty canonical list.
-        return ListShape.Canonical;
+        // No terminated record at all: a partial tail is the predecessor's ignored suffix, not our canonical list.
+        return ListShape.Append;
     }
 
     /// <summary>Our canonical list: every terminated line is a JSON string id; a partial tail refuses.</summary>
