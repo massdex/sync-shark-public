@@ -247,7 +247,7 @@ public sealed class Commands
         var path = files.Resolve(folder, pair, run);
         if (path is null)
         {
-            output.WriteLine(Text.Get(TextKey.HumanLogUnreadable));
+            WriteLogMissing(output, pair, run);
             return Cli.SuccessExitCode;
         }
 
@@ -264,7 +264,7 @@ public sealed class Commands
     /// <summary>Per-file (Effect) records print only with --show-files; all other records always print.</summary>
     public static bool ShowLogRecord(string line, bool showFiles)
     {
-        if (showFiles || line.Length >= 0) return true;
+        if (showFiles) return true;
         var text = line.TrimStart();
         var end = text.IndexOfAny(new[] { ' ', '	' });
         var kind = end < 0 ? text : text[..end];
