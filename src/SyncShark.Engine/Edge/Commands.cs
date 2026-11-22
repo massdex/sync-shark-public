@@ -110,8 +110,8 @@ public sealed class Commands
         var result = await host.SetExclusionAsync(pairId, exclusion, include: false, confirmed, ct).ConfigureAwait(false);
 
         if (result.Applied) output.WriteLine(RenderExclusionApplied(rel));
-        else if (result.Cause is { } cause) output.WriteLine(Text.Get(cause, (TextArg.Path, rel)));
-        else if (confirmed) output.WriteLine(RenderExclusionApplied(rel));
+        else if (result.Cause is { } cause) { output.WriteLine(Text.Get(cause, (TextArg.Path, rel))); return Cli.TransientExitCode; }
+        else if (confirmed) { output.WriteLine(Text.Get(TextKey.WaitItemRetry)); return Cli.TransientExitCode; }
         else output.WriteLine(RenderExclusionPreview(rel, side, result.CopyFiles, result.CopyBytes,
                 result.RemoveFiles, result.RemoveBytes, result.RecoveryPlace ?? string.Empty));
         return Cli.SuccessExitCode;
@@ -162,16 +162,14 @@ public sealed class Commands
         var pairId = invocation.Value(OptionKeys.Pair);
         var spec = invocation.Value(OptionKeys.Rules);
         if (pairId is null || spec is null) return Cli.UsageExitCode;
-        IReadOnlyList<string> rules;
         try
         {
-            rules = IgnoreRule.ParseForEdit(spec).Select(IgnoreRule.Format).ToArray();
+            await host.SetIgnoresAsync(pairId, [spec], ct).ConfigureAwait(false);
         }
         catch (InvalidDataException error)
         {
             throw new EngineRequestException(TextKey.IgnoreRulesInvalid, (TextArg.Message, error.Message));
         }
-        await host.SetIgnoresAsync(pairId, rules, ct).ConfigureAwait(false);
         return Cli.SuccessExitCode;
     }
 
@@ -296,9 +294,6 @@ public sealed class Commands
     /// <summary>The applied exclusion sentence.</summary>
     public static string RenderExclusionApplied(string path) => Text.Get(TextKey.ResultExcludeApplied, (TextArg.Path, path));
 
-    /// <summary>The blocked exclusion sentence.</summary>
-    public static string RenderExclusionBlocked(string path) => Text.Get(TextKey.ResultExcludeBlocked, (TextArg.Path, path));
-
     /// <summary>The destructive-exclusion warning: the recovery destination together with the recovery period.</summary>
     public static string RenderExclusionPreview(string path, Side side, long copyFiles, long copyBytes,
         long removeFiles, long removeBytes, string recoveryPlace) =>
@@ -335,8 +330,8 @@ public sealed class Commands
 
     internal static ResolutionChoice ParseChoice(string value)
     {
-        var name = new string(value.Where(char.IsLetterOrDigit).ToArray());
-        return Enum.Parse<ResolutionChoice>(name, ignoreCase: true);
+        var entry = Cli.Definitions.Choices.First(pair => string.Equals(pair.Value, value, StringComparison.Ordinal));
+        return Enum.Parse<ResolutionChoice>(entry.Key);
     }
 
     internal static bool TryParseSide(string value, out Side side) => Enum.TryParse(value, ignoreCase: true, out side);

@@ -33,11 +33,9 @@ public static class CommandsChecks
         Check.Require(Commands.RenderPairRemoved("pair-1").Contains("pair-1", StringComparison.Ordinal),
             "removed sentence lost the pair id");
 
-        // Applied and blocked exclusion sentences name the path; the ignore listing prints a line per rule.
+        // The applied exclusion sentence names the path; the ignore listing prints a line per rule.
         Check.Require(Commands.RenderExclusionApplied("Child").Contains("Child", StringComparison.Ordinal),
             "applied exclusion lost the path");
-        Check.Require(Commands.RenderExclusionBlocked("Child").Contains("Child", StringComparison.Ordinal),
-            "blocked exclusion lost the path");
         var ignores = Commands.RenderIgnores("pair-1", ["FileExtension:.tmp"]);
         Check.Require(ignores.Contains("pair-1", StringComparison.Ordinal) &&
             ignores.Contains("FileExtension:.tmp", StringComparison.Ordinal), "ignore listing lost its facts");

@@ -41,7 +41,7 @@ public static class Cli
             return Commands.ReadLogs(invocation, files, output, ct);
 
         var result = await new HostClient().SendAsync(args, output, error, ct).ConfigureAwait(false);
-        return await ResolveSend(invocation.CommandKey, result, output, error,
+        return await ResolveSend(invocation.CommandKey, result, output,
             c => new HostClient().SendAsync(args, output, error, c),
             c => HostClient.StartAsync(c), ct).ConfigureAwait(false);
     }
@@ -50,7 +50,7 @@ public static class Cli
     /// never replayed; a null exit is definite pre-send absence, where a read renders HostNotRunning and an eligible
     /// command may start the host and send exactly once.</summary>
     public static async Task<int> ResolveSend(string commandKey, (int? ExitCode, bool ReceivedExit) result,
-        TextWriter output, TextWriter error,
+        TextWriter output,
         Func<CancellationToken, Task<(int? ExitCode, bool ReceivedExit)>> sendAgain,
         Func<CancellationToken, Task<int>> startHost, CancellationToken ct)
     {

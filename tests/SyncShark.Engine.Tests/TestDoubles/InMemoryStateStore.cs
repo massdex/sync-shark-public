@@ -295,9 +295,14 @@ public sealed class InMemoryStateStore : IStore
     }
     public Task ResetJournalAsync(string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();var ids=affectedPairs.Distinct(StringComparer.Ordinal).ToArray();
-        lock(pairs) { if(ids.Any(id=>!pairs.ContainsKey(id))) throw new InvalidDataException("Unknown volume member");
-            foreach(var id in ids) Owe(id,Side.Local,reason); positions[volume]=fresh; }
+        lock (pairs)
+        {
+            ct.ThrowIfCancellationRequested();
+            foreach (var pair in pairs.Values)
+                if (pair.Roots?.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) == volume)
+                    Owe(pair.PairId, Side.Local, reason);
+            positions[volume] = fresh;
+        }
         return Task.CompletedTask;
     }
     public Task ResetCursorAsync(string pairId, string fresh, string reason, CancellationToken ct)

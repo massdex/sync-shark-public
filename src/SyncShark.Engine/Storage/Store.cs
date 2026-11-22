@@ -135,7 +135,7 @@ public sealed class Store : IStore
     /// <summary>In one transaction match the reviewed drive notice and publish the chosen pair; only FirstSync resets bindings and first Repair.</summary>
     public Task<bool> ResolveDriveAsync(PairConfig pair, Notice reviewed, ResolutionChoice choice, CancellationToken ct) => pairs.ResolveDriveAsync(Connection, pair, reviewed, choice, ct);
     /// <summary>Stream notices whose members overlap the mapped footprint on their own side, including covering ancestors.</summary>
-    public IAsyncEnumerable<Notice> NoticesUnderAsync(string pairId, Scope footprint, CancellationToken ct) => notices.NoticesUnderAsync(Connection, pairId, footprint, ct);
+    public IAsyncEnumerable<Notice> NoticesUnderAsync(string pairId, Scope footprint, CancellationToken ct) => notices.NoticesUnderAsync(Connection, pairId, footprint, settings.StoragePageSize, ct);
     /// <summary>Add or retire only this observed link member; close the pair-wide link notice only when no members remain.</summary>
     public Task UpdateLinkMemberAsync(string pairId, NoticeItem member, bool present, CancellationToken ct) => notices.UpdateLinkMemberAsync(Connection, pairId, member, present, ct);
     /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>

@@ -21,12 +21,16 @@ public sealed class DropboxApi
     public Task<System.Text.Json.JsonDocument> CallJsonAsync(string route, string argumentJson, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Decode one authenticated listing page from the response stream; the decoder owns its spool.</summary>
     public Task<DropboxPage> ReadPageAsync(string route, string argumentJson, PairConfig pair, CancellationToken ct) => throw new NotImplementedException();
-    /// <summary>LongpollAsync for the selected DropboxApi operation.</summary>
-    public Task<bool> LongpollAsync(string cursor, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Return the change flag and the provider backoff for this feed only.</summary>
+    public Task<(bool Changes, TimeSpan? Backoff)> LongpollAsync(string cursor, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>DownloadAsync for the selected DropboxApi operation.</summary>
     public Task<Stream> DownloadAsync(string route, string argumentJson, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Bind an account and namespace while sharing the host's transport limiter.</summary>
     public DropboxApi CreateAccountScope(Action<RunEvent> events, Func<CancellationToken, ValueTask<string?>>? accessToken, string? pathRootNamespaceId) => throw new NotImplementedException();
+    /// <summary>Classify a refused response through the shared bounded reader.</summary>
+    internal Task ThrowFailureAsync(HttpResponseMessage response, string route, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Accept busy feedback once per classified HTTP refusal, not once per batch member.</summary>
+    internal void ReportBusy(System.Net.HttpStatusCode status, DropboxErrors.Classified failure, TimeSpan? wait, long received) => throw new NotImplementedException();
     /// <summary>WaitAsync for the selected DropboxApi operation.</summary>
     public Task WaitAsync(TimeSpan delay, CancellationToken ct) => throw new NotImplementedException();
 }

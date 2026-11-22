@@ -37,12 +37,14 @@ $thumb=@($publisher.thumbprints)
 $subject=$publisher.subject
 $spki=@($publisher.spki)
 $encoding=[Text.UTF8Encoding]::new($false)
-$namesSource = [IO.File]::ReadAllText((Join-Path $repo 'src/SyncShark.Engine/ResourceNames.cs'))
-$signable = @(foreach ($key in 'HostExecutable','CliExecutable') {
-    $matchesForKey = [regex]::Matches($namesSource, ('public const string ' + $key + ' = "([A-Za-z0-9 .-]+[.]exe)";'))
-    if ($matchesForKey.Count -ne 1) { throw "Missing or ambiguous ResourceNames.$key" }
-    $matchesForKey[0].Groups[1].Value
-})
+# Read the frozen build's product layout once, including the paths supplied by the house builder.
+Assert-SyncSharkOrdinaryTree $publish
+$engine = Join-Path $publish 'SyncShark.Engine.dll'
+if ([Diagnostics.FileVersionInfo]::GetVersionInfo($engine).ProductVersion -cne $expectedVersion) { throw 'Published engine revision mismatch.' }
+$names = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($engine)).GetType('Massdex.SyncShark.Engine.ResourceNames',$true)
+$installedFiles = @($names::InstalledFiles)
+$signable = @($names::HostExecutable,$names::CliExecutable)
+$runtimeFiles = @($installedFiles | Where-Object { !$_.StartsWith('tools/',[StringComparison]::Ordinal) })
 $setupName = "SyncShark-Setup-v$version.exe"
 $setup = Join-Path $deploy $setupName
 function Get-ReleasePredecessor {
@@ -50,7 +52,9 @@ function Get-ReleasePredecessor {
     if($PredecessorReleaseRoot) {
         $predecessorRelease=[IO.Path]::GetFullPath($PredecessorReleaseRoot)
         Assert-SyncSharkWithin $allocation $predecessorRelease;Assert-SyncSharkOrdinaryTree $predecessorRelease -RootOnly
-        $previous=Join-Path $predecessorRelease 'package\signed-candidate';Assert-SyncSharkOrdinaryTree $previous
+        $previous=Join-Path $predecessorRelease 'house-stage/app'
+        if (![IO.Directory]::Exists($previous)) { $previous=Join-Path $predecessorRelease 'package/signed-candidate' }
+        Assert-SyncSharkOrdinaryTree $previous
         $previousInstaller=Join-Path $predecessorRelease 'deploy-scripts\Install-SyncShark.ps1'
         Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $previousInstaller) $thumb $subject $subject $spki
         $reader=[IO.File]::OpenText($previousInstaller)
@@ -101,12 +105,11 @@ if ($Step -eq 'Stage') {
             throw ('Published version/source mismatch: '+$name)
         }
     }
-    $members = @(Get-ChildItem -LiteralPath $publish -File -Force -Recurse | ForEach-Object {
-        $relative = [IO.Path]::GetRelativePath($publish,$_.FullName).Replace([IO.Path]::DirectorySeparatorChar,'/')
-        if ($_.Extension -ieq '.pdb') { return }
-        if (($_.Extension -ieq '.exe' -and $relative -cnotin $signable) -or $relative -match '(^tools/|Discovery|Explorer|^SyncShark\.Core\.dll$|\.msix$)') { throw "Unexpected member in published runtime: $relative" }
-        $relative
+    $members = $runtimeFiles
+    $published = @(Get-ChildItem -LiteralPath $publish -File -Recurse -Force | Where-Object Extension -ine '.pdb' | ForEach-Object {
+        [IO.Path]::GetRelativePath($publish,$_.FullName).Replace([IO.Path]::DirectorySeparatorChar,'/')
     })
+    if (Compare-Object $members $published -CaseSensitive) { throw 'Published runtime differs from ResourceNames.InstalledFiles.' }
     $inputs=@{}
     foreach ($name in $members) {
         $path=Join-Path $publish $name
@@ -137,36 +140,55 @@ foreach ($name in $signable) { $signed[$name]=Get-SyncSharkSha256 (Join-Path $pa
 $manifestHash=Get-SyncSharkSha256 $manifestPath
 Assert-SyncSharkExactPackage $package $manifestPath $manifestHash $expectedVersion $signed $thumb $subject $subject $spki '' $false
 
+$stageOutput = Join-Path $release 'house-stage'
+$payloadRoot = Join-Path $stageOutput 'app'
+$payloadManifest = Join-Path $release 'package/payload-manifest.json'
 if ($Step -eq 'Setup') {
+    & (Join-Path $PSScriptRoot 'Build-SyncSharkSetup.ps1') -PublishedApp $package -OutputDirectory $stageOutput -StageOnly
+    Assert-SyncSharkOrdinaryTree $payloadRoot
+    $rows = @(Get-SyncSharkTreeManifest $payloadRoot)
+    if (Compare-Object $installedFiles @($rows.path) -CaseSensitive) { throw 'Staged house payload differs from ResourceNames.InstalledFiles.' }
+    foreach ($member in $runtimeFiles) {
+        if ((Get-SyncSharkSha256 (Join-Path $payloadRoot $member)) -cne (Get-SyncSharkSha256 (Join-Path $package $member))) { throw "Staging changed a runtime member: $member" }
+    }
+    if ([IO.File]::Exists($payloadManifest)) { throw 'Refusing to replace a staged payload manifest.' }
+    [IO.File]::WriteAllText($payloadManifest,([ordered]@{version=$version;source_commit=$SourceCommit;members=$rows}|ConvertTo-Json -Depth 6),$encoding)
     & (Join-Path $PSScriptRoot 'Build-SyncSharkSetup.ps1') -PublishedApp $package -OutputDirectory $deploy
     exit
 }
+$package = $payloadRoot
+$manifestPath = $payloadManifest
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ($manifest.source_commit -cne $SourceCommit -or $manifest.version -cne $version -or (Compare-Object $installedFiles @($manifest.members.path) -CaseSensitive)) { throw 'Staged payload contract differs from the release.' }
+$manifestHash=Get-SyncSharkSha256 $manifestPath
+Assert-SyncSharkExactPackage $package $manifestPath $manifestHash $expectedVersion $signed $thumb $subject $subject $spki '' $false
 Assert-SyncSharkSignatureObservation (Get-SyncSharkSignatureObservation $setup) $thumb $subject $subject $spki
 # Bind the actual embedded payload, not just the setup filename or signer.
 $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($setup))
 $payload = $assembly.GetManifestResourceStream('payload.zip')
 $zip = [IO.Compression.ZipArchive]::new($payload,[IO.Compression.ZipArchiveMode]::Read)
 try {
-    $remaining = @{}
-    foreach ($member in $manifest.members) { $remaining[$member.path] = Get-SyncSharkSha256 (Join-Path $package $member.path) }
+    $remaining = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    foreach ($member in $manifest.members) { $remaining.Add($member.path,$member.sha256) }
     foreach ($entry in $zip.Entries) {
         if (!$entry.Name) { continue }
         $name = $entry.FullName.Replace([IO.Path]::DirectorySeparatorChar,'/'); $source=$entry.Open()
         try { $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($source)).ToLowerInvariant() } finally { $source.Dispose() }
-        if ($hash -cne $remaining[$name]) { throw "Unexpected setup payload: $name" }; $remaining.Remove($name)
+        if (!$remaining.ContainsKey($name) -or $hash -cne $remaining[$name]) { throw "Unexpected setup payload: $name" }; [void]$remaining.Remove($name)
     }
     if ($remaining.Count) { throw 'Incomplete setup payload.' }
 } finally { $zip.Dispose(); $payload.Dispose() }
 if ($Step -eq 'SignedScripts') {
-    foreach ($name in @('Install-SyncShark.ps1','SyncShark.Release.psm1')) {
+    foreach ($name in @('Install-SyncShark.ps1','SyncShark.Release.psm1','SyncShark.Registration.psm1')) {
         if (Test-Path -LiteralPath (Join-Path $deploy $name)) { throw 'Generated scripts already exist; do not overwrite or repeat signing.' }
     }
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'SyncShark.Release.psm1') -Destination $deploy
+    foreach ($module in 'SyncShark.Release.psm1','SyncShark.Registration.psm1') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $module) -Destination $deploy }
     $contract=[ordered]@{
         product='Massdex.SyncShark';version=$version;sourceRevision=$SourceCommit
-        previousVersion=$metadata.PreviousVersion
+        previousVersion=$metadata.PreviousVersion;previousTreeSha256=$metadata.PreviousTreeSha256
+        registrationSha256=(Get-SyncSharkSha256 (Join-Path $deploy 'SyncShark.Registration.psm1'))
         moduleSha256=(Get-SyncSharkSha256 (Join-Path $deploy 'SyncShark.Release.psm1'));manifestSha256=$manifestHash
-        signedMembers=$signed; setupSha256=(Get-SyncSharkSha256 $setup); hostExecutable=$signable[0]
+        signedMembers=$signed; setupSha256=(Get-SyncSharkSha256 $setup); hostExecutable=$signable[0];cliExecutable=$signable[1]
         runtimeMembers=@(foreach($member in $manifest.members){$path=Join-Path $package $member.path;
             [ordered]@{path=$member.path;bytes=(Get-Item -LiteralPath $path).Length;sha256=(Get-SyncSharkSha256 $path)}})
     }
@@ -193,8 +215,10 @@ foreach ($name in @('Install-SyncShark.ps1')) {
     $contract=$header.Substring($prefix.Length)|ConvertFrom-Json
     if ($contract.product -cne 'Massdex.SyncShark' -or $contract.version -cne $version -or
         $contract.sourceRevision -cne $SourceCommit -or
-        $contract.previousVersion -cne $metadata.PreviousVersion -or
+        $contract.previousVersion -cne $metadata.PreviousVersion -or $contract.previousTreeSha256 -cne $metadata.PreviousTreeSha256 -or
+        $contract.hostExecutable -cne $signable[0] -or $contract.cliExecutable -cne $signable[1] -or
         $contract.manifestSha256 -cne $manifestHash -or
+        $contract.registrationSha256 -cne (Get-SyncSharkSha256 (Join-Path $deploy 'SyncShark.Registration.psm1')) -or
         $contract.moduleSha256 -cne (Get-SyncSharkSha256 (Join-Path $deploy 'SyncShark.Release.psm1'))) {
         throw 'Signed release contract no longer binds this exact package and predecessor.'
     }
@@ -212,8 +236,8 @@ $stream=[IO.File]::Open($archive,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadW
 try {
     $zip=[IO.Compression.ZipArchive]::new($stream,[IO.Compression.ZipArchiveMode]::Create,$true)
     try {
-        $sources=@{ 'package/unsigned-candidate-framework-manifest.json'=$manifestPath }
-        foreach ($name in @('Install-SyncShark.ps1','SyncShark.Release.psm1')) { $sources['scripts/'+$name]=Join-Path $deploy $name }
+        $sources=@{ 'package/payload-manifest.json'=$manifestPath }
+        foreach ($name in @('Install-SyncShark.ps1','SyncShark.Release.psm1','SyncShark.Registration.psm1')) { $sources['scripts/'+$name]=Join-Path $deploy $name }
         $sources['scripts/'+$setupName]=$setup
         foreach ($member in $manifest.members) { $sources['package/signed-candidate/'+$member.path]=Join-Path $package $member.path }
         foreach ($name in ($sources.Keys|Sort-Object)) {

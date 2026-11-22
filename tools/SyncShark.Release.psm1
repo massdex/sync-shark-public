@@ -1,8 +1,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if ($PSVersionTable.PSVersion -lt [version]'7.4') {
-    throw 'Release preparation, installation and updates require PowerShell 7.4 or newer. Use system pwsh.exe or set SYNCSHARK_PWSH_PATH to the bundled pwsh.exe; Windows PowerShell 5.1 is not supported.'
-}
+# Release verification needs the .NET cryptography APIs shipped with PowerShell 7.4.
+#Requires -Version 7.4
+Import-Module (Join-Path $PSScriptRoot 'SyncShark.Registration.psm1') -Scope Local
 
 # The signer identity is the single source of truth for release trust and accepts
 # a LIST per role so an old and a replacement key verify during the switch. The
@@ -41,10 +41,6 @@ function Get-SyncSharkSha256([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-function Get-SyncSharkNormalizedPath([string]$Path) {
-    [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar,
-        [IO.Path]::AltDirectorySeparatorChar)
-}
 
 function Assert-SyncSharkWithin([string]$Root, [string]$Path) {
     $rootPath = (Get-SyncSharkNormalizedPath $Root) + [IO.Path]::DirectorySeparatorChar
@@ -54,22 +50,6 @@ function Assert-SyncSharkWithin([string]$Root, [string]$Path) {
     }
 }
 
-function Assert-SyncSharkOrdinaryTree([string]$Root, [switch]$AllowMissing, [switch]$RootOnly) {
-    if (-not (Test-Path -LiteralPath $Root)) {
-        if ($AllowMissing) { return }
-        throw "Missing tree: $Root"
-    }
-    $rootItem = Get-Item -LiteralPath $Root -Force
-    if (-not $rootItem.PSIsContainer) { throw "Expected a directory: $Root" }
-    if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Mutable tree root is a reparse point: $Root"
-    }
-    if ($RootOnly) { return }
-    $reparse = Get-ChildItem -LiteralPath $Root -Force -Recurse |
-        Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } |
-        Select-Object -First 1
-    if ($reparse) { throw "Mutable tree contains a reparse point: $($reparse.FullName)" }
-}
 
 function Assert-SyncSharkTransactionTree([string]$Root, [string[]]$AllowedReparsePaths) {
     if (-not (Test-Path -LiteralPath $Root)) { return }
@@ -107,40 +87,8 @@ function Get-SyncSharkTreeIdentity([string]$Root) {
         [Text.UTF8Encoding]::new($false).GetBytes($json))).ToLowerInvariant()
 }
 
-function Get-SyncSharkJunctionTarget([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { return $null }
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.LinkType -cne 'Junction') { throw "Expected a junction: $Path" }
-    Get-SyncSharkNormalizedPath ([string]$item.Target)
-}
 
-function Assert-SyncSharkJunction([string]$Path, [string]$Target) {
-    $actual = Get-SyncSharkJunctionTarget $Path
-    if ($null -eq $actual -or $actual -cne (Get-SyncSharkNormalizedPath $Target)) {
-        throw "Junction target mismatch: $Path"
-    }
-}
 
-function Resolve-SyncSharkProductRoot([string]$TestProductRoot) {
-    if ([string]::IsNullOrWhiteSpace($TestProductRoot)) {
-        $localApplicationData = [Environment]::GetFolderPath('LocalApplicationData')
-        if ([string]::IsNullOrWhiteSpace($localApplicationData) -or
-            -not [IO.Path]::IsPathFullyQualified($localApplicationData)) {
-            throw 'The current Windows user has no absolute LocalApplicationData folder.'
-        }
-        return Join-Path $localApplicationData 'Massdex\SyncShark'
-    }
-    if ($env:SYNC_SHARK_RELEASE_TEST_MODE -cne '1') {
-        throw 'The test product-root seam is disabled.'
-    }
-    $testBase = Join-Path ([IO.Path]::GetTempPath()) 'sync-shark-release-tests'
-    $base = (Get-SyncSharkNormalizedPath $testBase) + [IO.Path]::DirectorySeparatorChar
-    $resolved = Get-SyncSharkNormalizedPath $TestProductRoot
-    if (-not $resolved.StartsWith($base, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'The test product root must be a child of the fixed Sync Shark release-test root.'
-    }
-    $resolved
-}
 
 function Resolve-SyncSharkDataRoot([string]$InstallationRoot, [switch]$AllowMissingLeaf) {
     $pointer = Join-Path $InstallationRoot 'product-root.txt'
@@ -165,10 +113,6 @@ function Resolve-SyncSharkDataRoot([string]$InstallationRoot, [switch]$AllowMiss
     $root
 }
 
-function Resolve-SyncSharkRuntimeRoot([string]$Version,[string]$TestProductRoot='') {
-    if($Version -cnotmatch '^\d+\.\d+\.\d+$'){throw 'An exact runtime version is required.'}
-    Join-Path (Resolve-SyncSharkProductRoot $TestProductRoot) ('versions/'+$Version)
-}
 
 function Read-SyncSharkJournal([string]$Path, [string]$Operation, [string]$Version,
     [string]$Commit, [string]$ProductRoot, [string[]]$AllowedSteps) {
@@ -499,80 +443,6 @@ function Invoke-SyncSharkWithInstanceMaintenanceLease {
 
 # Windows ARP values: https://learn.microsoft.com/windows/win32/msi/uninstall-registry-key
 # Per-user Programs folder / shell links: https://learn.microsoft.com/windows/win32/shell/links
-function Invoke-SyncSharkAppRegistration {
-    param([string]$Version,[ValidateSet('Register','Remove','Verify','VerifyAbsent')][string]$Operation)
-    if ($Version -cnotmatch '^\d+\.\d+\.\d+$') { throw 'An exact registration version is required.' }
-    $root = Resolve-SyncSharkProductRoot ''
-    $runtime = Join-Path $root 'active'
-    $executable = Join-Path $runtime 'SyncShark.exe'
-    $uninstall = '"' + (Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe') + '" -NoProfile -ExecutionPolicy Bypass -File "' +
-        (Join-Path $runtime 'tools\SyncShark.Uninstall.ps1') + '"'
-    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Massdex.SyncShark'
-    $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Massdex\Sync Shark.lnk'
-    $owner = 'Massdex.SyncShark:' + $root
-    $values = @{ DisplayName='Sync Shark'; DisplayVersion=$Version; Publisher='Massdex';
-        InstallLocation=(Resolve-SyncSharkRuntimeRoot $Version); UninstallString=$uninstall; SyncSharkOwner=$owner }
-    $existing = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
-    # An empty key can survive creation before the first value; provider metadata is not a value.
-    $keyExists = Test-Path -LiteralPath $key
-    $emptyKey = $false
-    if ($keyExists) {
-        $registryKey = Get-Item -LiteralPath $key -ErrorAction Stop
-        try { $emptyKey = $registryKey.ValueCount -eq 0 -and $registryKey.SubKeyCount -eq 0 }
-        finally { if ($registryKey -is [IDisposable]) { $registryKey.Dispose() } }
-    }
-    if ($keyExists -and -not $emptyKey -and ($null -eq $existing -or $null -eq $existing.PSObject.Properties['SyncSharkOwner'] -or
-            $existing.SyncSharkOwner -cne $owner)) {
-        throw 'Another installation owns the uninstall registration. Nothing was changed.'
-    }
-    $shell = New-Object -ComObject WScript.Shell
-    try {
-        $link = $null
-        if (Test-Path -LiteralPath $shortcut) {
-            $item = Get-Item -LiteralPath $shortcut -Force
-            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-                throw 'The Start-menu shortcut must be an ordinary file.'
-            }
-            $link = $shell.CreateShortcut($shortcut)
-            if ($link.TargetPath -ine $executable -or $link.Arguments -notin @('', '--cli engine host start --yes')) {
-                throw 'Another application owns the Start-menu shortcut. Nothing was changed.'
-            }
-        }
-        if ($Operation -eq 'Register') {
-            Assert-SyncSharkJunction $runtime $values.InstallLocation
-            if (-not (Test-Path -LiteralPath (Join-Path $runtime 'tools\SyncShark.Uninstall.ps1') -PathType Leaf)) {
-                throw 'The installed uninstall entry point is missing.'
-            }
-            if (-not $keyExists) { New-Item -Path $key | Out-Null }
-            # Ownership precedes descriptive fields so an interrupted owned write can be replayed.
-            New-ItemProperty -LiteralPath $key -Name 'SyncSharkOwner' -Value $owner -PropertyType String -Force | Out-Null
-            foreach ($name in $values.Keys | Where-Object { $_ -cne 'SyncSharkOwner' }) {
-                New-ItemProperty -LiteralPath $key -Name $name -Value $values[$name] -PropertyType String -Force | Out-Null
-            }
-            if ($null -eq $link) {
-                $folder = Split-Path -Parent $shortcut
-                Assert-SyncSharkOrdinaryTree $folder -RootOnly -AllowMissing
-                [void][IO.Directory]::CreateDirectory($folder)
-                $link = $shell.CreateShortcut($shortcut)
-            }
-            $link.TargetPath=$executable; $link.Arguments='--cli engine host start --yes'; $link.WorkingDirectory=$runtime; $link.Save()
-        } elseif ($Operation -eq 'Remove') {
-            if ($null -ne $link) { Remove-Item -LiteralPath $shortcut }
-            if ($keyExists) { Remove-Item -LiteralPath $key }
-        } elseif ($Operation -eq 'VerifyAbsent') {
-            if ($null -ne $link -or $keyExists) { throw 'Application registration remains.' }
-        } else {
-            if ($null -eq $link -or $null -eq $existing) { throw 'Application registration is missing.' }
-            if ($link.Arguments -cne '--cli engine host start --yes') { throw 'Start menu must launch the engine host.' }
-            foreach ($name in $values.Keys) {
-                if ($existing.$name -cne $values[$name]) { throw "Application registration differs: $name" }
-            }
-        }
-    } finally {
-        if ($null -ne $link -and [Runtime.InteropServices.Marshal]::IsComObject($link)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
-        if ([Runtime.InteropServices.Marshal]::IsComObject($shell)) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
-    }
-}
 
 function Initialize-SyncSharkSignatureInspector {
     if ('SyncShark.Release.SignatureInspector' -as [type]) { return }
@@ -833,7 +703,7 @@ function Get-SyncSharkSignedMemberHashes([object]$Contract) {
         if ($property.Name -notmatch '^[^/\\:]+\.exe$' -or $property.Value -cnotmatch '^[0-9a-f]{64}$') { throw 'Invalid signed executable identity.' }
         $result.Add($property.Name,[string]$property.Value)
     }
-    if ($result.Count -ne 2) { throw 'Expected a signed host and CLI.' }
+    if ($Contract.hostExecutable -ieq $Contract.cliExecutable -or $result.Count -ne 2 -or $Contract.hostExecutable -cnotin $result.Keys -or $Contract.cliExecutable -cnotin $result.Keys) { throw 'Expected the exact signed host and CLI.' }
     return $result
 }
 

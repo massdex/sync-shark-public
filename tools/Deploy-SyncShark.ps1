@@ -2,10 +2,8 @@
 # Deploy:  pwsh -File <candidate outputDirectory>\tools\Deploy-SyncShark.ps1 -Build <candidate build root> -LauncherDir <launcher folder>
 # Recover: ... -Recover          Close a blocked transaction: ... -Close -Disposition <d>
 # Operating condition: no GUI, CLI, launcher or Repair use until the transaction is closed; refuse without effects otherwise.
-# Trust (coordinator ruling, review finding 6): the product binaries carry the pinned Authenticode signature; every
-# other file is covered by the manifest SHA256 tree check. Backups keep file and directory attributes and creation and
-# last-write times; ACLs are not copied (the data folder inherits its ACL). Launcher writes are temp then
-# File.Move(overwrite) rename-over (accepted amendment): the launchers are small .ps1 files whose metadata doesn't matter.
+# The signed house setup publishes the complete version and switches active once.
+# Build admission verifies pinned product signatures and manifest hashes; data backups retain file attributes and times.
 [CmdletBinding(DefaultParameterSetName = 'Deploy')]
 param(
     [Parameter(Mandatory, ParameterSetName = 'Deploy')][string]$Build,
@@ -46,7 +44,7 @@ for ($dir = Split-Path -Parent $ownOut; $dir; $dir = Split-Path -Parent $dir) {
 }
 if ($null -eq $ownManifest) { throw 'This script must run from <outputDirectory>\tools of a build whose manifest lists it.' }
 $modulePath = Join-Path $toolsDir 'SyncShark.Release.psm1'
-foreach ($pair in @(@('tools/SyncShark.Release.psm1', $modulePath), @('tools/Deploy-SyncShark.ps1', $PSCommandPath))) {
+foreach ($pair in @(@('tools/SyncShark.Release.psm1', $modulePath), @('tools/SyncShark.Registration.psm1', (Join-Path $toolsDir 'SyncShark.Registration.psm1')), @('tools/Deploy-SyncShark.ps1', $PSCommandPath))) {
     $entry = @($ownManifest.files | Where-Object { ([string]$_['path']).Replace('\', '/') -ieq $pair[0] })
     if ($entry.Count -ne 1) { throw "The candidate manifest does not list $($pair[0])." }
     if ((Get-FileHash -LiteralPath $pair[1] -Algorithm SHA256).Hash -ine [string]$entry[0]['sha256']) { throw "$($pair[0]) differs from its candidate manifest entry." }
@@ -185,14 +183,8 @@ function Get-LauncherExe([string]$Text, [string]$Pattern, [string]$Path) {
     if ($found.Count -ne 1) { throw "Expected exactly one exe reference in $Path (found $($found.Count))." }
     $found[0].Groups[2].Value
 }
-function Assert-Parse([string]$Text, [string]$Name) {
-    $tokens = $null; $errors = $null
-    [void][Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
-    if ($errors.Count) { throw "Parse errors in $Name : $($errors.Message -join '; ')" }
-}
-
 # ---- Build records and trust (step 1) ----
-function Read-BuildManifest([string]$Root) {
+function Read-BuildManifest([string]$Root,[switch]$Legacy) {
     $found = @(Get-ChildItem -LiteralPath $Root -Filter '*-manifest.json' -File -Force)
     if ($found.Count -ne 1) { throw "Expected exactly one *-manifest.json in $Root (found $($found.Count))." }
     $path = $found[0].FullName
@@ -202,8 +194,23 @@ function Read-BuildManifest([string]$Root) {
     if ((([IO.File]::ReadAllText($sidecar).Trim()) -split '\s+')[0] -ine $sha) { throw "Build manifest hash mismatch: $path" }
     $manifest = Read-Json $path
     $out = Get-SyncSharkNormalizedPath ([string]$manifest.outputDirectory)
+    $hostName='SyncShark.exe'; $cliName=$hostName
+    if (!$Legacy) {
+        $installer=Join-Path $Root ("release-$($manifest.version)/deploy-scripts/Install-SyncShark.ps1")
+        Assert-Isolated @($installer)
+        $signer=(Get-SyncSharkSignerIdentity).roles.publisher
+        Assert-SyncSharkSignatureObservation (Get-Observation $installer) $signer.thumbprints $signer.subject $signer.subject $signer.spki
+        $line=[IO.File]::ReadLines($installer) | Select-Object -First 1
+        $prefix='# SyncSharkUpdateContract: '
+        if (!$line.StartsWith($prefix,[StringComparison]::Ordinal)) { throw 'Installer contract missing.' }
+        $contract=$line.Substring($prefix.Length) | ConvertFrom-Json
+        if ($contract.product -cne 'Massdex.SyncShark' -or ($contract.version+'+'+$contract.sourceRevision) -cne $manifest.productVersion -or $contract.previousVersion -cne $manifest.expectedPreviousVersion) { throw 'Installer does not bind the selected builds.' }
+        $pins=Get-SyncSharkSignedMemberHashes $contract
+        foreach ($name in $pins.Keys) { if ((Get-SyncSharkSha256 (Join-Path $out $name)) -cne $pins[$name]) { throw "Signed build member differs: $name" } }
+        $hostName=$contract.hostExecutable; $cliName=$contract.cliExecutable
+    }
     [ordered]@{ root = (Get-SyncSharkNormalizedPath $Root); manifestPath = $path; manifestSha256 = $sha; outputDirectory = $out
-        exe = (Join-Path $out $(if (Test-Path -LiteralPath (Join-Path $out 'Sync Shark.exe')) { 'Sync Shark.exe' } else { 'SyncShark.exe' })); cliExe = $(if (Test-Path -LiteralPath (Join-Path $out 'syncshark.exe')) { Join-Path $out 'syncshark.exe' } else { $null }); productVersion = [string]$manifest.productVersion; version = [string]$manifest.version
+        exe=(Join-Path $out $hostName); cliExe=(Join-Path $out $cliName); installerSha256=$(if (!$Legacy) { Get-SyncSharkSha256 $installer }); productVersion=[string]$manifest.productVersion; version=[string]$manifest.version
         commit = [string]$manifest.commit; expectedPreviousVersion = [string]$manifest.expectedPreviousVersion; files = @($manifest.files) }
 }
 function Get-Observation([string]$Path) {
@@ -214,7 +221,7 @@ function Get-Observation([string]$Path) {
 }
 function Assert-Tree([System.Collections.IDictionary]$Side, [switch]$Legacy) {
     # Candidate: files[] equals the whole ordinary output tree. Legacy predecessor: every exe/dll listed (D:186-198).
-    $info = Read-BuildManifest $Side.root
+    $info = Read-BuildManifest $Side.root -Legacy:$Legacy
     if ($info.manifestSha256 -cne $Side.manifestSha256 -or -not (Same $info.outputDirectory $Side.outputDirectory)) {
         throw "Build manifest changed since admission: $($info.manifestPath)"
     }
@@ -247,12 +254,14 @@ function Assert-Tree([System.Collections.IDictionary]$Side, [switch]$Legacy) {
         if (-not $(if ($Legacy) { $actual.ContainsKey($name) } else { $listed.ContainsKey($name) })) { throw "Missing runtime metadata: $name" }
     }
     $signer = (Get-SyncSharkSignerIdentity).roles.publisher
-    $productBinaries = if ($Legacy) { $legacyBinaries } else { @('Sync Shark.exe','syncshark.exe') }
+    $productBinaries = if ($Legacy) { $legacyBinaries } else { @((Split-Path -Leaf $Side.exe),(Split-Path -Leaf $Side.cliExe)) }
     foreach ($name in $productBinaries) {
         if (-not $listed.ContainsKey($name.ToLowerInvariant())) { throw "Missing product binary: $name" }
         Assert-SyncSharkSignatureObservation (Get-Observation (Join-Path $out $name)) @($signer.thumbprints) $signer.subject $signer.subject @($signer.spki)
     }
-    if ([Diagnostics.FileVersionInfo]::GetVersionInfo($Side.exe).ProductVersion -cne $Side.productVersion) { throw "Product version mismatch: $($Side.exe)" }
+    foreach ($exe in @($Side.exe,$Side.cliExe) | Select-Object -Unique) {
+        if ([Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion -cne $Side.productVersion) { throw "Product version mismatch: $exe" }
+    }
 }
 function Find-Predecessor([string[]]$LauncherPaths, [string]$ExpectedPreviousVersion) {
     # Ruling 1: the build the launchers start, found by walking up from that exe's folder. No search, no "newest".
@@ -264,7 +273,7 @@ function Find-Predecessor([string[]]$LauncherPaths, [string]$ExpectedPreviousVer
     $side = $null
     for ($dir = [IO.Directory]::GetParent($outDir); $null -ne $dir; $dir = $dir.Parent) {
         if (@(Get-ChildItem -LiteralPath $dir.FullName -Filter '*-manifest.json' -File -Force -ErrorAction SilentlyContinue).Count -ne 1) { continue }
-        try { $info = Read-BuildManifest $dir.FullName } catch { continue }
+        try { $info = Read-BuildManifest $dir.FullName -Legacy } catch { continue }
         if (Same $info.outputDirectory $outDir) { $side = $info; break }
     }
     if ($null -eq $side) { throw "No predecessor build record found above $outDir." }
@@ -347,10 +356,6 @@ function Invoke-Cli([string]$Purpose, [string]$Exe, [string]$Arguments) {
     [pscustomobject]@{ Exit = $result.Exit; Json = $json }
 }
 function Get-PairsKey($Json) { if ($null -eq $Json) { return '' }; (@($Json.data.pairs) | ForEach-Object { "$($_.id)|$($_.enabled)" } | Sort-Object -CaseSensitive) -join ';' }
-function Invoke-NewCli([string]$Purpose, [string]$Exe, [string]$Arguments) {
-    $result = Invoke-Child $Purpose $Exe $Arguments
-    [pscustomobject]@{ Exit = $result.Exit; Out = $result.Out }
-}
 function Assert-FinishedWork {
     $reply=Invoke-Cli 'unfinished-work' $script:journal.predecessor.exe 'engine status --json'
     if ($reply.Exit -ne 0 -or !$reply.Json.ok -or $reply.Json.data.items -isnot [array]) { throw 'Unconfirmed predecessor status; not switching.' }
@@ -424,11 +429,7 @@ function Switch-Launcher {
     try {
         $signer=(Get-SyncSharkSignerIdentity).roles.publisher
         Assert-SyncSharkSignatureObservation (Get-Observation $installer) $signer.thumbprints $signer.subject $signer.subject $signer.spki
-        $header=[IO.File]::ReadLines($installer) | Select-Object -First 1
-        $prefix='# SyncSharkUpdateContract: '
-        if (!$header.StartsWith($prefix,[StringComparison]::Ordinal)) { throw 'Installer contract missing.' }
-        $contract=$header.Substring($prefix.Length) | ConvertFrom-Json
-        if ($contract.product -cne 'Massdex.SyncShark' -or ($contract.version+'+'+$contract.sourceRevision) -cne $j.candidate.productVersion -or $contract.previousVersion -cne $j.predecessor.productVersion) { throw 'Installer does not bind the selected builds.' }
+        if ((Get-SyncSharkSha256 $installer) -cne $j.candidate.installerSha256) { throw 'Installer changed since build admission.' }
         Mark 'switch-requested'
         if ($testMode) { & $installer -PredecessorRuntime $j.predecessor.outputDirectory -TestProductRoot $installationRoot }
         else { & $installer -PredecessorRuntime $j.predecessor.outputDirectory }
@@ -454,11 +455,20 @@ function Test-Health {
     Assert-SyncSharkJunction (Join-Path $installationRoot 'active') $installed
     $hostPath=Join-Path $installed (Split-Path -Leaf $build.exe)
     $cli=Join-Path $installed (Split-Path -Leaf $build.cliExe)
-    $status=Invoke-NewCli 'new-status' $cli 'status'
+    $status=Invoke-Child 'new-status' $cli 'status'
     if ($status.Exit -ne 0 -or !$status.Out.Trim()) { throw 'The installed host did not report status.' }
     $hosts=@(Get-Tracked @($hostPath) | Where-Object { $_.Args -in @('','--notify-ready') })
     if ($hosts.Count -ne 1 -or [Diagnostics.FileVersionInfo]::GetVersionInfo($hostPath).ProductVersion -cne $build.productVersion) { throw 'Expected one candidate host.' }
-    $pairs=Invoke-NewCli 'new-pairs' $cli 'pairs list'
+    # A refused startup returns just its diagnostic. A successful startup also returns the normal status for the store.
+    $lines=@($status.Out.TrimEnd() -split "`r?`n")
+    if (!$script:journal.snapshot.pairs) {
+        if ($lines[-1] -cne 'There are no pairs yet.') { throw 'The installed host did not report an open store.' }
+    } else {
+        $seen=@($lines | ForEach-Object { if ($_ -match '^(?<id>\S+)  .+  (?:last Repair: .+|no Repair yet)  open notices: [0-9]+$') { $Matches.id } } | Sort-Object -CaseSensitive)
+        $expected=@($script:journal.snapshot.pairs.Split(';') | ForEach-Object { $_.Split('|')[0] } | Sort-Object -CaseSensitive)
+        if (Compare-Object $expected $seen -CaseSensitive) { throw 'The installed host did not report status for the snapshotted pairs.' }
+    }
+    $pairs=Invoke-Child 'new-pairs' $cli 'pairs list'
     if ($pairs.Exit -ne 0 -or (Get-PairsKeyText $pairs.Out) -cne $script:journal.snapshot.pairs) { throw 'The pairs differ from the snapshot.' }
     Assert-NoNewAutoSyncFailure
 }
@@ -490,9 +500,9 @@ function Get-RecoveryRoot {
 }
 
 # ---- Data: scan, copy, capacity, restore (steps 3, 7) ----
-function Measure-Data {
+function Measure-Data([string]$Source) {
     $bytes = 0L
-    foreach ($item in Get-ChildItem -LiteralPath $script:dataTarget -Recurse -Force) {
+    foreach ($item in Get-ChildItem -LiteralPath $Source -Recurse -Force) {
         if (([int]$item.Attributes -band $unsafeAttributes) -ne 0) { throw "Reparse or offline entry in the data folder: $($item.FullName)" }
         if (-not $item.PSIsContainer) { $bytes += $item.Length }
     }
@@ -633,7 +643,7 @@ function Publish-Chain {
     # Ruling 5 / ADDENDUM-4 edit 3: only a successful candidate deploy, only journal values, atomic and read back.
     $j = $script:journal
     $log = [ordered]@{ completedAtUtc = $j.outcome.utc; transaction = $script:T; commit = $j.candidate.commit; productVersion = $j.candidate.productVersion
-        previousVersion = $j.predecessor.productVersion; launcherTarget = $j.candidate.exe
+        previousVersion = $j.predecessor.productVersion; launcherTarget = (Join-Path (Join-Path $installationRoot 'active') (Split-Path -Leaf $j.candidate.exe))
         backupPath = $j.backup.path; backupManifestSha256 = $j.backup.manifestSha256; manifestPath = $j.candidate.manifestPath
         phases = @($j.phases | ForEach-Object name); hostWasRunning = $j.snapshot.hostWasRunning; started = (Has 'started'); terminal = $j.outcome.terminal }
     $path=Join-Path $j.candidate.root 'deploy-log.json'
@@ -714,6 +724,7 @@ function Invoke-Forward {
     $j.snapshot.pairs = Get-PairsKey $pairs.Json
 
     Assert-FinishedWork
+    if (!$testMode) { throw 'Cutover not cleared: predecessor status does not prove provider submissions are settled.' }
     Mark 'snapshot'
     # Step 2: stop the running generation with its own CLI, then hold the instance lock.
     Stop-Running $generation
@@ -721,11 +732,11 @@ function Invoke-Forward {
     Assert-FinishedWork
     Mark 'stopped'
     # Step 3: backup.
-    $bytes = Measure-Data
+    $bytes = Measure-Data $j.backup.source
     Assert-Capacity $bytes
     $j.backup.bytes = $bytes; $j.backup.intentUtc = Utc
     Save-Journal
-    $entries = Copy-DataTree $script:dataTarget $j.backup.path 'backup-file'
+    $entries = Copy-DataTree $j.backup.source $j.backup.path 'backup-file'
     if ((Format-Manifest $entries) -cne (Format-Manifest (Get-SyncSharkTreeManifest $j.backup.path))) { throw 'The backup copy does not verify against the bytes read.' }
     $j.backup.manifestSha256 = Get-SyncSharkTreeIdentity $j.backup.path
     Mark 'backup-verified'
@@ -735,7 +746,7 @@ function Invoke-Forward {
     $installedCli=Join-Path (Join-Path $installationRoot ('versions/'+$j.candidate.version)) (Split-Path -Leaf $j.candidate.cliExe)
     # Step 5: start and health.
     if (-not $j.snapshot.hostWasRunning) {
-        $status=Invoke-NewCli 'new-status' $installedCli 'status'
+        $status=Invoke-Child 'new-status' $installedCli 'status'
         if ($status.Exit -eq 0 -or $status.Out.Trim() -cne 'The Sync Shark host is not running.') { throw 'Candidate did not report host absence.' }
         Say 'Staged: not live-verified (the host was not running before).'
         Complete-Success 'staged'
@@ -755,7 +766,7 @@ function Invoke-Deploy {
         $recorded = if ($last.Count) { Read-Journal $last[0].FullName }
         $expected = if ($recorded -is [Collections.IDictionary] -and $recorded['dataTarget'] -is [string] -and $recorded['dataTarget']) { "transaction $($last[0].Directory.Name) recorded $($recorded['dataTarget'])" }
             elseif ($last.Count) { "unavailable: transaction $($last[0].Directory.Name) has no readable dataTarget" } else { 'unavailable: no earlier deploy recorded one' }
-        throw "The data root $($script:dataTarget) holds no engine\state.db: product-root.txt in $installationRoot is missing or names the wrong folder (expected root: $expected). Restore the pointer by hand; nothing was changed."
+        throw "The data root $($script:dataTarget) holds no engine\state.db: product-root.txt in $installationRoot is missing or names the wrong folder (expected root: $expected). Nothing was changed."
     }
     $Build = Get-SyncSharkNormalizedPath $Build; $LauncherDir = Get-SyncSharkNormalizedPath $LauncherDir
     if ($testMode) { Assert-SyncSharkWithin $installationRoot $Build; Assert-SyncSharkWithin $installationRoot $LauncherDir }
@@ -776,10 +787,11 @@ function Invoke-Deploy {
 
     Set-Paths ('{0}-{1}' -f [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff'), [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(4)).ToLowerInvariant())
     $backupPath = Join-Path $script:txRoot 'Data'
-    foreach ($own in @($script:deployRoot, $backupPath, $script:txRoot)) {
-        foreach ($other in @($script:dataTarget)) {
-            if ((Test-Contains $own $other) -or (Test-Contains $other $own)) { throw "Overlapping roots: $own and $other (ruling 3)." }
-        }
+    # At the fixed root the store is engine/, not the installation (which also contains active and deployment records).
+    $backupSource = if (Same $script:dataTarget $installationRoot) { Join-Path $installationRoot 'engine' } else { $script:dataTarget }
+    Assert-SyncSharkOrdinaryTree $backupSource -RootOnly
+    foreach ($own in @($script:deployRoot,$backupPath,$script:txRoot)) {
+        if ((Test-Contains $own $backupSource) -or (Test-Contains $backupSource $own)) { throw "Overlapping roots: $own and $backupSource." }
     }
     Assert-Isolated @($script:txRoot, $backupPath)
     foreach ($path in @($script:txRoot)) { if (Test-Path -LiteralPath $path) { throw "Refusing: $path already exists." } }
@@ -792,7 +804,7 @@ function Invoke-Deploy {
     $script:journal = [ordered]@{ schema = 1; revision = 0; T = $script:T; rootId = $script:rootId; installationRoot = $installationRoot; dataTarget = $script:dataTarget
         testMode = $testMode; state = 'open'; terminal = $null; closedUtc = $null; outcome = $null; needsOwner = $null; errors = @(); phases = @()
         candidate = $candidate; predecessor = $predecessor; launcherDir = $LauncherDir; snapshot = $null; children = @()
-        stopRequested = $null; backup = [ordered]@{ path = $backupPath; bytes = $null; intentUtc = $null; manifestSha256 = $null }
+        stopRequested = $null; backup = [ordered]@{ source = $backupSource; path = $backupPath; bytes = $null; intentUtc = $null; manifestSha256 = $null }
         dataFileId = (Get-FileId $script:dataTarget); close = @() }
     Write-Record $script:journalPath $script:journal 'journal'
     Say "Transaction $($script:T): $($candidate.productVersion) replaces $($predecessor.productVersion). $pauseLine"

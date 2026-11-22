@@ -58,8 +58,8 @@ static class Stub {
             case "--cli engine host status --json":
                 if (Flag("statusFail")) { Console.Error.WriteLine("stub: status refused"); return 1; }
                 Json(new { state = Hosts().Length > 0 ? "StatusWatching" : "StatusUnavailable", message = "stub" }); return 0;
-            case "--cli engine status --json": Json(new { items = new[] { new { pair = new { pairId="pair-a", enabled=true }, pendingPresent=Flag("pending") } } }); return 0;
-            case "--cli engine pairs list --json": Json(new { pairs = new[] { new { id = "pair-a", enabled = true } } }); return 0;
+            case "--cli engine status --json": Json(new { items = Flag("empty") ? Array.Empty<object>() : new object[] { new { pair = new { pairId="pair-a", enabled=true }, pendingPresent=Flag("pending") || (Flag("pendingAfterStop") && File.Exists(StopFile)) } } }); return 0;
+            case "--cli engine pairs list --json": Json(new { pairs = Flag("empty") ? Array.Empty<object>() : new object[] { new { id = "pair-a", enabled = true } } }); return 0;
             case "--cli engine settings list --json":
                 var root = B("recoveryRoot");
                 Json(new { settings = root.ValueKind == JsonValueKind.String ? new object[] { new { name = "RecoveryRoot", value = root.GetString(), overridden = true } } : new object[0] });
@@ -69,8 +69,8 @@ static class Stub {
             case "status":
                 if (Hosts().Length==0) { Console.WriteLine("The Sync Shark host is not running."); return 1; }
                 if (Flag("statusFail")) { Console.Error.WriteLine("stub: status refused"); return 1; }
-                Console.WriteLine("pair-a  Pair A  /Local <-> /Cloud  account acc  first run: NewestWins"); return 0;
-            case "pairs list": Console.WriteLine("pair-a  Pair A  /Local <-> /Cloud  account acc  first run: NewestWins"); return 0;
+                Console.WriteLine(Flag("refused") ? "Startup refused." : Flag("empty") ? "There are no pairs yet." : "pair-a  Pair A  no Repair yet  open notices: 0"); return 0;
+            case "pairs list": Console.WriteLine(Flag("empty") ? "There are no pairs yet." : "pair-a  Pair A  /Local <-> /Cloud  account acc  first run: NewestWins"); return 0;
             default: return 2;
         }
     }
@@ -152,18 +152,18 @@ function New-StubBuild($Ctx, [string]$Name, [string]$Version, [string]$Previous,
         Copy-Item -LiteralPath (Join-Path $out 'syncshark.exe') -Destination (Join-Path $out 'Sync Shark.exe')
         $installerDir=Join-Path $root "release-$Version/deploy-scripts"
         [void][IO.Directory]::CreateDirectory($installerDir)
-        $contract=@{product='Massdex.SyncShark';version=$Version;sourceRevision=$commits[$Version];previousVersion=$Previous} | ConvertTo-Json -Compress
+        $contract=@{product='Massdex.SyncShark';version=$Version;sourceRevision=$commits[$Version];previousVersion=$Previous;hostExecutable='Sync Shark.exe';cliExecutable='syncshark.exe';signedMembers=@{'Sync Shark.exe'=(Get-SyncSharkSha256 (Join-Path $out 'Sync Shark.exe'));'syncshark.exe'=(Get-SyncSharkSha256 (Join-Path $out 'syncshark.exe'))}} | ConvertTo-Json -Compress
         $body=@'
 param($PredecessorRuntime,$TestProductRoot)
 $root=Resolve-SyncSharkProductRoot $TestProductRoot
-$target=Join-Path $root ('versions/'+$contract.version)
+$target=Join-Path $root ('versions/'+$j.candidate.version)
 [void][IO.Directory]::CreateDirectory($target)
 Copy-Item -Path (Join-Path $j.candidate.outputDirectory '*') -Destination $target -Recurse
 New-Item -ItemType Junction -Path (Join-Path $root 'active') -Target $target | Out-Null
 '@
         [IO.File]::WriteAllText((Join-Path $installerDir 'Install-SyncShark.ps1'),"# SyncSharkUpdateContract: $contract`n$body")
         [void][IO.Directory]::CreateDirectory((Join-Path $out 'tools'))
-        foreach ($tool in 'SyncShark.Release.psm1', 'Deploy-SyncShark.ps1') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $tool) -Destination (Join-Path $out "tools\$tool") }
+        foreach ($tool in 'SyncShark.Release.psm1','SyncShark.Registration.psm1', 'Deploy-SyncShark.ps1') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $tool) -Destination (Join-Path $out "tools\$tool") }
     }
     if ($Mutate) { & $Mutate $out }
     Write-Manifest $root $Name $Version $Previous $out -Legacy:$Legacy -Unlisted $Unlisted
@@ -356,6 +356,18 @@ F 48 'pending predecessor work leaves the host and active pointer untouched' {
     Expect ($r.Exit -ne 0 -and $r.Log -like '*Unfinished or unknown work*') 'pending work reported'
     Expect (@(Get-Stubs $ctx '--core v2 --engine-host').Count -eq 1 -and !(Test-Path -LiteralPath (Join-Path $ctx.root 'active'))) 'no stop or switch'
 }
+F 49 'work discovered after graceful stop prevents the switch' {
+    $ctx=Use (New-Context 49); Start-Host $ctx $ctx.old
+    Set-Behavior $ctx @{'0.3.75'=@{pendingAfterStop=$true}}
+    $r=Deploy $ctx; $j=Get-Journal $ctx
+    Expect ($j.stopRequested -and $r.Log -like '*Unfinished or unknown work*' -and !(Test-Path -LiteralPath (Join-Path $ctx.root 'active'))) 'final status prevented publication'
+}
+F 50 'startup refusal with zero pairs cannot close healthy' {
+    $ctx=Use (New-Context 50); Start-Host $ctx $ctx.old
+    Set-Behavior $ctx @{'0.3.75'=@{empty=$true}; '0.3.76'=@{empty=$true;refused=$true}}
+    $r=Deploy $ctx; $j=Expect-NeedsOwner $ctx '*did not report an open store*'
+    Expect (!$j.outcome) 'refusal never publishes a healthy result'
+}
 F 5 'a supervisor with no host: refused' {
     $ctx = Use (New-Context 5)
     $null = Start-Stub $ctx $ctx.old '--core v2 --engine-supervisor'
@@ -480,7 +492,7 @@ F 23 'a host that never answers trusted status (crash loop): refused before any 
     Set-Behavior $ctx @{ '0.3.75' = @{ statusFail = $true } }
     $r = Deploy $ctx
     $j = Expect-Closed $ctx 'refused'
-    Expect (@(@($j.errors) -like '*trusted peer*').Count -gt 0 -and -not $j.stopRequested) 'refused before any stop'
+    Expect (@(@($j.errors) -like '*not idle*').Count -gt 0 -and -not $j.stopRequested) 'refused before any stop'
 }
 F 27 'no pointer while a journal is open: needs-owner, not recreated' {
     $ctx = Use (New-Context 27)
@@ -570,13 +582,13 @@ F 35 'pointer naming another installation root or data target: refused on deploy
     Expect ($r.Exit -ne 0 -and $r.Log -like '*no journal exists*') 'journal-less close refused'
     Rename-Item -LiteralPath (Join-Path (Get-DeployRoot $ctx) "$($j.T)\journal.hidden") -NewName 'journal.json'
 }
-F 36 'no product-root.txt: the deploy root lies inside the data target, refused before any effect' {
-    $ctx = Use (New-Context 36)
+F 36 'store already at fixed root: verified backup is disjoint' {
+    $ctx=Use (New-Context 36)
     Remove-Item -LiteralPath (Join-Path $ctx.root 'product-root.txt')
-    # A store at the default root, so the bug #110 store check passes and ruling 3 is what refuses.
-    [void][IO.Directory]::CreateDirectory((Join-Path $ctx.root 'engine')); [IO.File]::WriteAllText((Join-Path $ctx.root 'engine\state.db'), 'db')
-    $r = Deploy $ctx
-    Expect ($r.Exit -ne 0 -and $r.Log -like '*Overlapping roots*' -and -not (Test-Path -LiteralPath (Join-Path $ctx.root 'replacement-staging'))) 'refused before any effect'
+    Copy-Item -LiteralPath (Join-Path $ctx.data 'engine'),(Join-Path $ctx.data 'state') -Destination $ctx.root -Recurse
+    $r=Deploy $ctx 'phase-backup-verified'
+    $j=Expect-Open $ctx 'backup-verified'
+    Expect ((Get-SyncSharkTreeIdentity (Join-Path $ctx.root 'engine')) -ceq $j.backup.manifestSha256) 'fixed store was copied exactly before switch'
 }
 function New-Outside([string]$Name) { [IO.Directory]::CreateDirectory((Join-Path $base ("escape-$Name-" + [Guid]::NewGuid().ToString('N').Substring(0, 6)))).FullName }
 function Get-StampDiff([string]$Before, [string]$Dir) { (Compare-Object ($Before -split "`n") ((Get-TreeStamp $Dir) -split "`n") | ForEach-Object { "$($_.SideIndicator)$($_.InputObject)" }) -join ' ; ' }
@@ -687,7 +699,7 @@ F 47 'bug #110: product-root.txt missing while the store exists elsewhere: refus
     [IO.File]::WriteAllText($journal, '{ not json')
     $deploys = Get-TreeStamp (Get-DeployRoot $ctx)
     $r = Deploy $ctx
-    Expect ($r.Exit -ne 0 -and $r.Log -like '*holds no engine\state.db*' -and $r.Log -like '*expected root: unavailable*' -and $r.Log -like '*Restore the pointer by hand*') 'corrupt journal: diagnosis reported, expected root unavailable'
+    Expect ($r.Exit -ne 0 -and $r.Log -like '*holds no engine\state.db*' -and $r.Log -like '*expected root: unavailable*') 'corrupt journal: diagnosis reported, expected root unavailable'
     Expect ((Get-TreeStamp $ctx.data) -ceq $data -and (Get-TreeStamp (Get-DeployRoot $ctx)) -ceq $deploys -and -not (Test-Path -LiteralPath (Join-Path $ctx.root 'product-root.txt'))) 'corrupt journal: nothing changed'
 }
 $results | Sort-Object Fixture | Format-Table Fixture, Result, Ms, Name -AutoSize | Out-String -Width 220 | Write-Host

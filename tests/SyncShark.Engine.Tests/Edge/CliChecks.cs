@@ -42,7 +42,7 @@ public static class CliChecks
         static Task<int> NeverStart(CancellationToken c) =>
             throw new InvalidDataException("absent read must not start the host");
         using var absent = new StringWriter();
-        var absentCode = await Cli.ResolveSend("Status", (null, false), absent, new StringWriter(), NeverSend, NeverStart, default);
+        var absentCode = await Cli.ResolveSend("Status", (null, false), absent, NeverSend, NeverStart, default);
         Check.Require(absentCode != 0, "absent read must report a non-zero exit");
         Check.Require(absent.ToString().Contains(Text.Get(TextKey.HostNotRunning), StringComparison.Ordinal),
             "absent read did not reach HostNotRunning through the CLI decision");
@@ -51,9 +51,9 @@ public static class CliChecks
 
         // F052: a received command result, even a failure, is terminal; a lost reply (non-null exit, not received) is
         // not replayed.
-        Check.Require(await Cli.ResolveSend("Repair", (5, true), new StringWriter(), new StringWriter(), NeverSend, NeverStart, default) == 5,
+        Check.Require(await Cli.ResolveSend("Repair", (5, true), new StringWriter(), NeverSend, NeverStart, default) == 5,
             "received command failure was not preserved as terminal");
-        Check.Require(await Cli.ResolveSend("Repair", (2, false), new StringWriter(), new StringWriter(), NeverSend, NeverStart, default) == 2,
+        Check.Require(await Cli.ResolveSend("Repair", (2, false), new StringWriter(), NeverSend, NeverStart, default) == 2,
             "a lost reply was replayed");
 
         // F052: on definite absence an eligible command may start the host and send exactly once.
@@ -61,7 +61,7 @@ public static class CliChecks
         var resent = 0;
         Task<int> Start(CancellationToken c) { started++; return Task.FromResult(0); }
         Task<(int? ExitCode, bool ReceivedExit)> SendAgain(CancellationToken c) { resent++; return Task.FromResult<(int? ExitCode, bool ReceivedExit)>((7, true)); }
-        var mutationCode = await Cli.ResolveSend("Repair", (null, false), new StringWriter(), new StringWriter(), SendAgain, Start, default);
+        var mutationCode = await Cli.ResolveSend("Repair", (null, false), new StringWriter(), SendAgain, Start, default);
         Check.Require(started == 1 && resent == 1 && mutationCode == 7, "absent mutation did not start and send exactly once");
     }
 }

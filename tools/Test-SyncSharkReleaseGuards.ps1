@@ -12,37 +12,19 @@ $releaseRoot = [IO.Path]::GetFullPath($ReleaseRoot)
 $predecessorRuntime = [IO.Path]::GetFullPath($PredecessorRuntime)
 $evidenceDirectory = [IO.Path]::GetFullPath($EvidenceDirectory)
 if (-not (Test-Path -LiteralPath $evidenceDirectory)) { New-Item -ItemType Directory -Path $evidenceDirectory | Out-Null }
-$testBase = Join-Path ([IO.Path]::GetTempPath()) 'sync-shark-release-tests'
-if (-not (Test-Path -LiteralPath $testBase)) { New-Item -ItemType Directory -Path $testBase | Out-Null }
-$deploy = Join-Path $releaseRoot 'deploy-scripts'
-$package = Join-Path $releaseRoot 'package\signed-candidate'
-$manifest = Join-Path $releaseRoot 'package\unsigned-candidate-framework-manifest.json'
-$install = Join-Path $deploy 'Install-SyncShark.ps1'
-$rollback = Join-Path $deploy 'Rollback-SyncShark.ps1'
-$module = Join-Path $deploy 'SyncShark.Release.psm1'
-foreach ($path in @($install, $rollback, $module, $manifest)) {
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing release input: $path" }
-}
-$hashes = [ordered]@{
-    ExpectedManifestSha256 = (Get-FileHash $manifest -Algorithm SHA256).Hash.ToLowerInvariant()
-    ExpectedModuleSha256 = (Get-FileHash $module -Algorithm SHA256).Hash.ToLowerInvariant()
-    ExpectedSignedCoreSha256 = (Get-FileHash (Join-Path $package 'SyncShark.Core.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
-    ExpectedSignedUiSha256 = (Get-FileHash (Join-Path $package 'SyncShark.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
-    ExpectedSignedExeSha256 = (Get-FileHash (Join-Path $package 'SyncShark.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
-}
-$packageSigner = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'SyncShark.SignerIdentity.json') -Raw | ConvertFrom-Json).roles.package
+$module=Join-Path $PSScriptRoot 'SyncShark.Release.psm1'
+$packageSigner = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'SyncShark.SignerIdentity.json') -Raw | ConvertFrom-Json).roles.publisher
 $pins = [ordered]@{
     Thumbprint = @($packageSigner.thumbprints)[0]
     Subject = $packageSigner.subject
     Issuer = $packageSigner.subject
     SpkiSha256 = @($packageSigner.spki)[0]
 }
-$pwsh = Join-Path $PSHOME 'pwsh.exe'
 $results = [Collections.Generic.List[object]]::new()
 
 function New-ObservationSet {
     $all = [ordered]@{}
-    foreach ($name in @('SyncShark.Core.dll', 'SyncShark.dll', 'SyncShark.exe')) {
+    foreach ($name in @('SyncShark.exe')) {
         $all[$name] = [pscustomobject]@{
             Status = 'Valid'; RawStatus = 'Valid'; Thumbprint = $pins.Thumbprint
             Subject = $pins.Subject; Issuer = $pins.Issuer; SpkiSha256 = $pins.SpkiSha256
@@ -54,44 +36,6 @@ function New-ObservationSet {
         }
     }
     $all
-}
-
-function Write-Observation([string]$Path, [scriptblock]$Mutate) {
-    $all = New-ObservationSet
-    if ($Mutate) { & $Mutate $all }
-    [IO.File]::WriteAllText($Path, ($all | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
-}
-
-function New-TestRoot([string]$Name, [switch]$WithoutActive) {
-    $root = Join-Path $testBase ($Name + '-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path (Join-Path $root 'versions\0.3.20'), (Join-Path $root 'state'), (Join-Path $root 'vNext\state') -Force | Out-Null
-    Get-ChildItem -LiteralPath $predecessorRuntime -Force | Copy-Item -Destination (Join-Path $root 'versions\0.3.20') -Recurse
-    [IO.File]::WriteAllText((Join-Path $root 'state\state.txt'), 'predecessor-state', [Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $root 'vNext\state\state.txt'), 'predecessor-vnext-state', [Text.UTF8Encoding]::new($false))
-    # The release transaction holds the application's own state lock for the whole
-    # install, so the isolated root supplies the same lock file.
-    [IO.File]::WriteAllText((Join-Path $root 'state\instance.lock'), '4242', [Text.UTF8Encoding]::new($false))
-    if (-not $WithoutActive) { New-Item -ItemType Junction -Path (Join-Path $root 'active') -Target (Join-Path $root 'versions\0.3.20') | Out-Null }
-    $observation = Join-Path $testBase ($Name + '-' + [guid]::NewGuid().ToString('N') + '.verification.json')
-    Write-Observation $observation {}
-    [pscustomobject]@{ Root = $root; Observation = $observation }
-}
-
-function Get-RootManifest([string]$Root) {
-    $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push([IO.Path]::GetFullPath($Root))
-    $rows = [Collections.Generic.List[object]]::new()
-    while ($pending.Count -gt 0) {
-        $directory = $pending.Pop()
-        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force | Sort-Object FullName)) {
-            $relative = [IO.Path]::GetRelativePath($Root, $item.FullName).Replace('\', '/')
-            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                $rows.Add([ordered]@{ path = $relative; kind = 'junction'; target = [string]$item.Target })
-            }
-            elseif ($item.PSIsContainer) { $rows.Add([ordered]@{ path = $relative; kind = 'directory' }); $pending.Push($item.FullName) }
-            else { $rows.Add([ordered]@{ path = $relative; kind = 'file'; length = $item.Length; sha256 = (Get-FileHash $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }) }
-        }
-    }
-    @($rows | Sort-Object { [string]$_.path }) | ConvertTo-Json -Depth 8 -Compress
 }
 
 function Get-PeAuthenticodeInfo([string]$Path) {
@@ -314,92 +258,6 @@ function New-ChainedTimestampParserFixture([string]$Name, [DateTimeOffset]$Token
     }
 }
 
-function Invoke-Installer([string]$Root, [string]$Observation, [hashtable]$HashOverride = @{}) {
-    $arguments = @('-NoLogo', '-NoProfile', '-File', $install)
-    foreach ($key in $hashes.Keys) {
-        $value = if ($HashOverride.ContainsKey($key)) { $HashOverride[$key] } else { $hashes[$key] }
-        $arguments += ('-' + $key)
-        $arguments += $value
-    }
-    $arguments += @('-TestProductRoot', $Root, '-VerificationObservationPath', $Observation)
-    $start = [Diagnostics.ProcessStartInfo]::new($pwsh)
-    foreach ($item in $arguments) { $start.ArgumentList.Add([string]$item) }
-    $start.UseShellExecute = $false; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
-    $start.Environment['SYNC_SHARK_RELEASE_TEST_MODE'] = '1'
-    $process = [Diagnostics.Process]::Start($start)
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync(); $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit(60000)) { try { $process.Kill($true) } catch {}; throw 'Installer child timed out.' }
-    [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdoutTask.GetAwaiter().GetResult(); Stderr = $stderrTask.GetAwaiter().GetResult() }
-}
-
-function Invoke-Rollback([string]$Root, [string]$Observation) {
-    $arguments = @('-NoLogo', '-NoProfile', '-File', $rollback)
-    foreach ($key in $hashes.Keys) { $arguments += ('-' + $key); $arguments += $hashes[$key] }
-    $arguments += @('-TestProductRoot', $Root, '-VerificationObservationPath', $Observation)
-    $start = [Diagnostics.ProcessStartInfo]::new($pwsh)
-    foreach ($item in $arguments) { $start.ArgumentList.Add([string]$item) }
-    $start.UseShellExecute = $false; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
-    $start.Environment['SYNC_SHARK_RELEASE_TEST_MODE'] = '1'
-    $process = [Diagnostics.Process]::Start($start)
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync(); $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit(60000)) { try { $process.Kill($true) } catch {}; throw 'Rollback child timed out.' }
-    [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdoutTask.GetAwaiter().GetResult(); Stderr = $stderrTask.GetAwaiter().GetResult() }
-}
-
-function Assert-RejectedUnchanged([string]$Case, [object]$Fixture, [hashtable]$HashOverride = @{}) {
-    $before = Get-RootManifest $Fixture.Root
-    $run = Invoke-Installer $Fixture.Root $Fixture.Observation $HashOverride
-    if ($run.ExitCode -eq 0) { throw "Rejected case was accepted: $Case" }
-    $after = Get-RootManifest $Fixture.Root
-    if ($after -cne $before) { throw "Rejected case mutated the product root: $Case" }
-    $beforeBytes = [Text.UTF8Encoding]::new($false).GetBytes($before)
-    $afterBytes = [Text.UTF8Encoding]::new($false).GetBytes($after)
-    $results.Add([ordered]@{
-        case = $Case
-        result = 'rejected-without-mutation'
-        error = ($run.Stderr.Trim() -split "`r?`n")[-1]
-        before_manifest = $before
-        before_manifest_length = $beforeBytes.Length
-        before_manifest_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($beforeBytes)).ToLowerInvariant()
-        after_manifest = $after
-        after_manifest_length = $afterBytes.Length
-        after_manifest_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($afterBytes)).ToLowerInvariant()
-    })
-}
-
-function New-RollbackTestRoot([string]$Name) {
-    $fixture = New-TestRoot $Name
-    $installRun = Invoke-Installer $fixture.Root $fixture.Observation
-    if ($installRun.ExitCode -ne 0) { throw "Rollback fixture install failed: $($installRun.Stderr)" }
-    [IO.File]::WriteAllText((Join-Path $fixture.Root 'state\state.txt'), 'successor-state', [Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $fixture.Root 'vNext\state\state.txt'), 'successor-vnext-state', [Text.UTF8Encoding]::new($false))
-    $fixture
-}
-
-function Assert-RollbackRejectedUnchanged([string]$Case, [object]$Fixture, [string]$ExpectedReason='') {
-    $dataRoot = Resolve-SyncSharkDataRoot $Fixture.Root
-    $dataBefore = Get-RootManifest $dataRoot
-    $before = Get-RootManifest $Fixture.Root
-    $run = Invoke-Rollback $Fixture.Root $Fixture.Observation
-    if ($run.ExitCode -eq 0) { throw "Rejected rollback case was accepted: $Case" }
-    if ($ExpectedReason -and -not $run.Stderr.Contains($ExpectedReason)) { throw "Wrong rollback rejection for ${Case}: $($run.Stderr)" }
-    $after = Get-RootManifest $Fixture.Root
-    if ($after -cne $before -or (Get-RootManifest $dataRoot) -cne $dataBefore) { throw "Rejected rollback case mutated installation or data: $Case" }
-    $beforeBytes = [Text.UTF8Encoding]::new($false).GetBytes($before)
-    $afterBytes = [Text.UTF8Encoding]::new($false).GetBytes($after)
-    $results.Add([ordered]@{
-        case = $Case
-        result = 'rejected-without-mutation'
-        error = ($run.Stderr.Trim() -split "`r?`n")[-1]
-        before_manifest = $before
-        before_manifest_length = $beforeBytes.Length
-        before_manifest_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($beforeBytes)).ToLowerInvariant()
-        after_manifest = $after
-        after_manifest_length = $afterBytes.Length
-        after_manifest_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($afterBytes)).ToLowerInvariant()
-    })
-}
-
 $releaseModule = Import-Module $module -Force -PassThru
 function Assert-Decision([string]$Case, [scriptblock]$Mutate, [bool]$ExpectedAllowed) {
     $all = New-ObservationSet; if ($Mutate) { & $Mutate $all }
@@ -426,7 +284,7 @@ foreach ($property in @('Rfc3161Present', 'Rfc3161CryptographicallyValid', 'Rfc3
 Assert-Decision 'timestamp-additional-chain-status' { param($x); $x.Values | ForEach-Object { $_.TimestampChainStatuses = @('NotTimeValid') } } $false
 
 $actual = [ordered]@{}
-foreach ($name in @('SyncShark.Core.dll', 'SyncShark.dll', 'SyncShark.exe')) {
+foreach ($name in @('SyncShark.exe')) {
     $observation = Get-SyncSharkSignatureObservation (Join-Path $predecessorRuntime $name)
     Assert-SyncSharkSignatureObservation $observation $pins.Thumbprint $pins.Subject $pins.Issuer $pins.SpkiSha256
     $actual[$name] = $observation
@@ -434,7 +292,7 @@ foreach ($name in @('SyncShark.Core.dll', 'SyncShark.dll', 'SyncShark.exe')) {
 $results.Add([ordered]@{ case = 'signature-parser/installed-0.3.20'; result = 'allowed'; observations = $actual })
 
 $parserFixtureDirectory = Join-Path $evidenceDirectory 'timestamp-parser-fixtures'
-if (Test-Path -LiteralPath $parserFixtureDirectory) { Remove-Item -LiteralPath $parserFixtureDirectory -Recurse -Force }
+if (Test-Path -LiteralPath $parserFixtureDirectory) { throw 'Use a fresh evidence directory.' }
 $parserCases = @(
     [pscustomobject]@{ Name='missing'; Present=$false; Crypto=$false; Rfc=$false; Bound=$false; AtTime=$false; Chain=$false },
     [pscustomobject]@{ Name='malformed'; Present=$true; Crypto=$false; Rfc=$false; Bound=$false; AtTime=$false; Chain=$false },
@@ -542,299 +400,7 @@ finally {
         if ($material) { $material.Leaf.Dispose(); $material.Root.Dispose(); $material.LeafKey.Dispose(); $material.RootKey.Dispose() }
     }
 }
-
-$consumerFixture = New-TestRoot 'timestamp-time-consumer-gate'
-try {
-    Write-Observation $consumerFixture.Observation {
-        param($x)
-        $x.Values | ForEach-Object { $_.TimestampChainEvaluatedAtTokenTime = $false }
-    }
-    $beforeInstall = Get-RootManifest $consumerFixture.Root
-    $installRejected = Invoke-Installer $consumerFixture.Root $consumerFixture.Observation
-    $afterInstall = Get-RootManifest $consumerFixture.Root
-    if ($installRejected.ExitCode -eq 0 -or $beforeInstall -cne $afterInstall) {
-        throw 'The exact installer did not reject the missing token-time chain proof before mutation.'
-    }
-    $results.Add([ordered]@{
-        case='consumer/install-rejects-missing-token-time-before-mutation'; result='exact-entry-point-rejected-without-mutation'
-        script=$install; script_sha256=(Get-FileHash $install -Algorithm SHA256).Hash.ToLowerInvariant()
-        module_sha256=$hashes.ExpectedModuleSha256; before_manifest_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($beforeInstall))).ToLowerInvariant()
-        after_manifest_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($afterInstall))).ToLowerInvariant()
-    })
-
-    Write-Observation $consumerFixture.Observation {}
-    $installAllowed = Invoke-Installer $consumerFixture.Root $consumerFixture.Observation
-    if ($installAllowed.ExitCode -ne 0) { throw "Could not establish the isolated rollback fixture: $($installAllowed.Stderr)" }
-    Write-Observation $consumerFixture.Observation {
-        param($x)
-        $x.Values | ForEach-Object { $_.TimestampChainEvaluatedAtTokenTime = $false }
-    }
-    $beforeRollback = Get-RootManifest $consumerFixture.Root
-    $rollbackRejected = Invoke-Rollback $consumerFixture.Root $consumerFixture.Observation
-    $afterRollback = Get-RootManifest $consumerFixture.Root
-    if ($rollbackRejected.ExitCode -eq 0 -or $beforeRollback -cne $afterRollback) {
-        throw 'The exact rollback did not reject the missing token-time chain proof before mutation.'
-    }
-    $results.Add([ordered]@{
-        case='consumer/rollback-rejects-missing-token-time-before-mutation'; result='exact-entry-point-rejected-without-mutation'
-        script=$rollback; script_sha256=(Get-FileHash $rollback -Algorithm SHA256).Hash.ToLowerInvariant()
-        module_sha256=$hashes.ExpectedModuleSha256; before_manifest_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($beforeRollback))).ToLowerInvariant()
-        after_manifest_sha256=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($afterRollback))).ToLowerInvariant()
-    })
+if (!$TimestampParserOnly) {
+    & (Join-Path $PSScriptRoot 'Test-SyncSharkReleaseTransactions.ps1') -ReleaseRoot $ReleaseRoot -PredecessorRuntime $PredecessorRuntime -SourceCommit $SourceCommit
 }
-finally {
-    $resolvedTestBase = [IO.Path]::GetFullPath($testBase).TrimEnd('\') + '\'
-    $resolvedFixture = [IO.Path]::GetFullPath($consumerFixture.Root)
-    if (-not $resolvedFixture.StartsWith($resolvedTestBase, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'Refused to clean a focused consumer fixture outside the fixed test root.'
-    }
-    if (Test-Path -LiteralPath $consumerFixture.Root) { Remove-Item -LiteralPath $consumerFixture.Root -Recurse -Force }
-    if (Test-Path -LiteralPath $consumerFixture.Observation) { Remove-Item -LiteralPath $consumerFixture.Observation -Force }
-}
-
-if ($TimestampParserOnly) {
-    $receipt = [ordered]@{
-        result = 'PASS'; source_commit = $SourceCommit; focused_scope = 'rfc3161-timestamp-parser-and-tsa-policy'
-        entry_points = @('Get-SyncSharkSignatureObservation actual PE/CMS parser', 'Assert-SyncSharkSignatureObservation decision gate')
-        command_shape = 'pwsh -File Test-SyncSharkReleaseGuards.ps1 -TimestampParserOnly -ReleaseRoot <exact-candidate> -PredecessorRuntime <signed-0.3.20> -SourceCommit <commit> -EvidenceDirectory <bounded-output>'
-        input_identity = [ordered]@{ predecessor_runtime=$predecessorRuntime; predecessor_exe_sha256=(Get-FileHash -LiteralPath (Join-Path $predecessorRuntime 'SyncShark.exe') -Algorithm SHA256).Hash.ToLowerInvariant(); module_sha256=$hashes.ExpectedModuleSha256; install_script=$install; install_sha256=(Get-FileHash $install -Algorithm SHA256).Hash.ToLowerInvariant(); rollback_script=$rollback; rollback_sha256=(Get-FileHash $rollback -Algorithm SHA256).Hash.ToLowerInvariant(); parser_fixture_directory=$parserFixtureDirectory }
-        oracle = 'genuine installed timestamps and a generated isolated chain valid at token time must pass; a signer invalid at token time plus malformed/incomplete TSTInfo, outer trailing bytes, missing/mismatched ESS, invalid imprint, absent/wrong/noncritical/nonexclusive TSA EKU, invalid signature/content and invalid chain must fail closed'
-        case_count = $results.Count; cases = $results
-    }
-    $receiptPath = Join-Path $evidenceDirectory 'release-guard-matrix.json'
-    [IO.File]::WriteAllText($receiptPath, ($receipt | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
-    $receipt | ConvertTo-Json -Depth 5
-    return
-}
-
-foreach ($allowedCase in @(
-    [pscustomobject]@{ Name = 'valid'; Mutate = {} },
-    [pscustomobject]@{ Name = 'nottrusted-isolated-untrustedroot'; Mutate = { param($x); $x.Values | ForEach-Object { $_.Status = 'NotTrusted'; $_.RawStatus = 'UnknownError'; $_.SignerChainStatuses = @('UntrustedRoot') } } }
-)) {
-    $fixture = New-TestRoot ('allow-' + $allowedCase.Name)
-    Write-Observation $fixture.Observation $allowedCase.Mutate
-    $run = Invoke-Installer $fixture.Root $fixture.Observation
-    if ($run.ExitCode -ne 0) { throw "Permitted installer case failed: $($allowedCase.Name): $($run.Stderr)" }
-    $active = Get-Item -LiteralPath (Join-Path $fixture.Root 'active') -Force
-    if ([IO.Path]::GetFullPath([string]$active.Target) -cne [IO.Path]::GetFullPath((Join-Path $fixture.Root 'versions\0.3.21'))) { throw 'Permitted installer did not publish the successor.' }
-    $results.Add([ordered]@{ case = 'installer-allow/' + $allowedCase.Name; result = 'installed-isolated-successor' })
-}
-
-$rejections = [Collections.Generic.List[object]]::new()
-foreach ($status in @('UnknownError', 'NotSigned', 'HashMismatch', 'NotSupportedFileFormat', 'Incompatible')) {
-    $rejections.Add([pscustomobject]@{ Name = "status-$status"; Mutate = { param($x); $x.Values | ForEach-Object { $_.Status = $status } }.GetNewClosure() })
-}
-$rejections.Add([pscustomobject]@{ Name = 'nottrusted-additional-status'; Mutate = { param($x); $x.Values | ForEach-Object { $_.Status = 'NotTrusted'; $_.SignerChainStatuses = @('UntrustedRoot', 'NotTimeValid') } } })
-foreach ($property in @('Thumbprint', 'Subject', 'Issuer', 'SpkiSha256')) {
-    $rejections.Add([pscustomobject]@{ Name = "pin-$property"; Mutate = { param($x); $x.Values | ForEach-Object { $_.$property = 'mismatch' } }.GetNewClosure() })
-}
-foreach ($property in @('Rfc3161Present', 'Rfc3161CryptographicallyValid', 'Rfc3161', 'TimestampSignatureBound', 'TimestampChainValid')) {
-    $rejections.Add([pscustomobject]@{ Name = "timestamp-$property-false"; Mutate = { param($x); $x.Values | ForEach-Object { $_.$property = $false } }.GetNewClosure() })
-}
-$rejections.Add([pscustomobject]@{ Name = 'timestamp-chain-status'; Mutate = { param($x); $x.Values | ForEach-Object { $_.TimestampChainStatuses = @('NotTimeValid') } } })
-foreach ($case in $rejections) {
-    $fixture = New-TestRoot ('reject-' + $case.Name)
-    Write-Observation $fixture.Observation $case.Mutate
-    Assert-RejectedUnchanged ('installer-reject/' + $case.Name) $fixture
-}
-
-$badHashFixture = New-TestRoot 'reject-package-hash'
-Assert-RejectedUnchanged 'installer-reject/package-hash-mismatch' $badHashFixture @{ ExpectedSignedExeSha256 = ('0' * 64) }
-
-foreach ($member in @('SyncShark.exe', 'SyncShark.Core.dll')) {
-    $fixture = New-TestRoot ('reject-predecessor-' + $member.Replace('.', '-'))
-    [IO.File]::AppendAllText((Join-Path $fixture.Root ('versions\0.3.20\' + $member)), 'tamper')
-    Assert-RejectedUnchanged ('installer-reject/predecessor-tree-' + $member) $fixture
-}
-
-function Write-Journal([string]$Root, [object]$Value) {
-    $transaction = Join-Path $Root ('replacement-staging\transactions\0.3.21-' + $SourceCommit.Substring(0, 7))
-    New-Item -ItemType Directory -Path $transaction -Force | Out-Null
-    $path = Join-Path $transaction 'install-journal.json'
-    if ($Value -is [string]) { [IO.File]::WriteAllText($path, $Value, [Text.UTF8Encoding]::new($false)) }
-    else { [IO.File]::WriteAllText($path, ($Value | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false)) }
-    [pscustomobject]@{ Root = $transaction; Path = $path }
-}
-function New-Journal([string]$Root, [string[]]$Completed = @(), [string]$Pending = $null) {
-    [pscustomobject]@{
-        schema = 1; operation = 'install'; version = '0.3.21'; commit = $SourceCommit
-        product_root = [IO.Path]::GetFullPath($Root); status = 'active'; pending = $Pending
-        completed = $Completed; allowed_steps = @('stage-package', 'publish-runtime', 'backup-state', 'create-next-link', 'retain-predecessor', 'publish-successor', 'register-explorer-package', 'register-application', 'verify-complete')
-        artifacts = [pscustomobject]@{ state_predecessor_sha256 = $null }
-    }
-}
-
-function Write-RollbackJournal([string]$Root, [object]$Value) {
-    $transaction = Join-Path $Root ('replacement-staging\transactions\0.3.21-' + $SourceCommit.Substring(0, 7))
-    $path = Join-Path $transaction 'rollback-journal.json'
-    if ($Value -is [string]) { [IO.File]::WriteAllText($path, $Value, [Text.UTF8Encoding]::new($false)) }
-    else { [IO.File]::WriteAllText($path, ($Value | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false)) }
-    [pscustomobject]@{ Root = $transaction; Path = $path }
-}
-function New-RollbackJournal([string]$Root, [string[]]$Completed = @(), [string]$Pending = $null) {
-    $transaction = Join-Path $Root ('replacement-staging\transactions\0.3.21-' + $SourceCommit.Substring(0, 7))
-    $installJournal = Get-Content -LiteralPath (Join-Path $transaction 'install-journal.json') -Raw | ConvertFrom-Json -Depth 20
-    [pscustomobject]@{
-        schema = 1; operation = 'rollback'; version = '0.3.21'; commit = $SourceCommit
-        product_root = [IO.Path]::GetFullPath($Root); status = 'active'; pending = $Pending
-        completed = $Completed; allowed_steps = @('preserve-state', 'preserve-vnext-state', 'restore-state', 'restore-vnext-state', 'retain-successor', 'publish-predecessor', 'verify-complete')
-        artifacts = [pscustomobject]@{ predecessor_state_sha256 = [string]$installJournal.artifacts.state_predecessor_sha256; successor_state_sha256 = $null; pending_successor_state_sha256 = $null }
-    }
-}
-
-foreach ($badJournal in @(
-    [pscustomobject]@{ Name = 'truncated'; Mutate = { param($j); '{bad' } },
-    [pscustomobject]@{ Name = 'unknown-schema'; Mutate = { param($j); $j.schema = 2; $j } },
-    [pscustomobject]@{ Name = 'version-mismatch'; Mutate = { param($j); $j.version = '9.9.9'; $j } },
-    [pscustomobject]@{ Name = 'commit-mismatch'; Mutate = { param($j); $j.commit = ('0' * 40); $j } },
-    [pscustomobject]@{ Name = 'escaped-product-root'; Mutate = { param($j); $j.product_root = 'C:\Windows'; $j } },
-    [pscustomobject]@{ Name = 'unknown-phase'; Mutate = { param($j); $j.pending = 'unknown'; $j } },
-    [pscustomobject]@{ Name = 'unknown-status'; Mutate = { param($j); $j.status = 'unknown'; $j } },
-    [pscustomobject]@{ Name = 'contradictory-order'; Mutate = { param($j); $j.completed = @('publish-runtime', 'stage-package'); $j } }
-)) {
-    $fixture = New-TestRoot ('journal-' + $badJournal.Name)
-    $journal = New-Journal $fixture.Root
-    $value = & $badJournal.Mutate $journal
-    Write-Journal $fixture.Root $value | Out-Null
-    Assert-RejectedUnchanged ('journal-reject/' + $badJournal.Name) $fixture
-}
-
-$fixture = New-TestRoot 'reparse-transaction'
-$tx = Write-Journal $fixture.Root (New-Journal $fixture.Root)
-$outside = Join-Path $testBase ('outside-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $outside | Out-Null
-New-Item -ItemType Junction -Path (Join-Path $tx.Root 'unexpected') -Target $outside | Out-Null
-Assert-RejectedUnchanged 'journal-reject/unexpected-transaction-reparse' $fixture
-
-$fixture = New-TestRoot 'active-target' -WithoutActive
-New-Item -ItemType Directory -Path (Join-Path $fixture.Root 'versions\rogue') | Out-Null
-New-Item -ItemType Junction -Path (Join-Path $fixture.Root 'active') -Target (Join-Path $fixture.Root 'versions\rogue') | Out-Null
-Assert-RejectedUnchanged 'identity-reject/unexpected-active-target' $fixture
-
-$fixture = New-TestRoot 'unexpected-rollback'
-$txPath = Join-Path $fixture.Root ('replacement-staging\transactions\0.3.21-' + $SourceCommit.Substring(0, 7))
-New-Item -ItemType Directory -Path $txPath -Force | Out-Null
-New-Item -ItemType Junction -Path (Join-Path $txPath 'predecessor.rollback') -Target (Join-Path $fixture.Root 'versions\0.3.20') | Out-Null
-Assert-RejectedUnchanged 'identity-reject/unexpected-rollback-artifact' $fixture
-
-$fixture = New-TestRoot 'missing-publish-artifact'
-Write-Journal $fixture.Root (New-Journal $fixture.Root @('stage-package') 'publish-runtime') | Out-Null
-Assert-RejectedUnchanged 'journal-reject/missing-nonreconcilable-staging' $fixture
-
-$fixture = New-TestRoot 'contradictory-publish-artifacts'
-$tx = Write-Journal $fixture.Root (New-Journal $fixture.Root @('stage-package') 'publish-runtime')
-Copy-Item -LiteralPath $package -Destination (Join-Path $tx.Root 'runtime.installing') -Recurse
-Copy-Item -LiteralPath $package -Destination (Join-Path $fixture.Root 'versions\0.3.21') -Recurse
-Assert-RejectedUnchanged 'journal-reject/contradictory-publish-artifacts' $fixture
-
-$fixture = New-TestRoot 'runtime-hash-mismatch'
-$tx = Write-Journal $fixture.Root (New-Journal $fixture.Root @('stage-package', 'publish-runtime'))
-Copy-Item -LiteralPath $package -Destination (Join-Path $fixture.Root 'versions\0.3.21') -Recurse
-[IO.File]::AppendAllText((Join-Path $fixture.Root 'versions\0.3.21\SyncShark.dll'), 'tamper')
-Assert-RejectedUnchanged 'journal-reject/runtime-hash-mismatch' $fixture
-
-$fixture = New-TestRoot 'state-backup-mismatch'
-$badStateJournal = New-Journal $fixture.Root @('stage-package', 'publish-runtime', 'backup-state')
-$badStateJournal.artifacts.state_predecessor_sha256 = ('0' * 64)
-$tx = Write-Journal $fixture.Root $badStateJournal
-Copy-Item -LiteralPath $package -Destination (Join-Path $fixture.Root 'versions\0.3.21') -Recurse
-New-Item -ItemType Directory -Path (Join-Path $tx.Root 'state.predecessor\state'), (Join-Path $tx.Root 'state.predecessor\vNext\state') -Force | Out-Null
-[IO.File]::WriteAllText((Join-Path $tx.Root 'state.predecessor\state\state.txt'), 'wrong', [Text.UTF8Encoding]::new($false))
-[IO.File]::WriteAllText((Join-Path $tx.Root 'state.predecessor\vNext\state\state.txt'), 'predecessor-vnext-state', [Text.UTF8Encoding]::new($false))
-Assert-RejectedUnchanged 'journal-reject/state-backup-hash-mismatch' $fixture
-
-foreach ($badJournal in @(
-    [pscustomobject]@{ Name = 'truncated'; Mutate = { param($j); '{bad' } },
-    [pscustomobject]@{ Name = 'unknown-schema'; Mutate = { param($j); $j.schema = 2; $j } },
-    [pscustomobject]@{ Name = 'version-mismatch'; Mutate = { param($j); $j.version = '9.9.9'; $j } },
-    [pscustomobject]@{ Name = 'commit-mismatch'; Mutate = { param($j); $j.commit = ('0' * 40); $j } },
-    [pscustomobject]@{ Name = 'escaped-product-root'; Mutate = { param($j); $j.product_root = 'C:\Windows'; $j } },
-    [pscustomobject]@{ Name = 'unknown-phase'; Mutate = { param($j); $j.pending = 'unknown'; $j } },
-    [pscustomobject]@{ Name = 'unknown-status'; Mutate = { param($j); $j.status = 'unknown'; $j } },
-    [pscustomobject]@{ Name = 'contradictory-order'; Mutate = { param($j); $j.completed = @('restore-state', 'preserve-state'); $j } },
-    [pscustomobject]@{ Name = 'predecessor-identity-mismatch'; Mutate = { param($j); $j.artifacts.predecessor_state_sha256 = ('0' * 64); $j } }
-)) {
-    $fixture = New-RollbackTestRoot ('rollback-journal-' + $badJournal.Name)
-    $journal = New-RollbackJournal $fixture.Root
-    $value = & $badJournal.Mutate $journal
-    Write-RollbackJournal $fixture.Root $value | Out-Null
-    Assert-RollbackRejectedUnchanged ('rollback-journal-reject/' + $badJournal.Name) $fixture
-}
-
-$fixture = New-RollbackTestRoot 'rollback-reparse-transaction'
-$transaction = Join-Path $fixture.Root ('replacement-staging\transactions\0.3.21-' + $SourceCommit.Substring(0, 7))
-$outsideRollback = Join-Path $testBase ('rollback-outside-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $outsideRollback | Out-Null
-New-Item -ItemType Junction -Path (Join-Path $transaction 'unexpected-rollback-reparse') -Target $outsideRollback | Out-Null
-Assert-RollbackRejectedUnchanged 'rollback-journal-reject/unexpected-transaction-reparse' $fixture
-
-foreach ($liveReparseCase in @(
-    [pscustomobject]@{ Name = 'state-child'; Relative = 'state\unexpected-reparse'; ReplaceRoot = $false },
-    [pscustomobject]@{ Name = 'state-root'; Relative = 'state'; ReplaceRoot = $true },
-    [pscustomobject]@{ Name = 'vnext-state-child'; Relative = 'vNext\state\unexpected-reparse'; ReplaceRoot = $false }
-)) {
-    $fixture = New-RollbackTestRoot ('rollback-live-reparse-' + $liveReparseCase.Name)
-    $outsideLive = Join-Path $testBase ('rollback-live-outside-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $outsideLive | Out-Null
-    [IO.File]::WriteAllText((Join-Path $outsideLive 'outside.txt'), 'must-not-be-followed', [Text.UTF8Encoding]::new($false))
-    $reparsePath = Join-Path $fixture.Root $liveReparseCase.Relative
-    if ($liveReparseCase.ReplaceRoot) { Remove-Item -LiteralPath $reparsePath -Recurse -Force }
-    New-Item -ItemType Junction -Path $reparsePath -Target $outsideLive | Out-Null
-    Assert-RollbackRejectedUnchanged ('rollback-state-reject/live-' + $liveReparseCase.Name) $fixture
-}
-
-$fixture = New-RollbackTestRoot 'rollback-missing-state-backup'
-$transaction = Join-Path $fixture.Root ('replacement-staging\transactions\0.3.21-' + $SourceCommit.Substring(0, 7))
-Remove-Item -LiteralPath (Join-Path $transaction 'state.predecessor') -Recurse -Force
-Assert-RollbackRejectedUnchanged 'rollback-journal-reject/missing-predecessor-state-backup' $fixture
-
-foreach ($member in @('SyncShark.exe', 'SyncShark.Core.dll')) {
-    $fixture = New-RollbackTestRoot ('rollback-reject-predecessor-' + $member.Replace('.', '-'))
-    [IO.File]::AppendAllText((Join-Path $fixture.Root ('versions\0.3.20\' + $member)), 'tamper')
-    Assert-RollbackRejectedUnchanged ('rollback-reject/predecessor-tree-' + $member) $fixture
-}
-
-$fixture = New-RollbackTestRoot 'rollback-state-backup-mismatch'
-$transaction = Join-Path $fixture.Root ('replacement-staging\transactions\0.3.21-' + $SourceCommit.Substring(0, 7))
-[IO.File]::AppendAllText((Join-Path $transaction 'state.predecessor\state\state.txt'), 'tamper')
-Assert-RollbackRejectedUnchanged 'rollback-journal-reject/predecessor-state-backup-mismatch' $fixture
-
-foreach ($redirected in @($false,$true)) {
-    $fixture = New-RollbackTestRoot 'rollback-unexpected-successor-artifact'
-    if ($redirected) {
-        $dataRoot = Join-Path $testBase ('rollback-data-' + [guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Path $dataRoot | Out-Null
-        foreach ($relative in @('state','vNext','engine')) {
-            $source = Join-Path $fixture.Root $relative
-            if (Test-Path -LiteralPath $source) { Move-Item -LiteralPath $source -Destination (Join-Path $dataRoot $relative) }
-        }
-        [IO.File]::WriteAllText((Join-Path $fixture.Root 'product-root.txt'), $dataRoot + [Environment]::NewLine)
-    }
-    $transaction = Join-Path (Resolve-SyncSharkDataRoot $fixture.Root) ('replacement-staging\rollback-0.3.21-' + $SourceCommit.Substring(0, 7))
-    $unexpected = Join-Path $transaction 'state.successor'
-    New-Item -ItemType Directory -Path $unexpected -Force | Out-Null
-    Assert-RollbackRejectedUnchanged ('rollback-journal-reject/unexpected-successor-state-artifact/redirected-' + $redirected) $fixture ('Unexpected rollback artifact: ' + $unexpected)
-    Remove-Item -LiteralPath $unexpected
-    $control = Invoke-Rollback $fixture.Root $fixture.Observation
-    if ($control.ExitCode -ne 0) { throw "Successor-artifact removal control failed: $($control.Stderr)" }
-    $results.Add([ordered]@{case=('rollback-successor-artifact-removal-control/redirected-' + $redirected);result='allowed-after-removing-only-artifact'})
-}
-
-$escapeRoot = Join-Path $testBase ('escape-source-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $escapeRoot | Out-Null
-$escapeObservation = Join-Path $testBase ('escape-' + [guid]::NewGuid().ToString('N') + '.json'); Write-Observation $escapeObservation {}
-$escapeRun = Invoke-Installer 'C:\Windows' $escapeObservation
-if ($escapeRun.ExitCode -eq 0) { throw 'The isolated test-root seam accepted a path outside its fixed temporary allocation.' }
-$results.Add([ordered]@{ case = 'isolation-seam/reject-outside-fixed-test-root'; result = 'rejected' })
-
-$receipt = [ordered]@{
-    result = 'PASS'; source_commit = $SourceCommit
-    entry_points = @('Get-SyncSharkSignatureObservation actual PE/CMS parser', 'Assert-SyncSharkSignatureObservation decision gate', 'exact packaged installer', 'exact packaged rollback')
-    command_shape = 'pwsh -File Test-SyncSharkReleaseGuards.ps1 -ReleaseRoot <exact-candidate> -PredecessorRuntime <signed-0.3.20> -SourceCommit <commit> -EvidenceDirectory <bounded-output>'
-    input_identity = [ordered]@{ predecessor_runtime=$predecessorRuntime; predecessor_exe_sha256=(Get-FileHash -LiteralPath (Join-Path $predecessorRuntime 'SyncShark.exe') -Algorithm SHA256).Hash.ToLowerInvariant(); package_manifest=$manifest; package_manifest_sha256=$hashes.ExpectedManifestSha256; parser_fixture_directory=$parserFixtureDirectory }
-    oracle = 'actual parser flags must match each constructed PE/CMS negative; only exact permitted decision states may install; every installer and rollback rejection must preserve an identical product-root manifest'
-    install_script = $install; install_sha256 = (Get-FileHash $install -Algorithm SHA256).Hash.ToLowerInvariant()
-    rollback_script = $rollback; rollback_sha256 = (Get-FileHash $rollback -Algorithm SHA256).Hash.ToLowerInvariant()
-    module_sha256 = $hashes.ExpectedModuleSha256; case_count = $results.Count; cases = $results
-}
-$receiptPath = Join-Path $evidenceDirectory 'release-guard-matrix.json'
-[IO.File]::WriteAllText($receiptPath, ($receipt | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
-$receipt | ConvertTo-Json -Depth 5
+$results | ConvertTo-Json -Depth 10
