@@ -247,7 +247,7 @@ public sealed class Commands
         var path = files.Resolve(folder, pair, run);
         if (path is null)
         {
-            WriteLogMissing(output, pair, run);
+            output.WriteLine(Text.Get(TextKey.HumanLogUnreadable));
             return Cli.SuccessExitCode;
         }
 
