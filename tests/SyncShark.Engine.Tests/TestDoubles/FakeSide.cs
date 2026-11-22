@@ -24,6 +24,7 @@ public sealed class FakeSide(Side side) : ISide
     public Dictionary<(string Id,string Revision,string Hash), Recovery> Recoverable { get; } = [];
     private sealed record Stage(string Path, byte[] Bytes, Entry Source) : IStaged
     {
+        public StageProof? Proof { get; init; }
         public bool ConsumesSourceOnPublish => false;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
@@ -72,7 +73,7 @@ public sealed class FakeSide(Side side) : ISide
         using var h = new ContentHash(); h.Append(Current(entry).Bytes); return Task.FromResult(h.Finish());
     }
     /// <summary>Stage operation on the supplied facts.</summary>
-    public Task<IStaged> StageAsync(string path, Stream content, Entry source, CancellationToken ct)
+    public Task<IStaged> StageAsync(string path, Stream content, Entry source, Entry? selectedTarget, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(StageAsync));
         return Copy();
@@ -86,14 +87,14 @@ public sealed class FakeSide(Side side) : ISide
         else if (Items.ContainsKey(stage.Path)) throw new PathOccupiedException(stage.Path);
         using var digest = new ContentHash(); digest.Append(stage.Bytes);
         var entry = stage.Source with { Path = stage.Path, Id = expected?.Id ?? $"{Side}-{++nextId}", Revision = $"r{++nextId}", ContentHash = digest.Finish() };
-        Items[stage.Path] = (entry, stage.Bytes.ToArray()); return Task.FromResult(new RemovalResult(RemovalOutcome.Published, null, entry, null));
+        Items[stage.Path] = (entry, stage.Bytes.ToArray()); return Task.FromResult(new RemovalResult(RemovalOutcome.Published, entry, null));
     }
     /// <summary>EnsureFolder operation on the supplied facts.</summary>
-    public Task<Entry> EnsureFolderAsync(string path, CancellationToken ct)
+    public Task<RemovalResult> EnsureFolderAsync(string path, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(EnsureFolderAsync));
-        if (Items.TryGetValue(path,out var old)) return old.Entry.IsFolder ? Task.FromResult(old.Entry) : throw new PathOccupiedException(path);
-        var folder = Folder(path); Seed(folder, []); return Task.FromResult(folder);
+        if (Items.TryGetValue(path,out var old)) return old.Entry.IsFolder ? Task.FromResult(new RemovalResult(RemovalOutcome.Published,old.Entry,null)) : throw new PathOccupiedException(path);
+        var folder = Folder(path); Seed(folder, []); return Task.FromResult(new RemovalResult(RemovalOutcome.Published,folder,null));
     }
     /// <summary>Delete operation on the supplied facts.</summary>
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct)
@@ -101,17 +102,17 @@ public sealed class FakeSide(Side side) : ISide
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(DeleteAsync)); var old = Current(expected);
         if (RecycleRefusals.TryGetValue(expected.Path, out var failure)) throw failure;
         foreach (var child in Items.Values.Where(v => expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray()) { History.Add(child); Items.Remove(child.Entry.Path); }
-        History.Add(old); Items.Remove(expected.Path); return Task.FromResult(new RemovalResult(RemovalOutcome.Removed, null, null, null));
+        History.Add(old); Items.Remove(expected.Path); return Task.FromResult(new RemovalResult(RemovalOutcome.Removed, null, null));
     }
     /// <summary>Move operation on the supplied facts.</summary>
-    public Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct)
+    public Task<RemovalResult> MoveAsync(Entry expected, string newPath, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(MoveAsync)); var old = Current(expected);
         if (!PathNames.Same(expected.Path, newPath) && Items.ContainsKey(newPath)) throw new PathOccupiedException(newPath);
         var moving = Items.Values.Where(v => v.Entry.Path == expected.Path || expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray();
         foreach (var v in moving) Items.Remove(v.Entry.Path);
         foreach (var v in moving) Seed(v.Entry with { Path = newPath + v.Entry.Path[expected.Path.Length..] }, v.Bytes);
-        return Task.FromResult(Items[newPath].Entry);
+        return Task.FromResult(new RemovalResult(RemovalOutcome.Published,Items[newPath].Entry,null));
     }
     /// <summary>ReadById operation on the supplied facts.</summary>
     public Task<(IdentityLocation Location, bool InScope)?> ReadByIdAsync(string id, CancellationToken ct)
@@ -120,11 +121,11 @@ public sealed class FakeSide(Side side) : ISide
         return Task.FromResult<(IdentityLocation Location,bool InScope)?>(hit is null ? null : (new(Side.ToString(), hit.Path, hit), true));
     }
     /// <summary>CreateFolderExclusive operation on the supplied facts.</summary>
-    public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct)
+    public Task<RemovalResult> CreateFolderExclusiveAsync(string path, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(CreateFolderExclusiveAsync));
         if (Items.ContainsKey(path)) throw new PathOccupiedException(path);
-        var folder = Folder(path); Seed(folder, []); return Task.FromResult(folder);
+        var folder = Folder(path); Seed(folder, []); return Task.FromResult(new RemovalResult(RemovalOutcome.Published,folder,null));
     }
     /// <summary>ReadChanges operation on the supplied facts.</summary>
     public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct)
@@ -144,4 +145,9 @@ public sealed class FakeSide(Side side) : ISide
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReadJobAsync));
         return Task.FromResult(JobReplies[job.JobId].Dequeue());
     }
+
+    /// <inheritdoc/>
+    public Task<IStaged> ReopenStageAsync(StageProof expected, Entry source, CancellationToken ct) => throw new InvalidOperationException();
+    public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive)> RootAsync(CancellationToken ct) => Task.FromResult(Root);
+    public (DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive) Root { get; set; }
 }

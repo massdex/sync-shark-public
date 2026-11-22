@@ -11,6 +11,9 @@ public static class PathScopeChecks
         var scope = new PathScope(outer, [outer, inner], volumeBin: Path.Combine(root, ResourceNames.RootBinFolder));
         Check.Require(scope.Excludes("inner/file", null, false) && scope.Excludes(null, "RemoteInner/file", false), "Nested roots");
         Check.Require(scope.Excludes("Recycle Bin/item", null, false) && !scope.Excludes("Recycle Bin Extra/item", null, false), "Volume bin boundary");
+        Check.Require(!scope.Excludes(null,"Inner/file",false) && !scope.Excludes("RemoteInner/file",null,false),"Unrelated relative spelling crossed endpoints");
+        Check.Require(!scope.Excludes(null,"Recycle Bin/item",false),"PC bin leaked into Dropbox matcher");
+        Check.Require(scope.Excludes("Inner/file","Elsewhere/file",false),"Mapped PC boundary lost");
         Check.Require(!scope.Excludes("innermost/file", null, false), "Unrelated sibling");
         return Task.CompletedTask;
     }
@@ -35,6 +38,9 @@ public static class PathScopeChecks
         var folder=Scenarios.ItemChecks.File(Side.Local,"victim",0,"folder-id",true);
         var note=new RemovalSelection(new(folder,"volume",null),null);
         Check.Require(note.Proof.Expected==folder && note.Proof.ContentHash==null,"Folder selection fabricated file proof");
+        var stub=folder with { IsFolder=false, Skip=nameof(TextKey.SkipOnlineOnly) };
+        Check.Require(new RemovalProof(stub,"volume",null).Expected==stub,"Dehydrated metadata proof rejected");
+        try { _=new StageProof("stage","volume","stage-id",1,"bad"); throw new InvalidDataException("Malformed stage proof accepted"); } catch(ArgumentException) { }
         try { _=new RemovalProof(folder with { IsFolder=false },"volume",null); }
         catch(ArgumentException) { return Task.CompletedTask; }
         throw new InvalidDataException("File victim accepted without content proof");

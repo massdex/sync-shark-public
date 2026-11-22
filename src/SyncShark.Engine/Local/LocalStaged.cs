@@ -10,6 +10,6 @@ public sealed class LocalStaged : IStaged
 
     /// <summary>Exact held stage version used for create-only publication.</summary>
     public StageProof Proof => throw new NotImplementedException();
-    public LocalStaged(string path, StageProof proof, Stream held) => throw new NotImplementedException();
+    public LocalStaged(string path, StageProof proof, Stream held, Func<StageProof,bool> ownedByNote) => throw new NotImplementedException();
 
 }

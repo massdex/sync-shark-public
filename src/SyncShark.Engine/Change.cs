@@ -14,13 +14,15 @@ namespace Massdex.SyncShark.Engine;
 public sealed record Change(
     Side Side,
     ChangeKind Kind,
-    string Path,
+    string? Path,
     string? OldPath,
     string? Id,
     Entry? Observed,
     bool LocalContentDirty,
     bool IdentityDeleted,
-    ulong? Usn = null);
+    ulong? Usn = null,
+    string? Volume = null, string? HistoricalParentId = null, string? HistoricalName = null,
+    string? OldParentId = null, string? OldName = null);
 
 /// <summary>Kind of a change notice from a source listener (section 8.7).</summary>
 public enum ChangeKind { Changed, Renamed, Deleted }

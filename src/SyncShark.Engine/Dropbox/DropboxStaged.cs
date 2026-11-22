@@ -17,6 +17,7 @@ public sealed class DropboxStaged : IStaged
 
     /// <summary>The pair-relative path the content is for.</summary>
     public string Path { get; }
+    public StageProof? Proof => null;
     public Entry Source { get; }
     /// <summary>Set for a single upload.</summary>
     public Stream? Content { get; }

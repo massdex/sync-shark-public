@@ -6,5 +6,5 @@ public sealed class PairRunner
     /// <summary>Run operation on the supplied facts.</summary>
     public Task RunAsync(PairConfig pair, ISide local, ISide dropbox, IStore store, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Checks the observed binding against the saved roots before admitting work for the pair.</summary>
-    public Task<bool> CheckRootsAsync(PairConfig pair, RootIdentity? observed, IStore store, CancellationToken ct) => throw new NotImplementedException();
+    public Task<bool> CheckRootsAsync(PairConfig pair, RootIdentity? observed, DriveEvidence? observedDrive, IStore store, CancellationToken ct) => throw new NotImplementedException();
 }

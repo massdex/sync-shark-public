@@ -66,6 +66,9 @@ public static class DependencyChecks
             ("Local","VolumeSpace","_ = new DriveInfo(string.Empty).AvailableFreeSpace;",true),
             ("Local","LocalSide","_ = Massdex.SyncShark.Engine.Local.InUse.Processes(string.Empty);",true),
             ("Local","RecycleBin","_ = Massdex.SyncShark.Engine.Local.InUse.Processes(string.Empty);",false),
+            ("Planner","Decide","_ = new System.Net.Sockets.TcpClient();",false),
+            ("Dropbox","SignIn","System.Net.HttpWebRequest r=null!; _ = r.GetResponseAsync();",false),
+            ("Dropbox","DropboxApi","System.Net.HttpWebRequest r=null!; _ = r.GetResponseAsync();",true),
             ("Planner","Decide","_ = Environment.TickCount64;",false),
             ("Run","Host","_ = typeof(Massdex.SyncShark.Engine.Dropbox.DropboxSide);",false),
             ("Edge","Commands","_ = typeof(Massdex.SyncShark.Engine.Run.Host);",true),
@@ -140,6 +143,8 @@ public static class DependencyChecks
                     module=="Planner" && name=="SettingsParser";
             }
             else if(space.StartsWith("Microsoft.Data.Sqlite",StringComparison.Ordinal) || space=="SQLitePCL") violates=module!="Storage";
+            else if(module=="Planner" && (space=="System.Net" || space.StartsWith("System.Net.",StringComparison.Ordinal))) violates=true;
+            else if((space=="System.Net.Sockets" || space=="System.Net" && name is "HttpWebRequest" or "WebRequest" or "WebClient" or "HttpListener" or "Dns") && symbol is IMethodSymbol) violates=(module,file)!=("Dropbox","DropboxApi");
             else if(space=="System.Net.Http" && name is "HttpClient" or "HttpMessageInvoker" && (member.Contains("Async",StringComparison.Ordinal) || member=="Send")) violates=(module,file)!=("Dropbox","DropboxApi");
             else if(space=="System.IO" && name=="DriveInfo" && member is "AvailableFreeSpace" or "TotalFreeSpace") violates=(module,file)!=("Local","VolumeSpace");
             else if(module=="Planner" && name=="Environment" && member is "TickCount" or "TickCount64") violates=true;

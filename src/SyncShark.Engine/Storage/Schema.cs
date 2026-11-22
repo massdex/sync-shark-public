@@ -9,21 +9,21 @@ public static class Schema
     public const string Pragmas = "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;";
     /// <summary>Creates the durable tables, indexes and root-change trigger.</summary>
     public const string Create = """
-        CREATE TABLE IF NOT EXISTS pair(id INTEGER PRIMARY KEY, pair_id TEXT NOT NULL UNIQUE, def_json TEXT NOT NULL, pending_json TEXT,
+        CREATE TABLE pair(id INTEGER PRIMARY KEY, pair_id TEXT NOT NULL UNIQUE, def_json TEXT NOT NULL, pending_json TEXT,
           last_repair_json TEXT, first_repair_done INTEGER NOT NULL DEFAULT 0,
           deleted_history_cursor TEXT CHECK(deleted_history_cursor IS NULL OR length(deleted_history_cursor)>0),
           deleted_history_owed INTEGER NOT NULL DEFAULT 1 CHECK(deleted_history_owed IN (0,1))) STRICT;
-        CREATE TABLE IF NOT EXISTS synced_entry(pair_id INTEGER NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
+        CREATE TABLE synced_entry(pair_id INTEGER NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
           local_path TEXT NOT NULL, dropbox_key_delta TEXT, dropbox_path_delta TEXT,
           dropbox_key TEXT GENERATED ALWAYS AS (coalesce(dropbox_key_delta, pathkey(local_path))) VIRTUAL,
           dropbox_path TEXT GENERATED ALWAYS AS (coalesce(dropbox_path_delta, local_path)) VIRTUAL,
           is_folder INTEGER NOT NULL, local_id ANY NOT NULL, local_size INTEGER NOT NULL, local_mtime INTEGER NOT NULL,
           dropbox_id TEXT NOT NULL, dropbox_hash ANY NOT NULL,
           local_published_journal INTEGER, local_published_usn INTEGER) STRICT;
-        CREATE UNIQUE INDEX IF NOT EXISTS synced_local_key ON synced_entry(pair_id, pathkey(local_path));
-        CREATE UNIQUE INDEX IF NOT EXISTS synced_dropbox_key ON synced_entry(pair_id, dropbox_key_delta) WHERE dropbox_key_delta IS NOT NULL;
-        CREATE INDEX IF NOT EXISTS synced_local_id ON synced_entry(pair_id, local_id);
-        CREATE INDEX IF NOT EXISTS synced_dropbox_id ON synced_entry(pair_id, dropbox_id);
+        CREATE UNIQUE INDEX synced_local_key ON synced_entry(pair_id, pathkey(local_path));
+        CREATE UNIQUE INDEX synced_dropbox_key ON synced_entry(pair_id, dropbox_key_delta) WHERE dropbox_key_delta IS NOT NULL;
+        CREATE INDEX synced_local_id ON synced_entry(pair_id, local_id);
+        CREATE INDEX synced_dropbox_id ON synced_entry(pair_id, dropbox_id);
         CREATE TABLE issue(issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
          pair_id INTEGER NOT NULL REFERENCES pair(id) ON DELETE CASCADE,
          kind INTEGER NOT NULL, cause TEXT NOT NULL, path TEXT NOT NULL, subject_json TEXT NOT NULL,

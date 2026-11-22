@@ -15,7 +15,9 @@ public sealed class InMemoryStateStore : IStore
     private readonly Dictionary<string,(RemovalSelection Victim, StageProof? Stage)> armed = [];
     private readonly Dictionary<(string Pair,Side Side,string Key),Entry> scan = [];
     private readonly HashSet<string> firstRepairDone = [];
-    public void MarkFirstRepairDone(string pair) => firstRepairDone.Add(pair);
+    private readonly Dictionary<string,string> summaries=[];
+    private readonly Dictionary<string,string> historyCursor=[];
+    public HashSet<(string Pair,string Key)> DeletedNames { get; }=[];
     /// <summary>Pairs operation on the supplied facts.</summary>
     public IAsyncEnumerable<PairConfig> PairsAsync(CancellationToken ct)
     {
@@ -138,13 +140,17 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested(); lock(pairs) return Task.FromResult(repairs.GetValueOrDefault((pairId,side)));
     }
-    public Task<bool> FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct, Scope? scope = null)
+    public Task<bool> FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct, Scope? scope = null, string? completedRepairJson = null)
     {
         ct.ThrowIfCancellationRequested();
         lock(pairs)
         {
             if(!repairs.TryGetValue((pairId,side),out var owed) || owed.Revision!=revision) return Task.FromResult(false);
-            if(scope is null) repairs[(pairId,side)]=(revision,null);
+            if(scope is null)
+            {
+                repairs[(pairId,side)]=(revision,null);
+                if(completedRepairJson!=null) { firstRepairDone.Add(pairId);summaries[pairId]=completedRepairJson; }
+            }
             else
             {
                 if(side!=Side.Dropbox || !pairs.TryGetValue(pairId,out var pair) || pair.OwedScopes?.Contains(scope)!=true) return Task.FromResult(false);
@@ -196,21 +202,27 @@ public sealed class InMemoryStateStore : IStore
         await foreach(var row in rows.WithCancellation(ct)) if(row.Entry is { } entry) scan[(pairId,side,PathNames.KeyFor(side,row.Path))]=entry;
     }
     /// <summary>Compare operation on the supplied facts.</summary>
-    public IAsyncEnumerable<Row> CompareAsync(string pairId, Scope? scope, CancellationToken ct)
+    public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var records = Records.Where(k=>k.Key.Pair==pairId).Select(k=>k.Value).ToArray();
-        var keys = scan.Keys.Where(k=>k.Pair==pairId).Select(k=>k.Key).Concat(records.Select(v=>v.LocalKey)).Distinct(PathNames.Comparer).Order(StringComparer.Ordinal);
+        var remoteKeys=Records.Where(x=>x.Key.Pair==pairId).Select(x=>x.Value).ToDictionary(v=>v.DropboxKey,v=>v.LocalKey,PathNames.Comparer);
+        string Canonical(Side side,string path) {var key=PathNames.KeyFor(side,path);return side==Side.Dropbox?remoteKeys.GetValueOrDefault(key,key):key;}
+        var members=notices.Where(v=>v.Key.Pair==pairId).SelectMany(v=>v.Value.Subject.Items.Count==0 ?
+            new[]{(Key:PathNames.Key(v.Value.Path),Notice:v.Value,Member:(NoticeItem?)null)} :
+            v.Value.Subject.Items.Select(m=>(Key:Canonical(m.Side,m.Path),Notice:v.Value,Member:(NoticeItem?)m))).ToLookup(x=>x.Key,PathNames.Comparer);
+        var keys=scan.Where(x=>x.Key.Pair==pairId).Select(x=>Canonical(x.Key.Side,x.Value.Path)).Concat(Records.Keys.Where(k=>k.Pair==pairId).Select(k=>k.LocalKey)).Concat(members.Select(x=>x.Key)).Distinct(PathNames.Comparer).Order(StringComparer.Ordinal);
         return Enumerate(Rows(),ct);
-        IEnumerable<Row> Rows()
+        IEnumerable<(Row,IReadOnlyList<(Notice,NoticeItem?,bool,bool)>)> Rows()
         {
             foreach(var key in keys)
             {
-                var saved = records.FirstOrDefault(v=>v.LocalKey==key || v.DropboxKey==key);
-                var local=scan.GetValueOrDefault((pairId,Side.Local,saved?.LocalKey??key));
-                var cloud=scan.GetValueOrDefault((pairId,Side.Dropbox,saved?.DropboxKey??key));
-                if(scope!=null && !PathNames.IsSelfOrUnder(local?.Path??saved?.LocalPath??key,scope.LocalPath) && !PathNames.IsSelfOrUnder(cloud?.Path??saved?.DropboxPath??key,scope.DropboxPath)) continue;
-                yield return new Row(key,local,cloud,saved,[],null,RowContext.Neutral with { FirstRun=!firstRepairDone.Contains(pairId), CompleteInventory=true });
+                var saved=Records.GetValueOrDefault((pairId,key));
+                var local=scan.GetValueOrDefault((pairId,Side.Local,saved?.LocalKey??key));var cloud=scan.GetValueOrDefault((pairId,Side.Dropbox,saved?.DropboxKey??key));
+                var lp=local?.Path??saved?.LocalPath??key;var dp=cloud?.Path??saved?.DropboxPath??key;
+                if(scope!=null && !PathNames.IsSelfOrUnder(lp,scope.LocalPath) && !PathNames.IsSelfOrUnder(dp,scope.DropboxPath)) continue;
+                var l=evidence(Side.Local,lp);var d=evidence(Side.Dropbox,dp);
+                var row=new Row(key,local,cloud,saved,[],null,RowContext.Neutral with { FirstRun=!firstRepairDone.Contains(pairId),CompleteInventory=l.Covered&&d.Covered });
+                yield return (row,members[key].Select(x=>{ var proof=x.Member is {} m?evidence(m.Side,m.Path):(Covered:l.Covered&&d.Covered,Touched:l.Touched||d.Touched);return (x.Notice,x.Member,proof.Covered,proof.Touched); }).ToArray());
             }
         }
     }
@@ -227,4 +239,22 @@ public sealed class InMemoryStateStore : IStore
         foreach (var value in values) { ct.ThrowIfCancellationRequested(); yield return value; }
     }
     public void Dispose() { }
+    public Task<(bool FirstRepairDone,string? LastRepairJson)> RepairStateAsync(string pairId,CancellationToken ct) => Task.FromResult((firstRepairDone.Contains(pairId),summaries.GetValueOrDefault(pairId)));
+    public Task<(string? Cursor,bool Owed)> DeletedHistoryAsync(string pairId,CancellationToken ct) => Task.FromResult((historyCursor.GetValueOrDefault(pairId),!historyCursor.ContainsKey(pairId)));
+    public Task PublishDeletedHistoryAsync(string pairId,string cursor,CancellationToken ct) { ct.ThrowIfCancellationRequested(); historyCursor[pairId]=cursor;return Task.CompletedTask; }
+    public Task<bool> DeletedNameAsync(string pairId,string key,CancellationToken ct) => Task.FromResult(DeletedNames.Contains((pairId,key)));
+    public IAsyncEnumerable<Notice> NoticesAtAsync(string pairId,string pathKey,CancellationToken ct) => Enumerate(notices.Where(n=>n.Key.Pair==pairId && PathNames.Same(n.Value.Path,pathKey)).Select(n=>n.Value),ct);
+    public Task ProjectSubtreeAsync(string pairId,Scope from,Scope to,CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();var projected=new List<(SyncedEntry Before,SyncedEntry After)>();
+        foreach(var item in Records.Where(k=>k.Key.Pair==pairId).Select(k=>k.Value))
+        {
+            string Rewrite(string path,string before,string after)=>PathNames.IsSelfOrUnder(path,before)?after+path[before.Length..]:path;
+            var l=Rewrite(item.LocalPath,from.LocalPath,to.LocalPath);var d=Rewrite(item.DropboxPath,from.DropboxPath,to.DropboxPath);
+            if(l!=item.LocalPath || d!=item.DropboxPath) projected.Add((item,item with { LocalPath=l,LocalKey=PathNames.Key(l),DropboxPath=d,DropboxKey=PathNames.DropboxKey(d) }));
+        }
+        foreach(var x in projected) Records.Remove((pairId,x.Before.LocalKey));
+        foreach(var x in projected) Records.Add((pairId,x.After.LocalKey),x.After);
+        return Task.CompletedTask;
+    }
 }

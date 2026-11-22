@@ -4,5 +4,5 @@ namespace Massdex.SyncShark.Engine.Executor;
 public sealed class CaseRename
 {
     /// <summary>Move operation on the supplied facts.</summary>
-    public Task<Entry> MoveAsync(ISide side, Entry expected, string destination, string suffix, CancellationToken ct) => throw new NotImplementedException();
+    public Task<RemovalResult> MoveAsync(ISide side, Entry expected, string destination, string suffix, CancellationToken ct) => throw new NotImplementedException();
 }

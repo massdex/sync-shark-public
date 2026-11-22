@@ -4,6 +4,8 @@ namespace Massdex.SyncShark.Engine;
 public interface IStaged : IAsyncDisposable
 {
     string Path { get; }
+    /// <summary>Exact held PC stage, null for Dropbox content.</summary>
+    StageProof? Proof { get; }
 
     /// <summary>Whether the source must remain open until publication completes.</summary>
     bool ConsumesSourceOnPublish { get; }

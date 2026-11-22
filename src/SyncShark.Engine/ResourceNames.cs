@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 namespace Massdex.SyncShark.Engine;
 
 /// <summary>Names of the engine's data: embedded resources, and the files under the product folder
-/// (&lt;ProductRoot&gt;/engine/state.db, settings.json, logs/).</summary>
+/// (&lt;ProductRoot&gt;/engine/state.db, logs/).</summary>
 public static class ResourceNames
 {
     /// <summary>Embedded resource name of the complete engine settings defaults.</summary>
@@ -24,10 +24,6 @@ public static class ResourceNames
     public const string Routes = "SyncShark.DropboxRoutes.json";
     public const string EngineFolder = "engine";
     public const string DatabaseFile = "state.db";
-    /// <summary>File name of the user's partial settings overlay.</summary>
-    public const string UserSettingsFile = "settings.json";
-    /// <summary>Owned replacement written and renamed into place so a settings publication is old-or-new.</summary>
-    public const string UserSettingsReplacementFile = UserSettingsFile + ".replacement";
     public const string LogsFolder = "logs";
     public const string LogExtension = ".log";
     public const string LogPattern = "*" + LogExtension;

@@ -10,6 +10,8 @@ public sealed class PathScope
     private readonly string? defaultIgnoreRules;
     private readonly IReadOnlyList<IgnoreRule> ignoreRules;
     private readonly PrefixSet excluded = new();
+    private readonly PrefixSet localBoundaries = new();
+    private readonly PrefixSet dropboxBoundaries = new();
     private readonly string[] localNestedRoots;
     private readonly string[] dropboxNestedRoots;
     private readonly string[] localNestedRootKeys;
@@ -22,7 +24,7 @@ public sealed class PathScope
         this.pair = pair;
         this.volumeBin = volumeBin;
         if (volumeBin is not null && PathNames.RelativeUnderLocalRoot(pair.LocalRoot, volumeBin) is { } bin)
-            excluded.Add(PathNames.Key(bin));
+            localBoundaries.Add(PathNames.Key(bin));
         this.allPairs = allPairs;
         this.defaultIgnoreRules = defaultIgnoreRules;
         ignoreRules = IgnoreRule.Normalize(IgnoreRule.Parse(defaultIgnoreRules ?? "")
@@ -42,7 +44,7 @@ public sealed class PathScope
         }
         localNestedRoots = local.ToArray();
         dropboxNestedRoots = dropbox.ToArray();
-        // Bilateral (2.3): a nested root keeps the row out of sync whichever side's path the row has.
+        // Native boundaries apply to their actual mapped endpoint, never the other side’s spelling.
         localNestedRootKeys = CacheNestedRootKeys(localNestedRoots, Side.Local);
         dropboxNestedRootKeys = CacheNestedRootKeys(dropboxNestedRoots, Side.Dropbox);
     }
@@ -65,17 +67,18 @@ public sealed class PathScope
 
     /// <summary>True when an exclusion or nested root covers the key, whichever side the key belongs to. Ignore
     /// rules are not consulted.</summary>
-    public bool CoversKey(string key) => excluded.Covers(key);
+    public bool CoversKey(Side side,string key) => excluded.Covers(key) || (side==Side.Local ? localBoundaries : dropboxBoundaries).Covers(key);
 
     /// <summary>True when the binding is absent or both of its sides lie under an exclusion or nested root.</summary>
     public bool ExcludesBinding(SyncedEntry? binding) =>
-        binding is null || CoversKey(binding.LocalKey) && CoversKey(binding.DropboxKey);
+        binding is null || CoversKey(Side.Local,binding.LocalKey) || CoversKey(Side.Dropbox,binding.DropboxKey);
 
     /// <summary>True when a queued change names only paths under exclusions or nested roots: each of its paths, the
     /// saved binding at it and its mapped counterpart. A change crossing the boundary, or one whose binding or
     /// counterpart reaches into scope, is not.</summary>
     public bool ExcludesChange<T>(Change notice, T state, Func<T, Side, string, SyncedEntry?> readSaved)
     {
+        if (notice.Path is null) return false; // Unresolved historical binding is not proof of exclusion.
         var side = notice.Side;
         var other = PathNames.Other(side);
         // Each distinct path is evaluated once: a Dropbox notice observes its own path, and the key folds case.
@@ -87,8 +90,8 @@ public sealed class PathScope
         bool Excludes(string path)
         {
             var key = PathNames.KeyFor(side, path);
-            return CoversKey(key) && ExcludesBinding(readSaved(state, side, key)) &&
-                CoversKey(PathNames.KeyFor(other, PathNames.MappedDestination(other, path, state, readSaved)));
+            return ExcludesBinding(readSaved(state, side, key)) && (CoversKey(side,key) ||
+                CoversKey(other,PathNames.KeyFor(other, PathNames.MappedDestination(other, path, state, readSaved))));
         }
     }
 
@@ -149,13 +152,13 @@ public sealed class PathScope
 
     private bool ExcludesPath(string path, bool isFolder, bool isDropbox) =>
         IgnoreRule.IsIgnored(path, isFolder, ignoreRules) ||
-        excluded.Covers(isDropbox ? PathNames.LocalSpelling(path) : path);
+        CoversKey(isDropbox ? Side.Dropbox : Side.Local, PathNames.KeyFor(isDropbox ? Side.Dropbox : Side.Local,path));
 
     // The keys are computed once here, and the same instances form part of the exclusion set.
     private string[] CacheNestedRootKeys(string[] roots, Side side)
     {
         var keys = new string[roots.Length];
-        for (var i = 0; i < roots.Length; i++) excluded.Add(keys[i] = PathNames.KeyFor(side, roots[i]));
+        for (var i = 0; i < roots.Length; i++) (side==Side.Local ? localBoundaries : dropboxBoundaries).Add(keys[i] = PathNames.KeyFor(side, roots[i]));
         return keys;
     }
 }

@@ -16,7 +16,5 @@
   "BackoffJitter": 0.2,
   "MaximumBackoffSeconds": 120,
   "StoragePageSize": 100,
-  "StoreBatchRows": 20000,
-  "AtomicReplaceAttempts": 5,
-  "AtomicReplaceInitialDelayMilliseconds": 50
+  "StoreBatchRows": 20000
 }

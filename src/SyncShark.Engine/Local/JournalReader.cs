@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.Engine.Local;
 /// <summary>JournalReader operations for the local module.</summary>
 public sealed class JournalReader
 {
-    /// <summary>Read operation on the supplied facts.</summary>
+    /// <summary>Reads raw ordered changes, retaining the volume, historical parent id and name for each physical hop even when the current relative path is unknown.</summary>
     public IAsyncEnumerable<ChangePage> ReadAsync(string root, JournalPosition position, EngineSettings settings, CancellationToken ct) => throw new NotImplementedException();
 }
 

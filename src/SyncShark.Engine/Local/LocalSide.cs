@@ -18,19 +18,19 @@ public sealed class LocalSide : ISide
     /// <summary>ContentHash operation on the supplied facts.</summary>
     public Task<string> ContentHashAsync(Entry entry, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Stage operation on the supplied facts.</summary>
-    public Task<IStaged> StageAsync(string path, Stream content, Entry source, CancellationToken ct) => throw new NotImplementedException();
+    public Task<IStaged> StageAsync(string path, Stream content, Entry source, Entry? selectedTarget, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Publish operation on the supplied facts.</summary>
     public Task<RemovalResult> PublishAsync(IStaged staged, Entry? expected, RemovalSelection? selection, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>EnsureFolder operation on the supplied facts.</summary>
-    public Task<Entry> EnsureFolderAsync(string path, CancellationToken ct) => throw new NotImplementedException();
+    public Task<RemovalResult> EnsureFolderAsync(string path, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Delete operation on the supplied facts.</summary>
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Move operation on the supplied facts.</summary>
-    public Task<Entry> MoveAsync(Entry expected, string newPath, CancellationToken ct) => throw new NotImplementedException();
+    public Task<RemovalResult> MoveAsync(Entry expected, string newPath, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>ReadById operation on the supplied facts.</summary>
     public Task<(IdentityLocation Location, bool InScope)?> ReadByIdAsync(string id, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>CreateFolderExclusive operation on the supplied facts.</summary>
-    public Task<Entry> CreateFolderExclusiveAsync(string path, CancellationToken ct) => throw new NotImplementedException();
+    public Task<RemovalResult> CreateFolderExclusiveAsync(string path, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>ReadChanges operation on the supplied facts.</summary>
     public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Recover operation on the supplied facts.</summary>
@@ -38,6 +38,10 @@ public sealed class LocalSide : ISide
     /// <summary>ReadJob operation on the supplied facts.</summary>
     public Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
 
-    public LocalSide(PairConfig pair, PathScope scope, EngineSettings settings) => throw new NotImplementedException();
+    public LocalSide(PairConfig pair, PathScope scope, EngineSettings settings, IStore store) => throw new NotImplementedException();
 
+
+    /// <inheritdoc/>
+    public Task<IStaged> ReopenStageAsync(StageProof expected, Entry source, CancellationToken ct) => throw new NotImplementedException();
+    public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive)> RootAsync(CancellationToken ct) => throw new NotImplementedException();
 }

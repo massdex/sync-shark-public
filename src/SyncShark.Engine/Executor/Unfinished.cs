@@ -4,5 +4,5 @@ namespace Massdex.SyncShark.Engine.Executor;
 public sealed class Unfinished
 {
     /// <summary>Check operation on the supplied facts.</summary>
-    public Task CheckAsync(PairConfig pair, ISide local, ISide dropbox, IStore store, CancellationToken ct) => throw new NotImplementedException();
+    public Task CheckAsync(PairConfig pair, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, CancellationToken ct) => throw new NotImplementedException();
 }
