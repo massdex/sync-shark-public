@@ -17,22 +17,9 @@ public static class DropboxApiChecks
         using var http = new HttpClient(wire);
         var api = new DropboxApi(http, TimeProvider.System, settings, _ => { });
 
-        // A wrong style is rejected before any request; a rejected call never reaches the transport.
+        // A wrong typed style is rejected before any request; a rejected call never reaches the transport.
         await ExpectArgumentException(() => api.DownloadAsync("files/delete_v2", "{}", CancellationToken.None));
         await ExpectArgumentException(() => api.CallJsonAsync("files/download", "{}", CancellationToken.None));
-
-        // The prepared path consults the catalog: content on a non-upload route, or none on an upload route, is refused.
-        using (var withContent = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/delete_v2"))
-        {
-            Content = new StringContent("{}", Encoding.UTF8, "application/json")
-        })
-        {
-            await ExpectArgumentException(() => api.SendAsync(withContent, CancellationToken.None));
-        }
-        using (var missingContent = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/upload")))
-        {
-            await ExpectArgumentException(() => api.SendAsync(missingContent, CancellationToken.None));
-        }
 
         Check.Require(wire.Paths.Count == 0, "a rejected call reached the transport");
     }
@@ -61,7 +48,7 @@ public static class DropboxApiChecks
             var (used, allocated) = await clockApi.SpaceUsageAsync(CancellationToken.None);
             Check.Require(used == 1 && allocated == 2, "individual space usage decode");
             Check.Require(clockWire.Bodies.Count == 1 && clockWire.Bodies[0] == "null", "void wire body is not JSON null");
-            Check.Require(clockApi.ClockOffset is { } sample, "clock sample not recorded");
+            var sample = clockApi.ClockOffset ?? throw new InvalidDataException("clock sample not recorded");
             Check.Require(sample.Offset == serverDate - clock.GetUtcNow(), "clock offset wrong");
             Check.Require(sample.Uncertainty == rtt + TimeSpan.FromSeconds(1), "clock uncertainty wrong");
         }
@@ -95,14 +82,8 @@ public static class DropboxApiChecks
                 Content = new StreamContent(caller)
             };
             upload.Content!.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-            try
-            {
-                using var refusedResponse = await refusalApi.SendAsync(upload, CancellationToken.None);
-                throw new InvalidDataException("refusal accepted");
-            }
-            catch (HttpRequestException)
-            {
-            }
+            using var refusedResponse = await refusalApi.SendAsync(upload, CancellationToken.None);
+            Check.Require(refusedResponse.StatusCode == HttpStatusCode.Conflict, "prepared refusal status not returned");
             Check.Require(!caller.Disposed, "a refused send closed the caller-owned upload source");
         }
     }

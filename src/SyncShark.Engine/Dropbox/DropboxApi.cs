@@ -69,29 +69,13 @@ public sealed class DropboxApi
         }
     }
 
-    /// <summary>Send a prepared request through the single catalog-validated owner: a known route gets its
-    /// credential and verified path root and its policy/style checked; a non-catalog (bootstrap/OAuth) endpoint is
-    /// sent without credentials. The caller owns the request and its content.</summary>
+    /// <summary>Send a prepared request through the single transport: a known catalog route gets the account's token
+    /// and verified path root; a non-catalog (bootstrap/OAuth) endpoint is sent without credentials. The status and
+    /// body are returned to the caller for W10/W14 classification; nothing is rejected by body shape (R35).</summary>
     public async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var name = Routes.NameOf(request.RequestUri);
-        if (name is null) return await SendPreparedAsync(request, null, ct).ConfigureAwait(false);
-        if (Routes.PolicyOf(name) == Routes.Policy.Denied) throw new ArgumentException(null, nameof(request));
-        var expectedContent = Routes.StyleOf(name) == Routes.Style.Upload;
-        if ((request.Content is not null) != expectedContent) throw new ArgumentException(null, nameof(request));
-        await using var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
-        var success = false;
-        try
-        {
-            var response = await SendPreparedAsync(request, name, ct).ConfigureAwait(false);
-            success = true;
-            return response;
-        }
-        finally
-        {
-            _limiter.Value.TransferFinished(success);
-        }
+        return await SendPreparedAsync(request, Routes.NameOf(request.RequestUri), ct).ConfigureAwait(false);
     }
 
     /// <summary>Read Dropbox storage usage using the account route; the void body is the provider's JSON null.</summary>
@@ -133,47 +117,37 @@ public sealed class DropboxApi
         ArgumentNullException.ThrowIfNull(pair);
         Routes.RequireStyle(route, Routes.Style.Rpc);
         var request = BuildRequest(route, argumentJson);
-        await using var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
-        var success = false;
         try
         {
             using var response = await SendPreparedAsync(request, route, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) await ThrowFailureAsync(response, route, ct).ConfigureAwait(false);
             await using var body = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            var page = await DropboxReply.ReadAsync(body, DropboxReplyShapes.Page(pair), ct).ConfigureAwait(false);
-            success = true;
-            return page;
+            return await DropboxReply.ReadAsync(body, DropboxReplyShapes.Page(pair), ct).ConfigureAwait(false);
         }
         finally
         {
             request.Dispose();
-            _limiter.Value.TransferFinished(success);
         }
     }
 
-    /// <summary>Streams one download reply; the returned body owns the response and the transfer slot until its
-    /// terminal outcome, and EOF is not staging success.</summary>
+    /// <summary>Streams one download reply; the returned body owns the response and reports its own terminal outcome,
+    /// and EOF is not staging success.</summary>
     public async Task<Stream> DownloadAsync(string route, string argumentJson, CancellationToken ct)
     {
         Routes.RequireStyle(route, Routes.Style.Download);
         if (Routes.PolicyOf(route) != Routes.Policy.Read) throw new ArgumentException(null, nameof(route));
         var request = BuildRequest(route, argumentJson);
-        var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
         HttpResponseMessage? response = null;
         try
         {
             response = await SendPreparedAsync(request, route, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) await ThrowFailureAsync(response, route, ct).ConfigureAwait(false);
             var content = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            return new ResponseStream().Open(response, content, ct, outcome =>
-            {
-                _limiter.Value.TransferFinished(outcome == ResponseStream.BodyOutcome.Completed);
-                Release(permit);
-            });
+            return new ResponseStream().Open(response, content, ct, null);
         }
         catch
         {
             response?.Dispose();
-            _limiter.Value.TransferFinished(false);
-            Release(permit);
             throw;
         }
         finally
@@ -188,20 +162,16 @@ public sealed class DropboxApi
     private async Task<JsonDocument> SendJsonAsync(string route, string argumentJson, CancellationToken ct)
     {
         var request = BuildRequest(route, argumentJson);
-        await using var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
-        var success = false;
         try
         {
             using var response = await SendPreparedAsync(request, route, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) await ThrowFailureAsync(response, route, ct).ConfigureAwait(false);
             await using var stream = await response.Content!.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            var document = DropboxProtocol.Parse(stream);
-            success = true;
-            return document;
+            return DropboxProtocol.Parse(stream);
         }
         finally
         {
             request.Dispose();
-            _limiter.Value.TransferFinished(success);
         }
     }
 
@@ -224,22 +194,32 @@ public sealed class DropboxApi
         return request;
     }
 
+    // One admission/feedback per HTTP call on the single host-shared limiter (R35); the response is returned with its
+    // status and body for the caller to classify, so a 409 is never thrown here.
     private async Task<HttpResponseMessage> SendPreparedAsync(HttpRequestMessage request, string? route,
         CancellationToken ct)
     {
         var started = _clock.GetTimestamp();
-        await ApplyBindingAsync(request, route, ct).ConfigureAwait(false);
-        var response = await _transport
-            .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        await using var permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
+        var success = false;
+        try
         {
-            try { await ThrowFailureAsync(response, route, ct).ConfigureAwait(false); }
-            finally { response.Dispose(); }
-            throw new InvalidOperationException(nameof(SendPreparedAsync));
+            await ApplyBindingAsync(request, route, ct).ConfigureAwait(false);
+            var response = await _transport
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            success = response.IsSuccessStatusCode;
+            if (IsBusy(response.StatusCode)) _limiter.Value.SlowDown();
+            if (success) RecordClock(response, started);
+            return response;
         }
-        RecordClock(response, started);
-        return response;
+        finally
+        {
+            _limiter.Value.TransferFinished(success);
+        }
     }
+
+    private static bool IsBusy(HttpStatusCode status) =>
+        status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable;
 
     private async ValueTask ApplyBindingAsync(HttpRequestMessage request, string? route, CancellationToken ct)
     {
@@ -284,11 +264,9 @@ public sealed class DropboxApi
             }
         }
         catch (Exception read) when (read is IOException or HttpRequestException) { }
-        var wait = DropboxProtocol.ProviderWait(retryAfter, failure);
-        _limiter.Value.SlowDown();
         var exception = new HttpRequestException(Text.Get(TextKey.DropboxRefused), null, response.StatusCode);
         exception.Data["Route"] = route ?? string.Empty;
-        exception.Data["RetryAfterTicks"] = wait?.Ticks ?? 0L;
+        exception.Data["RetryAfterTicks"] = retryAfter?.Ticks ?? 0L;
         exception.Data["Dispatched"] = true;
         if (failure.ValueKind != JsonValueKind.Undefined) exception.Data["Failure"] = failure;
         throw exception;
@@ -318,12 +296,6 @@ public sealed class DropboxApi
             total += read;
         }
         return total == 0 ? string.Empty : Encoding.UTF8.GetString(buffer, 0, total);
-    }
-
-    private static void Release(IAsyncDisposable permit)
-    {
-        try { permit.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
-        catch (Exception) { }
     }
 
     private static string PathRootJson(string namespaceId) => JsonSerializer.Serialize(
