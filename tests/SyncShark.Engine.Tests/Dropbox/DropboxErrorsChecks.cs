@@ -164,6 +164,20 @@ public static class DropboxErrorsChecks
                 DropboxProtocol.Upload, true, default).Cause != TextKey.FailDropboxDeleteJobInvalid,
             "a wrong-route invalid_async_job_id is not the invalid-job cause");
 
+        // W13 job reader: the exact tag wins over a conflicting summary; an unrelated structured error under an
+        // invalid summary, or a malformed/non-object envelope, is not the invalid-job cause.
+        Expect(errors.Classify(HttpStatusCode.Conflict, Reply("path/not_found", Union("invalid_async_job_id")),
+                DropboxProtocol.DeleteBatchCheck, false, default).Cause == TextKey.FailDropboxDeleteJobInvalid,
+            "an exact invalid_async_job_id wins over a conflicting summary");
+        Expect(errors.Classify(HttpStatusCode.Conflict, Reply("invalid_async_job_id", Union(DropboxProtocol.TagOther)),
+                DropboxProtocol.DeleteBatchCheck, false, default).Cause != TextKey.FailDropboxDeleteJobInvalid,
+            "an unrelated structured error under an invalid summary is not the invalid-job cause");
+        Expect(errors.Classify(HttpStatusCode.Conflict, default, DropboxProtocol.DeleteBatchCheck, false, default).Cause !=
+            TextKey.FailDropboxDeleteJobInvalid, "a malformed envelope is not the invalid-job cause");
+        Expect(errors.Classify(HttpStatusCode.Conflict, Element("not-json"), DropboxProtocol.DeleteBatchCheck, false,
+                default).Cause != TextKey.FailDropboxDeleteJobInvalid,
+            "a non-object envelope is not the invalid-job cause");
+
         Check.Require(failures.Count == 0, string.Join("; ", failures));
     }
 
