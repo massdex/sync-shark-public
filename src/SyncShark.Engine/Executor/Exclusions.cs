@@ -1,19 +1,20 @@
 namespace Massdex.SyncShark.Engine.Executor;
 
-/// <summary>What applying a no-keep exclusion would do (decision 58(h), section 7.7). BlockedByProtected: skipped,
-/// other-excluded or nested-pair content prevents the removal.</summary>
+/// <summary>Expected effects of applying the exclusion.</summary>
 public sealed record ExcludePreview(Side Side, string Path, int CopyFiles, long CopyBytes, int RemoveFiles,
     long RemoveBytes, TextKey RecoveryPlace, bool BlockedByProtected);
 
-/// <summary>The classified result of one exclusion application: copies completed and the removal succeeded
-/// (Applied), or a block, failure or still-running provider operation left the exclusion pending (Pending), keeping
-/// every completed copy.</summary>
-public enum ExclusionOutcome { Applied, Pending }
+/// <summary>Whether the exclusion settled (R31: only Applied permits a removal).</summary>
+public enum ExclusionOutcome { Applied, Pending, Refused }
 
 /// <summary>Exclusions operations for the executor module.</summary>
 public sealed class Exclusions
 {
-    /// <summary>Sync eligible changes to the kept side, then remove the excluded copy; Pending keeps completed copies.</summary>
+    private readonly record struct Plan(bool Blocked, int CopyFiles, long CopyBytes, int RemoveFiles, long RemoveBytes,
+        NoticeItem? Protected);
+
+    /// <summary>Copy eligible changes to the kept side through the shared effect owner, then remove the excluded copy;
+    /// a block, refusal or unsettled copy leaves it pending/refused with the source in place.</summary>
     public async Task<ExclusionOutcome> ApplyAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Exclusion exclusion, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope,CancellationToken,Task> compareOldBinding, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -21,46 +22,62 @@ public sealed class Exclusions
         var side = exclusion.Side == Side.Local ? local : dropbox;
         var entry = await side.ReadOneAsync(exclusion.Path, ct);
         if (entry is null) return ExclusionOutcome.Applied;
-        var preview = await PreviewAsync(pair, exclusion, local, dropbox, store, paths, ct);
-        if (preview.BlockedByProtected)
+        var plan = await PlanAsync(pair, exclusion, local, dropbox, store, paths, ct);
+        if (plan.Blocked)
         {
-            await RaiseProtectedAsync(store, pair.PairId, exclusion, entry, ct);
-            return ExclusionOutcome.Pending;
+            await RaiseProtectedAsync(store, pair.PairId, exclusion, entry, plan.Protected, ct);
+            return ExclusionOutcome.Refused;
         }
-        if (!await PreserveCopiesAsync(pair, settings, events, paths, exclusion, entry, local, dropbox, store,
-                populate, compareOldBinding, ct))
-            return ExclusionOutcome.Pending;
-        return await RemoveAsync(pair, settings, events, paths, exclusion, entry, local, dropbox, store,
-            populate, compareOldBinding, ct);
+        // Any entry that may still need a copy is copied first; the removal never follows a refused or unsettled copy.
+        if (plan.CopyFiles > 0)
+        {
+            var copy = await PreserveAsync(pair, settings, events, paths, exclusion, entry, local, dropbox, store,
+                populate, compareOldBinding, ct);
+            if (copy != ExclusionOutcome.Applied) return copy;
+        }
+        return await RemoveAsync(pair, settings, events, paths, exclusion, entry, local, dropbox, store, populate,
+            compareOldBinding, ct);
     }
 
-    /// <summary>Reports the copies and removals an application would make without hashing or changing durable state;
-    /// the same eligibility as ApplyAsync.</summary>
+    /// <summary>Reports the copies and removals an application would make without hashing or changing durable state.</summary>
     public async Task<ExcludePreview> PreviewAsync(PairConfig pair, Exclusion exclusion, ISide local, ISide dropbox, IStore store, PathScope paths, CancellationToken ct)
     {
-        var recovery = exclusion.Side == Side.Local ? TextKey.RecoveryRecycleBin : TextKey.RecoveryDropboxHistory;
+        var recovery = Recovery(exclusion.Side);
         ct.ThrowIfCancellationRequested();
         if (exclusion.Keep) return new ExcludePreview(exclusion.Side, exclusion.Path, 0, 0, 0, 0, recovery, false);
+        var plan = await PlanAsync(pair, exclusion, local, dropbox, store, paths, ct);
+        return new ExcludePreview(exclusion.Side, exclusion.Path, plan.CopyFiles, plan.CopyBytes, plan.RemoveFiles,
+            plan.RemoveBytes, recovery, plan.Blocked);
+    }
+
+    // One scoped pass: counts and the protected verdict, judged on both mapped endpoints so a kept-side nested root or
+    // exclusion beneath a differently named folder is seen. A protected root is not walked into.
+    private async Task<Plan> PlanAsync(PairConfig pair, Exclusion exclusion, ISide local, ISide dropbox, IStore store,
+        PathScope paths, CancellationToken ct)
+    {
         var side = exclusion.Side == Side.Local ? local : dropbox;
         var entry = await side.ReadOneAsync(exclusion.Path, ct);
-        if (entry is null) return new ExcludePreview(exclusion.Side, exclusion.Path, 0, 0, 0, 0, recovery, false);
-
-        // The exclusion being applied must not stop its own preservation copy, so eligibility is judged over the scope
-        // without it (D26); protection additionally ignores ignore rules so ignored children travel with the folder.
+        if (entry is null) return default;
         var scope = paths.Without(exclusion);
         var protection = paths.ProtectionWithout(exclusion);
-        var nested = scope.HoldsNestedRoot(exclusion.Side, entry.Path);
-        var blocked = nested;
-        int copyFiles = 0, removeFiles = 0;
-        long copyBytes = 0, removeBytes = 0;
-        await foreach (var item in TargetItemsAsync(side, entry, nested, ct))
+        var blocked = false;
+        var copyFiles = 0;
+        long copyBytes = 0;
+        var removeFiles = 0;
+        long removeBytes = 0;
+        NoticeItem? protectedItem = null;
+        async Task See(Entry item)
         {
-            var saved = await store.FindAsync(pair.PairId, exclusion.Side,
-                PathNames.KeyFor(exclusion.Side, item.Path), ct);
-            var facts = Facts(exclusion, item, scope, protection, saved);
-            blocked |= facts.Protected;
-            if (item.IsFolder) continue;
-            if (facts.Copy && MayCopyFile(item, saved, exclusion.Side))
+            var saved = await store.FindAsync(pair.PairId, exclusion.Side, PathNames.KeyFor(exclusion.Side, item.Path), ct);
+            var (localPath, dropboxPath) = Endpoints(exclusion, item.Path, saved);
+            if (Protected(exclusion, item, localPath, dropboxPath, scope, protection))
+            {
+                blocked = true;
+                protectedItem ??= new NoticeItem(exclusion.Side, item.Path, item.Id);
+            }
+            if (item.IsFolder) return;
+            if (!blocked && !scope.Excludes(localPath, dropboxPath, item.IsFolder) &&
+                MayCopyFile(item, saved, exclusion.Side))
             {
                 copyFiles++;
                 copyBytes += item.Size;
@@ -68,108 +85,124 @@ public sealed class Exclusions
             removeFiles++;
             removeBytes += item.Size;
         }
-        return new ExcludePreview(exclusion.Side, exclusion.Path, copyFiles, copyBytes, removeFiles, removeBytes,
-            recovery, blocked);
+        await See(entry);
+        if (!blocked && entry.IsFolder && entry.Skip is null)
+            await foreach (var listed in side.ReadAllAsync(entry.Path, new ListOptions(true, true), ct))
+                if (listed.Entry is { } child) await See(child);
+        return new Plan(blocked, copyFiles, copyBytes, removeFiles, removeBytes, protectedItem);
     }
 
-    // The target and, when it is a listable folder, its subtree; a refused or nested root is judged on the root alone.
-    private static async IAsyncEnumerable<Entry> TargetItemsAsync(ISide side, Entry entry, bool nested,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
-    {
-        yield return entry;
-        if (nested || !entry.IsFolder || entry.Skip is not null) yield break;
-        await foreach (var listed in side.ReadAllAsync(entry.Path, new ListOptions(true, true), ct))
-            if (listed.Entry is { } child) yield return child;
-    }
-
-    /// <summary>Copies eligible changes to the kept side; false leaves the exclusion pending and keeps completed copies.</summary>
-    private async Task<bool> PreserveCopiesAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Exclusion exclusion, Entry entry, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope,CancellationToken,Task> compareOldBinding, CancellationToken ct)
+    // Streams the target, copies each eligible change to the kept side through the shared owner, and reports the worst
+    // outcome; a protected item met here raises the same refusal notice as the preview.
+    private async Task<ExclusionOutcome> PreserveAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Exclusion exclusion, Entry entry, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope,CancellationToken,Task> compareOldBinding, CancellationToken ct)
     {
         var side = exclusion.Side == Side.Local ? local : dropbox;
         var scope = paths.Without(exclusion);
         var protection = paths.ProtectionWithout(exclusion);
-        var failed = false;
-        await foreach (var item in TargetItemsAsync(side, entry, scope.HoldsNestedRoot(exclusion.Side, entry.Path), ct))
+        var owed = pair.OwedScopes is { } scopes && scopes.Any(s =>
+            PathNames.IsSelfOrUnder(s.LocalPath, exclusion.Path) || PathNames.IsSelfOrUnder(s.DropboxPath, exclusion.Path));
+        var copyKind = exclusion.Side == Side.Local ? ActionKind.Upload : ActionKind.Download;
+        await foreach (var item in TargetItemsAsync(side, entry, ct))
         {
             ct.ThrowIfCancellationRequested();
-            var key = PathNames.KeyFor(exclusion.Side, item.Path);
-            var saved = await store.FindAsync(pair.PairId, exclusion.Side, key, ct);
-            var facts = Facts(exclusion, item, scope, protection, saved);
-            if (facts.Protected) { failed = true; continue; }
-            if (!facts.Copy) continue;
-            if (!item.IsFolder && !MayCopyFile(item, saved, exclusion.Side)) continue;
-            var row = Row.ForOneSide(exclusion.Side, key, item, saved, [], null,
-                RowContext.Neutral with { Destination = item.Path });
-            var action = Override(exclusion, item, row, Planner.Decide.For(row, pair.FirstRun, item.Modified, false));
-            // A null action is a kept-side edit or deletion: preserve it without a no-op effect.
-            if (action is null) continue;
-            await new Effects().ApplyAsync(pair, settings, events, paths, action, local, dropbox, store, populate,
-                compareOldBinding, ct);
+            var saved = await store.FindAsync(pair.PairId, exclusion.Side, PathNames.KeyFor(exclusion.Side, item.Path), ct);
+            var (localPath, dropboxPath) = Endpoints(exclusion, item.Path, saved);
+            // Protection met here, including a protected folder that arrived after the plan, raises the same notice.
+            if (Protected(exclusion, item, localPath, dropboxPath, scope, protection))
+            {
+                await RaiseProtectedAsync(store, pair.PairId, exclusion, item, new NoticeItem(exclusion.Side, item.Path, item.Id), ct);
+                return ExclusionOutcome.Refused;
+            }
+            if (item.IsFolder) continue;
+            if (scope.Excludes(localPath, dropboxPath, false) || !MayCopyFile(item, saved, exclusion.Side)) continue;
+            var row = await ObserveAsync(pair, exclusion, item, saved, local, dropbox, ct);
+            var action = Planner.Decide.For(row, pair.FirstRun, DateTimeOffset.UtcNow, false, (exclusion.Side, owed));
+            if (action.Kind == ActionKind.NeedLocalHash)
+            {
+                row = row with { LocalHash = await side.ContentHashAsync(item, ct) };
+                action = Planner.Decide.For(row, pair.FirstRun, DateTimeOffset.UtcNow, false, (exclusion.Side, owed));
+            }
+            if (action.Kind == ActionKind.None && action.None == Planner.NoneReason.InSync) continue;
+            // A warning or clash never authorizes removal: raise it and stop. Kept-side-newer deletes need no copy.
+            if (action.Kind == ActionKind.Notice)
+            {
+                await new Effects().ApplyAsync(pair, settings, events, paths, action, local, dropbox, store, populate, compareOldBinding, ct);
+                return ExclusionOutcome.Refused;
+            }
+            if (action.Kind is ActionKind.DeleteLocal or ActionKind.DeleteDropbox or ActionKind.Record or
+                ActionKind.ReplaceKind or ActionKind.DeferFolder) continue;
+            if (action.Kind != copyKind && action.Kind != ActionKind.KeepBoth) return ExclusionOutcome.Refused;
+            var outcome = await new Effects().ApplyAsync(pair, settings, events, paths, action, local, dropbox, store,
+                populate, compareOldBinding, ct);
+            if (outcome != EffectOutcome.Applied)
+                return outcome == EffectOutcome.Pending ? ExclusionOutcome.Pending : ExclusionOutcome.Refused;
         }
-        return !failed;
+        return ExclusionOutcome.Applied;
     }
 
-    /// <summary>The excluded profile of one decided action, or null to skip it (port of the 0.3.95 override).</summary>
-    private static Planner.SyncAction? Override(Exclusion exclusion, Entry item, Row row, Planner.SyncAction decided)
-    {
-        var copyKind = item.IsFolder
-            ? exclusion.Side == Side.Local ? ActionKind.EnsureDropboxFolder : ActionKind.EnsureLocalFolder
-            : exclusion.Side == Side.Local ? ActionKind.Upload : ActionKind.Download;
-        // The kept side already has the newer state (or the deletion): do not sync it back to the excluded side.
-        if (exclusion.Side == Side.Local && decided.Kind is ActionKind.Download or ActionKind.DeleteLocal) return null;
-        if (exclusion.Side == Side.Dropbox && decided.Kind is ActionKind.Upload or ActionKind.DeleteDropbox) return null;
-        if (decided.Kind == ActionKind.DeferFolder &&
-            (exclusion.Side == Side.Local ? row.Dropbox is null : row.Local is null))
-            return null;
-        // A file/folder swap met by a no-keep exclusion blocks the removal until its existing choice resolves it.
-        if (decided.Kind == ActionKind.ReplaceKind)
-            return new Planner.SyncAction(ActionKind.Notice, row, NoticeKind: NoticeKind.NameClash, Cause: TextKey.ClashFileFolder);
-        var inSync = decided.Kind == ActionKind.Record ||
-            decided.Kind == ActionKind.None && decided.None == Planner.NoneReason.InSync;
-        if (decided.Kind != copyKind && decided.Kind is not (ActionKind.Record or ActionKind.KeepBoth or ActionKind.Notice) && !inSync)
-            return new Planner.SyncAction(ActionKind.Notice, row, NoticeKind: NoticeKind.Failure, Cause: TextKey.FailChanged);
-        if (inSync) return decided;
-        return decided.Kind == copyKind ? decided : new Planner.SyncAction(copyKind, row, Target: row.Context.Destination);
-    }
-
-    /// <summary>Removes the excluded copy (through the folder owner for a folder) and reports whether it settled.</summary>
+    // The removal runs through the shared effect owner's selected delete, which owns the selection proof, retirement,
+    // folder held input and notice/retry routing; only Applied settles the exclusion.
     private async Task<ExclusionOutcome> RemoveAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Exclusion exclusion, Entry entry, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope,CancellationToken,Task> compareOldBinding, CancellationToken ct)
     {
-        var side = exclusion.Side == Side.Local ? local : dropbox;
-        var saved = await store.FindAsync(pair.PairId, exclusion.Side,
-            PathNames.KeyFor(exclusion.Side, entry.Path), ct);
-        if (entry.IsFolder)
+        var key = PathNames.KeyFor(exclusion.Side, entry.Path);
+        var saved = await store.FindAsync(pair.PairId, exclusion.Side, key, ct);
+        var deletion = exclusion.Side == Side.Local ? ActionKind.DeleteLocal : ActionKind.DeleteDropbox;
+        var action = new Planner.SyncAction(deletion, Row.ForOneSide(exclusion.Side, key, entry, saved, [], null, RowContext.Neutral),
+            Side: exclusion.Side);
+        var outcome = await new Effects().ApplyAsync(pair, settings, events, paths, action, local, dropbox, store,
+            populate, compareOldBinding, ct);
+        return outcome switch
         {
-            var binding = saved ?? SyncedEntries.From(exclusion.Side, entry, entry);
-            await new FolderDelete().ApplyAsync(pair, settings, events, paths, binding, exclusion.Side, local, dropbox,
-                store, _ => Array.Empty<Change>(), populate, compareOldBinding, ct);
-            // A folder removal is settled only once the source is gone; a survivor or pending job leaves it pending.
-            return await side.ReadOneAsync(entry.Path, ct) is null ? ExclusionOutcome.Applied : ExclusionOutcome.Pending;
-        }
-        var removed = await side.DeleteAsync(entry, null, ct);
-        return removed.Outcome == RemovalOutcome.Removed ? ExclusionOutcome.Applied : ExclusionOutcome.Pending;
+            EffectOutcome.Applied => ExclusionOutcome.Applied,
+            EffectOutcome.Pending => ExclusionOutcome.Pending,
+            _ => ExclusionOutcome.Refused
+        };
     }
 
-    // Skipped, other-excluded or nested content refuses the removal (product-0247/0250); no other exclusion does.
-    private Task RaiseProtectedAsync(IStore store, string pairId, Exclusion exclusion, Entry entry, CancellationToken ct) =>
+    private static async IAsyncEnumerable<Entry> TargetItemsAsync(ISide side, Entry entry,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        yield return entry;
+        if (!entry.IsFolder || entry.Skip is not null) yield break;
+        await foreach (var listed in side.ReadAllAsync(entry.Path, new ListOptions(true, true), ct))
+            if (listed.Entry is { } child) yield return child;
+    }
+
+    // The two-sided observation for one row: both mapped endpoints observed (the excluded side's own item wins on its
+    // side) with the saved binding, so a kept-side edit, relocation or folder is visible to Planner.Decide.
+    private static async Task<Row> ObserveAsync(PairConfig pair, Exclusion exclusion, Entry item, SyncedEntry? saved,
+        ISide local, ISide dropbox, CancellationToken ct)
+    {
+        var (localPath, dropboxPath) = Endpoints(exclusion, item.Path, saved);
+        var localEntry = await local.ReadOneAsync(localPath, ct);
+        var dropboxEntry = await dropbox.ReadOneAsync(dropboxPath, ct);
+        if (exclusion.Side == Side.Local) localEntry = item; else dropboxEntry = item;
+        var key = saved?.LocalKey ?? PathNames.Key(localPath);
+        return new Row(key, localEntry, dropboxEntry, saved, [], null, RowContext.Neutral);
+    }
+
+    private static Task RaiseProtectedAsync(IStore store, string pairId, Exclusion exclusion, Entry entry,
+        NoticeItem? protectedItem, CancellationToken ct) =>
         new Notices().RaiseAsync(store, pairId,
             new Notice(0, NoticeKind.Failure, TextKey.FailExcludeHoldsProtected, exclusion.Path,
-                new IssueSubject([new NoticeItem(exclusion.Side, entry.Path, entry.Id)], exclusion.Side),
+                new IssueSubject([protectedItem ?? new NoticeItem(exclusion.Side, entry.Path, entry.Id)], exclusion.Side),
                 DateTimeOffset.UtcNow, false),
             ct);
 
-    // The stored exclusion rules applied to one item without the exclusion itself (port of Planner/Exclusions.cs:11-46).
-    private static (bool Protected, bool Copy) Facts(Exclusion exclusion, Entry item, PathScope scope,
-        PathScope protection, SyncedEntry? saved)
+    private static bool Protected(Exclusion exclusion, Entry item, string localPath, string dropboxPath,
+        PathScope scope, PathScope protection) =>
+        item.Skip is not null || protection.Excludes(localPath, dropboxPath, item.IsFolder) ||
+        scope.HoldsNestedRoot(Side.Local, localPath) || scope.HoldsNestedRoot(Side.Dropbox, dropboxPath);
+
+    private static (string Local, string Dropbox) Endpoints(Exclusion exclusion, string path, SyncedEntry? saved)
     {
-        var local = exclusion.Side == Side.Local ? item.Path : saved?.LocalPath ?? item.Path;
-        var dropbox = exclusion.Side == Side.Dropbox ? item.Path : saved?.DropboxPath ?? item.Path;
-        var protectedItem = item.Skip is not null || protection.Excludes(local, dropbox, item.IsFolder);
-        return (protectedItem, !protectedItem && !scope.Excludes(local, dropbox, item.IsFolder));
+        if (saved is null) return (path, path);
+        return exclusion.Side == Side.Local ? (path, saved.DropboxPath) : (saved.LocalPath, path);
     }
 
-    /// <summary>True when the item may still need a copy: no saved record or a saved folder, otherwise the change
-    /// test. Local content without a hash counts as unknown, so it counts as a potential copy.</summary>
+    private static TextKey Recovery(Side side) =>
+        side == Side.Local ? TextKey.RecoveryRecycleBin : TextKey.RecoveryDropboxHistory;
+
     private static bool MayCopyFile(Entry item, SyncedEntry? saved, Side excludedSide)
     {
         if (saved is null || saved.IsFolder) return true;

@@ -75,4 +75,12 @@ public interface IStore : IDisposable
     Task UpdateLinkMemberAsync(string pairId, NoticeItem member, bool present, CancellationToken ct);
     /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>
     Task<Notice?> NoticeAsync(string pairId, long id, CancellationToken ct);
+    /// <summary>Publish the single receiving-side keep-both link and its notice atomically.</summary>
+    Task CommitKeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, Notice notice, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read unspent history for a file or folder candidate.</summary>
+    Task<bool> DeletedNameAsync(string pairId, Guid? scanId, string key, bool isFolder, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Register the active acquisition before its boundaries are read.</summary>
+    void BeginScan(string pairId, Guid scanId) => throw new NotImplementedException();
+    /// <summary>Check whether a concurrent write touched this footprint.</summary>
+    bool ScanTouched(string pairId, Guid scanId, Side side, string path, bool descendants) => throw new NotImplementedException();
 }

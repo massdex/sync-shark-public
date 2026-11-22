@@ -9,6 +9,12 @@ public sealed class JournalReader
     public Task SettleAsync(PairConfig pair, JournalPosition position, IStore store, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Reads raw ordered changes, stamping each record with its acquired journal ID and retaining the volume, historical parent id and name for each physical hop even when the current relative path is unknown.</summary>
     public IAsyncEnumerable<ChangePage> ReadAsync(PairConfig pair, JournalPosition position, EngineSettings settings, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Attach for the selected JournalReader operation.</summary>
+    public void Attach(PairConfig pair,IStore store,Func<PathScope> scope, Func<ulong,bool,CancellationToken,(string? Path,IReadOnlyList<string>? Links)> locate,Func<string,Entry?> entry) => throw new NotImplementedException();
+    /// <summary>Membership for the selected JournalReader operation.</summary>
+    public void Membership(PairConfig pair,bool paused,bool removed=false) => throw new NotImplementedException();
+    /// <summary>ReadPageAsync for the selected JournalReader operation.</summary>
+    public Task<ChangePage> ReadPageAsync(PairConfig pair,JournalPosition? position,JournalPosition? end,EngineSettings settings,CancellationToken ct) => throw new NotImplementedException();
 }
 
 /// <summary>Classifies the result of one native USN journal page read.</summary>

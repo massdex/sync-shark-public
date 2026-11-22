@@ -20,18 +20,14 @@ public sealed class Notices
     public static IReadOnlyList<NoticeKind> AfterKeepBoth { get; } =
         Array.AsReadOnly(new[] { NoticeKind.Failure, NoticeKind.Tie });
 
-    /// <summary>A PutBack notice is settled only by its own Retry or a later change of the same identified item; no
-    /// compare outcome settles it, whether the path is absent or holds another file (R8/R24, F147). Ignore and
-    /// Unignore hide or restore it without settling it.</summary>
-    public static bool PutBackSettled(bool ownRetryOrLaterChange) => ownRetryOrLaterChange;
-
     /// <summary>Raise or refresh one notice; the store keeps an unrelated Failure from displacing a PutBack notice and
     /// lets the newest put-back failure at a path replace its predecessor in the same slot (R24).</summary>
     public Task RaiseAsync(IStore store, string pairId, Notice notice, CancellationToken ct) =>
         store.SaveNoticeAsync(pairId, notice, ct);
 
-    /// <summary>Close one notice only when the exact reviewed identity still matches the stored row; a compare or
-    /// scan must not route a PutBack through here — only its own Retry or a later change of the item settles it.</summary>
+    /// <summary>Close one ordinary notice only when the exact reviewed identity still matches the stored row. A PutBack
+    /// notice is never closed here: only its own successful Retry or a later change of the same identified item settles
+    /// it (R8/R24), and those act through the retry/change owner, not this general close path.</summary>
     public Task CloseAsync(IStore store, string pairId, Notice expected, CancellationToken ct) =>
-        store.CloseNoticeAsync(pairId, expected, ct);
+        expected.Kind == NoticeKind.PutBack ? Task.CompletedTask : store.CloseNoticeAsync(pairId, expected, ct);
 }

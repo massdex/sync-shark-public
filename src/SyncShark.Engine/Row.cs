@@ -84,6 +84,10 @@ public sealed record RowContext(bool OutOfScope, bool Skipped, bool Held, Side? 
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     IssueSubject.FirstRunDeletionKind FirstRunDeletion = IssueSubject.FirstRunDeletionKind.None)
 {
+    /// <summary>Null until the ordered folder contents have been acquired.</summary>
+    public bool? ProtectedContents { get; init; }
+    /// <summary>Cause reported by an unreadable descendant.</summary>
+    public TextKey? UnreadableCause { get; init; }
     /// <summary>The row facts no observation has added yet; one shared immutable instance for every caller that
     /// observes before projecting.</summary>
     public static RowContext Neutral { get; } = new(false, false, false, null, false, false, false, false);
