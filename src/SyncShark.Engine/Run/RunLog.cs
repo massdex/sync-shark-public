@@ -109,25 +109,50 @@ public sealed class RunLog : IDisposable
     /// failure or a cause delivered only in structured fields is never lost.</summary>
     internal static RunEvent Present(RunEvent value)
     {
-        var what = value.What;
+        var what = value.Error?.GetType().Name ?? value.What;
         if (what.Length == 0)
         {
             if (value.Notice is { } notice) what = notice.ToString();
             else if (value.Action is { } action) what = action.ToString();
-            else if (value.Error is { } error) what = error.GetType().Name;
         }
         var detail = value.Detail;
-        if (detail.Length == 0 && value.Error is { } failure) detail = failure.GetBaseException().Message;
+        if (value.Error is { } failure) detail = FailureReason(failure);
+        if (value.Cause is { } reason)
+        {
+            var named = Text.Get(reason, (TextArg.Path, value.Path), (TextArg.Message, string.Empty));
+            detail = detail.Length == 0 ? named : named + FactJoiner + detail;
+        }
         if (value.Count is { } count) detail = AppendFact(detail, CountFact, count.ToString(CultureInfo.InvariantCulture));
         if (value.Total is { } total) detail = AppendFact(detail, TotalFact, total.ToString(CultureInfo.InvariantCulture));
         if (value.Side is { } side) detail = AppendFact(detail, SideFact, side.ToString());
-        var outcome = value.Outcome;
+        var outcome = value.Error is null ? value.Outcome : string.Empty;
         if (outcome.Length == 0)
         {
             if (value.Cause is { } cause) outcome = cause.ToString();
             else if (value.Ended) outcome = EndedOutcome;
         }
         return value with { What = what, Detail = detail, Outcome = outcome };
+    }
+
+    // Exceptions may contain credentials, headers or response bodies. Only typed facts cross the log boundary.
+    private static string FailureReason(Exception error)
+    {
+        for (Exception? current = error; current is not null; current = current.InnerException)
+        {
+            if (current is ItemFailedException item) return Text.Get(item.Cause, (TextArg.Path, item.Path), (TextArg.Message, string.Empty));
+            if (current is EngineRequestException request) return request.Key.ToString();
+            if (current is InsufficientSpaceException) return Text.Get(TextKey.RepairStoppedNoSpace);
+            if (current is System.Net.Http.HttpRequestException { StatusCode: { } status })
+                return Text.Get(TextKey.ProviderFailure, (TextArg.Name, Text.Get(TextKey.HumanNotRecorded)),
+                    (TextArg.Count, ((int)status).ToString(CultureInfo.InvariantCulture)),
+                    (TextArg.Message, Text.Get(TextKey.ProviderReasonUnavailable)));
+            if (current is System.ComponentModel.Win32Exception native)
+                return Text.Get(TextKey.FailureNativeCode, (TextArg.Name, native.GetType().Name),
+                    (TextArg.Count, native.NativeErrorCode.ToString(CultureInfo.InvariantCulture)));
+        }
+        var root = error.GetBaseException();
+        return Text.Get(TextKey.FailureCode, (TextArg.Name, root.GetType().Name),
+            (TextArg.Count, root.HResult.ToString(CultureInfo.InvariantCulture)));
     }
 
     private static string AppendFact(string detail, string name, string value)

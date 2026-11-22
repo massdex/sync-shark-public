@@ -1,113 +1,130 @@
+using System.Globalization;
 using System.Text;
 
 namespace Massdex.SyncShark.Engine.Run;
 
-/// <summary>The one readable projection of a run event, built from the text catalog so a human sees the approved
-/// labels, reasons and results instead of a raw record. Present facts are shown, empty facts omitted, data values are
-/// escaped, and typed facts (a stage end, a failure, a notice, an action) reach the appropriate block. The stored
-/// canonical TSV and its timestamp are RunLog's; this projection is for display (D-1105-6, M22, product-0689).</summary>
+/// <summary>Renders observed facts without substituting a successful operation for an unknown one.</summary>
 public static class LogText
 {
-    /// <summary>Projects one event to its readable block.</summary>
-    public static string Format(RunEvent value)
+    /// <summary>Formats a live event at observation time.</summary>
+    public static string Format(RunEvent value) => Format(value, DateTimeOffset.UtcNow);
+
+    /// <summary>Formats a historical event at its recorded time, not the time the reader opened the log.</summary>
+    public static string Format(RunEvent value, DateTimeOffset recordedAt)
+    {
+        var clock = recordedAt.UtcDateTime.ToString(Text.Get(TextKey.HumanClockFormat), CultureInfo.InvariantCulture);
+        switch (value.Kind)
+        {
+            case RunEventKind.Stage: return StageText(value, clock);
+            case RunEventKind.Effect: return EffectText(value, clock);
+            case RunEventKind.ProviderRequest:
+                // Completed requests are diagnostics, not sync results.
+                return value.Outcome.Length == 0 ? Text.Get(TextKey.HumanStageActive, (TextArg.Time, clock)) : string.Empty;
+            case RunEventKind.Wait:
+                return AttentionText(value, clock, TextKey.HumanWaitLabel, null) + Environment.NewLine + Text.Get(TextKey.HumanWaitActivity);
+            case RunEventKind.Failed:
+                var stopped = value.Error is OperationCanceledException || value.What == nameof(OperationCanceledException);
+                return AttentionText(value, clock, stopped ? TextKey.HumanStopped : TextKey.HumanError,
+                    stopped ? TextKey.HumanAttentionStoppedResult : null);
+            default:
+                var notice = value.Notice ?? (EnumNames.TryExact<NoticeKind>(value.What, out var kind) ? kind : (NoticeKind?)null);
+                var informational = notice is NoticeKind.Info or NoticeKind.Skipped;
+                return AttentionText(value, clock, informational ? TextKey.HumanNotice : notice == NoticeKind.Failure
+                    ? TextKey.HumanAttentionFileNotSynced : TextKey.HumanAttention,
+                    informational ? TextKey.HumanAttentionAutomaticResult : TextKey.HumanAttentionUnsyncedResult);
+        }
+    }
+
+    private static string StageText(RunEvent item, string clock)
+    {
+        var typed = EnumNames.TryExact<TextKey>(item.What, out var key);
+        var name = typed ? Text.Get(key) : RunLog.EscapeDisplay(item.What);
+        var unit = key switch
+        {
+            TextKey.StageLocalWalk or TextKey.StageDropboxListing or TextKey.StageListing => TextKey.HumanUnitObservations,
+            TextKey.StageRows => TextKey.HumanUnitRows, TextKey.StageDropboxPages => TextKey.HumanUnitPages,
+            TextKey.StageRenames => TextKey.HumanUnitGroups, TextKey.StageFolderPlans => TextKey.HumanUnitMembers,
+            _ => (TextKey?)null,
+        };
+        var ended = item.Ended || item.Outcome == RunLog.EndedOutcome;
+        var heading = Text.Get(TextKey.HumanStageHeading, (TextArg.Time, clock), (TextArg.Name, name));
+        var builder = new StringBuilder(heading);
+        if (ended)
+        {
+            var count = item.Count?.ToString(CultureInfo.InvariantCulture);
+            if (count is not null && item.Total is { } total) count += "/" + total.ToString(CultureInfo.InvariantCulture);
+            builder.AppendLine().Append(Text.Get(count is null ? TextKey.HumanStageCompleteNoCount : TextKey.HumanStageComplete,
+                (TextArg.Indent, Text.Get(TextKey.HumanIndent)), (TextArg.Name, name), (TextArg.Count, count ?? string.Empty),
+                (TextArg.Unit, typed && unit is { } u ? Text.Get(u) : string.Empty), (TextArg.Elapsed, Text.Get(TextKey.HumanNotMeasured))));
+        }
+        var detail = ended && item.Count is not null ? item.Detail : RunLog.Present(item).Detail;
+        if (detail.Length != 0) builder.AppendLine().Append(RunLog.EscapeDisplay(detail));
+        return builder.ToString();
+    }
+
+    private static string EffectText(RunEvent item, string clock)
+    {
+        var action = item.Action ?? (EnumNames.TryExact<ActionKind>(item.What, out var kind) ? kind : item.What switch
+        {
+            "Uploaded" => ActionKind.Upload, "Downloaded" => ActionKind.Download,
+            "FolderCreated" => ActionKind.EnsureLocalFolder, "DeletedLocal" or "DeletedDropbox" => ActionKind.DeleteLocal,
+            "MovedLocal" or "MovedDropbox" or nameof(ISide.MoveAsync) => ActionKind.MoveLocal,
+            "KeptBoth" => ActionKind.KeepBoth, "Recorded" => ActionKind.Record, "Forgotten" => ActionKind.ForgetOnly,
+            "Replaced" => ActionKind.ReplaceKind, _ => ActionKind.None,
+        });
+        var side = item.Side ?? (EnumNames.TryExact<Side>(item.Outcome, out var endSide) ? endSide : (Side?)null);
+        var committed = item.Outcome.Length == 0 || item.Outcome is nameof(Side.Local) or nameof(Side.Dropbox) ||
+            item.Outcome is nameof(Executor.EffectOutcome.Applied) or nameof(RemovalOutcome.Published) or nameof(RemovalOutcome.Removed);
+        var card = committed ? CardText(action) : null;
+        var heading = card is { } known ? Text.Get(TextKey.HumanCardHeading, (TextArg.Time, clock),
+            (TextArg.Label, Text.Get(TextKey.HumanOkLabel)), (TextArg.Operation, Text.Get(known.Operation))) :
+            Text.Get(TextKey.HumanStageHeading, (TextArg.Time, clock), (TextArg.Name, RunLog.EscapeDisplay(item.What)));
+        var builder = new StringBuilder(heading);
+        var move = action is ActionKind.MoveLocal or ActionKind.MoveDropbox or ActionKind.MoveUnlinked;
+        if (move || action == ActionKind.KeepBoth)
+        {
+            AppendLine(builder, move ? TextKey.HumanCardFrom : TextKey.HumanCardOriginal, TextArg.Path, item.Detail);
+            AppendLine(builder, move ? TextKey.HumanCardTo : TextKey.HumanCardCopy, TextArg.Path, item.Path);
+        }
+        else
+        {
+            AppendLine(builder, TextKey.HumanCardFile, TextArg.Path, item.Path);
+            AppendLine(builder, TextKey.HumanAttentionReason, TextArg.Message, item.Detail);
+        }
+        if (action is ActionKind.Upload or ActionKind.Download)
+            AppendLine(builder, TextKey.HumanCardDirection, TextArg.Message, Text.Get(action == ActionKind.Upload ? TextKey.HumanDirectionUpload : TextKey.HumanDirectionDownload));
+        if (side is { } endpoint) AppendLine(builder, TextKey.HumanCardSide, TextArg.Side, Text.Get(endpoint == Side.Local ? TextKey.HumanSideLocal : TextKey.HumanSideDropbox));
+        if (card is { } result) AppendLine(builder, TextKey.HumanCardResult, TextArg.Message, Text.Get(result.Result));
+        else AppendLine(builder, TextKey.HumanCardResult, TextArg.Message, item.Outcome);
+        return builder.ToString();
+    }
+
+    private static string AttentionText(RunEvent value, string clock, TextKey label, TextKey? result)
     {
         var item = RunLog.Present(value);
-        return value.Kind switch
-        {
-            RunEventKind.Stage => StageText(item),
-            RunEventKind.Effect => EffectText(item),
-            RunEventKind.Issue => AttentionText(item, NoticeLabel(value), NoticeResult(value)),
-            RunEventKind.Failed => AttentionText(item, StoppedLabel(value), TextKey.HumanAttentionFailedResult),
-            RunEventKind.Wait => WaitText(item),
-            _ => AttentionText(item, TextKey.HumanAttention, TextKey.HumanAttentionAutomaticResult),
-        };
-    }
-
-    private static string StageText(RunEvent item)
-    {
-        var name = RunLog.EscapeDisplay(item.What);
-        if (item.Ended)
-            return Text.Get(TextKey.HumanStageCompleteNoCount,
-                (TextArg.Indent, Text.Get(TextKey.HumanIndent)), (TextArg.Name, name), (TextArg.Elapsed, string.Empty));
-        return Text.Get(TextKey.HumanStageHeading, (TextArg.Time, string.Empty), (TextArg.Name, name));
-    }
-
-    private static string EffectText(RunEvent item)
-    {
-        var (operation, result) = CardText(item.Action);
-        var builder = new StringBuilder();
-        builder.Append(Text.Get(TextKey.HumanCardHeading,
-            (TextArg.Time, string.Empty), (TextArg.Label, Text.Get(TextKey.HumanOkLabel)),
-            (TextArg.Operation, Text.Get(operation))));
+        var builder = new StringBuilder(Text.Get(TextKey.HumanAttentionHeading, (TextArg.Time, clock), (TextArg.Label, Text.Get(label))));
         AppendLine(builder, TextKey.HumanCardFile, TextArg.Path, item.Path);
-        if (DirectionKey(item.Action) is { } direction)
-            builder.AppendLine().Append(Text.Get(TextKey.HumanCardDirection, (TextArg.Message, Text.Get(direction))));
-        if (item.Side is { } side)
-            builder.AppendLine().Append(Text.Get(TextKey.HumanCardSide, (TextArg.Side, Text.Get(SideKey(side)))));
-        builder.AppendLine().Append(Text.Get(TextKey.HumanCardResult, (TextArg.Message, Text.Get(result))));
-        return builder.ToString();
-    }
-
-    private static string AttentionText(RunEvent item, TextKey label, TextKey result)
-    {
-        var builder = new StringBuilder();
-        builder.Append(Text.Get(TextKey.HumanAttentionHeading,
-            (TextArg.Time, string.Empty), (TextArg.Label, Text.Get(label))));
-        AppendLine(builder, TextKey.HumanCardFile, TextArg.Path, item.Path);
-        AppendLine(builder, TextKey.HumanAttentionReason, TextArg.Message, item.Detail);
-        builder.AppendLine().Append(Text.Get(TextKey.HumanAttentionResult, (TextArg.Message, Text.Get(result))));
-        return builder.ToString();
-    }
-
-    private static string WaitText(RunEvent item)
-    {
-        var builder = new StringBuilder();
-        builder.Append(Text.Get(TextKey.HumanAttentionHeading,
-            (TextArg.Time, string.Empty), (TextArg.Label, Text.Get(TextKey.HumanWaitLabel))));
-        AppendLine(builder, TextKey.HumanWaitReason, TextArg.Message, item.Detail);
-        builder.AppendLine().Append(Text.Get(TextKey.HumanWaitActivity));
+        AppendLine(builder, TextKey.HumanAttentionReason, TextArg.Message, item.Detail.Length == 0 ? item.What : item.Detail);
+        if (result is { } key) AppendLine(builder, TextKey.HumanAttentionResult, TextArg.Message, Text.Get(key));
         return builder.ToString();
     }
 
     private static void AppendLine(StringBuilder builder, TextKey template, TextArg argument, string value)
     {
-        if (value.Length == 0) return;
-        builder.AppendLine().Append(Text.Get(template, (argument, RunLog.EscapeDisplay(value))));
+        if (value.Length != 0) builder.AppendLine().Append(Text.Get(template, (argument, RunLog.EscapeDisplay(value))));
     }
 
-    private static TextKey NoticeLabel(RunEvent value) =>
-        value.Notice is NoticeKind.Info or NoticeKind.Skipped ? TextKey.HumanNotice : TextKey.HumanAttention;
-
-    private static TextKey NoticeResult(RunEvent value) =>
-        value.Notice is NoticeKind.Info or NoticeKind.Skipped
-            ? TextKey.HumanAttentionAutomaticResult
-            : TextKey.HumanAttentionUnsyncedResult;
-
-    private static TextKey StoppedLabel(RunEvent value) =>
-        value.Error is OperationCanceledException ? TextKey.HumanStopped : TextKey.HumanError;
-
-    private static TextKey SideKey(Side side) => side == Side.Local ? TextKey.HumanSideLocal : TextKey.HumanSideDropbox;
-
-    private static TextKey? DirectionKey(ActionKind? action) => action switch
-    {
-        ActionKind.Upload => TextKey.HumanDirectionUpload,
-        ActionKind.Download => TextKey.HumanDirectionDownload,
-        _ => null,
-    };
-
-    private static (TextKey Operation, TextKey Result) CardText(ActionKind? action) => action switch
+    private static (TextKey Operation, TextKey Result)? CardText(ActionKind action) => action switch
     {
         ActionKind.Upload => (TextKey.HumanOperationUpload, TextKey.HumanResultSynced),
         ActionKind.Download => (TextKey.HumanOperationDownload, TextKey.HumanResultSynced),
-        ActionKind.EnsureDropboxFolder or ActionKind.EnsureLocalFolder =>
-            (TextKey.HumanOperationFolderCreate, TextKey.HumanResultFolderCreated),
-        ActionKind.DeleteDropbox or ActionKind.DeleteLocal =>
-            (TextKey.HumanOperationRemove, TextKey.HumanResultRemovalCommitted),
-        ActionKind.MoveDropbox or ActionKind.MoveLocal or ActionKind.MoveUnlinked =>
-            (TextKey.HumanOperationMove, TextKey.HumanResultMoveCommitted),
+        ActionKind.EnsureDropboxFolder or ActionKind.EnsureLocalFolder => (TextKey.HumanOperationFolderCreate, TextKey.HumanResultFolderCreated),
+        ActionKind.DeleteDropbox or ActionKind.DeleteLocal => (TextKey.HumanOperationRemove, TextKey.HumanResultRemovalCommitted),
+        ActionKind.MoveDropbox or ActionKind.MoveLocal or ActionKind.MoveUnlinked => (TextKey.HumanOperationMove, TextKey.HumanResultMoveCommitted),
         ActionKind.KeepBoth => (TextKey.HumanOperationKeepBoth, TextKey.HumanResultKeptBoth),
         ActionKind.Record => (TextKey.HumanOperationRecorded, TextKey.HumanResultRecorded),
         ActionKind.ForgetOnly => (TextKey.HumanOperationForgotten, TextKey.HumanResultForgotten),
-        _ => (TextKey.HumanOperationReplace, TextKey.HumanResultReplaced),
+        ActionKind.ReplaceKind => (TextKey.HumanOperationReplace, TextKey.HumanResultReplaced),
+        _ => null,
     };
 }
