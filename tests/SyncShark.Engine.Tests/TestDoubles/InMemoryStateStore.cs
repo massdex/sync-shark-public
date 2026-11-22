@@ -104,7 +104,13 @@ public sealed class InMemoryStateStore : IStore
         return Enumerate(notices.Where(x=>x.Key.Pair == pairId).Select(x=>x.Value),ct);
     }
     /// <summary>SaveNotice operation on the supplied facts.</summary>
-    public Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct) { ct.ThrowIfCancellationRequested(); notices[(pairId,notice.Id)] = notice; return Task.CompletedTask; }
+    public Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct) {
+        ct.ThrowIfCancellationRequested();
+        var slot=notices.Where(x=>x.Key.Pair==pairId).Select(x=>x.Value).FirstOrDefault(n=>n.Path==notice.Path && n.Kind==notice.Kind);
+        var id=slot?.Id??notice.Id;
+        if(slot is null && notices.ContainsKey((pairId,id))) throw new InvalidDataException("Notice id belongs to another slot");
+        notices[(pairId,id)]=notice with { Id=id };return Task.CompletedTask;
+    }
     /// <summary>CloseNotice operation on the supplied facts.</summary>
     public Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct)
     {

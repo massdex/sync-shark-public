@@ -49,9 +49,21 @@ public sealed class Store : IStore
     public Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct) => pairs.OweRepairAsync(Connection, pairId, side, reason, ct);
     /// <summary>FinishRepair operation on the supplied facts.</summary>
     public Task<(long Revision, string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct) => pairs.ReadRepairAsync(Connection, pairId, side, ct);
-    public Task<bool> FinishRepairAsync(string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct) => throw new NotImplementedException();
+    public async Task<bool> FinishRepairAsync(string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct)
+    {
+        using var tx=Connection.BeginTransaction(deferred:false);
+        var matched=await pairs.FinishRepairAsync(tx, pairId, revisions, completedRepairJson, ct);
+        if(matched) tx.Commit();
+        return matched;
+    }
     /// <summary>Retire only the matching mapped scope at the owner’s Dropbox revision. No first-run bit or full summary is published.</summary>
-    public Task<bool> FinishRepairAsync(string pairId, Scope scope, long revision, CancellationToken ct) => throw new NotImplementedException();
+    public async Task<bool> FinishRepairAsync(string pairId, Scope scope, long revision, CancellationToken ct)
+    {
+        using var tx=Connection.BeginTransaction(deferred:false);
+        var matched=await pairs.FinishRepairAsync(tx, pairId, scope, revision, ct);
+        if(matched) tx.Commit();
+        return matched;
+    }
     /// <summary>SaveJob operation on the supplied facts.</summary>
     public Task SaveJobAsync(AcceptedJob job, CancellationToken ct) => pairs.SaveJobAsync(Connection, job, ct);
     /// <summary>Jobs operation on the supplied facts.</summary>
@@ -101,9 +113,19 @@ public sealed class Store : IStore
     /// <summary>Indexed exact-path notice lookup; no whole-pair notice scan on the item path.</summary>
     public IAsyncEnumerable<Notice> NoticesAtAsync(string pairId, string pathKey, CancellationToken ct) => notices.NoticesAtAsync(Connection, pairId, pathKey, ct);
     /// <summary>On lost journal continuity only, install the fresh volume boundary and increment the Local Repair revision/reason of every affected pair in one transaction.</summary>
-    public Task ResetJournalAsync(string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct) => throw new NotImplementedException();
+    public async Task ResetJournalAsync(string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct)
+    {
+        using var tx=Connection.BeginTransaction(deferred:false);
+        await pairs.ResetJournalAsync(tx, volume, fresh, affectedPairs, reason, ct);
+        tx.Commit();
+    }
     /// <summary>On Dropbox reset only, install its fresh cursor and increment that pair’s Dropbox Repair revision/reason in one transaction.</summary>
-    public Task ResetCursorAsync(string pairId, string fresh, string reason, CancellationToken ct) => throw new NotImplementedException();
+    public async Task ResetCursorAsync(string pairId, string fresh, string reason, CancellationToken ct)
+    {
+        using var tx=Connection.BeginTransaction(deferred:false);
+        await pairs.ResetCursorAsync(tx, pairId, fresh, reason, ct);
+        tx.Commit();
+    }
     /// <summary>Stream the existing scan’s move candidates before ordinary differences, ordered by shallowest candidate of the binding then by binding so all its observed sides are adjacent.</summary>
     public IAsyncEnumerable<RenameCandidate> RenamesAsync(string pairId, Guid scanId, Scope? scope, CancellationToken ct) => scan.RenamesAsync(Connection, pairId, scanId, scope, settings.StoragePageSize, ct);
 }

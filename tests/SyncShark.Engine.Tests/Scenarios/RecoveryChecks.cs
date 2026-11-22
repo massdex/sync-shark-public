@@ -181,9 +181,11 @@ public static class RecoveryChecks
     {
         using var x=new PairState();await x.InitializeAsync();await x.LinkAsync("steady",1);
         var clock=new FakeTimeProvider(DateTimeOffset.UnixEpoch);var delay=TimeSpan.FromSeconds(7);
-        var waiting=new global::Massdex.SyncShark.Engine.Dropbox.RateLimit(ItemChecks.Settings.InitialLimiterLevel,ItemChecks.Settings.Backoff,_=>{}).WaitAsync(delay,clock,default);
+        var events=new List<RunEvent>();
+        var waiting=new global::Massdex.SyncShark.Engine.Dropbox.RateLimit(ItemChecks.Settings.InitialLimiterLevel,ItemChecks.Settings.Backoff,events.Add).WaitAsync(delay,clock,default);
         Check.Require(!waiting.IsCompleted && clock.ScheduledDelay==delay,"Provider wait ignored or replaced");
         clock.ElapseScheduledDelay();await waiting;x.VerifyLinks();
+        Check.Require(events.Any(e=>e.Kind==RunEventKind.Wait),"Provider wait missing from the run log");
         Check.Require(x.Store.OpenNotices.Count==0 && x.Store.Records.Count==1,"A provider wait created an item failure");
     }
     public static async Task RootReplacementAsync()
@@ -372,7 +374,18 @@ public static class RecoveryChecks
     public static Task A43BatchLabelTakenAsync() => throw new NotImplementedException();
     public static Task A43DeleteParentRevisionSingleAsync() => throw new NotImplementedException();
     public static Task A43DeleteParentRevisionBatchAsync() => throw new NotImplementedException();
-    public static Task A45PathOnlyWakeUnboundMemberAsync() => throw new NotImplementedException();
+    public static async Task A45PathOnlyWakeUnboundMemberAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();
+        foreach(var path in new[]{"selected","unrelated"})
+        {
+            var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check",path,[new(path,path,null)]);
+            await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies[path]=new([new JobReply.Running()]);
+        }
+        var received=new Change(Side.Dropbox,ChangeKind.Deleted,"selected/child",null,null,null,false,false);
+        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,received,x.Pc,x.Cloud,x.Store,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        Check.Require(x.Cloud.JobReplies["selected"].Count==0 && x.Cloud.JobReplies["unrelated"].Count==1,"Path-only news must check exactly the overlapping saved job");
+    }
     public static Task A45NoLookupBeforeWakeAsync() => throw new NotImplementedException();
     public static Task A45UnrelatedNewsNoCheckAsync() => throw new NotImplementedException();
     public static Task A45NewsBehindUnsettledWorkAsync() => throw new NotImplementedException();

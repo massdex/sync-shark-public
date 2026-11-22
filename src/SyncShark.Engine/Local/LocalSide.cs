@@ -32,7 +32,7 @@ public sealed class LocalSide : ISide
     /// <summary>CreateFolderExclusive operation on the supplied facts.</summary>
     public Task<RemovalResult> CreateFolderExclusiveAsync(string path, CancellationToken ct) => throw new NotImplementedException();
     /// <inheritdoc/>
-    public Task SettleJournalAsync(JournalPosition position, CancellationToken ct) => throw new NotImplementedException();
+    public Task SettleJournalAsync(JournalPosition position, CancellationToken ct) => journal.SettleAsync(pair,position,store,ct);
     /// <inheritdoc/>
     public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Recover operation on the supplied facts.</summary>
@@ -46,7 +46,14 @@ public sealed class LocalSide : ISide
         var journal=new JournalReader();
         return (pair,scope,settings,store)=>new LocalSide(pair,scope,settings,store,journal);
     }
-    private LocalSide(PairConfig pair, Func<PathScope> resolvedScope, EngineSettings settings, IStore store, JournalReader journal) => throw new NotImplementedException();
+    private readonly PairConfig pair;
+    private readonly IStore store;
+    private readonly JournalReader journal;
+    private LocalSide(PairConfig pair, Func<PathScope> resolvedScope, EngineSettings settings, IStore store, JournalReader journal)
+    {
+        this.pair=pair;this.store=store;this.journal=journal;
+        journal.Attach(pair);
+    }
 
 
     /// <inheritdoc/>
