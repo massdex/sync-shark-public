@@ -27,9 +27,8 @@ public sealed class Exclusions
         // current observation on the same pass that may remove.
         var outcome = await PreserveAsync(pair, settings, events, paths, exclusion, side, entry, local, dropbox, store,
             populate, compareOldBinding, ct);
-        if (outcome != ExclusionOutcome.Applied) return outcome;
-        return await RemoveAsync(pair, settings, events, paths, exclusion, entry, local, dropbox, store, populate,
-            compareOldBinding, ct);
+        _ = outcome;
+        return ExclusionOutcome.Applied; // DELIBERATE RED MUTATION: a blocked/refused exclusion is reported applied
     }
 
     /// <summary>Reports the copies and removals an application would make without hashing or changing durable state;
