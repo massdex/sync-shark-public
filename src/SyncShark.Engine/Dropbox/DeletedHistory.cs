@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Net;
+using System.Text.Json;
 
 namespace Massdex.SyncShark.Engine.Dropbox;
 
@@ -35,7 +37,7 @@ public sealed class DeletedHistory
         }
         catch (ItemFailedException error) { return new DeletionEvidence.Unknown(path, error.Cause); }
         catch (ChangedUnderneathException) { return new DeletionEvidence.Unknown(path, TextKey.FailChanged); }
-        catch (Exception error) when (error is not OperationCanceledException)
+        catch (Exception error) when (error is not (OperationCanceledException or NotImplementedException))
         {
             return new DeletionEvidence.Unknown(path, TextKey.ReadDropboxFailed);
         }
@@ -47,34 +49,43 @@ public sealed class DeletedHistory
         CancellationToken ct)
     {
         var target = await ReadMetadataAsync(api, pair, path, ct).ConfigureAwait(false);
-        if (target.Entry is { } occupant)
+        if (target?.Entry is { } occupant)
             return await ReadLiveAsync(api, pair, path, occupant, ct).ConfigureAwait(false);
 
-        (bool IsDeleted, bool HasHead, string? ServerDeleted, bool TimeWrongType, string? Id, string? Revision,
-            string? NativePath, string? ContentHash, bool HashWrongType) head;
-        try { head = await ReadHeadAsync(api, pair, path, ct).ConfigureAwait(false); }
-        catch (Exception error) when (error is not OperationCanceledException)
+        JsonDocument body;
+        HttpStatusCode status;
+        try
         {
-            // A failed history read is not a negative: keep it non-destructive.
+            (status, body) = await DropboxListing.ReadReplyAsync(api, ListRevisions, new
+            {
+                path = DropboxPaths.Remote(pair, path), mode = PathMode, limit = DeletionHistoryHeadLimit
+            }, ct).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is HttpRequestException or JsonException)
+        {
             return new DeletionEvidence.HistoryUnavailable(path, TextKey.ReadDropboxFailed);
         }
+        using (body)
+        {
+            if (status != HttpStatusCode.OK)
+                return HistoryRefusal(path, DropboxListing.Classify(status, body.RootElement, ListRevisions,
+                    expectedIsNull: false));
+            var head = await DropboxListing.DecodeAsync(body.RootElement, DropboxReplyShapes.HistoryHead(), ct)
+                .ConfigureAwait(false);
+            if (!head.HasHead) return new DeletionEvidence.NoRetainedHistory(path);
+            if (string.IsNullOrWhiteSpace(head.Id))
+                return new DeletionEvidence.HistoryUnavailable(path, TextKey.ReadDropboxFailed);
+            var current = await new DropboxListing().ReadByIdAsync(api, pair, head.Id!, ct).ConfigureAwait(false);
+            if (current is not null) return Live(pair, path, current);
+            if (!head.IsDeleted || !PathNames.Same(head.NativePath, DropboxPaths.Remote(pair, path)))
+                return new DeletionEvidence.Unknown(path, TextKey.FailChanged);
 
-        // No retained revision is positive evidence that the name never existed: an empty history list uploads
-        // without a notice. Only a malformed head with entries but no identity is a failed read.
-        if (!head.HasHead) return new DeletionEvidence.NoRetainedHistory(path);
-        if (string.IsNullOrWhiteSpace(head.Id))
-            return new DeletionEvidence.HistoryUnavailable(path, TextKey.ReadDropboxFailed);
-
-        var current = await new DropboxListing().ReadByIdAsync(api, pair, head.Id!, ct).ConfigureAwait(false);
-        if (current is not null) return Live(pair, path, current);
-        if (!head.IsDeleted || !PathNames.Same(head.NativePath, DropboxPaths.Remote(pair, path)))
-            return new DeletionEvidence.Unknown(path, TextKey.FailChanged);
-
-        var time = DeletionTime(head.ServerDeleted, head.TimeWrongType);
-        var hash = DeletionHash(head.ContentHash, head.HashWrongType);
-        return new DeletionEvidence.DeletedFile(path, pair.Roots!.Dropbox.RootNamespaceId, head.Id!,
-            string.IsNullOrWhiteSpace(head.Revision) ? null : head.Revision,
-            time.Value, time.Reason, hash.Value, hash.Reason);
+            var time = DeletionTime(head.ServerDeleted, head.TimeWrongType);
+            var hash = DeletionHash(head.ContentHash, head.HashWrongType);
+            return new DeletionEvidence.DeletedFile(path, pair.Roots!.Dropbox.RootNamespaceId, head.Id!,
+                string.IsNullOrWhiteSpace(head.Revision) ? null : head.Revision,
+                time.Value, time.Reason, hash.Value, hash.Reason);
+        }
     }
 
     private async Task<DeletionEvidence> ReadFolderAsync(DropboxApi api, PairConfig pair, string path,
@@ -83,6 +94,7 @@ public sealed class DeletedHistory
         for (var probe = path; probe.Length != 0; probe = PathNames.Parent(probe))
         {
             var metadata = await ReadMetadataAsync(api, pair, probe, ct).ConfigureAwait(false);
+            if (metadata is null) continue;
             if (metadata.Entry is null) return new DeletionEvidence.DeletedPath(path, probe);
             if (PathNames.Same(probe, path))
                 return await ReadLiveAsync(api, pair, path, metadata.Entry, ct).ConfigureAwait(false);
@@ -90,14 +102,23 @@ public sealed class DeletedHistory
         return new DeletionEvidence.NoFolderTombstone(path);
     }
 
-    private static async Task<Listed> ReadMetadataAsync(DropboxApi api, PairConfig pair, string path,
+    private static async Task<Listed?> ReadMetadataAsync(DropboxApi api, PairConfig pair, string path,
         CancellationToken ct)
     {
-        using var document = await DropboxListing.CallAsync(api, GetMetadata,
+        var (status, body) = await DropboxListing.ReadReplyAsync(api, GetMetadata,
             new { path = DropboxPaths.Remote(pair, path), include_deleted = true }, ct).ConfigureAwait(false);
-        var listed = DropboxEntries.Parse(document.RootElement, pair);
-        if (!PathNames.Same(listed.Path, path)) throw new ChangedUnderneathException(path);
-        return listed;
+        using (body)
+        {
+            if (status != HttpStatusCode.OK)
+            {
+                var classified = DropboxListing.Classify(status, body.RootElement, GetMetadata, expectedIsNull: false);
+                if (DropboxListing.IsAbsence(classified)) return null;
+                throw new ItemFailedException(path, classified.Cause, null);
+            }
+            var listed = DropboxEntries.Parse(body.RootElement, pair);
+            if (!PathNames.Same(listed.Path, path)) throw new ChangedUnderneathException(path);
+            return listed;
+        }
     }
 
     private async Task<DeletionEvidence> ReadLiveAsync(DropboxApi api, PairConfig pair, string path, Entry entry,
@@ -120,18 +141,12 @@ public sealed class DeletedHistory
                 : new DeletionEvidence.LiveElsewhere(path, location);
     }
 
-    private static async Task<(bool IsDeleted, bool HasHead, string? ServerDeleted, bool TimeWrongType, string? Id,
-        string? Revision, string? NativePath, string? ContentHash, bool HashWrongType)> ReadHeadAsync(DropboxApi api,
-        PairConfig pair, string path, CancellationToken ct)
-    {
-        using var document = await DropboxListing.CallAsync(api, ListRevisions, new
-        {
-            path = DropboxPaths.Remote(pair, path), mode = PathMode, limit = DeletionHistoryHeadLimit
-        }, ct).ConfigureAwait(false);
-        // The history head decoder is owned by W11, not re-implemented here.
-        return await DropboxListing.DecodeAsync(document.RootElement, DropboxReplyShapes.HistoryHead(), ct)
-            .ConfigureAwait(false);
-    }
+    /// <summary>Maps a classified history refusal: an exact structured absence is a successful history negative; any
+    /// other refusal stays non-destructive and names the classifier's cause.</summary>
+    public static DeletionEvidence HistoryRefusal(string path, DropboxErrors.Classified classified) =>
+        classified.Absent
+            ? new DeletionEvidence.NoRetainedHistory(path)
+            : new DeletionEvidence.HistoryUnavailable(path, classified.Cause);
 
     /// <summary>Parses the provider deletion time; a missing or malformed value keeps the coherent remainder usable.</summary>
     private static (DateTimeOffset? Value, TextKey? Reason) DeletionTime(string? value, bool wrongType)

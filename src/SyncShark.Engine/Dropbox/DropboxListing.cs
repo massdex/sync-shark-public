@@ -1,3 +1,4 @@
+using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -68,24 +69,31 @@ public sealed class DropboxListing
             yield return listed;
     }
 
-    /// <summary>Reads the entry at path exactly, preserving its true spelling under the requested path; a reply that
-    /// names a different in-pair key is a failed read, never a renamed success.</summary>
+    /// <summary>Reads the entry at path exactly; a reply naming a different in-pair key is a failed read, and a
+    /// classified exact absence returns null.</summary>
     public async Task<Entry?> ReadOneAsync(DropboxApi api, PairConfig pair, string path, CancellationToken ct)
     {
-        JsonDocument document;
+        JsonDocument body;
+        HttpStatusCode status;
         try
         {
-            document = await CallAsync(api, GetMetadata,
+            (status, body) = await ReadReplyAsync(api, GetMetadata,
                 new { path = DropboxPaths.Remote(pair, path), include_deleted = false }, ct).ConfigureAwait(false);
         }
-        catch (Exception error) when (error is not OperationCanceledException)
+        catch (Exception error) when (error is HttpRequestException or JsonException)
         {
             throw new ItemFailedException(path, TextKey.ReadDropboxFailed, error);
         }
-        using (document)
+        using (body)
         {
+            if (status != HttpStatusCode.OK)
+            {
+                var classified = Classify(status, body.RootElement, GetMetadata, expectedIsNull: false);
+                if (IsAbsence(classified)) return null;
+                throw new ItemFailedException(path, classified.Cause, null);
+            }
             Listed listed;
-            try { listed = DropboxEntries.Parse(document.RootElement, pair); }
+            try { listed = DropboxEntries.Parse(body.RootElement, pair); }
             catch (Exception error) when (error is JsonException or InvalidDataException)
             {
                 throw new ItemFailedException(path, TextKey.ReadDropboxFailed, error);
@@ -94,29 +102,37 @@ public sealed class DropboxListing
         }
     }
 
-    /// <summary>Returns the current native location of id, including outside this pair.</summary>
+    /// <summary>Returns the current native location of id, including outside this pair; a classified exact absence
+    /// returns null.</summary>
     public async Task<IdentityLocation?> ReadByIdAsync(DropboxApi api, PairConfig pair, string id, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(id)) throw new ItemFailedException(id, TextKey.ReadDropboxFailed, null);
         if (pair.Roots?.Dropbox.RootNamespaceId is not { Length: > 0 })
             throw new EngineRequestException(TextKey.RootUnbound, (TextArg.Pair, pair.PairId));
-        JsonDocument document;
+        JsonDocument body;
+        HttpStatusCode status;
         try
         {
-            document = await CallAsync(api, GetMetadata, new { path = id, include_deleted = false }, ct)
+            (status, body) = await ReadReplyAsync(api, GetMetadata, new { path = id, include_deleted = false }, ct)
                 .ConfigureAwait(false);
         }
-        catch (Exception error) when (error is not OperationCanceledException)
+        catch (Exception error) when (error is HttpRequestException or JsonException)
         {
             throw new ItemFailedException(id, TextKey.ReadDropboxFailed, error);
         }
-        using (document)
+        using (body)
         {
+            if (status != HttpStatusCode.OK)
+            {
+                var classified = Classify(status, body.RootElement, GetMetadata, expectedIsNull: false);
+                if (IsAbsence(classified)) return null;
+                throw new ItemFailedException(id, classified.Cause, null);
+            }
             Entry entry;
             try
             {
                 // Decoded against the namespace root, so a location outside this pair stays intact.
-                entry = DropboxReply.Metadata(document.RootElement, pair with { DropboxRoot = string.Empty });
+                entry = DropboxReply.Metadata(body.RootElement, pair with { DropboxRoot = string.Empty });
             }
             catch (Exception error) when (error is JsonException or InvalidDataException)
             {
@@ -133,42 +149,61 @@ public sealed class DropboxListing
         ArgumentNullException.ThrowIfNull(api);
         ArgumentNullException.ThrowIfNull(pair);
         ArgumentNullException.ThrowIfNull(options);
-        using var document = await CallAsync(api, ListFolderGetLatestCursor, new
+        JsonDocument body;
+        HttpStatusCode status;
+        try
         {
-            path = DropboxPaths.Remote(pair, ""),
-            recursive = options.Recursive,
-            include_deleted = options.IncludeDeleted,
-            include_mounted_folders = true,
-            include_non_downloadable_files = true
-        }, ct).ConfigureAwait(false);
-        var cursor = await DecodeAsync(document.RootElement, DropboxReplyShapes.Cursor(), ct).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(cursor))
-            throw new InventoryIncompleteException(Text.Get(TextKey.ReadDropboxFailed,
-                (TextArg.Path, pair.DropboxRoot), (TextArg.Message, "")), null);
-        return cursor;
+            (status, body) = await ReadReplyAsync(api, ListFolderGetLatestCursor, new
+            {
+                path = DropboxPaths.Remote(pair, ""),
+                recursive = options.Recursive,
+                include_deleted = options.IncludeDeleted,
+                include_mounted_folders = true,
+                include_non_downloadable_files = true
+            }, ct).ConfigureAwait(false);
+        }
+        catch (Exception error) when (error is HttpRequestException or JsonException)
+        {
+            throw Incomplete(pair.DropboxRoot, error);
+        }
+        using (body)
+        {
+            if (status != HttpStatusCode.OK)
+                throw Incomplete(pair.DropboxRoot, Refusal(Classify(status, body.RootElement,
+                    ListFolderGetLatestCursor, expectedIsNull: false)));
+            var cursor = await DecodeAsync(body.RootElement, DropboxReplyShapes.Cursor(), ct).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(cursor)) throw Incomplete(pair.DropboxRoot, new JsonException());
+            return cursor;
+        }
     }
 
-    /// <summary>Reads one sparse change page at the supplied cursor; CaughtUp is a proven source end (has_more=false
-    /// with a usable cursor).</summary>
+    /// <summary>Reads one sparse change page; a 409 on the continuation is a cursor reset, and CaughtUp requires
+    /// has_more=false with a usable cursor.</summary>
     public async Task<ChangePage> ReadChangePageAsync(DropboxApi api, PairConfig pair, string cursor,
         CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(api);
         ArgumentNullException.ThrowIfNull(pair);
-        JsonDocument document;
+        JsonDocument body;
+        HttpStatusCode status;
         try
         {
-            document = await CallAsync(api, ListFolderContinue, new { cursor }, ct).ConfigureAwait(false);
+            (status, body) = await ReadReplyAsync(api, ListFolderContinue, new { cursor }, ct).ConfigureAwait(false);
         }
-        catch (Exception error) when (error is not OperationCanceledException)
+        catch (Exception error) when (error is HttpRequestException or JsonException)
         {
-            // Without the authenticated refusal surface a reset is not distinguishable here; stay on the ordinary
-            // incomplete/retry path rather than inferring a source end.  (See REPORT blocker for the seam.)
             throw Incomplete(pair.DropboxRoot, error);
         }
-        using (document)
+        using (body)
         {
-            var root = document.RootElement;
+            if (status != HttpStatusCode.OK)
+            {
+                if (IsCursorReset(status))
+                    throw new ListingCursorResetException(Incomplete(pair.DropboxRoot, new JsonException()));
+                throw Incomplete(pair.DropboxRoot, Refusal(Classify(status, body.RootElement,
+                    ListFolderContinue, expectedIsNull: false)));
+            }
+            var root = body.RootElement;
             if (root.ValueKind != JsonValueKind.Object ||
                 !root.TryGetProperty(EntriesName, out var entries) || entries.ValueKind != JsonValueKind.Array ||
                 !root.TryGetProperty(CursorName, out var cursorElement) || cursorElement.ValueKind != JsonValueKind.String ||
@@ -213,6 +248,13 @@ public sealed class DropboxListing
         return Respelled(entry, requestedPath);
     }
 
+    /// <summary>True when the classifier marks the exact target as absent (a successful history/identity negative),
+    /// never a generic refusal.</summary>
+    public static bool IsAbsence(DropboxErrors.Classified classified) => classified.Absent;
+
+    /// <summary>True when a continuation refusal is Dropbox's cursor reset (a conflict on the continuation route).</summary>
+    public static bool IsCursorReset(HttpStatusCode status) => status == HttpStatusCode.Conflict;
+
     /// <summary>The entry as a proven native location for id; a mismatched identity is a failed read. The location is
     /// preserved intact even outside the current pair.</summary>
     public static IdentityLocation VerifiedById(Entry entry, string id, PairConfig pair)
@@ -227,8 +269,8 @@ public sealed class DropboxListing
         return new IdentityLocation(domain, native, entry with { Path = relative ?? native });
     }
 
-    // One shared, paginated page loop for path and id listings: the authenticated RPC, the advancing-continuation
-    // repeat guard, and a usable terminal cursor.  Pages are decoded from the returned reply (one page at a time).
+    // One shared, paginated page loop for path and id listings: W09's sealed ReadPageAsync streams each page to a
+    // spool (R12/R26/R28), replayed once here; a reset propagates and advancing continuations use the repeat guard.
     private static async IAsyncEnumerable<Listed> PageLoopAsync(DropboxApi api, PairConfig pair, string firstRoute,
         object firstArg, string? startCursor, Action<string>? acquired, Action<string, long>? progress,
         string subject, [EnumeratorCancellation] CancellationToken ct)
@@ -241,52 +283,41 @@ public sealed class DropboxListing
             arg = new { cursor = startCursor };
         }
         var cycle = new ContinuationCycle();
-        var decoder = new DropboxEntries();
         var previous = startCursor ?? "";
         long pages = 0;
         var currentPath = subject;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            JsonDocument document;
-            try { document = await CallAsync(api, route, arg, ct).ConfigureAwait(false); }
-            catch (Exception error) when (error is not OperationCanceledException)
+            DropboxPage page;
+            try { page = await api.ReadPageAsync(route, JsonSerializer.Serialize(arg), pair, ct).ConfigureAwait(false); }
+            catch (ListingCursorResetException) { throw; }
+            catch (Exception error) when (error is not (OperationCanceledException or NotImplementedException))
             {
                 throw Incomplete(currentPath, error);
             }
-            using var page = document;
-            var root = page.RootElement;
-            if (root.ValueKind != JsonValueKind.Object ||
-                !root.TryGetProperty(EntriesName, out var entries) || entries.ValueKind != JsonValueKind.Array ||
-                !root.TryGetProperty(CursorName, out var cursorElement) || cursorElement.ValueKind != JsonValueKind.String ||
-                !root.TryGetProperty(HasMoreName, out var moreElement) || moreElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-                throw Incomplete(currentPath, new JsonException());
-            var cursor = cursorElement.GetString();
-            var hasMore = moreElement.GetBoolean();
-            foreach (var element in entries.EnumerateArray())
+            await using (page)
             {
-                ct.ThrowIfCancellationRequested();
-                Listed listed;
-                try { listed = decoder.Decode(element, pair); }
-                catch (Exception error) when (error is JsonException or InvalidDataException)
+                foreach (var listed in page.ReadEntries())
                 {
-                    throw Incomplete(currentPath, error);
+                    ct.ThrowIfCancellationRequested();
+                    currentPath = listed.Path;
+                    yield return listed;
                 }
-                currentPath = listed.Path;
-                yield return listed;
+                pages++;
+                progress?.Invoke(currentPath, pages);
+                var cursor = page.Cursor;
+                if (!page.HasMore)
+                {
+                    if (!string.IsNullOrWhiteSpace(cursor)) acquired?.Invoke(cursor!);
+                    yield break;
+                }
+                if (string.IsNullOrWhiteSpace(cursor) || cycle.Repeats(previous, cursor!))
+                    throw Incomplete(currentPath, new JsonException());
+                previous = cursor!;
+                route = ListFolderContinue;
+                arg = new { cursor };
             }
-            pages++;
-            progress?.Invoke(currentPath, pages);
-            if (!hasMore)
-            {
-                if (!string.IsNullOrWhiteSpace(cursor)) acquired?.Invoke(cursor!);
-                yield break;
-            }
-            if (string.IsNullOrWhiteSpace(cursor) || cycle.Repeats(previous, cursor!))
-                throw Incomplete(currentPath, new JsonException());
-            previous = cursor!;
-            route = ListFolderContinue;
-            arg = new { cursor };
         }
     }
 
@@ -302,17 +333,36 @@ public sealed class DropboxListing
             scope.Excludes(null, listed.Path, entry.IsFolder);
     }
 
-    // The one authenticated read boundary: W09's RPC seam adds the bearer token and the path-root namespace and
-    // returns the parsed reply; no local header builder.
-    internal static Task<JsonDocument> CallAsync(DropboxApi api, string route, object arg, CancellationToken ct) =>
-        api.CallJsonAsync(route, JsonSerializer.Serialize(arg), ct);
+    // The one authenticated non-page read boundary (R35): W09's SendAsync authenticates and returns the status and the
+    // unchanged body stream (even a 409); this parses the reply so W10 classifies it. No limiter permit here.
+    internal static async Task<(HttpStatusCode Status, JsonDocument Body)> ReadReplyAsync(DropboxApi api, string route,
+        object arg, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint(route))
+        {
+            Content = new StringContent(JsonSerializer.Serialize(arg), Encoding.UTF8, "application/json")
+        };
+        using var response = await api.SendAsync(request, ct).ConfigureAwait(false);
+        var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        return (response.StatusCode, DropboxProtocol.Parse(stream));
+    }
 
-    // Decode an already-received reply through its owner decoder (small replies only; listing pages stay on the RPC path).
+    /// <summary>Classifies one provider refusal through W10's owner (never a local prefix test).</summary>
+    internal static DropboxErrors.Classified Classify(HttpStatusCode status, JsonElement body, string route,
+        bool expectedIsNull) =>
+        new DropboxErrors().Classify(status, body, route, expectedIsNull,
+            new DropboxErrors.RequestEvidence(Read: true, Dispatched: false, ProvenNoEffect: true,
+                Transient: (int)status >= 500));
+
+    // Decode an already-received reply through its owner decoder (small replies only; listing pages stream via ReadPageAsync).
     internal static async Task<T> DecodeAsync<T>(JsonElement root, DropboxReply<T> decoder, CancellationToken ct)
     {
         using var stream = new MemoryStream(Encoding.UTF8.GetBytes(root.GetRawText()));
         return await DropboxReply.ReadAsync(stream, decoder, ct).ConfigureAwait(false);
     }
+
+    private static InventoryIncompleteException Refusal(DropboxErrors.Classified classified) =>
+        new(Text.Get(classified.Cause), null);
 
     /// <summary>A failed listing read is incomplete inventory, never absence of the unseen items.</summary>
     private static InventoryIncompleteException Incomplete(string path, Exception error) =>

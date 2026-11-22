@@ -10,6 +10,15 @@ public static class DeletedHistoryChecks
     /// <summary>Verifies the DeletedHistory contract through the module surface.</summary>
     public static async Task RunAsync()
     {
+        // --- Classified history refusal (owned rule; fails on the wrong outcome). ---
+        var absent = new DropboxErrors.Classified(TextKey.ReadDropboxFailed, FailureDisposition.Permanent, false, Absent: true);
+        Check.Require(DeletedHistory.HistoryRefusal("A/Note.txt", absent) is DeletionEvidence.NoRetainedHistory,
+            "An exact structured history absence was not a successful history negative.");
+        var refused = new DropboxErrors.Classified(TextKey.ReadDropboxFailed, FailureDisposition.Permanent, false);
+        Check.Require(DeletedHistory.HistoryRefusal("A/Note.txt", refused)
+                is DeletionEvidence.HistoryUnavailable { Cause: TextKey.ReadDropboxFailed },
+            "A history refusal was not kept non-destructive with the classifier's cause.");
+
         var roots = new RootIdentity("T:\\Pair A", "/Pair A", "connection-a",
             new DirectoryIdentity(1, 2, null), new DropboxRootIdentity("account", "ns-root", "ns-home", "folder"));
         var pair = new PairConfig("pair-a", "Pair A", "T:\\Pair A", "/Pair A", "connection-a", [], [],

@@ -80,7 +80,11 @@ public abstract record JobReply
 {
     public sealed record Running : JobReply;
     public sealed record Invalid : JobReply;
-    public sealed record Terminal(IReadOnlyList<(Entry? Entry, TextKey? Cause, FailureDisposition? Failure)> Members) : JobReply;
+    public sealed record Terminal(IReadOnlyList<(Entry? Entry, TextKey? Cause, FailureDisposition? Failure)> Members) : JobReply
+    {
+        /// <summary>Zero-based indices into Members whose selected ID was observed absent, not proof this request removed it. Reindex when projecting a subset.</summary>
+        public IReadOnlySet<int> AbsentOrdinals { get; init; } = System.Collections.Frozen.FrozenSet<int>.Empty;
+    }
 }
 
 /// <summary>The Executor's selected losing proof together with the exact saved binding it was selected against,

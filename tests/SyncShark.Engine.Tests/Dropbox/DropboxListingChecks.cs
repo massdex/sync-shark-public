@@ -60,6 +60,18 @@ public static class DropboxListingChecks
         }
         catch (ItemFailedException) { }
 
+        // --- Refusal mapping (owned rules; each fails on the wrong outcome). ---
+        Check.Require(DropboxListing.IsAbsence(
+            new DropboxErrors.Classified(TextKey.ReadDropboxFailed, FailureDisposition.Permanent, false, Absent: true)),
+            "IsAbsence ignored the classifier's exact structured absence.");
+        Check.Require(!DropboxListing.IsAbsence(
+            new DropboxErrors.Classified(TextKey.ReadDropboxFailed, FailureDisposition.Permanent, false)),
+            "IsAbsence treated a plain refusal as absence.");
+        Check.Require(DropboxListing.IsCursorReset(HttpStatusCode.Conflict),
+            "IsCursorReset missed a 409 continuation reset.");
+        Check.Require(!DropboxListing.IsCursorReset(HttpStatusCode.InternalServerError),
+            "IsCursorReset treated a server error as a reset.");
+
         // --- Real read operations (exercise the I/O path; a stubbed transport reports NOT IMPLEMENTED). ---
         // Each call below drives the actual reader; on the current W09/W10/W11 stubs it throws NotImplementedException.
         var api = DropboxCheckApi.ForStatus(HttpStatusCode.InternalServerError);
