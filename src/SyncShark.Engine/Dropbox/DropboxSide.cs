@@ -38,7 +38,7 @@ public sealed class DropboxSide : ISide
     /// <summary>ReadJob operation on the supplied facts.</summary>
     public Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
 
-    public DropboxSide(PairConfig pair, DropboxApi api, Dispatcher dispatcher) => throw new NotImplementedException();
+    public DropboxSide(PairConfig pair, Func<PathScope> resolvedScope, DropboxApi api, Dispatcher dispatcher) => throw new NotImplementedException();
 
 
     /// <inheritdoc/>

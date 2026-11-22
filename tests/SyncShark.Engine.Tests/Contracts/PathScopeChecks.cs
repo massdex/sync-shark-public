@@ -40,6 +40,14 @@ public static class PathScopeChecks
         Check.Require(await store.FinishRepairAsync(pair.PairId,a,current,default),"Matching completion refused");
         Check.Require((await store.PairAsync(pair.PairId,default))!.OwedScopes!.SequenceEqual([b]),"Wrong mapped footprint cleared");
         Check.Require((await store.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason=="requested","Scoped completion cleared whole-pair debt");
+        var inner=pair with { PairId="inner" };await store.SavePairAsync(inner,default);
+        var ordinary=new Notice(1,NoticeKind.Failure,TextKey.PublishFailed,"file",new([new(Side.Local,"file","id")],Side.Local),DateTimeOffset.UnixEpoch,false);
+        var putBack=ordinary with { Id=2,Path="edit",Subject=new([new(Side.Local,"edit","edit-id")],Side.Local) };
+        await store.SaveNoticeAsync(inner.PairId,ordinary,default);await store.SaveNoticeAsync(inner.PairId,putBack with { Ignored=true },default);
+        store.PutBacks[(inner.PairId,putBack.Id)]=putBack;
+        Check.Require(!await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)]) && !(await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Removal released an outstanding put-back or published its scope");
+        await store.CloseNoticeAsync(inner.PairId,putBack,default);
+        Check.Require(await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)]) && (await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Ordinary failure blocked removal or its returned scope");
     }
     public static Task FolderProofAsync()
     {
@@ -82,18 +90,28 @@ public static class PathScopeChecks
         try { await store.PublishDeletedHistoryAsync(pair.PairId,first,default); throw new InvalidDataException("Ordinary scan published history"); } catch(InvalidOperationException) { }
         await store.ClearScanAsync(pair.PairId,first,default);
         Check.Require(await store.DeletedNameAsync(pair.PairId,discovery,key,default) && !await store.DeletedNameAsync(pair.PairId,second,key,default),"Another scan cleared or read discovery names");
-        await store.PublishDeletedHistoryAsync(pair.PairId,discovery,default);await store.ClearScanAsync(pair.PairId,discovery,default);
+        await store.PublishDeletedHistoryAsync(pair.PairId,discovery,default);
         Check.Require(await store.DeletedNameAsync(pair.PairId,null,key,default) && (await store.DeletedHistoryAsync(pair.PairId,default)).Cursor=="terminal","History names or acquisition cursor lost");
         var rows=new List<Row>();await foreach(var row in store.CompareAsync(pair.PairId,second,null,(_,_) => (true,false),default)) rows.Add(row.Row);
         Check.Require(rows.Count==1 && rows[0].Local?.Path=="second","Clearing one acquisition changed another acquisition");
         var pc=Scenarios.ItemChecks.File(Side.Local,"old",1,"pc-id");var db=Scenarios.ItemChecks.File(Side.Dropbox,"original",1,"db-id");
-        var binding=SyncedEntries.From(pc,db);await store.CommitAsync(pair.PairId,null,binding,null,null,default);
+        var boundary=new JournalPosition(3,17);var binding=SyncedEntries.From(pc,db) with { LocalPublication=boundary };
+        await store.CommitAsync(pair.PairId,null,binding with { LocalPublication=null },boundary,null,default);
+        Check.Require((await store.FindAsync(pair.PairId,Side.Local,binding.LocalKey,default))?.LocalPublication==boundary,"Binding lost its publication boundary");
         static async IAsyncEnumerable<Listed> Moved(Entry entry) { await Task.CompletedTask; yield return new Listed(entry.Path,entry); }
         await store.AddScanAsync(pair.PairId,second,Side.Local,Moved(pc with {Path="z/file"}),null,default);
         await store.AddScanAsync(pair.PairId,second,Side.Dropbox,Moved(db with {Path="a/file"}),null,default);
+        foreach(var path in new[]{"AliasA","AliasB","LetterCase"})
+        {
+            var alias=pc with { Path=path, Id=path=="LetterCase"?"case-id":"shared-id" };
+            await store.CommitAsync(pair.PairId,null,SyncedEntries.From(alias,db with {Path=path,Id=path}),null,null,default);
+            await store.AddScanAsync(pair.PairId,second,Side.Local,Moved(alias with {Path=path=="LetterCase"?"lettercase":path}),null,default);
+        }
         var moves=new List<RenameCandidate>();await foreach(var move in store.RenamesAsync(pair.PairId,second,null,default))moves.Add(move);
-        Check.Require(moves.Count==2 && moves.All(m=>m.Synced==binding) && moves.Select(m=>m.Side).SequenceEqual(new[]{Side.Local,Side.Dropbox}),"Rename projection lost or split a binding’s two sides");
+        Check.Require(moves.Count==3 && moves.Count(m=>m.Moved.Path=="lettercase" && m.Synced.LocalPath=="LetterCase")==1 && moves.Where(m=>m.Synced==binding).Select(m=>m.Side).SequenceEqual(new[]{Side.Local,Side.Dropbox}),"Rename projection lost or split a binding’s two sides");
         await store.CommitAsync(pair.PairId,null,null,null,spentDeletedKey:key,ct:default);
+        Check.Require(!await store.DeletedNameAsync(pair.PairId,discovery,key,default),"Discovery returned a spent name");
+        await store.ClearScanAsync(pair.PairId,discovery,default);
         Check.Require(!await store.DeletedNameAsync(pair.PairId,null,key,default),"Unbound first-run history was not spent");
     }
     public static async Task SourceResetAsync()

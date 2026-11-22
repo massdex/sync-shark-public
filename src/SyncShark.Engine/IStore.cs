@@ -7,8 +7,9 @@ public interface IStore : IDisposable
     Task<PairConfig?> PairAsync(string pairId, CancellationToken ct);
     /// <summary>Publishes configuration and each distinct returned footprint at its owner in one transaction, advancing the existing Repair revision even if the same scope was already owed.</summary>
     Task SavePairAsync(PairConfig pair, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null);
-    /// <summary>Removes an eligible pair and publishes each returned scope to its surviving owner atomically. Refusal changes neither.</summary>
+    /// <summary>An accepted job, an armed PC note, or an open failure still owning a put-back prevents removal. Otherwise remove the pair and publish each returned scope to its surviving owner atomically. Refusal changes neither.</summary>
     Task<bool> RemovePairAsync(string pairId, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null);
+    /// <summary>Binding projections include the saved PC publication journal and boundary; only the dirty owner compares them.</summary>
     Task<SyncedEntry?> FindAsync(string pairId, Side side, string key, CancellationToken ct);
     IAsyncEnumerable<SyncedEntry> ByIdAsync(string pairId, Side side, string id, CancellationToken ct);
     IAsyncEnumerable<SyncedEntry> DescendantsAsync(string pairId, Side side, string key, CancellationToken ct);
@@ -48,7 +49,7 @@ public interface IStore : IDisposable
     /// <summary>Fold only this completed history acquisition and publish its own terminal cursor with it. An ordinary or incomplete scan cannot publish history.</summary>
     Task PublishDeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct);
 
-    /// <summary>Read the unspent name from the existing delta, scratch and block homes.</summary>
+    /// <summary>A spent delta masks the name in both the current acquisition and published history.</summary>
     Task<bool> DeletedNameAsync(string pairId, Guid? scanId, string key, CancellationToken ct);
 
     /// <summary>Project both physical endpoints of a settled folder move set-wise in one transaction.</summary>

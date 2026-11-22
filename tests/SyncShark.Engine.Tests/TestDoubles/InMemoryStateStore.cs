@@ -7,6 +7,8 @@ public sealed class InMemoryStateStore : IStore
     public RequestCounters Requests { get; } = new();
     private readonly Dictionary<(string Pair,long Id),Notice> notices = [];
     public IReadOnlyCollection<Notice> OpenNotices => notices.Values;
+    // Fixture evidence for the exact failure whose identified version still needs putting back.
+    internal Dictionary<(string Pair,long Id),Notice> PutBacks { get; } = [];
     private readonly Dictionary<string,PairConfig> pairs = [];
     private readonly Dictionary<string,JournalPosition> positions = [];
     private readonly Dictionary<string,string> cursors = [];
@@ -19,7 +21,7 @@ public sealed class InMemoryStateStore : IStore
     private readonly Dictionary<string,string> historyCursor=[];
     private readonly HashSet<(Guid Scan,string Key)> scratchDeleted=[];
     private readonly Dictionary<(string Pair,Guid Scan),string> completedHistory=[];
-    public HashSet<(string Pair,string Key)> DeletedNames { get; }=[];
+    private readonly Dictionary<(string Pair,string Key),bool> spentDeleted=[];
     /// <summary>Pairs operation on the supplied facts.</summary>
     public IAsyncEnumerable<PairConfig> PairsAsync(CancellationToken ct)
     {
@@ -50,7 +52,7 @@ public sealed class InMemoryStateStore : IStore
         ct.ThrowIfCancellationRequested();
         lock (pairs)
         {
-            if (armed.ContainsKey(pairId) || jobs.Keys.Any(k=>k.Pair==pairId) || notices.Any(x=>x.Key.Pair==pairId && x.Value.Kind==NoticeKind.Failure)) return Task.FromResult(false);
+            if (armed.ContainsKey(pairId) || jobs.Keys.Any(k=>k.Pair==pairId) || PutBacks.Any(x=>x.Key.Pair==pairId && notices.TryGetValue(x.Key,out var open) && open.Kind==NoticeKind.Failure && open.Matches(x.Value))) return Task.FromResult(false);
             ValidateOwners(returnedScopes, null, pairId);
             if (!pairs.Remove(pairId)) return Task.FromResult(false);
             PublishScopes(returnedScopes);
@@ -92,8 +94,8 @@ public sealed class InMemoryStateStore : IStore
         ct.ThrowIfCancellationRequested();
         Requests.Count(nameof(CommitAsync));
         if (before != null && !Records.Remove((pairId, before.LocalKey))) throw new InvalidDataException("Missing previous binding");
-        if (after != null) Records[(pairId, after.LocalKey)] = after;
-        if (spentDeletedKey!=null) DeletedNames.Remove((pairId,spentDeletedKey));
+        if (after != null) Records[(pairId, after.LocalKey)] = after with { LocalPublication = publication };
+        if (spentDeletedKey!=null) spentDeleted[(pairId,spentDeletedKey)]=true;
         return Task.CompletedTask;
     }
     /// <summary>Notices operation on the supplied facts.</summary>
@@ -259,10 +261,10 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested();
         if(!completedHistory.Remove((pairId,scanId),out var cursor)) throw new InvalidOperationException("Not a completed discovery acquisition");
-        foreach(var row in scratchDeleted.Where(x=>x.Scan==scanId)) DeletedNames.Add((pairId,row.Key));
+        foreach(var row in scratchDeleted.Where(x=>x.Scan==scanId)) spentDeleted.TryAdd((pairId,row.Key),false);
         historyCursor[pairId]=cursor;return Task.CompletedTask;
     }
-    public Task<bool> DeletedNameAsync(string pairId,Guid? scanId,string key,CancellationToken ct) => Task.FromResult(DeletedNames.Contains((pairId,key)) || scanId is {} id && scratchDeleted.Contains((id,key)));
+    public Task<bool> DeletedNameAsync(string pairId,Guid? scanId,string key,CancellationToken ct) => Task.FromResult(spentDeleted.TryGetValue((pairId,key),out var spent) ? !spent : scanId is {} id && scratchDeleted.Contains((id,key)));
     public IAsyncEnumerable<Notice> NoticesAtAsync(string pairId,string pathKey,CancellationToken ct) => Enumerate(notices.Where(n=>n.Key.Pair==pairId && PathNames.Same(n.Value.Path,pathKey)).Select(n=>n.Value),ct);
     public Task ProjectSubtreeAsync(string pairId,Scope from,Scope to,CancellationToken ct)
     {
@@ -295,13 +297,16 @@ public sealed class InMemoryStateStore : IStore
     }
     public IAsyncEnumerable<RenameCandidate> RenamesAsync(string pairId, Guid scanId, Scope? scope, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();var bindings=Records.Where(x=>x.Key.Pair==pairId).Select(x=>x.Value)
-            .SelectMany(v=>new[]{(Side.Local,v.LocalId,v),(Side.Dropbox,v.DropboxId,v)}).Where(x=>x.Item2.Length!=0).ToLookup(x=>(x.Item1,x.Item2),x=>x.v);
-        var candidates=from row in scan where row.Key.Pair==pairId && row.Key.Scan==scanId
-                       from saved in bindings[(row.Key.Side,row.Value.Id)]
-                       where row.Value.IsFolder==saved.IsFolder && row.Value.Path!=saved.PathOn(row.Key.Side) &&
-                         (scope==null || PathNames.IsSelfOrUnder(saved.LocalPath,scope.LocalPath) || PathNames.IsSelfOrUnder(saved.DropboxPath,scope.DropboxPath) || PathNames.IsSelfOrUnder(row.Value.Path,row.Key.Side==Side.Local?scope.LocalPath:scope.DropboxPath))
-                       select new RenameCandidate(row.Key.Side,row.Value,saved);
+        ct.ThrowIfCancellationRequested();var observed=scan.Where(x=>x.Key.Pair==pairId && x.Key.Scan==scanId).Select(x=>(x.Key.Side,Entry:x.Value));
+        var sides=Records.Where(x=>x.Key.Pair==pairId).SelectMany(x=>new[]{(Side:Side.Local,Saved:x.Value),(Side:Side.Dropbox,Saved:x.Value)});
+        var present=observed.Select(x=>(x.Side,x.Entry.Id,x.Entry.IsFolder,x.Entry.Path)).ToHashSet();
+        var matched=sides.Select(x=>(x.Side,Id:x.Saved.IdOn(x.Side),x.Saved.IsFolder,Path:x.Saved.PathOn(x.Side))).Where(present.Contains).ToHashSet();
+        var bindings=sides.Where(x=>!matched.Contains((x.Side,x.Saved.IdOn(x.Side),x.Saved.IsFolder,x.Saved.PathOn(x.Side))))
+            .ToLookup(x=>(x.Side,x.Saved.IdOn(x.Side),x.Saved.IsFolder),x=>x.Saved);
+        var candidates=from row in observed where row.Entry.Id.Length!=0 && !matched.Contains((row.Side,row.Entry.Id,row.Entry.IsFolder,row.Entry.Path))
+                       from saved in bindings[(row.Side,row.Entry.Id,row.Entry.IsFolder)]
+                       where (scope==null || PathNames.IsSelfOrUnder(saved.LocalPath,scope.LocalPath) || PathNames.IsSelfOrUnder(saved.DropboxPath,scope.DropboxPath) || PathNames.IsSelfOrUnder(row.Entry.Path,row.Side==Side.Local?scope.LocalPath:scope.DropboxPath))
+                       select new RenameCandidate(row.Side,row.Entry,saved);
         return Enumerate(candidates.GroupBy(x=>x.Synced).OrderBy(group=>group.Min(x=>PathNames.Depth(x.Moved.Path))).ThenBy(group=>group.Key.LocalKey,StringComparer.Ordinal).SelectMany(group=>group.OrderBy(x=>x.Side)),ct);
     }
 }

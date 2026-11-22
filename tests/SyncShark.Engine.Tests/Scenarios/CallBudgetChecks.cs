@@ -17,7 +17,7 @@ public static class CallBudgetChecks
             pc.Seed(local,[1]); cloud.Seed(remote,[1]); await store.CommitAsync(pair.PairId,null,SyncedEntries.From(local,remote),null,null,default);
         }
         long before = store.Requests[nameof(IStore.CommitAsync)];
-        await Repair.RunAsync(pair,new PathScope(pair,[pair],DriveType.Fixed),pc,cloud,store,null,null,default);
+        await Repair.RunAsync(pair,new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(),pc,cloud,store,null,null,default);
         foreach (var side in new[]{pc,cloud})
         {
             Check.Require(side.Items.Count == size && side.Items.Values.All(v => v.Bytes.SequenceEqual(new byte[]{1})), "Unchanged file modified");

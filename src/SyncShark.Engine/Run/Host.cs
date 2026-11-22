@@ -14,7 +14,7 @@ public sealed class Host
     /// <summary>Whether this pair may start work under the global and per-pair pause settings.</summary>
     public bool IsPaused(string pairId) => throw new NotImplementedException();
 
-    /// <summary>The store factory opens an existing image without creating one unless first pairs add explicitly requests creation. The factory receives an accessor, not a scope builder. RootAsync reads the PC drive type without using scope. Before admitting work, Host builds one PathScope from that observation and its current pair set; the accessor returns that instance to Local and Host passes it to Run and Executor. Scope changes are published before the next entry.</summary>
+    /// <summary>The store factory opens an existing image without creating one unless first pairs add explicitly requests creation. The factory receives an accessor, not a scope builder. RootAsync reads the PC drive type without using scope. Before admitting work, Host builds one PathScope from that observation and its current pair set; the accessor returns that instance to both adapters and Host passes it to Run and Executor. Stop the runner at an entry boundary before switching the accessor; restart with the new pair and scope.</summary>
     public Host(Func<bool,CancellationToken,Task<IStore?>> openStore, Func<PairConfig,Func<PathScope>,(ISide Local,ISide Dropbox)> sides, EngineSettings settings, ILogFiles logs, TimeProvider clock, Func<CancellationToken,Task<string>> connect, Func<string,CancellationToken,Task> disconnect) => throw new NotImplementedException();
 
     public IAsyncEnumerable<PairConfig> PairsAsync(CancellationToken ct) => throw new NotImplementedException();

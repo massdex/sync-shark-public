@@ -4,5 +4,5 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 public sealed class DropboxListing
 {
     /// <summary>Read operation on the supplied facts.</summary>
-    public IAsyncEnumerable<Listed> ReadAsync(DropboxApi api, PairConfig pair, string under, ListOptions options, CancellationToken ct) => throw new NotImplementedException();
+    public IAsyncEnumerable<Listed> ReadAsync(DropboxApi api, PairConfig pair, Func<PathScope> resolvedScope, string under, ListOptions options, CancellationToken ct) => throw new NotImplementedException();
 }
