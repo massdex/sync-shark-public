@@ -15,10 +15,9 @@ public sealed class DropboxErrors
     public readonly record struct RequestEvidence(bool Read, bool Dispatched, bool ProvenNoEffect, bool Transient);
 
     /// <summary>One classified failure: the cause, the disposition, whether it is an attributable refusal that proves
-    /// the write had no effect (a folder split may act on it), and whether a usable observation proved the target
-    /// identity absent. Absence means a get_metadata's exact structured path/not_found, or a by-id delete's exact
-    /// structured path_lookup/not_found; it is never the same as our request having deleted it (its effect stays
-    /// Unknown), and a caller carries a delete absence only when its own request addressed the selected id.</summary>
+    /// the write had no effect, and what the route proved absent. An exact metadata miss means no live target;
+    /// the same miss on list_revisions means no retained history, not that the live target is gone. A by-id delete
+    /// miss proves only the selected identity absent, not that our delete took effect.</summary>
     public readonly record struct Classified(
         TextKey Cause, FailureDisposition Disposition, bool ProvenNoEffect, bool Absent = false)
     {
@@ -45,7 +44,8 @@ public sealed class DropboxErrors
 
         Classified? decoded = hasError ? route switch
         {
-            DropboxProtocol.GetMetadata when IsStructuredNotFound(failure) => Refused(TextKey.DropboxRefused) with { Absent = true },
+            DropboxProtocol.GetMetadata or DropboxProtocol.ListRevisions when IsStructuredNotFound(failure) =>
+                Refused(TextKey.DropboxRefused) with { Absent = true },
             DropboxProtocol.Download when IsStructuredNotFound(failure) => Refused(TextKey.FailChanged),
             DropboxProtocol.ListFolderContinue when UnionTag(failure) == DropboxProtocol.TagReset =>
                 Refused(TextKey.DropboxRefused) with { CursorReset = true },
