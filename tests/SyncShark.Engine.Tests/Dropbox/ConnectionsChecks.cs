@@ -418,11 +418,11 @@ public static class ConnectionsChecks
                 var collision = string.Empty;
                 try { published = connections.Verify(source, target, new[] { first }) is not null; }
                 catch (Exception error) { collision = " (" + error.Message + ")"; }
-                Expect(published, "An abandoned same-second stage blocked the next attempt" + collision);
-                Expect(connections.Read(target).SequenceEqual(new[] { first }), "The published target membership is missing");
-                Expect(abandoned.All(file => File.Exists(file) &&
+                Expect(failures, published, "stage: An abandoned same-second stage blocked the next attempt" + collision);
+                Expect(failures, connections.Read(target).SequenceEqual(new[] { first }), "stage: The published target membership is missing");
+                Expect(failures, abandoned.All(file => File.Exists(file) &&
                         File.ReadAllBytes(file).AsSpan().SequenceEqual(abandonedBytes)),
-                    "An abandoned prior attempt's stage was removed or changed");
+                    "stage: An abandoned prior attempt's stage was removed or changed");
             });
             Case(failures, "predecessor append validation and valid prefix", () =>
             {
@@ -497,6 +497,12 @@ public static class ConnectionsChecks
     private static void Expect(bool condition, string message)
     {
         if (!condition) throw new InvalidDataException(message);
+    }
+
+    // Records the failure without aborting the case, so independent postconditions each report their own outcome.
+    private static void Expect(List<string> failures, bool condition, string message)
+    {
+        if (!condition) failures.Add(message);
     }
 
     private static bool Refuses(Action action)
