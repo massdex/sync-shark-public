@@ -78,6 +78,12 @@ public static class DropboxProtocol
     public const string PayloadTooLarge = "payload_too_large";
     public const string ContentHashMismatch = "content_hash_mismatch";
     public const string LookupFailed = "lookup_failed";
+    internal const string UploadSessionId = "upload_session_id";
+    internal const string IncorrectOffset = "incorrect_offset";
+    internal const string CorrectOffset = "correct_offset";
+    internal const string SessionClosed = "closed";
+    internal const string SessionNotClosed = "not_closed";
+    internal const string SessionTooLarge = "too_large";
 
     // Write-error summary locations by route: upload, upload_session/finish and create_folder_v2 report under
     // path/, delete_v2 under path_write/, move_v2 under to/ (destination) and from_write/ (source).
