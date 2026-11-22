@@ -93,7 +93,7 @@ public static class ReconciliationChecks
         var before=ItemChecks.File(Side.Local,"file",1,"pc");var db=ItemChecks.File(Side.Dropbox,"file",1,"db");
         var after=ItemChecks.File(Side.Local,"file",2,before.Id) with { Modified=before.Modified };
         local.Seed(after,[2]);remote.Seed(db,[1]);await store.CommitAsync(pair.PairId,null,SyncedEntries.From(before,db),new(1,10),null,default);
-        await store.SaveNoticeAsync(pair.PairId,new(1,NoticeKind.Failure,TextKey.FailChanged,before.Path,new([new(Side.Local,before.Path,before.Id)],Side.Local,new(before.Size,before.Modified.UtcTicks,before.ContentHash)),DateTimeOffset.UnixEpoch,false),default);
+        await store.SaveNoticeAsync(pair.PairId,new(1,NoticeKind.Failure,TextKey.FailChanged,before.Path,new([new(Side.Local,before.Path,before.Id)],Side.Local),DateTimeOffset.UnixEpoch,false),default);
         await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Local,ChangeKind.Changed,after.Path,null,after.Id,after,true,false,11,JournalId:1),local,remote,store,ItemChecks.Population(pair,paths,local,remote,store),ItemChecks.Hop(pair,paths,queue,local,remote,store),default);
         Check.Require(remote.Items[after.Path].Bytes.SequenceEqual(new byte[]{2}) && remote.History.Any(v=>v.Entry==db),"Stale publication or stamp-only proof hid changed bytes");
     }

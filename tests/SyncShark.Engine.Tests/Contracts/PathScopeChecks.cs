@@ -32,7 +32,7 @@ public static class PathScopeChecks
         Check.Require(!new PathScope(outer,[outer],DriveType.Fixed).ExcludesChange(incoming with { Path="Recycle Bin/item" },0,static (_,_,_)=>null),"Native-bin volume treated as removable");
         Check.Require(!scope.Excludes("innermost/file", null, false), "Unrelated sibling");
         var legacy=System.Text.Json.JsonSerializer.Deserialize<IssueSubject>("""{"Items":[],"Incoming":null,"LocalHash":{"Size":1,"ModifiedTicks":1,"Hash":"unverified"}}""")!;
-        Check.Require(legacy.LocalHash==null && !System.Text.Json.JsonSerializer.Serialize(legacy).Contains("LocalHash",StringComparison.Ordinal),"Retired hash proof survived a legacy read");
+        Check.Require(legacy.Items.Count==0 && legacy.Incoming==null && !System.Text.Json.JsonSerializer.Serialize(legacy).Contains("LocalHash",StringComparison.Ordinal),"Retired hash proof survived a legacy read");
         return Task.CompletedTask;
     }
     /// <summary>A stale completion, an unrelated scope and an uncompleted full-pair Repair all keep their independent debt.</summary>

@@ -57,25 +57,58 @@ public static class FolderChecks
         Check.Require(pc.Items.Count==2 && cloud.Items.Count==0 && store.Records.Count==0,"Link followed or copied");
         pc.Items.Clear();await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,null,null,default);Check.Require(store.OpenNotices.Count==0 && cloud.Items.Count==0 && store.Records.Count==0,"Stale link membership");
     }
-    /// <summary>A detached read opens no image; first add alone publishes the real store and its pair.</summary>
-    public static async Task FreshStartAsync()
+    /// <summary>A detached read creates no image; the first explicit add publishes the pair.</summary>
+    public static Task FreshStartAsync() => FirstAddAsync(false);
+
+    private static async Task FirstAddAsync(bool interrupt)
     {
-        var scratch=Directory.CreateTempSubdirectory().FullName;var path=Path.Combine(scratch,ResourceNames.EngineFolder,ResourceNames.DatabaseFile);int creates=0;
+        var scratch=Directory.CreateTempSubdirectory().FullName;
+        var folder=Path.Combine(scratch,ResourceNames.EngineFolder);var path=Path.Combine(folder,ResourceNames.DatabaseFile);
+        var stage=path+".20000101T000000Z.new";var boundary=new IOException("Fixture: closed stage, before publication");
+        int creates=0;byte[]? abandoned=null;
         try
         {
             var pair=ItemChecks.Pair();var local=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox);
             async Task<IStore?> Open(bool create,CancellationToken ct)
             {
                 if(!File.Exists(path) && !create) return null;
-                if(create && !File.Exists(path)){creates++;await new global::Massdex.SyncShark.Engine.Storage.StoreMove().CreateAsync(scratch,ct);}
+                if(create && !File.Exists(path))
+                {
+                    creates++;
+                    if(interrupt && creates==1)
+                    {
+                        // Stop the first host at the create factory, after writing a closed stage but before the rename.
+                        Directory.CreateDirectory(folder);
+                        using(var db=new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder {DataSource=stage,Pooling=false}.ToString()))
+                        {
+                            await db.OpenAsync(ct);db.CreateFunction<string,string>("pathkey",PathNames.Key,isDeterministic:true);
+                            using var cmd=db.CreateCommand();cmd.CommandText=global::Massdex.SyncShark.Engine.Storage.Schema.Create;
+                            await cmd.ExecuteNonQueryAsync(ct);
+                            cmd.CommandText=$"PRAGMA user_version={global::Massdex.SyncShark.Engine.Storage.Schema.Version}; INSERT INTO journal_position VALUES('orphan',1,2)";await cmd.ExecuteNonQueryAsync(ct);
+                        }
+                        abandoned=File.ReadAllBytes(stage);throw boundary;
+                    }
+                    await new global::Massdex.SyncShark.Engine.Storage.StoreMove().CreateAsync(scratch,ct);
+                }
                 return new global::Massdex.SyncShark.Engine.Storage.Store(path,false,ItemChecks.Settings);
             }
-            var host=new Host(Open,(_,_,_,_)=>(local,cloud),ItemChecks.Settings,null!,TimeProvider.System,_=>throw new InvalidOperationException(),(_,_)=>throw new InvalidOperationException());
+            Host Start()=>new(Open,(_,_,_,_)=>(local,cloud),ItemChecks.Settings,null!,TimeProvider.System,_=>throw new InvalidOperationException(),(_,_)=>throw new InvalidOperationException());
+            var host=Start();
             await foreach(var unused in host.PairsAsync(default)) throw new InvalidDataException("Fresh read reported a pair");
-            Check.Require(creates==0 && !File.Exists(path),"Read created a database");await host.AddPairAsync(pair,default);
-            Check.Require(creates==1 && File.Exists(path),"First add failed to publish exactly one image");
+            Check.Require(creates==0 && !File.Exists(path),"Read created a database");
+            if(interrupt)
+            {
+                try { await host.AddPairAsync(pair,default);throw new InvalidDataException("First add did not report interruption"); }
+                catch(IOException ex) when(ReferenceEquals(ex,boundary)) { }
+                Check.Require(creates==1 && abandoned is {Length:>0} && !File.Exists(path),"No observable closed-stage/pre-publication boundary");
+                host=Start();await foreach(var unused in host.PairsAsync(default)) throw new InvalidDataException("Restart adopted an abandoned stage");
+                Check.Require(creates==1 && !File.Exists(path) && File.ReadAllBytes(stage).SequenceEqual(abandoned!),"Restart published or disturbed the earlier attempt");
+            }
+            await host.AddPairAsync(pair,default);
+            Check.Require(creates==(interrupt?2:1) && File.Exists(path),"Explicit add did not publish exactly one fresh store");
             using var reopened=new global::Massdex.SyncShark.Engine.Storage.Store(path,true,ItemChecks.Settings);
             Check.Require((await reopened.PairAsync(pair.PairId,default))?.PairId==pair.PairId,"Published image lacks the new pair");
+            if(interrupt) Check.Require(await reopened.PositionAsync("orphan",default)==null && File.ReadAllBytes(stage).SequenceEqual(abandoned!),"Retry reused or removed an earlier attempt’s stage");
         }
         finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();Directory.Delete(scratch,true); }
     }
@@ -158,7 +191,8 @@ public static class FolderChecks
     public static Task A46MixedLinkAndNonlinkMembersAsync() => throw new NotImplementedException();
     public static Task A46UnchangedNoticesPreservedAsync() => throw new NotImplementedException();
     public static Task A46CrashDuringConnectionListCopyAsync() => throw new NotImplementedException();
-    public static Task A46CrashDuringFirstPairAddAsync() => throw new NotImplementedException();
+    /// <summary>Restart after the first add stops before publication; neither restart nor retry may adopt its stage.</summary>
+    public static Task A46CrashDuringFirstPairAddAsync() => FirstAddAsync(true);
     public static Task A46FreshReadCreatesNoStoreAsync() => FreshStartAsync();
     public static Task A46ClosedImageNoWalAsync() => throw new NotImplementedException();
     public static Task A46AmbiguousIndependentStoresAsync() => throw new NotImplementedException();
