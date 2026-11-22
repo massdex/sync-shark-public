@@ -605,7 +605,10 @@ public static class ConnectionsChecks
     private static string LegacyRecord(object schema, string operation, string? valueJson, string? recoveryJson,
         string? payload = null)
     {
-        var hashed = payload ?? recoveryJson ?? valueJson ?? "delete";
+        // The predecessor hashes the operation payload: a set's Value, a recovery's Recovery, the word for a delete.
+        var hashed = payload
+            ?? (operation == "set" ? valueJson : operation == "recovery" ? recoveryJson : null)
+            ?? "delete";
         return JsonSerializer.Serialize(new Dictionary<string, object?>
         {
             ["SchemaVersion"] = schema,
