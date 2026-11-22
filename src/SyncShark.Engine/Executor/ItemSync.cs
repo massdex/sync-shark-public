@@ -9,7 +9,7 @@ public static class ItemSync
 
     public static async Task ApplyAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Change change, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope,CancellationToken,Task> compareOldBinding, CancellationToken ct, Func<Scope,IEnumerable<Change>>? heldInput=null, Action<string,bool>? failed=null)
     {
-        var path=change.Path ?? change.Observed?.Path ?? throw new InventoryIncompleteException(nameof(Change.Path));
+        var path=change.Path ?? change.Observed?.Path ?? throw new InventoryIncompleteException(nameof(Change.Path),null);
         var key=PathNames.KeyFor(change.Side,path);
         var saved=await store.FindAsync(pair.PairId,change.Side,key,ct);
         var notices=new List<Notice>();
@@ -109,11 +109,11 @@ public static class ItemSync
             if(currentBinding!=row.Synced) throw new ChangedUnderneathException(Row.Path(row));
             if(action.Kind==ActionKind.DeferFolder && row.Synced is {} folder)
             {
-                if(heldInput is null) throw new InventoryIncompleteException(nameof(heldInput));
+                if(heldInput is null) throw new InventoryIncompleteException(nameof(heldInput),null);
                 await new FolderDelete().ApplyAsync(pair,settings,events,paths,folder,row.Local==null?Side.Local:Side.Dropbox,local,dropbox,store,heldInput,populate,compareOldBinding,ct);
                 return true;
             }
-            if(action.Kind is ActionKind.NeedLocalHash or ActionKind.NeedDeletionEvidence) throw new InventoryIncompleteException(action.Kind.ToString());
+            if(action.Kind is ActionKind.NeedLocalHash or ActionKind.NeedDeletionEvidence) throw new InventoryIncompleteException(action.Kind.ToString(),null);
             // Effects owns physical-leg logging and passes the original hop callback between legs.
             await new Effects().ApplyAsync(pair,settings,events,paths,action,local,dropbox,store,populate,compareOldBinding,ct);
             return true;

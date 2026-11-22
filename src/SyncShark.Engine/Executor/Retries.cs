@@ -24,7 +24,7 @@ public sealed class Retries
         var scope = new Scope(failure.Path,failure.Path);
         var reports = new List<Change>(); Entry? version = null;
         var member = failure.Subject.Items.SingleOrDefault(i=>i.Side==side && PathNames.Same(i.Path,failure.Path));
-        if (member is null) throw new ItemFailedException(failure.Path,TextKey.RecoveryIncomplete);
+        if (member is null) throw new ItemFailedException(failure.Path,TextKey.RecoveryIncomplete,null);
         foreach (var report in heldInput(scope))
         {
             if (report.Side!=side || !PathNames.Same(report.Path,failure.Path)) continue;
@@ -37,18 +37,18 @@ public sealed class Retries
         }
         // Missing identifying input is not permission to restore whatever now has this name.
         if (version is null || paths.Excludes(scope.LocalPath,scope.DropboxPath,version.IsFolder))
-            throw new ItemFailedException(failure.Path,TextKey.RecoveryIncomplete);
+            throw new ItemFailedException(failure.Path,TextKey.RecoveryIncomplete,null);
         var source = side==Side.Local ? local : dropbox;
         var destination = side==Side.Local ? dropbox : local;
         var at = await source.ReadOneAsync(version.Path,ct);
-        if (at!=version) throw new ItemFailedException(version.Path,TextKey.RecoveryIncomplete);
+        if (at!=version) throw new ItemFailedException(version.Path,TextKey.RecoveryIncomplete,null);
         if (await destination.ReadOneAsync(failure.Path,ct)!=null) throw new PathOccupiedException(failure.Path);
         RemovalResult published;
         if (version.IsFolder)
         {
             var location=await source.ReadByIdAsync(version.Id,ct);
             if (location is not {InScope:true} found || await source.RecoverAsync(found.Location,version,ct) is not Recovery.Folder contents || contents.Root!=version)
-                throw new ItemFailedException(version.Path,TextKey.RecoveryIncomplete);
+                throw new ItemFailedException(version.Path,TextKey.RecoveryIncomplete,null);
             published=await destination.CreateFolderExclusiveAsync(failure.Path,ct);
             if (published.Outcome==RemovalOutcome.Published) await populate(scope,side,contents,ct);
         }
@@ -60,7 +60,7 @@ public sealed class Retries
         }
         if (published is not {Outcome:RemovalOutcome.Published,Final:{} final} || final.IsFolder!=version.IsFolder ||
             !version.IsFolder && (final.Size!=version.Size || final.ContentHash!=version.ContentHash))
-            throw new ItemFailedException(version.Path,published.Cause ?? TextKey.RecoveryIncomplete);
+            throw new ItemFailedException(version.Path,published.Cause ?? TextKey.RecoveryIncomplete,null);
         var before=await store.FindAsync(pair.PairId,side,PathNames.KeyFor(side,version.Path),ct);
         await store.CommitAsync(pair.PairId,before,SyncedEntries.From(side,version,final),published.LocalPublished,null,ct);
         await store.CloseNoticeAsync(pair.PairId,failure,ct);
