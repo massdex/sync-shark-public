@@ -15,6 +15,8 @@ public sealed class DropboxApi
     private const string SpaceUsageRoute = "users/get_space_usage";
     private const string LongpollRoute = "files/list_folder/longpoll";
     private const string ContinueRoute = "files/list_folder/continue";
+    private const string ErrorSummaryField = "error_summary";
+    private const string ResetTag = "reset";
 
     private readonly HttpClient _transport;
     private readonly TimeProvider _clock;
@@ -109,10 +111,10 @@ public sealed class DropboxApi
         using var document = await SendJsonAsync(LongpollRoute, argument, ct).ConfigureAwait(false);
         var root = document.RootElement;
         var changes = root.TryGetProperty("changes", out var changesElement) && changesElement.GetBoolean();
-        var backoff = root.TryGetProperty("backoff", out var backoffElement) &&
+        var defer = root.TryGetProperty("backoff", out var backoffElement) &&
             backoffElement.TryGetDouble(out var seconds) && seconds > 0
                 ? TimeSpan.FromSeconds(seconds) : (TimeSpan?)null;
-        return (changes, backoff);
+        return (changes, defer);
     }
 
     /// <summary>Reads one list page body and decodes it through W11's streaming page decoder, which opens and owns
@@ -277,7 +279,7 @@ public sealed class DropboxApi
                     using var document = JsonDocument.Parse(text);
                     body = document.RootElement.Clone();
                     if (body.ValueKind == JsonValueKind.Object &&
-                        body.TryGetProperty("error_summary", out var summaryElement))
+                        body.TryGetProperty(ErrorSummaryField, out var summaryElement))
                         summary = summaryElement.GetString();
                 }
                 catch (JsonException) { }
@@ -306,8 +308,8 @@ public sealed class DropboxApi
     {
         if (body.ValueKind == JsonValueKind.Object && body.TryGetProperty("error", out var error) &&
             error.ValueKind == JsonValueKind.Object && error.TryGetProperty(".tag", out var tag) &&
-            string.Equals(tag.GetString(), "reset", StringComparison.Ordinal)) return true;
-        return summary is not null && summary.StartsWith("reset", StringComparison.Ordinal);
+            string.Equals(tag.GetString(), ResetTag, StringComparison.Ordinal)) return true;
+        return summary is not null && summary.StartsWith(ResetTag, StringComparison.Ordinal);
     }
 
     private TimeSpan? ParseRetryAfter(HttpResponseMessage response)
