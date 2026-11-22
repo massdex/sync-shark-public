@@ -220,19 +220,12 @@ public static class SignInChecks
 
     private static async Task<string> SendAsync(int port, string request)
     {
-        for (var attempt = 0; ; attempt++)
-        {
-            try
-            {
-                using var client = new TcpClient();
-                await client.ConnectAsync(IPAddress.Loopback, port);
-                await using var stream = client.GetStream();
-                await stream.WriteAsync(Encoding.ASCII.GetBytes(request));
-                using var reader = new StreamReader(stream, Encoding.ASCII);
-                return await reader.ReadToEndAsync();
-            }
-            catch (SocketException) when (attempt < 400) { await Task.Delay(25); }
-        }
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        await using var stream = client.GetStream();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes(request));
+        using var reader = new StreamReader(stream, Encoding.ASCII);
+        return await reader.ReadToEndAsync();
     }
 
     private static void Rejects(Action action)

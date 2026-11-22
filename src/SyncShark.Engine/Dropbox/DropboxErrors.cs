@@ -14,5 +14,9 @@ public sealed class DropboxErrors
     public readonly record struct RequestEvidence(bool Read, bool Dispatched, bool ProvenNoEffect, bool Transient);
     /// <summary>Cause and effect certainty for a provider refusal.</summary>
     public readonly record struct Classified(
-        TextKey Cause, FailureDisposition Disposition, bool ProvenNoEffect, bool Absent = false);
+        TextKey Cause, FailureDisposition Disposition, bool ProvenNoEffect, bool Absent = false)
+    {
+        /// <summary>Whether this continuation cursor requires a fresh listing.</summary>
+        public bool CursorReset { get; init; }
+    }
 }

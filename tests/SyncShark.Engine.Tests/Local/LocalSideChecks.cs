@@ -11,6 +11,8 @@ public static class LocalSideChecks
     public static Task PublishedFileRecordAsync() => throw new NotImplementedException();
     /// <summary>Check bound inventory through the module interface.</summary>
     public static Task BoundInventoryAsync() => throw new NotImplementedException();
+    /// <summary>Compare parent handles retained during publication at different directory depths.</summary>
+    public static Task ParentPinCountAsync() => throw new NotImplementedException();
     /// <summary>Verifies the LocalSide contract through the module surface.</summary>
     public static Task RunAsync() => throw new NotImplementedException();
 }

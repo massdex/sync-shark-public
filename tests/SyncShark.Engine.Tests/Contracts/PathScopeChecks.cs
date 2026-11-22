@@ -35,6 +35,19 @@ public static class PathScopeChecks
         Check.Require(legacy.Items.Count==0 && legacy.Incoming==null && !System.Text.Json.JsonSerializer.Serialize(legacy).Contains("LocalHash",StringComparison.Ordinal),"Retired hash proof survived a legacy read");
         return Task.CompletedTask;
     }
+    /// <summary>Job origin survives per member; a legacy launch stays unknown and keeps its settlement key.</summary>
+    public static Task JobMemberOriginAsync()
+    {
+        const string legacy = """[{"Id":"folder","Path":"A","Destination":null}]""";
+        var old = System.Text.Json.JsonSerializer.Deserialize<JobMember[]>(legacy)!.Single();
+        Check.Require(old.Origin is null && System.Text.Json.JsonSerializer.Serialize(new[] { old }) == legacy,
+            "Legacy launch acquired an origin or changed its settlement key");
+        JobMember[] members = [old with { Origin = ActionKind.ReplaceKind }, old with { Origin = ActionKind.DeleteDropbox }, old];
+        var encoded = System.Text.Json.JsonSerializer.Serialize(members);
+        var restored = System.Text.Json.JsonSerializer.Deserialize<JobMember[]>(encoded)!;
+        Check.Require(restored.Select(m => m.Origin).SequenceEqual(members.Select(m => m.Origin)), "Lost per-member action in a saved launch");
+        return Task.CompletedTask;
+    }
     /// <summary>A stale completion, an unrelated scope and an uncompleted full-pair Repair all keep their independent debt.</summary>
     public static async Task MatchingRevisionAsync()
     {

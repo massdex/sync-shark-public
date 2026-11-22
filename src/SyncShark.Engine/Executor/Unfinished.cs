@@ -8,4 +8,10 @@ public sealed class Unfinished
 
     /// <summary>InstalledAsync for the selected Unfinished operation.</summary>
     public Task InstalledAsync(AcceptedJob job,Func<Scope,IEnumerable<Change>> heldInput,Func<Change,Task> wake) => throw new NotImplementedException();
+    /// <summary>Check this pair's settled source coverage at the observed boundary.</summary>
+    public Func<(JournalPosition? Local, string? Dropbox), bool>? CoversThrough
+    {
+        get => throw new NotImplementedException();
+        set => throw new NotImplementedException();
+    }
 }

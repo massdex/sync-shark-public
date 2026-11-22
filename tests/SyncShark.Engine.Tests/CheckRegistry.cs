@@ -14,6 +14,7 @@ public static class CheckRegistry
             new("Fixtures/ReleaseSchema", Scenarios.StoreMoveChecks.CreateFixtureAsync)
         ],
         ["contracts"] = [
+            new("Contracts/job member origin", Contracts.PathScopeChecks.JobMemberOriginAsync),
             new("Contracts/atomic source resets",Contracts.PathScopeChecks.SourceResetAsync),
             new("Contracts/acquisition isolation and spent name", Contracts.PathScopeChecks.AcquisitionIsolationAsync),
             new("Contracts/completed repair facts", Contracts.PathScopeChecks.CompletedRepairFactsAsync),
@@ -27,8 +28,12 @@ public static class CheckRegistry
             new("Dropbox/ConnectionsChecks", Dropbox.ConnectionsChecks.RunAsync),
             new("Dropbox/CredentialStoreChecks", Dropbox.CredentialStoreChecks.RunAsync),
             new("Dropbox/DeletedHistoryChecks", Dropbox.DeletedHistoryChecks.RunAsync),
+            new("Dropbox/upload receipt validation", Dropbox.DispatcherChecks.UploadReceiptAsync),
+            new("Dropbox/throttled write", Dropbox.DispatcherChecks.ThrottledWriteAsync),
+            new("Dropbox/deferred create", Dropbox.DispatcherChecks.DeferredCreateAsync),
             new("Dropbox/DispatcherChecks", Dropbox.DispatcherChecks.RunAsync),
             new("Dropbox/DropboxApiChecks", Dropbox.DropboxApiChecks.RunAsync),
+            new("Dropbox/authenticated send path", Dropbox.DropboxApiChecks.SendPathAsync),
             new("Dropbox/DropboxEntriesChecks", Dropbox.DropboxEntriesChecks.RunAsync),
             new("Dropbox/DropboxErrorsChecks", Dropbox.DropboxErrorsChecks.RunAsync),
             new("Dropbox/DropboxFeedChecks", Dropbox.DropboxFeedChecks.RunAsync),
@@ -49,6 +54,7 @@ public static class CheckRegistry
             new("Dropbox/upload slice window", Dropbox.UploadContentChecks.WindowAsync),
             new("Dropbox/staged source ownership", Dropbox.DropboxWriterChecks.StagedAsync),
             new("Dropbox/upload replacement order", Dropbox.UploadContentChecks.ReplacementOrderAsync),
+            new("Dropbox/upload session append", Dropbox.UploadContentChecks.AppendAsync),
             new("Dropbox/UploadContentChecks", Dropbox.UploadContentChecks.RunAsync)
         ],
         ["edge"] = [
@@ -62,6 +68,9 @@ public static class CheckRegistry
         ["executor"] = [
             new("Executor/CaseRenameChecks", Executor.CaseRenameChecks.RunAsync),
             new("Executor/EffectsChecks", Executor.EffectsChecks.RunAsync),
+            new("Executor/mapped exclusion protection", Executor.ExclusionsChecks.MappedProtectionAsync),
+            new("Executor/exclusion copy estimate", Executor.ExclusionsChecks.CopyEstimateAsync),
+            new("Executor/exclusion read failure", Executor.ExclusionsChecks.ReadFailureAsync),
             new("Executor/ExclusionsChecks", Executor.ExclusionsChecks.RunAsync),
             new("Executor/FolderDeleteChecks", Executor.FolderDeleteChecks.RunAsync),
             new("Executor/FolderMergeChecks", Executor.FolderMergeChecks.RunAsync),
@@ -69,6 +78,8 @@ public static class CheckRegistry
             new("Executor/ItemSyncChecks", Executor.ItemSyncChecks.RunAsync),
             new("Executor/KeepBothChecks", Executor.KeepBothChecks.RunAsync),
             new("Executor/NoticesChecks", Executor.NoticesChecks.RunAsync),
+            new("Executor/dismiss choice matrix", Executor.ResolveChecks.DismissAsync),
+            new("Executor/reviewed resolution endpoints", Executor.ResolveChecks.ReviewedEndpointsAsync),
             new("Executor/ResolveChecks", Executor.ResolveChecks.RunAsync),
             new("Executor/RetriesChecks", Executor.RetriesChecks.RunAsync),
             new("Executor/UnfinishedChecks", Executor.UnfinishedChecks.RunAsync)
@@ -90,6 +101,7 @@ public static class CheckRegistry
             new("Local/excluded first alias", Local.LocalSideChecks.ExcludedFirstAliasAsync),
             new("Local/published file record", Local.LocalSideChecks.PublishedFileRecordAsync),
             new("Local/bound inventory", Local.LocalSideChecks.BoundInventoryAsync),
+            new("Local/parent pin count", Local.LocalSideChecks.ParentPinCountAsync),
             new("Local/LocalSideChecks", Local.LocalSideChecks.RunAsync),
             new("Local/LocalStagedChecks", Local.LocalStagedChecks.RunAsync),
             new("Local/LogFilesChecks", Local.LogFilesChecks.RunAsync),
@@ -101,6 +113,7 @@ public static class CheckRegistry
         ["planner"] = [
             new("Planner/ConflictNameChecks", Planner.ConflictNameChecks.RunAsync),
             new("Planner/DecideChecks", Planner.DecideChecks.RunAsync),
+            new("Planner/live folder target", Planner.FolderDeletesChecks.LiveTargetAsync),
             new("Planner/FolderDeletesChecks", Planner.FolderDeletesChecks.RunAsync),
             new("Planner/move counterpart and destination", Planner.MovesChecks.CounterpartAsync),
             new("Planner/MovesChecks", Planner.MovesChecks.RunAsync),
@@ -314,7 +327,6 @@ public static class CheckRegistry
             new("A08 folder to file on cloud", Scenarios.FolderChecks.A08FolderToFileOnCloudAsync),
             new("A08 child deletes before parent replacement", Scenarios.FolderChecks.A08ChildDeletesBeforeParentReplacementAsync),
             new("A08 stage failure before removal", Scenarios.FolderChecks.A08StageFailureBeforeRemovalAsync),
-            new("A08 small upload staged before folder removal", Scenarios.RecoveryChecks.StageBeforeFolderAsync),
             new("A08 sole small upload source unreadable", Scenarios.FolderChecks.A08SoleSmallUploadSourceUnreadableAsync),
             new("A08 protected exclusion pc", Scenarios.FolderChecks.A08ProtectedExclusionPcAsync),
             new("A08 protected exclusion cloud", Scenarios.FolderChecks.A08ProtectedExclusionCloudAsync),

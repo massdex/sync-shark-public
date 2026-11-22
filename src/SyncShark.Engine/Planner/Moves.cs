@@ -13,7 +13,7 @@ public static class Moves
     /// <summary>For for the selected Moves operation.</summary>
     public static SyncAction For(IReadOnlyList<RenameCandidate> bindingCandidates, Row? destination, Observations observations, bool localContentDirty) => throw new NotImplementedException();
     /// <summary>For for the selected Moves operation.</summary>
-    public static SyncAction For(RenameCandidate candidate, Row destination, JobMember selected, JobReply reply, (IdentityLocation Location, bool InScope)? observed, Observations observations, bool localContentDirty) => throw new NotImplementedException();
+    public static SyncAction For(RenameCandidate candidate, Row destination, JobMember selected, JobReply reply, (IdentityLocation Location, bool InScope)? observed, Observations observations, bool localContentDirty, Func<string, SyncedEntry?>? savedDropboxParent = null) => throw new NotImplementedException();
     /// <summary>Classifies destinationidentity for the selected operation.</summary>
     public enum DestinationIdentity { Gone, Moving, Here, MovingAncestor }
     /// <summary>Classifies destinationfacts for the selected operation.</summary>

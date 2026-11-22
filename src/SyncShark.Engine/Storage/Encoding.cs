@@ -3,6 +3,8 @@ namespace Massdex.SyncShark.Engine.Storage;
 /// <summary>Encoding operations for the storage module.</summary>
 public static class Encoding
 {
+    /// <summary>Decode a notice header subject from its stored JSON.</summary>
+    public static IssueSubject DecodeSubject(string json) => throw new NotImplementedException();
     /// <summary>DecodePair operation on the supplied facts.</summary>
     public static PairConfig DecodePair(string json) => throw new NotImplementedException();
     /// <summary>DecodeNotice operation on the supplied facts.</summary>

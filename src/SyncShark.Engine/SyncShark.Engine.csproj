@@ -12,6 +12,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.11" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+    <EmbeddedResource Include="../../tools/SyncShark.SignerIdentity.json" LogicalName="SyncShark.SignerIdentity.json" />
     <EmbeddedResource Include="engine-path-case.json" LogicalName="SyncShark.EnginePathCase.json" />
     <EmbeddedResource Include="engine-settings.json" LogicalName="SyncShark.EngineSettings.json" />
     <EmbeddedResource Include="engine-strings.json" LogicalName="SyncShark.EngineStrings.json" />
