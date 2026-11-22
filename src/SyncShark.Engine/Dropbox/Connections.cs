@@ -71,6 +71,9 @@ public sealed class Connections
             }
             else if (File.Exists(target))
             {
+                // The actual target set must equal the authoritative source set, whatever the target's bytes.
+                if (!ProductList(productRoot).SequenceEqual(sourceSet, StringComparer.Ordinal))
+                    throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
                 if (ListForm(target) == ListShape.Append && !SameBytesBounded(source, target))
                     throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
             }
@@ -103,7 +106,6 @@ public sealed class Connections
         var ids = connections.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         foreach (var id in ids) _ = CredentialStore.AccountTarget(id);
         var target = FilePath(productRoot);
-        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         if (!Publish(target, output => WriteIds(output, ids), overwrite: true)) throw new IOException();
     }
 
@@ -125,6 +127,7 @@ public sealed class Connections
     /// <summary>The one attempt-publication path: write this attempt's own stage, then move it create-only (or replace).</summary>
     private static bool Publish(string target, Action<FileStream> write, bool overwrite = false)
     {
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         var stage = StagePath(target);
         FileStream output;
         try { output = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None); }

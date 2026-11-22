@@ -5,10 +5,10 @@ using Massdex.SyncShark.Engine.Dropbox;
 
 namespace Massdex.SyncShark.Engine.Tests.Dropbox;
 
-/// <summary>Contract checks for Connections: an in-place 0.3.95 upgrade accepts the root's authoritative value without
-/// overwriting its own evidence; distinct targets must carry the authoritative set (BC8), byte-copying an authoritative
-/// append log and refusing a target that drops a connection; the predecessor's append validation, valid prefix, record
-/// ceiling and id normalization are retained; Verify and the next Read agree.</summary>
+/// <summary>Contract checks for Connections: the explicit empty-list value is disjoint from legacy input and a save
+/// cannot revive old slots; distinct targets must carry the authoritative set (BC8/R47) and an append target its exact
+/// bytes; the predecessor's appended records and slot payloads are structurally validated before acceptance; in-place
+/// upgrades never overwrite evidence; Verify and the next Read agree.</summary>
 public static class ConnectionsChecks
 {
     private const int MaximumStateBytes = 1024 * 1024;
@@ -23,6 +23,48 @@ public static class ConnectionsChecks
         {
             var connections = new Connections();
 
+            // A blank legacy line is valid legacy input; only an empty JSON array line marks our empty list.
+            var blankLegacy = Root(scratch, "blankLegacy");
+            Slot(blankLegacy, 'a', 1, present: true, new[] { first });
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(blankLegacy))!);
+            File.WriteAllText(ListFile(blankLegacy), "\n");
+            Check.Require(connections.Verify(blankLegacy, blankLegacy, new[] { first }) is null &&
+                          connections.Read(blankLegacy).SequenceEqual(new[] { first }),
+                "A blank legacy line was treated as our empty list instead of the authoritative slot");
+            Check.Require(connections.Read(blankLegacy).SequenceEqual(new[] { first }),
+                "A blank legacy log did not expose the slot the Verify used");
+            connections.Save(blankLegacy, Array.Empty<string>());
+            Check.Require(connections.Read(blankLegacy).Count == 0,
+                "Saving an empty list did not override the old slots");
+            Check.Require(File.ReadAllText(ListFile(blankLegacy)).Trim() == "[]",
+                "The empty list is not the explicit empty JSON array value");
+
+            // R47: an append-authoritative source and a same-set canonical target with different bytes are both kept.
+            var r47Source = Root(scratch, "r47Source");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(r47Source))!);
+            File.WriteAllText(ListFile(r47Source), LegacyRecovery("evidence.json") + LegacySet(first));
+            var r47Target = Root(scratch, "r47Target");
+            connections.Save(r47Target, new[] { first });
+            var sourceBytes = File.ReadAllBytes(ListFile(r47Source));
+            var targetBytes = File.ReadAllBytes(ListFile(r47Target));
+            Check.Require(connections.Verify(r47Source, r47Target, new[] { first }) is null,
+                "A same-set canonical target with different bytes was refused instead of kept under R47");
+            Check.Require(File.ReadAllBytes(ListFile(r47Source)).AsSpan().SequenceEqual(sourceBytes) &&
+                          File.ReadAllBytes(ListFile(r47Target)).AsSpan().SequenceEqual(targetBytes),
+                "R47 verification overwrote one side");
+
+            // The predecessor's typed payload is validated before a record replaces the prefix or a slot is selected.
+            var legacy = Root(scratch, "legacy");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(legacy))!);
+            File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecord(1, "set", NumericAccountBinding(second), null));
+            Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
+                "A wrong-typed payload replaced the earlier valid set");
+            var structSlot = Root(scratch, "structSlot");
+            Slot(structSlot, 'a', 1, present: true, new[] { first });
+            SlotWithBinding(structSlot, 'b', 2, NumericAccountBinding(second));
+            Check.Require(connections.Read(structSlot).SequenceEqual(new[] { first }),
+                "A wrong-typed higher slot generation was selected");
+
             // BC8: a byte-identical distinct target that omits an authoritative slot connection must refuse.
             var slotSource = Root(scratch, "slotSource");
             Slot(slotSource, 'a', 2, present: true, new[] { first, second });
@@ -36,7 +78,7 @@ public static class ConnectionsChecks
             catch (InvalidDataException) { refused = true; }
             Check.Require(refused, "A distinct target that dropped an authoritative connection was accepted");
 
-            // A distinct append target with equal bytes and equal ids is accepted.
+            // A distinct append target is accepted only byte-identically and with the same set.
             var appendSource = Root(scratch, "appendSource");
             Directory.CreateDirectory(Path.GetDirectoryName(ListFile(appendSource))!);
             File.WriteAllText(ListFile(appendSource), LegacySet(first));
@@ -45,8 +87,6 @@ public static class ConnectionsChecks
             File.Copy(ListFile(appendSource), ListFile(identical));
             Check.Require(connections.Verify(appendSource, identical, new[] { first }) is null,
                 "A byte-identical distinct append target with the same set was refused");
-
-            // Distinct append targets are still accepted only byte-identically (BC8).
             var sameIdsOtherBytes = Root(scratch, "sameIdsOtherBytes");
             Directory.CreateDirectory(Path.GetDirectoryName(ListFile(sameIdsOtherBytes))!);
             File.WriteAllText(ListFile(sameIdsOtherBytes), LegacyRecovery("evidence.json") + LegacySet(first));
@@ -163,8 +203,6 @@ public static class ConnectionsChecks
             Check.Require(refused, "An oversized append log was read");
 
             // The predecessor's append validation and valid prefix.
-            var legacy = Root(scratch, "legacy");
-            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(legacy))!);
             File.WriteAllText(ListFile(legacy), LegacySetWithBinding(BindingJson(null, "acct-derived")));
             Check.Require(connections.Read(legacy).SequenceEqual(new[] { Connections.CreateConnectionId("acct-derived") }),
                 "A blank connection id with an account id was not normalized to its derived id");
@@ -175,6 +213,9 @@ public static class ConnectionsChecks
             File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecovery("evidence.json"));
             Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
                 "A valid recovery record changed the current value or stopped the scan");
+            File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecovery("evidence.json") + LegacySet(second));
+            Check.Require(connections.Read(legacy).SequenceEqual(new[] { second }),
+                "A different valid set after a recovery record was not applied");
             File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecord(1.5, "set", BindingJson(null, "acct-other"), null));
             Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
                 "A non-Int32 record schema threw instead of keeping the valid prefix");
@@ -188,7 +229,7 @@ public static class ConnectionsChecks
             File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecord(1, "append", null, null));
             Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }), "An invalid operation did not stop the append scan");
 
-            // Only applied records count against the ceiling; a bad record after 100 applied records stops without throwing.
+            // Only applied records count against the ceiling.
             var hundred = new StringBuilder();
             for (var index = 0; index < 100; index++) hundred.Append(LegacySet(first));
             File.WriteAllText(ListFile(legacy), hundred + LegacyRecord(1, "append", null, null));
@@ -201,7 +242,7 @@ public static class ConnectionsChecks
             catch (InvalidDataException) { refused = true; }
             Check.Require(refused, "An append log over its applied-record ceiling was accepted");
 
-            // Empty lists, canonical save and an empty canonical marker.
+            // Empty lists and canonical save.
             var empty = Root(scratch, "empty");
             Check.Require(connections.Verify(Root(scratch, "none"), empty, Array.Empty<string>()) is null &&
                           !File.Exists(ListFile(empty)), "Both lists absent created a list");
@@ -248,8 +289,21 @@ public static class ConnectionsChecks
             }).ToArray()
         });
 
+    private static string NumericAccountBinding(string explicitId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["ConnectionId"] = explicitId,
+            ["AccountId"] = 123,
+            ["AdditionalConnections"] = Array.Empty<object>()
+        });
+
     /// <summary>Writes one 0.3.95 alternating slot with the predecessor's record shape and payload hash.</summary>
-    private static string Slot(string root, char slot, long generation, bool present, string[] ids, string? hash = null)
+    private static string Slot(string root, char slot, long generation, bool present, string[] ids, string? hash = null) =>
+        SlotWithBinding(root, slot, generation, present ? BindingJson(ids[0], "acct-slot", ids.Skip(1).ToArray()) : null,
+            present: present, hash: hash);
+
+    private static string SlotWithBinding(string root, char slot, long generation, string? bindingJson,
+        bool present = true, string? hash = null)
     {
         var state = Path.Combine(root, "state");
         Directory.CreateDirectory(state);
@@ -257,7 +311,7 @@ public static class ConnectionsChecks
             ? JsonSerializer.SerializeToElement(new Dictionary<string, object?>
             {
                 ["Present"] = true,
-                ["Value"] = JsonSerializer.Deserialize<JsonElement>(BindingJson(ids[0], "acct-slot", ids.Skip(1).ToArray()))
+                ["Value"] = JsonSerializer.Deserialize<JsonElement>(bindingJson!)
             })
             : JsonSerializer.SerializeToElement(new Dictionary<string, object?> { ["Present"] = false, ["Value"] = null });
         var payloadHash = hash ?? Hex(SHA256.HashData(Encoding.UTF8.GetBytes(value.GetRawText())));

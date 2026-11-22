@@ -168,11 +168,23 @@ public static class SignInChecks
             Check.Require(store.ReadLegacy() is null, "A revoked legacy credential was kept");
 
             // Offline/unproven legacy ownership completes the local disconnect and leaves the fixed entry (R41).
+            // An HTTP timeout surfaces as a non-caller OperationCanceledException with an inner TimeoutException.
             CredentialStoreChecks.LegacyFixture.Write("legacy-fixture");
             store.Save(connectionOwner, "own-a");
-            await SignIn.DisconnectAsync((_, _) => throw new HttpRequestException(Text.Get(TextKey.SignInReturnRetry)),
+            await SignIn.DisconnectAsync(
+                (_, _) => throw new OperationCanceledException("timeout", new TimeoutException()),
                 store, connectionOwner, default);
             Check.Require(store.ReadOwn(connectionOwner) is null && store.ReadLegacy() == "legacy-fixture",
+                "An HTTP timeout aborted the local disconnect or removed the unproven fixed entry");
+
+            // An interrupted response body (IOException) is the same offline outcome.
+            await SignIn.DisconnectAsync((_, _) => throw new IOException(), store, connectionOwner, default);
+            Check.Require(store.ReadLegacy() == "legacy-fixture",
+                "An interrupted response body removed the unproven fixed entry");
+
+            await SignIn.DisconnectAsync((_, _) => throw new HttpRequestException(Text.Get(TextKey.SignInReturnRetry)),
+                store, connectionOwner, default);
+            Check.Require(store.ReadLegacy() == "legacy-fixture",
                 "An offline legacy owner aborted the local disconnect or removed the unproven fixed entry");
 
             // Caller cancellation is not swallowed: nothing is removed.
