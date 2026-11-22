@@ -196,6 +196,15 @@
       "scope": "account_info.read",
       "policy": "read",
       "voidArg": true
+    },
+    {
+      "name": "users/get_space_usage",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "account_info.read",
+      "policy": "read",
+      "voidArg": true
     }
   ],
   "limits": {

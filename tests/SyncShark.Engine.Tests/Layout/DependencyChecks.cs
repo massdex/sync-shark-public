@@ -44,6 +44,11 @@ public static class DependencyChecks
             ("Planner","TimeRules","_ = DateTimeOffset.UnixEpoch;",true),
             ("Planner","Decide","_ = typeof(Massdex.SyncShark.Engine.SettingsParser);",false),
             ("Planner","Moves","_ = System.IO.File.Exists(null);",false),
+            ("Planner","Moves","_ = Environment.GetEnvironmentVariable(nameof(Probe));",false),
+            ("Planner","Moves","_ = Path.GetFileName(string.Empty);",true),
+            ("Dropbox","nested/SignIn","_ = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);",false),
+            ("Run","PairRunner","_ = Massdex.SyncShark.Engine.SyncedEntries.RenameTarget(null!,string.Empty);",false),
+            ("Planner","Moves","_ = $\"SELECT {1}\\nFROM pair\";",false),
             ("Planner","Moves","_ = typeof(Massdex.SyncShark.Engine.Executor.ItemSync);",false),
             ("Storage","Store","_ = typeof(Massdex.SyncShark.Engine.Dropbox.Routes);",false),
             ("Storage","Store","_ = typeof(Microsoft.Data.Sqlite.SqliteConnection);",true),
@@ -115,13 +120,17 @@ public static class DependencyChecks
     private const string Prefix = "Massdex.SyncShark.Engine";
     private static IEnumerable<string> Violations(CSharpCompilation compilation,SyntaxTree tree,string module,string path)
     {
-        var file=Path.GetFileNameWithoutExtension(path);
+        var file=Path.GetDirectoryName(path)?.Replace('\\','/')=="src/SyncShark.Engine/"+module ? Path.GetFileNameWithoutExtension(path) : string.Empty;
         var model=compilation.GetSemanticModel(tree);
         var root=tree.GetRoot();
+        if(module=="Planner" && root.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>().Any(n=>model.GetTypeInfo(n).Type?.ContainingNamespace.ToDisplayString()=="System.IO" && model.GetTypeInfo(n).Type?.Name is "StreamReader" or "StreamWriter" or "FileStream")) yield return "Planner I/O";
         if(module!="Storage")
         {
-            foreach(var literal in root.DescendantNodes().OfType<LiteralExpressionSyntax>())
-                if(literal.Token.Value is string sql && System.Text.RegularExpressions.Regex.IsMatch(sql.TrimStart(), @"^(?:SELECT\s+.+\s+FROM\s+|INSERT\s+INTO\s+|UPDATE\s+\w+\s+SET\s+|DELETE\s+FROM\s+|(?:ALTER|CREATE|DROP)\s+(?:TABLE|INDEX|TRIGGER)\s+|PRAGMA\s+)",System.Text.RegularExpressions.RegexOptions.IgnoreCase)) yield return "SQL outside Storage";
+            foreach(var expr in root.DescendantNodes().OfType<ExpressionSyntax>().Where(n=>n is LiteralExpressionSyntax or InterpolatedStringExpressionSyntax))
+            {
+                var sql=expr switch { LiteralExpressionSyntax l=>l.Token.Value as string, InterpolatedStringExpressionSyntax i=>string.Concat(i.Contents.Select(c=>c is InterpolatedStringTextSyntax text?text.TextToken.ValueText:"?")), _=>null };
+                if(sql!=null && System.Text.RegularExpressions.Regex.IsMatch(sql.TrimStart(),@"^(?:SELECT\s+.+\s+FROM\s+|INSERT\s+INTO\s+|UPDATE\s+\w+\s+SET\s+|DELETE\s+FROM\s+|(?:ALTER|CREATE|DROP)\s+(?:TABLE|INDEX|TRIGGER)\s+|PRAGMA\s+)",System.Text.RegularExpressions.RegexOptions.IgnoreCase|System.Text.RegularExpressions.RegexOptions.Singleline)) yield return "SQL outside Storage";
+            }
         }
         foreach(var creation in root.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())
         {
@@ -162,7 +171,7 @@ public static class DependencyChecks
                     "SyncShark" => path=="apps/SyncShark/Program.cs" && (other,name) is ("Storage","Store" or "StoreMove") or ("Dropbox","Connections" or "DropboxSide" or "DropboxApi" or "Dispatcher" or "CredentialStore" or "SignIn") or ("Local","LocalSide" or "RecycleBin" or "LogFiles") or ("Run","Host") or ("Edge","HostServer" or "Commands") or ("Contracts",_),
                     _ => module==other || other=="Contracts" || (module,other) is ("Executor","Planner") or ("Run","Planner" or "Executor") or ("Edge","Run")
                 };
-                violates=!allowed || (other,name)==("Planner","Moves") && module!="Executor" && (module,file)!=("Planner","Moves") ||
+                violates=!allowed || other!=module && (symbol.DeclaredAccessibility==Accessibility.Internal || type.DeclaredAccessibility==Accessibility.Internal) || (other,name)==("Planner","Moves") && module!="Executor" && (module,file)!=("Planner","Moves") ||
                     other=="Local" && name is "InUse" or "VolumeSpace" && file!=name && (module,file)!=("Local","LocalSide") ||
                     module=="Planner" && name=="SettingsParser";
             }
@@ -178,7 +187,7 @@ public static class DependencyChecks
             }
             else if(space=="System.Net.Http" && name is "HttpClient" or "HttpMessageInvoker" && (member.Contains("Async",StringComparison.Ordinal) || member=="Send")) violates=(module,file)!=("Dropbox","DropboxApi");
             else if(space=="System.IO" && name=="DriveInfo" && member is "AvailableFreeSpace" or "TotalFreeSpace") violates=(module,file)!=("Local","VolumeSpace");
-            else if(module=="Planner" && name=="Environment" && member is "TickCount" or "TickCount64") violates=true;
+            else if(module=="Planner" && name=="Environment") violates=true;
             else if(space=="System.IO" && name is "File" or "Directory" or "FileInfo" or "DirectoryInfo" or "FileStream" or "DriveInfo" or "FileSystemWatcher")
                 violates=module is not ("Local" or "Storage") && (module,file)!=("Dropbox","Connections");
             else if(module=="Planner" && (name=="TimeProvider" || name is "DateTime" or "DateTimeOffset" && member is "Now" or "UtcNow" or "Today" || name=="Stopwatch")) violates=true;

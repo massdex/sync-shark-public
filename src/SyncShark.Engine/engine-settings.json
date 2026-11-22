@@ -1,7 +1,7 @@
 {
   "ConflictLabelFormat": "{name} [{side} version {time}]{ext}",
   "ConflictLabelTimeFormat": "d MMM HH.mm",
-  "ConflictLabelLocalName": "Local",
+  "ConflictLabelLocalName": "{computerName}",
   "ConflictLabelDropboxName": "Dropbox",
   "CaseRenameSuffix": ".syncshark-case",
   "LogRetentionDays": 30,

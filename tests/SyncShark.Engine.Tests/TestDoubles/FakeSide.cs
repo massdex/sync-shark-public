@@ -16,9 +16,13 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Dictionary<string, (Entry Entry, byte[] Bytes)> Items { get; } = new(PathNames.Comparer);
     public void Seed(Entry entry, byte[] bytes) => Items.Add(entry.Path, (entry, bytes.ToArray()));
     public List<(Entry Entry, byte[] Bytes)> History { get; } = [];
+    /// <summary>Previously selected endpoint identities supplied to mutations.</summary>
+    public List<string> Mutations { get; }=[];
     private int nextId;
     public Dictionary<string,Exception> RecycleRefusals { get; } = new(PathNames.Comparer);
     public Dictionary<string,Exception> ReadFailures { get; } = new(PathNames.Comparer);
+    /// <summary>Content-only faults leave listing and metadata reads intact.</summary>
+    public Dictionary<string,Exception> ContentFailures { get; } = new(PathNames.Comparer);
     public Queue<ChangePage> Pages { get; } = [];
     public Dictionary<string, Queue<JobReply>> JobReplies { get; } = [];
     public Dictionary<(string Id,string Revision,string Hash), Recovery> Recoverable { get; } = [];
@@ -48,13 +52,19 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
         async IAsyncEnumerable<Listed> List()
         {
             await Task.CompletedTask;
-            foreach (var item in Items.Values.OrderBy(v => v.Entry.Path, StringComparer.Ordinal))
+            bool InListing(string path)=>path!=under && (under.Length==0 || PathNames.IsSelfOrUnder(path,under)) && (options.Recursive || PathNames.Same(PathNames.Parent(path),under));
+            if(ReadFailures.TryGetValue(under,out var rootError)) throw rootError;
+            var unreadable=new PrefixSet();
+            foreach (var item in Items.Values.OrderBy(v => v.Entry.Path,StringComparer.Ordinal))
             {
-                ct.ThrowIfCancellationRequested();
-                if (ReadFailures.TryGetValue(item.Entry.Path,out var error)) throw error;
-                if (item.Entry.Path != under && (under.Length == 0 || PathNames.IsSelfOrUnder(item.Entry.Path, under)) &&
-                    (options.Recursive || PathNames.Same(PathNames.Parent(item.Entry.Path), under))) yield return new(item.Entry.Path, item.Entry);
+                ct.ThrowIfCancellationRequested();var path=item.Entry.Path;var key=PathNames.Key(path);
+                if(!InListing(path) || unreadable.Covers(key)) continue;
+                if(ReadFailures.ContainsKey(path)) { if(item.Entry.IsFolder) unreadable.Add(key);yield return new(path,item.Entry with {Skip=nameof(TextKey.SkipUnreadable)}); }
+                else yield return new(path,item.Entry);
             }
+            if(options.IncludeDeleted)
+                foreach(var path in DeletedHistory.Keys.Where(InListing)) {ct.ThrowIfCancellationRequested();yield return new(path,null);}
+            options.CursorAcquired?.Invoke("terminal");
         }
     }
     /// <summary>ReadOne operation on the supplied facts.</summary>
@@ -68,6 +78,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Task<Stream> OpenReadAsync(Entry entry, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(OpenReadAsync));
+        if(ContentFailures.TryGetValue(entry.Path,out var error)) throw error;
         var current = Items[entry.Path];
         if (current.Entry != entry) throw new ChangedUnderneathException(entry.Path);
         return Task.FromResult<Stream>(new MemoryStream(current.Bytes, false));
@@ -76,6 +87,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Task<string> ContentHashAsync(Entry entry, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ContentHashAsync));
+        if(ContentFailures.TryGetValue(entry.Path,out var error)) throw error;
         using var h = new ContentHash(); h.Append(Current(entry).Bytes); return Task.FromResult(h.Finish());
     }
     /// <summary>Stage operation on the supplied facts.</summary>
@@ -98,10 +110,10 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Task<RemovalResult> PublishAsync(IStaged staged, Entry? expected, RemovalSelection? selection, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(PublishAsync)); var stage = (Stage)staged;
-        if (expected != null) { var old = Current(expected); History.Add(old); }
+        if (expected != null) { Mutations.Add(expected.Id);var old = Current(expected); History.Add(old); }
         else if (Items.ContainsKey(stage.Path)) throw new PathOccupiedException(stage.Path);
         using var digest = new ContentHash(); digest.Append(stage.Bytes);
-        var entry = stage.Source with { Path = stage.Path, Id = expected?.Id ?? $"{Side}-{++nextId}", Revision = $"r{++nextId}", ContentHash = digest.Finish() };
+        var entry = stage.Source with { Path = stage.Path, Id = stage.Proof?.FileId ?? expected?.Id ?? $"{Side}-{++nextId}", Revision = $"r{++nextId}", ContentHash = digest.Finish() };
         if(stage.Proof is { } proof && stages.TryGetValue(proof.Path,out var held) && held.Proof==proof) stages.Remove(proof.Path);
         Items[stage.Path] = (entry, stage.Bytes.ToArray()); return Task.FromResult(new RemovalResult(RemovalOutcome.Published, entry, null));
     }
@@ -115,7 +127,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     /// <summary>Delete operation on the supplied facts.</summary>
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(DeleteAsync)); var old = Current(expected);
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(DeleteAsync)); Mutations.Add(expected.Id);var old = Current(expected);
         if (RecycleRefusals.TryGetValue(expected.Path, out var failure)) throw failure;
         foreach (var child in Items.Values.Where(v => expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray()) { History.Add(child); Items.Remove(child.Entry.Path); }
         History.Add(old); Items.Remove(expected.Path); return Task.FromResult(new RemovalResult(RemovalOutcome.Removed, null, null));
@@ -123,7 +135,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     /// <summary>Move operation on the supplied facts.</summary>
     public Task<RemovalResult> MoveAsync(Entry expected, string newPath, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(MoveAsync)); var old = Current(expected);
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(MoveAsync)); Mutations.Add(expected.Id);var old = Current(expected);
         if (!PathNames.Same(expected.Path, newPath) && Items.ContainsKey(newPath)) throw new PathOccupiedException(newPath);
         var moving = Items.Values.Where(v => v.Entry.Path == expected.Path || expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray();
         foreach (var v in moving) Items.Remove(v.Entry.Path);
@@ -134,6 +146,8 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Task<(IdentityLocation Location, bool InScope)?> ReadByIdAsync(string id, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReadByIdAsync)); var hit = Items.Values.FirstOrDefault(v => v.Entry.Id == id).Entry;
+        if(hit is null && Side==Side.Local && History.LastOrDefault(v=>v.Entry.Id==id).Entry is {} victim)
+            return Task.FromResult<(IdentityLocation Location,bool InScope)?>((new("volume",victim.Path,victim),false));
         return Task.FromResult<(IdentityLocation Location,bool InScope)?>(hit is null ? null : (new(Side.ToString(), hit.Path, hit), true));
     }
     /// <summary>CreateFolderExclusive operation on the supplied facts.</summary>
@@ -154,6 +168,8 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(RecoverAsync));
+        if(Side==Side.Local && actual.Domain=="volume" && actual.Entry==version && History.LastOrDefault(v=>v.Entry==version) is { Entry:not null } retained && !version.IsFolder)
+            return Task.FromResult<Recovery?>(new Recovery.File(version,new MemoryStream(retained.Bytes,false)));
         return Task.FromResult(Recoverable.GetValueOrDefault((actual.Entry.Id,version.Revision,version.ContentHash)));
     }
     /// <summary>ReadJob operation on the supplied facts.</summary>
@@ -175,4 +191,18 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     }
     public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType)> RootAsync(CancellationToken ct) => Task.FromResult(Root);
     public (DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType) Root { get; set; }
+    /// <inheritdoc/>
+    public Task<DeletionEvidence> DeletedAsync(string path, bool folder, CancellationToken ct)
+    {
+        if(folder && !DeletedHistory.ContainsKey(path))
+        {
+            var ancestor=DeletedHistory.Keys.Where(k=>PathNames.IsSelfOrUnder(path,k)).OrderByDescending(k=>k.Length).FirstOrDefault();
+            if(ancestor!=null){ct.ThrowIfCancellationRequested();Requests.Count(nameof(DeletedAsync));return Task.FromResult<DeletionEvidence>(new DeletionEvidence.DeletedPath(path,ancestor));}
+        }
+        return DeletedAsync(path,ct);
+    }
+    /// <inheritdoc/>
+    public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, bool catchUp, CancellationToken ct) => ReadChangesAsync(cursor,position,ct);
+    /// <inheritdoc/>
+    public Task<(string? Cursor,JournalPosition? Position)> BoundaryAsync(CancellationToken ct) => Task.FromResult((Pages.LastOrDefault()?.Cursor,Pages.LastOrDefault()?.Position));
 }

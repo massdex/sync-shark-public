@@ -4,7 +4,6 @@ $repository = Split-Path $PSScriptRoot
 if (-not $Root) { $Root = Join-Path $env:RUNNER_TEMP ('setup-mutants-' + [guid]::NewGuid().ToString('N')) }
 $mutants = @(
     @('downgrade', 'setup.ps1', 'Assert-SetupUpgrade $version $active.JunctionTarget()', '$null = $version', 'Direct downgrade was accepted.'),
-    @('preparation-drain', 'setup.ps1', 'Clear-SetupPreparation $Root', '[IO.Directory]::CreateDirectory((Join-Path $Root ''versions\.staging'')) | Out-Null', 'Next setup did not report interrupted preparation cleanup.'),
     @('payload-proof', 'setup.ps1', 'if ($item.Identity -cne $entry.Identity -or (-not $entry.Directory -and $item.Hash() -cne $entry.Hash)) {', 'if ($false) {', 'Changed payload was admitted for deletion.'),
     @('publication-proof', 'setup.ps1', '$publishedTree = Open-SetupTree $destination $manifest -RequireComplete', '$publishedTree = $null', 'Changed payload was published.'),
     @('first-rollback', 'setup.ps1', '$active.Delete(); $active = $null', '$active.Dispose(); $active = $null', 'First-install rollback retained the launcher.'),

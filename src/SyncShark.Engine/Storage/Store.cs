@@ -4,6 +4,7 @@ namespace Massdex.SyncShark.Engine.Storage;
 public sealed class Store : IStore
 {
     private Microsoft.Data.Sqlite.SqliteConnection Connection { get; }
+    private readonly Committer committer=new();
     private readonly PairTable pairs = new();
     private readonly RecordTable records = new();
     private readonly NoticeTable notices = new();
@@ -49,6 +50,7 @@ public sealed class Store : IStore
     public Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct) => pairs.OweRepairAsync(Connection, pairId, side, reason, ct);
     /// <summary>FinishRepair operation on the supplied facts.</summary>
     public Task<(long Revision, string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct) => pairs.ReadRepairAsync(Connection, pairId, side, ct);
+    /// <summary>Complete full Repair only when both captured revisions still match.</summary>
     public async Task<bool> FinishRepairAsync(string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct)
     {
         using var tx=Connection.BeginTransaction(deferred:false);
@@ -128,4 +130,14 @@ public sealed class Store : IStore
     }
     /// <summary>Stream the existing scan’s move candidates before ordinary differences, ordered by shallowest candidate of the binding then by binding so all its observed sides are adjacent.</summary>
     public IAsyncEnumerable<RenameCandidate> RenamesAsync(string pairId, Guid scanId, Scope? scope, CancellationToken ct) => scan.RenamesAsync(Connection, pairId, scanId, scope, settings.StoragePageSize, ct);
+    /// <summary>Replace the old link with both new links and their notice in one transaction.</summary>
+    public Task CommitKeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry second, Notice notice, CancellationToken ct) => committer.CommitKeepBothAsync(Connection, pairId, before, first, second, notice, ct);
+    /// <summary>In one transaction match the reviewed drive notice and publish the chosen pair; only FirstSync resets bindings and first Repair.</summary>
+    public Task<bool> ResolveDriveAsync(PairConfig pair, Notice reviewed, ResolutionChoice choice, CancellationToken ct) => pairs.ResolveDriveAsync(Connection, pair, reviewed, choice, ct);
+    /// <summary>Stream notices whose members overlap the mapped footprint on their own side, including covering ancestors.</summary>
+    public IAsyncEnumerable<Notice> NoticesUnderAsync(string pairId, Scope footprint, CancellationToken ct) => notices.NoticesUnderAsync(Connection, pairId, footprint, ct);
+    /// <summary>Add or retire only this observed link member; close the pair-wide link notice only when no members remain.</summary>
+    public Task UpdateLinkMemberAsync(string pairId, NoticeItem member, bool present, CancellationToken ct) => notices.UpdateLinkMemberAsync(Connection, pairId, member, present, ct);
+    /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>
+    public Task<Notice?> NoticeAsync(string pairId, long id, CancellationToken ct) => notices.NoticeAsync(Connection, pairId, id, ct);
 }

@@ -7,18 +7,25 @@ public static class StoreMoveChecks
 {
     public static async Task CreateFixtureAsync()
     {
-        using var connection = new SqliteConnection("Data Source=:memory:");
-        await connection.OpenAsync();
-        connection.CreateFunction<string, string>("pathkey", PathNames.Key, isDeterministic: true);
-        connection.CreateFunction<string, int>("plandepth", PathNames.Depth, isDeterministic: true);
-        connection.CreateFunction<string, int>("localaccessretrycause", _ => 0, isDeterministic: true);
-        using var command = connection.CreateCommand();
-        command.CommandText = ReleaseSchema;
-        await command.ExecuteNonQueryAsync();
-        command.CommandText = "PRAGMA user_version";
-        Check.Require(Convert.ToInt32(await command.ExecuteScalarAsync()) == 16, "Fixture version");
-        command.CommandText = "SELECT count(*) FROM pair";
-        Check.Require(Convert.ToInt64(await command.ExecuteScalarAsync()) == 0, "Fixture is not empty");
+        var root=Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var folder=Directory.CreateDirectory(Path.Combine(root,ResourceNames.EngineFolder)).FullName;var path=Path.Combine(folder,ResourceNames.DatabaseFile);
+            string Connect(SqliteOpenMode mode)=>new SqliteConnectionStringBuilder{DataSource=path,Mode=mode,Pooling=false}.ToString();
+            var pair=ItemChecks.Pair();
+            using(var db=new SqliteConnection(Connect(SqliteOpenMode.ReadWriteCreate)))
+            {
+                await db.OpenAsync();db.CreateFunction<string,string>("pathkey",PathNames.Key,isDeterministic:true);db.CreateFunction<string,int>("plandepth",PathNames.Depth,isDeterministic:true);db.CreateFunction<string,int>("localaccessretrycause",_=>0,isDeterministic:true);
+                using var cmd=db.CreateCommand();cmd.CommandText=ReleaseSchema;await cmd.ExecuteNonQueryAsync();
+                cmd.CommandText="INSERT INTO pair(id,pair_id,def_json) VALUES(1,$id,$def); INSERT INTO synced_entry(pair_id,local_path,is_folder,local_id,local_size,local_mtime,dropbox_id,dropbox_hash) VALUES(1,'item',0,101,1,10,'cloud',X'01'); INSERT INTO journal_position VALUES('volume',3,17);";
+                cmd.Parameters.AddWithValue("$id",pair.PairId);cmd.Parameters.AddWithValue("$def",System.Text.Json.JsonSerializer.Serialize(pair));await cmd.ExecuteNonQueryAsync();
+            }
+            bool verified=false;await new StoreMove().MoveAsync(root,root,(source,target,ids)=>{verified=ids.Contains(pair.ConnectionId);return null;},default);
+            using var migrated=new SqliteConnection(Connect(SqliteOpenMode.ReadOnly));await migrated.OpenAsync();migrated.CreateFunction<string,string>("pathkey",PathNames.Key,isDeterministic:true);
+            using var read=migrated.CreateCommand();read.CommandText="PRAGMA user_version";Check.Require(verified && Convert.ToInt32(await read.ExecuteScalarAsync())==Schema.Version,"Migration did not verify and switch");
+            read.CommandText="SELECT count(*) FROM pair p JOIN synced_entry s ON p.id=s.pair_id JOIN journal_position j ON j.volume_key='volume' WHERE p.pair_id=$id AND s.local_id=101 AND s.dropbox_id='cloud' AND j.journal_id=3 AND j.next_usn=17";read.Parameters.AddWithValue("$id",pair.PairId);Check.Require(Convert.ToInt32(await read.ExecuteScalarAsync())==1,"Migration lost stored facts");
+        }
+        finally { SqliteConnection.ClearAllPools();Directory.Delete(root,true); }
     }
 
     private const string ReleaseSchema = """

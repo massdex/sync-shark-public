@@ -3,120 +3,344 @@
     {
       "command": "pairs list",
       "usage": "pairs list",
-      "effect": "List the configured pairs."
+      "effect": "List the configured pairs.",
+      "key": "PairsList",
+      "options": []
     },
     {
       "command": "pairs add",
       "usage": "pairs add --name <name> --local <folder> --path <folder> --account <id> [--first-sync newest|pc|dropbox]",
-      "effect": "Add a pair and select how its first comparison treats differences."
+      "effect": "Add a pair and select how its first comparison treats differences.",
+      "key": "PairsAdd",
+      "options": [
+        "Account",
+        "FirstSync",
+        "Local",
+        "Name",
+        "Path"
+      ]
     },
     {
       "command": "pairs remove",
       "usage": "pairs remove --pair <id>",
-      "effect": "Remove the configuration, not the files. Report unfinished recovery before removal."
+      "effect": "Remove the configuration, not the files. Report unfinished recovery before removal.",
+      "key": "PairsRemove",
+      "options": [
+        "Pair"
+      ]
     },
     {
       "command": "pairs bind",
       "usage": "pairs bind --pair <id> --yes",
-      "effect": "Confirm the observed root identities for this pair."
+      "effect": "Confirm the observed root identities for this pair.",
+      "key": "PairsBind",
+      "options": [
+        "Pair",
+        "Yes"
+      ]
     },
     {
       "command": "pairs exclude",
       "usage": "pairs exclude --pair <id> --side local|dropbox --rel <path> [--keep] [--yes]",
-      "effect": "Keep the selected copy out of sync. Without --keep, preview the removal and recovery information before confirming."
+      "effect": "Keep the selected copy out of sync. Without --keep, preview the removal and recovery information before confirming.",
+      "key": "PairsExclude",
+      "options": [
+        "Keep",
+        "Pair",
+        "Rel",
+        "Side",
+        "Yes"
+      ]
     },
     {
       "command": "pairs include",
       "usage": "pairs include --pair <id> --side local|dropbox --rel <path>",
-      "effect": "Remove the exclusion and compare the newly included scope."
+      "effect": "Remove the exclusion and compare the newly included scope.",
+      "key": "PairsInclude",
+      "options": [
+        "Pair",
+        "Rel",
+        "Side"
+      ]
     },
     {
       "command": "pairs exclusions",
       "usage": "pairs exclusions --pair <id>",
-      "effect": "List the configured exclusions."
+      "effect": "List the configured exclusions.",
+      "key": "PairsExclusions",
+      "options": [
+        "Pair"
+      ]
     },
     {
       "command": "ignores list",
       "usage": "ignores list --pair <id>",
-      "effect": "List the ignore rules."
+      "effect": "List the ignore rules.",
+      "key": "IgnoresList",
+      "options": [
+        "Pair"
+      ]
     },
     {
       "command": "ignores set",
       "usage": "ignores set --pair <id> --rules <rules>",
-      "effect": "Replace this pair’s ignore rules."
+      "effect": "Replace this pair\u2019s ignore rules.",
+      "key": "IgnoresSet",
+      "options": [
+        "Pair",
+        "Rules"
+      ]
     },
     {
       "command": "host start",
       "usage": "host start",
-      "effect": "Start the background host or attach to the one already running."
+      "effect": "Start the background host or attach to the one already running.",
+      "key": "HostStart",
+      "options": []
     },
     {
       "command": "host stop",
       "usage": "host stop",
-      "effect": "Stop the background host."
+      "effect": "Stop the background host.",
+      "key": "HostStop",
+      "options": []
     },
     {
       "command": "status",
       "usage": "status [--pair <id>]",
-      "effect": "Read current status without starting the host."
+      "effect": "Read current status without starting the host.",
+      "key": "Status",
+      "options": [
+        "Pair"
+      ]
     },
     {
       "command": "pause",
       "usage": "pause [--pair <id>]",
-      "effect": "Pause one pair or all pairs until resume or restart."
+      "effect": "Pause one pair or all pairs until resume or restart.",
+      "key": "Pause",
+      "options": [
+        "Pair"
+      ]
     },
     {
       "command": "resume",
       "usage": "resume [--pair <id>]",
-      "effect": "Resume one pair or all pairs."
+      "effect": "Resume one pair or all pairs.",
+      "key": "Resume",
+      "options": [
+        "Pair"
+      ]
     },
     {
       "command": "repair",
       "usage": "repair --pair <id>",
-      "effect": "Compare both sides against the saved records."
+      "effect": "Compare both sides against the saved records.",
+      "key": "Repair",
+      "options": [
+        "Pair"
+      ]
     },
     {
       "command": "notices",
       "usage": "notices --pair <id> [--ignored]",
-      "effect": "List current notices."
+      "effect": "List current notices.",
+      "key": "Notices",
+      "options": [
+        "Ignored",
+        "Pair"
+      ]
     },
     {
       "command": "resolve",
       "usage": "resolve --pair <id> --issue <number> --reviewed <token> --choice <choice> [--name <name>]",
-      "effect": "Apply an available choice to the reviewed notice."
+      "effect": "Apply an available choice to the reviewed notice.",
+      "key": "Resolve",
+      "options": [
+        "Choice",
+        "Issue",
+        "Name",
+        "Pair",
+        "Reviewed"
+      ]
     },
     {
       "command": "logs",
       "usage": "logs --pair <id> --run <id> [--show-files]",
-      "effect": "Read run logs, optionally including individual file operations."
+      "effect": "Read run logs, optionally including individual file operations.",
+      "key": "Logs",
+      "options": [
+        "Pair",
+        "Run",
+        "ShowFiles"
+      ]
     },
     {
       "command": "accounts connect",
       "usage": "accounts connect",
-      "effect": "Connect a Dropbox account through browser sign-in."
+      "effect": "Connect a Dropbox account through browser sign-in.",
+      "key": "AccountsConnect",
+      "options": []
     },
     {
       "command": "accounts disconnect",
       "usage": "accounts disconnect --account <id>",
-      "effect": "Disconnect the account and pause affected pairs without deleting files."
+      "effect": "Disconnect the account and pause affected pairs without deleting files.",
+      "key": "AccountsDisconnect",
+      "options": [
+        "Account"
+      ]
     }
   ],
-  "choices": [
-    "use-local",
-    "use-dropbox",
-    "keep-both",
-    "dismiss",
-    "rename-incoming",
-    "replace-existing",
-    "keep-local",
-    "keep-dropbox",
-    "rename-local",
-    "rename-dropbox",
-    "retry",
-    "first-sync",
-    "sync-normally",
-    "bind-roots",
-    "ignore",
-    "unignore"
-  ]
+  "choices": {
+    "UseLocal": "use-local",
+    "UseDropbox": "use-dropbox",
+    "KeepBoth": "keep-both",
+    "Dismiss": "dismiss",
+    "RenameIncoming": "rename-incoming",
+    "ReplaceExisting": "replace-existing",
+    "KeepLocal": "keep-local",
+    "KeepDropbox": "keep-dropbox",
+    "RenameLocal": "rename-local",
+    "RenameDropbox": "rename-dropbox",
+    "Retry": "retry",
+    "FirstSync": "first-sync",
+    "SyncNormally": "sync-normally",
+    "BindRoots": "bind-roots",
+    "Ignore": "ignore",
+    "Unignore": "unignore"
+  },
+  "options": [
+    {
+      "key": "Account",
+      "flag": "--account",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "Choice",
+      "flag": "--choice",
+      "takesValue": true,
+      "values": [
+        "use-local",
+        "use-dropbox",
+        "keep-both",
+        "dismiss",
+        "rename-incoming",
+        "replace-existing",
+        "keep-local",
+        "keep-dropbox",
+        "rename-local",
+        "rename-dropbox",
+        "retry",
+        "first-sync",
+        "sync-normally",
+        "bind-roots",
+        "ignore",
+        "unignore"
+      ]
+    },
+    {
+      "key": "FirstSync",
+      "flag": "--first-sync",
+      "takesValue": true,
+      "values": [
+        "newest",
+        "pc",
+        "dropbox"
+      ]
+    },
+    {
+      "key": "Ignored",
+      "flag": "--ignored",
+      "takesValue": false,
+      "values": []
+    },
+    {
+      "key": "Issue",
+      "flag": "--issue",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "Keep",
+      "flag": "--keep",
+      "takesValue": false,
+      "values": []
+    },
+    {
+      "key": "Local",
+      "flag": "--local",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "Name",
+      "flag": "--name",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "Pair",
+      "flag": "--pair",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "Path",
+      "flag": "--path",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "Rel",
+      "flag": "--rel",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "Reviewed",
+      "flag": "--reviewed",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "Rules",
+      "flag": "--rules",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "Run",
+      "flag": "--run",
+      "takesValue": true,
+      "values": []
+    },
+    {
+      "key": "ShowFiles",
+      "flag": "--show-files",
+      "takesValue": false,
+      "values": []
+    },
+    {
+      "key": "Side",
+      "flag": "--side",
+      "takesValue": true,
+      "values": [
+        "local",
+        "dropbox"
+      ]
+    },
+    {
+      "key": "Yes",
+      "flag": "--yes",
+      "takesValue": false,
+      "values": []
+    }
+  ],
+  "firstRunPolicies": {
+    "NewestWins": "newest",
+    "LocalWins": "pc",
+    "DropboxWins": "dropbox"
+  }
 }

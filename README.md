@@ -1,6 +1,6 @@
 # Sync Shark
 
-Windows file synchronisation client with Dropbox and Google Drive support.
+Windows file synchronisation client with Dropbox support.
 
 This repository contains cleaned source snapshots, not the private development history.
 No licence is granted. All rights reserved.

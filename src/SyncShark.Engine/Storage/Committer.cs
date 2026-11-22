@@ -7,4 +7,6 @@ public sealed class Committer
     public Task CommitAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, string? spentDeletedKey, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Projects both endpoint prefixes set-wise without one command per binding.</summary>
     public Task ProjectSubtreeAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Scope from, Scope to, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Replace the old link with both new links and their notice in one transaction.</summary>
+    public Task CommitKeepBothAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry second, Notice notice, CancellationToken ct) => throw new NotImplementedException();
 }

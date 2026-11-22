@@ -7,4 +7,6 @@ public sealed class WorkQueue
     public Task AdmitAsync(PairConfig pair, ChangePage page, Func<Change,CancellationToken,Task> apply, Func<JournalPosition,CancellationToken,Task>? settleJournal, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Admit a Repair row or one binding’s complete group of moves; reject a missing row with no candidates. Order their old and observed footprints with the same competing inputs; no journal or feed position belongs to Repair.</summary>
     public Task AdmitAsync(PairConfig pair, Row? prepared, IReadOnlyList<RenameCandidate> bindingCandidates, Func<CancellationToken,Task> apply, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read retained source evidence for the selected bilateral footprint in receipt order, including path-only reports. Release only with exact settlement.</summary>
+    public IEnumerable<Change> Held(Scope footprint) => throw new NotImplementedException();
 }

@@ -36,24 +36,8 @@ reviews = _load('spec_reviews', 'spec_reviews.py')
 ratchet = _load('spec_ratchet', 'check-spec-ratchet.py')
 
 REFRESH_HINT = 'python -I tools/ci/check-spec-ratchet.py --refresh-register '
-# Reviewed exemptions. Each value is (path, indirect): indirect is False for a
-# plain dead wrapper (gone when its declaration is gone), or the name of the
-# action-list method that must still contain it. A new exemption is only possible
-# by editing this reviewed set, so a lane cannot silence its own method with data.
-REVIEWED_EXEMPTIONS = {
-    ('ExcludedSavedRowChecks', 'PrefixFirstRun'): ('tests/SyncShark.Engine.Tests/Run/ExcludedSavedRowChecks.cs', False),
-    ('ExcludedSavedRowChecks', 'PrefixUnchanged'): ('tests/SyncShark.Engine.Tests/Run/ExcludedSavedRowChecks.cs', False),
-    ('ExcludedSavedRowChecks', 'PrefixChangedNeighbor'): ('tests/SyncShark.Engine.Tests/Run/ExcludedSavedRowChecks.cs', False),
-    ('ExcludedSavedRowChecks', 'PrefixSavedOnly'): ('tests/SyncShark.Engine.Tests/Run/ExcludedSavedRowChecks.cs', False),
-    ('ExcludedSavedRowChecks', 'PrefixBothAbsent'): ('tests/SyncShark.Engine.Tests/Run/ExcludedSavedRowChecks.cs', False),
-    ('ExcludedSavedRowChecks', 'PrefixExactName'): ('tests/SyncShark.Engine.Tests/Run/ExcludedSavedRowChecks.cs', False),
-    ('ExcludedSavedRowChecks', 'PrefixPerPair'): ('tests/SyncShark.Engine.Tests/Run/ExcludedSavedRowChecks.cs', False),
-    # Wired only through ScenarioChecks.OfflineCases(), the hosted-CI path. Stale
-    # if registered directly or dropped from that list (a direct call does not count).
-    ('ScenarioChecks', 'HarnessSafety'): ('tests/SyncShark.Engine.Tests/Scenarios/ScenarioChecks.cs', 'OfflineCases'),
-}
 CHECK_REGISTRY = 'tests/SyncShark.Engine.Tests/CheckRegistry.cs'
-PUBLIC_STATIC_VOID = re.compile(r'public\s+static\s+void\s+([A-Za-z_]\w*)\s*\(\s*\)')
+PUBLIC_STATIC_CHECK = re.compile(r'public\s+static\s+(?:async\s+)?(?:void|(?:System\.Threading\.Tasks\.)?Task)\s+([A-Za-z_]\w*)\s*\(\s*\)')
 
 
 def git(repo, *args):
@@ -266,40 +250,6 @@ def _method_body(masked, method):
     return None
 
 
-def check_exemptions(repo, by_cm):
-    """Stale reviewed exemptions fail: registered now, or the wiring is gone."""
-    findings = []
-    cache = {}
-    for (owner, name), (relative, indirect) in REVIEWED_EXEMPTIONS.items():
-        if (owner, name) in by_cm:
-            findings.append('FAIL exemption stale: ' + owner + '.' + name
-                            + ' is now registered in CheckRegistry; remove it from the reviewed exemptions')
-            continue
-        if relative not in cache:
-            path = repo / relative
-            cache[relative] = path.read_text(encoding='utf-8-sig') if path.exists() else None
-        text = cache[relative]
-        if text is None:
-            findings.append('FAIL exemption stale: ' + owner + '.' + name + ' file ' + relative
-                            + ' no longer exists; remove the reviewed exemption')
-            continue
-        masked = lex.mask(text)
-        declaration = next((match for match in PUBLIC_STATIC_VOID.finditer(masked) if match.group(1) == name), None)
-        if declaration is None:
-            findings.append('FAIL exemption stale: ' + owner + '.' + name + ' is no longer declared in '
-                            + relative + '; remove the reviewed exemption')
-            continue
-        if indirect:
-            # Search only the named action-list body, not the whole file: a
-            # direct call elsewhere does not keep it running in hosted CI.
-            body = _method_body(masked, indirect)
-            if body is None or not re.search(r'\b' + re.escape(name) + r'\b', body):
-                findings.append('FAIL exemption stale: ' + owner + '.' + name
-                                + ' is no longer in ' + indirect + '() (it left its action list); '
-                                + 'remove the reviewed exemption')
-    return findings
-
-
 def _witness_groups(by_cm, methods, witness):
     # shortcut: a witness wired only through an action list (e.g. OfflineCases)
     # reports "not registered"; model action-list members if a control ever targets one.
@@ -360,7 +310,7 @@ def registration_inventory(repo, methods):
         masked = lex.mask(text)
         regions = _type_regions(masked)
         namespace = _namespace_last(masked)
-        for match in PUBLIC_STATIC_VOID.finditer(masked):
+        for match in PUBLIC_STATIC_CHECK.finditer(masked):
             region = _innermost(regions, match.start())
             if region is None or not region['name'].endswith('Checks'):
                 continue
@@ -382,14 +332,13 @@ def check_tests(repo, base, head, registry_path, controls_path=None):
     findings = []
     methods = json.loads((Path(registry_path) if Path(registry_path).is_absolute()
                           else repo / registry_path).read_text(encoding='utf-8-sig'))
-    findings.extend(check_exemptions(repo, _by_class_method(methods)))
     selected = set(_scan_files(repo, base, head))
     declarations, calls = registration_inventory(repo, methods)
     for token, groups in calls.items():
         methods[token] = sorted(set(methods.get(token, [])) | groups)
     by_cm = _by_class_method(methods)
     for path, namespace, owner, name, line in declarations:
-        if path not in selected or (owner, name) in REVIEWED_EXEMPTIONS:
+        if path not in selected:
             continue
         if _is_wired(by_cm, namespace, owner, name):
             continue

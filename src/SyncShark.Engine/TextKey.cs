@@ -141,7 +141,6 @@ public enum TextKey
     ResultIssueLine,
     ResultResolveDone,
     ResultResolveFailed,
-    ResultRetryAll,
     StateSchemaTooOld = 147,
     SkipUnreadable,
     FailDropboxNameRejected,
@@ -410,4 +409,8 @@ public enum TextKey
     PairJobOutstanding,
     PairPcNoteOutstanding,
     ResultPairNotRemoved,
+    FileHolderKnown,
+    SignInReturnReceived,
+    SignInReturnRetry,
+    HostNotRunning,
 }

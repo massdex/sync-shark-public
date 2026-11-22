@@ -8,11 +8,13 @@ public sealed class PairTable
 
     /// <summary>Publish the pair edit or removal and its returned scopes in the caller’s immediate write transaction. Check the accepted jobs, armed note and PutBack notices through that transaction, not earlier connection reads. Return the blocking cause on refusal, null on success.</summary>
     public Task<TextKey?> PublishAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, PairConfig? replacement, IReadOnlyList<(string Owner,Scope Scope)> returnedScopes, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Complete full Repair only when both captured revisions still match.</summary>
     public Task<bool> FinishRepairAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Retire only the matching mapped scope at the owner’s Dropbox revision. No first-run bit or full summary is published.</summary>
     public Task<bool> FinishRepairAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, Scope scope, long revision, CancellationToken ct) => throw new NotImplementedException();
 
 
+    /// <summary>Read or settle the named store operation without changing unrelated state.</summary>
     public Task<(bool FirstRepairDone, string? LastRepairJson)> RepairStateAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>On lost journal continuity only, install the fresh volume boundary and increment the Local Repair revision/reason of every affected pair in one transaction.</summary>
     public Task ResetJournalAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct) => throw new NotImplementedException();
@@ -46,4 +48,6 @@ public sealed class PairTable
     public Task<long> OweRepairAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Side side, string reason, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Read or update the existing pair or source facts.</summary>
     public Task<(long Revision, string? Reason)> ReadRepairAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Side side, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>In one transaction match the reviewed drive notice and publish the chosen pair; only FirstSync resets bindings and first Repair.</summary>
+    public Task<bool> ResolveDriveAsync(Microsoft.Data.Sqlite.SqliteConnection db, PairConfig pair, Notice reviewed, ResolutionChoice choice, CancellationToken ct) => throw new NotImplementedException();
 }

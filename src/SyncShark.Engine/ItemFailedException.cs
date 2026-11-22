@@ -8,6 +8,8 @@ public sealed class ItemFailedException(string path, TextKey cause, Exception? i
     public string Path { get; } = path;
     /// <summary>The reason key used for the raised issue.</summary>
     public TextKey Cause { get; } = cause;
+    /// <summary>The program observed holding this local file, when available.</summary>
+    public string? Holder { get; init; }
     /// <summary>The exact native item observed by a journal reader, when known.</summary>
     public string? LocalId { get; init; }
     /// <summary>The provider adapter's settlement disposition; Permanent unless its classifier proved otherwise.</summary>

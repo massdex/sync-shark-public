@@ -46,4 +46,10 @@ public sealed class DropboxSide : ISide
     /// <inheritdoc/>
     public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, CancellationToken ct) => throw new NotImplementedException();
     public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType)> RootAsync(CancellationToken ct) => throw new NotImplementedException();
+    /// <inheritdoc/>
+    public Task<DeletionEvidence> DeletedAsync(string path, bool folder, CancellationToken ct) => throw new NotImplementedException();
+    /// <inheritdoc/>
+    public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, bool catchUp, CancellationToken ct) => throw new NotImplementedException();
+    /// <inheritdoc/>
+    public Task<(string? Cursor,JournalPosition? Position)> BoundaryAsync(CancellationToken ct) => throw new NotImplementedException();
 }

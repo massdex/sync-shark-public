@@ -1,6 +1,6 @@
 namespace Massdex.SyncShark.Engine.Dropbox;
 
-/// <summary>Staged Dropbox content (section 5.4): a single upload not yet sent, or a finished upload session.
+/// <summary>Staged Dropbox content: a single upload not yet sent, or a finished upload session.
 /// Dispose does nothing; an unfinished session expires at Dropbox.</summary>
 public sealed class DropboxStaged : IStaged
 {

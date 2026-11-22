@@ -21,8 +21,13 @@ public static class FolderChecks
         var childA=ItemChecks.File(Side.Local,child,1,"child-a",nested);var childB=ItemChecks.File(Side.Dropbox,child,1,"child-b",nested);
         if(!ignored && !excluded && !nested) await store.CommitAsync(pair.PairId,null,SyncedEntries.From(childA,childB),null,null,default);
         var live=edited?ItemChecks.File(Side.Local,child,3,childA.Id):childA;pc.Seed(live,nested?[]:new[]{edited?(byte)3:(byte)1});
+        if(excluded || nested)
+        {
+            var sibling=ItemChecks.File(Side.Local,"folder/free",2,"free-a");pc.Seed(sibling,[2]);
+            await store.CommitAsync(pair.PairId,null,SyncedEntries.From(sibling,ItemChecks.File(Side.Dropbox,"folder/free",2,"free-b")),null,null,default);
+        }
         if(unreadable) pc.ReadFailures[child]=new ItemFailedException(child,TextKey.ReadLocalFailed,null);
-        await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,parent,Side.Dropbox,pc,cloud,store,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),default);
+        await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,parent,Side.Dropbox,pc,cloud,store,queue.Held,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),default);
         if(ignored)
         {
             Check.Require(pc.Items.Count==0 && cloud.Items.Count==0 && pc.History.Any(x=>x.Entry.Path==child && x.Bytes.SequenceEqual(new byte[]{1})),"Ignored child did not accompany recycled parent");
@@ -35,7 +40,8 @@ public static class FolderChecks
         }
         else
         {
-            Check.Require(pc.Items.Count==2 && pc.Items.ContainsKey(root) && pc.Items[child].Entry==live && cloud.Items.Count==0 && pc.History.Count==0,"Protected or unreadable child was removed");
+            Check.Require(pc.Items.Count==2 && pc.Items.ContainsKey(root) && pc.Items[child].Entry==live && cloud.Items.Count==0 && pc.History.All(v=>v.Entry.Path=="folder/free"),"Protected or unreadable child was removed");
+            if(excluded || nested) Check.Require(pc.History.Single().Bytes.SequenceEqual(new byte[]{2}) && store.Records.Values.All(v=>v.LocalPath!="folder/free"),"Eligible sibling not recycled and retired");
             if(unreadable) Check.Require(store.OpenNotices.Count(n=>n.Kind==NoticeKind.Failure)==1 && store.Records.Count==2,"Unreadable source incorrectly settled");
             else Check.Require(store.OpenNotices.All(n=>n.Kind!=NoticeKind.Failure),"Ordinary protected survivor became a failure");
         }
@@ -51,17 +57,27 @@ public static class FolderChecks
         Check.Require(pc.Items.Count==2 && cloud.Items.Count==0 && store.Records.Count==0,"Link followed or copied");
         pc.Items.Clear();await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,null,null,default);Check.Require(store.OpenNotices.Count==0 && cloud.Items.Count==0 && store.Records.Count==0,"Stale link membership");
     }
+    /// <summary>A detached read opens no image; first add alone publishes the real store and its pair.</summary>
     public static async Task FreshStartAsync()
     {
-        // The empty disposable container is not a database; startup must not create one on a read.
-        var scratch=Directory.CreateTempSubdirectory().FullName;
+        var scratch=Directory.CreateTempSubdirectory().FullName;var path=Path.Combine(scratch,ResourceNames.EngineFolder,ResourceNames.DatabaseFile);int creates=0;
         try
         {
-            var source=Path.Combine(scratch,"predecessor");var dest=Path.Combine(scratch,"current");
-            await new global::Massdex.SyncShark.Engine.Storage.StoreMove().MoveAsync(source,dest,new global::Massdex.SyncShark.Engine.Dropbox.Connections().Verify,default);
-            Check.Require(!File.Exists(Path.Combine(dest,ResourceNames.EngineFolder,ResourceNames.DatabaseFile)),"Fresh startup created a store");
+            var pair=ItemChecks.Pair();var local=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox);
+            async Task<IStore?> Open(bool create,CancellationToken ct)
+            {
+                if(!File.Exists(path) && !create) return null;
+                if(create && !File.Exists(path)){creates++;await new global::Massdex.SyncShark.Engine.Storage.StoreMove().CreateAsync(scratch,ct);}
+                return new global::Massdex.SyncShark.Engine.Storage.Store(path,false,ItemChecks.Settings);
+            }
+            var host=new Host(Open,(_,_,_,_)=>(local,cloud),ItemChecks.Settings,null!,TimeProvider.System,_=>throw new InvalidOperationException(),(_,_)=>throw new InvalidOperationException());
+            await foreach(var unused in host.PairsAsync(default)) throw new InvalidDataException("Fresh read reported a pair");
+            Check.Require(creates==0 && !File.Exists(path),"Read created a database");await host.AddPairAsync(pair,default);
+            Check.Require(creates==1 && File.Exists(path),"First add failed to publish exactly one image");
+            using var reopened=new global::Massdex.SyncShark.Engine.Storage.Store(path,true,ItemChecks.Settings);
+            Check.Require((await reopened.PairAsync(pair.PairId,default))?.PairId==pair.PairId,"Published image lacks the new pair");
         }
-        finally { Directory.Delete(scratch,true); }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();Directory.Delete(scratch,true); }
     }
 
     public static Task A04FileOnPcFolderOnCloudAsync() => throw new NotImplementedException();
@@ -73,7 +89,14 @@ public static class FolderChecks
     public static Task A08FolderToFileOnCloudAsync() => throw new NotImplementedException();
     public static Task A08ChildDeletesBeforeParentReplacementAsync() => throw new NotImplementedException();
     public static Task A08StageFailureBeforeRemovalAsync() => throw new NotImplementedException();
-    public static Task A08SoleSmallUploadSourceUnreadableAsync() => throw new NotImplementedException();
+    public static async Task A08SoleSmallUploadSourceUnreadableAsync()
+    {
+        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);var queue=new WorkQueue();using var store=new InMemoryStateStore();
+        var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);var file=ItemChecks.File(Side.Local,"item",2,"pc");var folder=ItemChecks.File(Side.Dropbox,"item",0,"db",true);
+        pc.Seed(file,[2]);db.Seed(folder,[]);pc.ContentFailures[file.Path]=new ItemFailedException(file.Path,TextKey.ReadLocalFailed,null);
+        await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Local,ChangeKind.Changed,file.Path,null,file.Id,file,true,false),pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),default);
+        Check.Require(pc.Requests[nameof(ISide.OpenReadAsync)]+pc.Requests[nameof(ISide.ContentHashAsync)]>0 && db.Items[folder.Path].Entry==folder && db.Requests[nameof(ISide.DeleteAsync)]==0 && store.OpenNotices.Any(n=>n.Kind==NoticeKind.Failure),"Failed content read removed the target or went unreported");
+    }
     public static Task A08ProtectedExclusionPcAsync() => throw new NotImplementedException();
     public static Task A08ProtectedExclusionCloudAsync() => throw new NotImplementedException();
     public static Task A08ProtectedLinkPcAsync() => throw new NotImplementedException();
@@ -136,7 +159,7 @@ public static class FolderChecks
     public static Task A46UnchangedNoticesPreservedAsync() => throw new NotImplementedException();
     public static Task A46CrashDuringConnectionListCopyAsync() => throw new NotImplementedException();
     public static Task A46CrashDuringFirstPairAddAsync() => throw new NotImplementedException();
-    public static Task A46FreshReadCreatesNoStoreAsync() => throw new NotImplementedException();
+    public static Task A46FreshReadCreatesNoStoreAsync() => FreshStartAsync();
     public static Task A46ClosedImageNoWalAsync() => throw new NotImplementedException();
     public static Task A46AmbiguousIndependentStoresAsync() => throw new NotImplementedException();
     public static Task A46InvalidSourceAsync() => throw new NotImplementedException();

@@ -1,6 +1,6 @@
 namespace Massdex.SyncShark.Engine.Local;
 
-/// <summary>The engine's fixed stage-file name: <c>.syncshark-</c>, a fresh id and <c>.stage</c>, beside the target; the fixed grammar keeps an ordinary user file from ever being collected as an orphan.</summary>
+/// <summary>The engine's fixed stage-file name: <c>.syncshark-</c>, a fresh id and <c>.stage</c>, beside the target; matching the grammar proves no ownership. Deletion requires the held object or this attempt’s existing proof.</summary>
 public static class StageNames
 {
     private const string Prefix = ".syncshark-";

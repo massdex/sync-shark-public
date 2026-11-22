@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.Engine.Run;
 /// <summary>Host operations for the run module.</summary>
 public sealed class Host
 {
-    /// <summary>Completes after one finite pass over work available at start, including one check per known token; does not drain later arrivals. Returns the participating volume roots and types observed by their local adapters, once per volume, for startup trim.</summary>
+    /// <summary>Capture source boundaries before listing. Await the pair runner’s finite catch-up separately from its live loop. Completes after one finite pass over work available at start, including one check per known token; does not drain later arrivals. Returns the participating volume roots and types observed by their local adapters, once per volume, for startup trim.</summary>
     public Task<IReadOnlyList<(string VolumeRoot, DriveType Type)>> StartAsync(CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Stop operation on the supplied facts.</summary>
     public Task StopAsync(CancellationToken ct) => throw new NotImplementedException();

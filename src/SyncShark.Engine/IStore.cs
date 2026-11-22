@@ -65,4 +65,14 @@ public interface IStore : IDisposable
     Task ResetCursorAsync(string pairId, string fresh, string reason, CancellationToken ct);
     /// <summary>Stream the existing scan’s move candidates before ordinary differences, ordered by shallowest candidate of the binding then by binding so all its observed sides are adjacent.</summary>
     IAsyncEnumerable<RenameCandidate> RenamesAsync(string pairId, Guid scanId, Scope? scope, CancellationToken ct);
+    /// <summary>Replace the old link with both new links and their notice in one transaction.</summary>
+    Task CommitKeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry second, Notice notice, CancellationToken ct);
+    /// <summary>In one transaction match the reviewed drive notice and publish the chosen pair; only FirstSync resets bindings and first Repair.</summary>
+    Task<bool> ResolveDriveAsync(PairConfig pair, Notice reviewed, ResolutionChoice choice, CancellationToken ct);
+    /// <summary>Stream notices whose members overlap the mapped footprint on their own side, including covering ancestors.</summary>
+    IAsyncEnumerable<Notice> NoticesUnderAsync(string pairId, Scope footprint, CancellationToken ct);
+    /// <summary>Add or retire only this observed link member; close the pair-wide link notice only when no members remain.</summary>
+    Task UpdateLinkMemberAsync(string pairId, NoticeItem member, bool present, CancellationToken ct);
+    /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>
+    Task<Notice?> NoticeAsync(string pairId, long id, CancellationToken ct);
 }

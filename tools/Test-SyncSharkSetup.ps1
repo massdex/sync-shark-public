@@ -114,8 +114,8 @@ $preparation = Join-Path $install ('versions/.staging/' + [guid]::NewGuid().ToSt
 [IO.Directory]::CreateDirectory($preparation) | Out-Null
 [IO.File]::WriteAllText((Join-Path $preparation 'partial'), 'incomplete extraction')
 $cleared = @(Clear-SetupPreparation $install)
-Assert (-not (Test-Path -LiteralPath $preparation)) 'Interrupted preparation accumulated.'
-Assert (($cleared -join '').Contains($preparation)) 'Preparation cleanup did not report its path.'
+Assert ([IO.File]::ReadAllText((Join-Path $preparation 'partial')) -ceq 'incomplete extraction') 'Name-only cleanup changed an unproven preparation.'
+
 $protected = Join-Path $Root 'foreign-tree'; [IO.Directory]::CreateDirectory($protected) | Out-Null
 [IO.File]::WriteAllText((Join-Path $protected 'owned'), 'before')
 $inventory = Get-SetupTree $protected
@@ -255,10 +255,7 @@ foreach ($mode in @('throw','crash')) {
             }
             Assert (-not (Test-Path -LiteralPath (Join-Path $target 'versions\1.2.4'))) 'Rollback retained the owned destination and blocks retry.'
             $retried = @(Invoke-SetupInstall $new $target)
-            if ($mode -eq 'crash' -and $boundary -eq $boundaries[0]) {
-                Assert (($retried -join '').Contains('Removed interrupted setup preparation:')) 'Next setup did not report interrupted preparation cleanup.'
-                Assert (@([IO.Directory]::EnumerateFileSystemEntries((Join-Path $target 'versions\.staging'))).Count -eq 0) 'Next setup retained interrupted preparation.'
-            }
+
         }
         Assert ((Active-Version $target) -ceq '1.2.4') 'Install retry failed.'
     }

@@ -42,6 +42,7 @@ public static class SettingsParser
             throw Bad(nameof(EngineSettings.BackoffSettings.MaximumBackoffSeconds));
         return settings with
         {
+            ComputerName = Environment.MachineName,
             Backoff = backoff,
             StoragePageSize = ReadInt(nameof(EngineSettings.StoragePageSize)),
             LogReadBufferBytes = ReadInt(nameof(EngineSettings.LogReadBufferBytes)),

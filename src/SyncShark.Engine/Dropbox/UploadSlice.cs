@@ -1,6 +1,6 @@
 namespace Massdex.SyncShark.Engine.Dropbox;
 
-/// <summary>A read-only, seekable window over a seekable stream; no buffering (section 5.5).</summary>
+/// <summary>A read-only, seekable window over a seekable stream; no buffering.</summary>
 public sealed class UploadSlice : Stream
 {
     private readonly Stream _inner;

@@ -19,10 +19,20 @@ public static class PathScopeChecks
         Check.Require(scope.ExcludesChange(incoming with { Path="Recycle Bin/item" },0,static (_,_,_)=>null),"Unbound change entered the PC bin");
         var parent = new SyncedEntry("INNER","Inner","CLOUD","Cloud",true,"local",0,0,"cloud","");
         Check.Require(scope.ExcludesChange(incoming with { Path="Cloud/new" },parent,static (p,side,key)=>side==Side.Dropbox && key==p.DropboxKey?p:null),"Mapped child entered nested root");
+        var cloudNew=Scenarios.ItemChecks.File(Side.Dropbox,"Cloud/new",1,"new");
+        var repairRow=new Row("CLOUD/NEW",null,cloudNew,null,[],null,RowContext.Neutral);
+        Check.Require(RowContext.ForRow(repairRow,scope,RowContext.Neutral,false,null,null,false,default,new Scope("Inner/new","Cloud/new")).OutOfScope,"Repair ignored the mapped missing endpoint");
+        foreach(var reserved in new[]{"COM¹.txt","LPT²","COM³.bin"})
+        {
+            try { PathNames.NormalizeRelative(reserved);throw new InvalidDataException("Reserved device accepted"); } catch(ArgumentException) { }
+        }
+        Check.Require(PathNames.NormalizeRelative("COM¹x.txt")=="COM¹x.txt","Valid name rejected");
         var saved = parent with { LocalKey="OUTSIDE/FILE",LocalPath="Outside/file",DropboxKey="INNER/FILE",DropboxPath="Inner/file" };
         Check.Require(!scope.ExcludesChange(incoming,saved,static (p,side,key)=>side==Side.Dropbox && key==p.DropboxKey?p:null),"Coincidental spelling excluded a safe saved endpoint");
         Check.Require(!new PathScope(outer,[outer],DriveType.Fixed).ExcludesChange(incoming with { Path="Recycle Bin/item" },0,static (_,_,_)=>null),"Native-bin volume treated as removable");
         Check.Require(!scope.Excludes("innermost/file", null, false), "Unrelated sibling");
+        var legacy=System.Text.Json.JsonSerializer.Deserialize<IssueSubject>("""{"Items":[],"Incoming":null,"LocalHash":{"Size":1,"ModifiedTicks":1,"Hash":"unverified"}}""")!;
+        Check.Require(legacy.LocalHash==null && !System.Text.Json.JsonSerializer.Serialize(legacy).Contains("LocalHash",StringComparison.Ordinal),"Retired hash proof survived a legacy read");
         return Task.CompletedTask;
     }
     /// <summary>A stale completion, an unrelated scope and an uncompleted full-pair Repair all keep their independent debt.</summary>
@@ -46,6 +56,11 @@ public static class PathScopeChecks
         await store.SaveNoticeAsync(inner.PairId,putBack with { Ignored=true },default);await store.SaveNoticeAsync(inner.PairId,ordinary,default);
         Check.Require(store.OpenNotices.Count==2 && store.OpenNotices.Any(n=>n.Ignored && n.Matches(putBack)),"Ordinary failure displaced put-back evidence");
         Check.Require(await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)])==TextKey.PairPutBackOutstanding && !(await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Removal released an outstanding put-back or published its scope");
+        var oldMove=new IssueSubject.UnknownMove("id","before","old",null,false);
+        var reviewed=ordinary with {Subject=ordinary.Subject with { Move=oldMove }};
+        var refreshed=reviewed with {Subject=reviewed.Subject with { Move=oldMove with { Destination="new" } }};
+        await store.SaveNoticeAsync(inner.PairId,refreshed,default);await store.CloseNoticeAsync(inner.PairId,reviewed,default);
+        Check.Require(store.OpenNotices.Any(n=>n.Matches(refreshed)) && !reviewed.Matches(refreshed),"A stale move destination closed a refreshed notice");
         await store.CloseNoticeAsync(inner.PairId,putBack,default);
         var job=new AcceptedJob(inner.PairId,"route","token",[]);await store.SaveJobAsync(job,default);
         Check.Require(await store.RemovePairAsync(inner.PairId,default)==TextKey.PairJobOutstanding,"Accepted job lost its removal reason");await store.SettleJobAsync(job,default);

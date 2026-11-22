@@ -7,6 +7,10 @@ namespace Massdex.SyncShark.Engine;
 public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path, IssueSubject Subject,
     DateTimeOffset At, bool Dismissed, bool Ignored = false)
 {
+    /// <summary>The observed program holding the file, if known; absent in older notices.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Holder { get; init; }
+
     /// <summary>The exact reviewed-version token, populated only by the public notice read projection.</summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? Reviewed { get; init; }
@@ -15,7 +19,7 @@ public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path
     public bool Matches(Notice expected) =>
         this with { Subject = expected.Subject, Ignored = expected.Ignored, Reviewed = expected.Reviewed } == expected &&
         Subject.Incoming == expected.Subject.Incoming && Subject.HasSameItems(expected.Subject) &&
-        Subject.LocalHash == expected.Subject.LocalHash && Subject.FirstRunDeletion == expected.Subject.FirstRunDeletion;
+        Subject.FirstRunDeletion == expected.Subject.FirstRunDeletion;
 
     /// <summary>Whether any subject key is self-or-under this scope; item-less operational notices use their path.
     /// Empty scope includes every issue, including dismissed ones, independently of holding policy.</summary>
@@ -35,7 +39,7 @@ public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path
 /// (null: no history, D20).</summary>
 public sealed record IssueSubject(
     IReadOnlyList<NoticeItem> Items, Side? Incoming,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [property: JsonIgnore]
     LocalHashProof? LocalHash = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     IssueSubject.FirstRunDeletionKind FirstRunDeletion = IssueSubject.FirstRunDeletionKind.None)
@@ -64,15 +68,8 @@ public sealed record IssueSubject(
     /// <summary>The side of the endpoint a turn at path retains: the incoming side, else the item at that path.</summary>
     internal Side? EndpointSide(string path) => Incoming ?? Items.FirstOrDefault(item => item.Path == path)?.Side;
 
-    /// <summary>Returns the conflict proof only while its exact local identity and file metadata still match.</summary>
-    public string? ReusableLocalHash(Entry? local) =>
-        local is { IsFolder: false, Skip: null, Path: not null, Id: not null } &&
-        Items is not null && LocalHash is { } proof && !string.IsNullOrEmpty(proof.Hash) &&
-        proof.Size >= 0 && proof.Size == local.Size && proof.ModifiedTicks == local.Modified.UtcTicks &&
-        Items.Any(item => item is { Side: Side.Local } &&
-            string.Equals(item.Path, local.Path, StringComparison.Ordinal) &&
-            string.Equals(item.Id, local.Id, StringComparison.Ordinal))
-                ? proof.Hash : null;
+    /// <summary>Legacy caller compatibility only: a stored stamp never proves current bytes. Request a fresh hash.</summary>
+    public string? ReusableLocalHash(Entry? local) => null;
 
     /// <summary>True when both subjects name exactly the same items and the same unknown move; order and repetition
     /// are ignored, Incoming is not compared (D20 continuation). Two unknown moves of the same items to different
@@ -83,46 +80,6 @@ public sealed record IssueSubject(
     /// <summary>Every item of this subject, by side, path and identity, is in other, with the same move.</summary>
     public bool HasItemsWithin(IssueSubject other) =>
         Equals(Move, other.Move) && new HashSet<NoticeItem>(other.Items).IsSupersetOf(Items);
-
-    /// <summary>Retry capture only (row 43a): fresh names the same items after a case-only rename. Exact duplicates
-    /// aside, items pair one to one under <see cref="IsRespelling"/>; the move must be equal. A wait recorded before
-    /// rename subjects named the saved Dropbox counterpart holds only its Local item, and pairs with a fresh subject
-    /// that adds exactly one Dropbox item only when that item is the counterpart (identity and key) of the binding
-    /// <paramref name="saved"/> held now for the same Local identity; any other added endpoint, including one beside
-    /// a new file's wait, stays a miss. Never an item-set equality: tokens, registration and completion stay exact.</summary>
-    internal bool HasCaseRenamedItems(IssueSubject fresh, SyncedEntry? saved)
-    {
-        var recorded = DistinctItems(Items);
-        var unmatched = DistinctItems(fresh.Items).ToList();
-        if (recorded is [{ Side: Side.Local } legacy] && saved is { IsFolder: false } && saved.LocalId == legacy.Id &&
-            unmatched.Where(item => item.Side == Side.Dropbox).ToList() is [var added] &&
-            added.Id is { Length: > 0 } && added.Id == saved.DropboxId && PathNames.DropboxKey(added.Path) == saved.DropboxKey)
-            unmatched.Remove(added);
-        if (!Equals(Move, fresh.Move) || recorded.Length != unmatched.Count) return false;
-        foreach (var item in recorded)
-        {
-            // Every candidate with this side and known id shares the key, so a first match never strands a later one.
-            var index = unmatched.FindIndex(other => IsRespelling(item, other));
-            if (index < 0) return false;
-            unmatched.RemoveAt(index);
-        }
-        return true;
-    }
-
-    /// <summary>Row 43a: fresh is recorded itself, or the same side and known identity respelled only in case.</summary>
-    internal static bool IsRespelling(NoticeItem recorded, NoticeItem fresh) =>
-        fresh.Side == recorded.Side && fresh.Id == recorded.Id && (fresh.Path == recorded.Path ||
-            recorded.Id is { Length: > 0 } && PathNames.Comparer.Equals(
-                PathNames.KeyFor(recorded.Side, recorded.Path), PathNames.KeyFor(fresh.Side, fresh.Path)));
-
-    /// <summary>Row 43a: whether this subject records item itself or its case-only respelling (<see cref="IsRespelling"/>);
-    /// the completed-pending membership test, indexed so it allocates nothing beyond the respelling's key reads.</summary>
-    internal bool HoldsRespelling(NoticeItem item)
-    {
-        for (var i = 0; i < Items.Count; i++)
-            if (IsRespelling(Items[i], item)) return true;
-        return false;
-    }
 
     /// <summary>The one distinct Local item at localKey (a <see cref="PathNames.KeyFor"/> Local key), or null when the
     /// subject names none or more than one Local item, or its Local item is elsewhere: the Local retry capture's

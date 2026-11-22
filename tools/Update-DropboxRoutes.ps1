@@ -14,6 +14,7 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $catalogPath = Join-Path $repositoryRoot 'src/SyncShark.Engine/Dropbox/dropbox-routes.json'
 if (-not $OutputPath) { $OutputPath = $catalogPath }
 $current = Get-Content -LiteralPath $catalogPath -Raw | ConvertFrom-Json
+# Add newly used routes to the catalog first; regeneration verifies only that set against the pinned spec.
 $used = @($current.routes.name)
 $limitsByRoute = @{}
 foreach ($route in $current.routes) {

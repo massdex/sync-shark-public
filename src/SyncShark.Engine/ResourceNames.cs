@@ -16,7 +16,13 @@ public static class ResourceNames
     // The csproj LogicalName for the frozen case mapping matches this value.
     public const string PathCase = "SyncShark.EnginePathCase.json";
 
-    /// <summary>Folder under the product root holding the engine database and logs.</summary>
+    /// <summary>Product directory below the user’s local application data.</summary>
+    public static readonly string ProductFolder=Path.Combine("Massdex","SyncShark");
+    /// <summary>Absolute engine database path under this installation’s local application data.</summary>
+    public static string DatabasePath(string localAppData) => Path.Combine(localAppData,ProductFolder,EngineFolder,DatabaseFile);
+    /// <summary>Absolute log directory under the same product root.</summary>
+    public static string LogDirectory(string localAppData) => Path.Combine(localAppData,ProductFolder,LogsFolder);
+    /// <summary>Host executable filename.</summary>
     public const string HostExecutable = "Sync Shark.exe";
     public const string CliExecutable = "syncshark.exe";
     public const string RootBinFolder = "Recycle Bin";

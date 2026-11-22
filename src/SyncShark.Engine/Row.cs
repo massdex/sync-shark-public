@@ -95,14 +95,14 @@ public sealed record RowContext(bool OutOfScope, bool Skipped, bool Held, Side? 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static RowContext ForRow(Row row, PathScope scope, RowContext neutral, bool skipped,
         NoticeKind? heldKind, Side? underFolderDelete, bool deletionEligible,
-        IssueSubject.FirstRunDeletionKind firstRunDeletion)
+        IssueSubject.FirstRunDeletionKind firstRunDeletion, Scope? mapped = null)
     {
         Debug.Assert(neutral is { OutOfScope: false, Skipped: false, Held: false, UnderFolderDelete: null,
             HoldsNestedRoot: false, DeletionEligible: false, Destination: null, HeldKind: null,
             FirstRunDeletion: IssueSubject.FirstRunDeletionKind.None });
         // Scope evaluates the listed path, else the saved path, on each side (the corrected exclusion rule).
-        var outOfScope = scope.Excludes(row.Local?.Path ?? row.Synced?.LocalPath,
-            row.Dropbox?.Path ?? row.Synced?.DropboxPath,
+        var outOfScope = scope.Excludes(row.Local?.Path ?? row.Synced?.LocalPath ?? mapped?.LocalPath,
+            row.Dropbox?.Path ?? row.Synced?.DropboxPath ?? mapped?.DropboxPath,
             row.IsFolder());
         if (!outOfScope && !skipped && heldKind is null && underFolderDelete is null && !deletionEligible &&
             firstRunDeletion == IssueSubject.FirstRunDeletionKind.None)

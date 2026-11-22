@@ -1053,35 +1053,8 @@ REVIEW SPLIT-PENDING | src/C.cs | file-size |  |  | ~hash
             ($methods | ConvertTo-Json -Compress) | Set-Content -LiteralPath $Path -Encoding utf8
             $Path
         }
-        function New-ExemptFile {
-            param([string]$Repo, [string[]]$Methods)
-            $dir = Join-Path $Repo 'tests/SyncShark.Engine.Tests/Run'
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-            $body = @('namespace Massdex.SyncShark.Engine.Tests.Run;', 'public static class ExcludedSavedRowChecks', '{')
-            foreach ($name in $Methods) { $body += "    public static void $name() { }" }
-            $body += '}'
-            Set-Content -LiteralPath (Join-Path $dir 'ExcludedSavedRowChecks.cs') -Value $body -NoNewline:$false
-            # HarnessSafety is exempt because a registered action list returns it.
-            $scen = Join-Path $Repo 'tests/SyncShark.Engine.Tests/Scenarios'
-            New-Item -ItemType Directory -Path $scen -Force | Out-Null
-            Set-Content -LiteralPath (Join-Path $scen 'ScenarioChecks.cs') -Value @(
-                'namespace Massdex.SyncShark.Engine.Tests.Scenarios;',
-                'public static class ScenarioChecks',
-                '{',
-                '    public static System.Collections.Generic.IReadOnlyList<System.Action> OfflineCases()',
-                '    {',
-                '        return new System.Action[] { HarnessSafety };',
-                '    }',
-                '    private static void Other()',
-                '    {',
-                '        HarnessSafety();',
-                '    }',
-                '    public static void HarnessSafety() { }',
-                '}') -NoNewline:$false
-        }
         $checkScript = Join-Path $PSScriptRoot 'ci/prereview_checks.py'
         $ratchetScript = Join-Path $PSScriptRoot 'ci/check-spec-ratchet.py'
-        $exemptNames = @('PrefixFirstRun', 'PrefixUnchanged', 'PrefixChangedNeighbor', 'PrefixSavedOnly', 'PrefixBothAbsent', 'PrefixExactName', 'PrefixPerPair')
 
         # Check 3: ownership map (and the -Owners without -Lane guard).
         $ownersFile = Join-Path $temp 'owners.json'
@@ -1223,8 +1196,8 @@ public static class CheckRegistry
         New-Item -ItemType Directory -Path (Join-Path $r5 'tests/SyncShark.Engine.Tests') -Force | Out-Null
         Invoke-Git -Root $r5 -ArgumentList @('commit', '--allow-empty', '-m', 'base', '--no-gpg-sign') | Out-Null
         $r5base = (Invoke-Git -Root $r5 -ArgumentList @('rev-parse', 'HEAD')).Trim()
-        New-ExemptFile -Repo $r5 -Methods $exemptNames
-        Set-Content -LiteralPath (Join-Path $r5 'tests/SyncShark.Engine.Tests/FooChecks.cs') -Value @('namespace Massdex.SyncShark.Engine.Tests;', 'public static class FooChecks { public static void Run() { } }') -NoNewline:$false
+        New-Item -ItemType Directory -Force -Path (Join-Path $r5 'tests/SyncShark.Engine.Tests/Run') | Out-Null
+        Set-Content -LiteralPath (Join-Path $r5 'tests/SyncShark.Engine.Tests/FooChecks.cs') -Value @('namespace Massdex.SyncShark.Engine.Tests;', 'public static class FooChecks { public static async Task Run() { await Task.CompletedTask; } }') -NoNewline:$false
         Set-Content -LiteralPath (Join-Path $r5 'tests/SyncShark.Engine.Tests/Run/NewThingChecks.cs') -Value @('namespace Massdex.SyncShark.Engine.Tests.Run;', 'public static class NewThingChecks { public static void Run() { var m = typeof(Massdex.SyncShark.Engine.Run.Monitor); } }') -NoNewline:$false
         Set-Content -LiteralPath (Join-Path $r5 'tests/SyncShark.Engine.Tests/InlineChecks.cs') -Value @('namespace Massdex.SyncShark.Engine.Tests;', 'public static class InlineChecks { public static void Run() { Other.Run(); } }') -NoNewline:$false
         Set-Content -LiteralPath (Join-Path $r5 'tests/SyncShark.Engine.Tests/CheckRegistry.cs') -Value 'namespace T; public static class CheckRegistry { }' -NoNewline:$false
@@ -1316,7 +1289,7 @@ public static class CheckRegistry
         $unusedCatalog = Get-CheckRegistryIndex -Text ($catalogRegistry -replace 'BudgetChecks,', '[],' -replace 'BudgetShard\(\d+\),', '[],')
         Assert-True ($unusedCatalog.Methods.Count -eq 0) 'catalog: an unused catalog grants no registration'
         $catalogRoot = Join-Path $temp 'catalog-registration'
-        New-ExemptFile -Repo $catalogRoot -Methods $exemptNames
+        New-Item -ItemType Directory -Force -Path (Join-Path $catalogRoot 'tests/SyncShark.Engine.Tests/Run') | Out-Null
         $callerPath = Join-Path $catalogRoot 'tests/SyncShark.Engine.Tests/Run/CallBudgetChecks.cs'
         $callerText = 'namespace T.Run; public static class CallBudgetChecks { public static void RunBudgetCommon() { StorageCostChecks.Run(); } public static void RunBudgetPair() { } }'
         Set-Content -LiteralPath $callerPath -Value $callerText
@@ -1332,48 +1305,6 @@ public static class CheckRegistry
         Set-Content -LiteralPath $callerPath -Value ($callerText.Replace('StorageCostChecks.Run();', '') -replace '\}\s*$', 'private static void Unregistered() { StorageCostChecks.Run(); } }')
         $unregisteredCaller = Invoke-Python -Root $catalogRoot -Arguments $catalogArgs
         Assert-True ($unregisteredCaller.ExitCode -eq 1 -and $unregisteredCaller.Output -like '*StorageCostChecks.Run*') 'catalog: a call only from an unregistered method still fails'
-        # P2-4: a stale reviewed exemption fails.
-        $regStaleText = @'
-namespace T;
-public static class CheckRegistry
-{
-    public static readonly System.Collections.Generic.Dictionary<string, System.Action[]> All = new()
-    {
-        ["syncer"] = [FooChecks.Run, InlineChecks.Run],
-        ["run"] = [NewThingChecks.Run],
-        ["extra"] = [ExcludedSavedRowChecks.PrefixFirstRun],
-    };
-}
-'@
-        $regStale = New-RegistryJson -RegistryText $regStaleText -Path (Join-Path $temp 'registry-stale.json')
-        $stale = Invoke-Python -Root $r5 -Arguments ($testsBase + @('--registry', $regStale))
-        Assert-True ($stale.ExitCode -eq 1 -and $stale.Output -like '*exemption stale*') 'tests: a registered reviewed exemption is stale and fails'
-        # P2-2: the HarnessSafety exemption fails when it leaves its action list.
-        $harness = Join-Path $temp 'harness-stale'
-        New-FixtureRepo -Path $harness
-        New-Item -ItemType Directory -Path (Join-Path $harness 'tests/SyncShark.Engine.Tests') -Force | Out-Null
-        Invoke-Git -Root $harness -ArgumentList @('commit', '--allow-empty', '-m', 'base', '--no-gpg-sign') | Out-Null
-        $harnessBase = (Invoke-Git -Root $harness -ArgumentList @('rev-parse', 'HEAD')).Trim()
-        New-ExemptFile -Repo $harness -Methods $exemptNames
-        Set-Content -LiteralPath (Join-Path $harness 'tests/SyncShark.Engine.Tests/Scenarios/ScenarioChecks.cs') -Value @(
-            'namespace Massdex.SyncShark.Engine.Tests.Scenarios;',
-            'public static class ScenarioChecks',
-            '{',
-            '    public static System.Collections.Generic.IReadOnlyList<System.Action> OfflineCases()',
-            '    {',
-            '        return new System.Action[] { };',
-            '    }',
-            '    private static void Other()',
-            '    {',
-            '        HarnessSafety();',
-            '    }',
-            '    public static void HarnessSafety() { }',
-            '}') -NoNewline:$false
-        $harnessHead = Commit-Fixture -Path $harness -Message 'head'
-        $emptyReg = New-RegistryJson -RegistryText 'namespace T; public static class CheckRegistry { }' -Path (Join-Path $temp 'registry-empty.json')
-        $harnessRun = Invoke-Python -Root $harness -Arguments @($checkScript, '--check', 'tests', '--repo', $harness, '--base', $harnessBase, '--head', $harnessHead, '--registry', $emptyReg)
-        # A direct call elsewhere must not keep it: only the OfflineCases body counts.
-        Assert-True ($harnessRun.ExitCode -eq 1 -and $harnessRun.Output -like '*HarnessSafety*' -and $harnessRun.Output -like '*OfflineCases*') 'tests: HarnessSafety removed from OfflineCases is stale even with a direct call'
         # Control witness: in its group, mismatch, and not registered.
         $controlsOk = Join-Path $temp 'controls-ok.json'
         Set-Content -LiteralPath $controlsOk -Value '{ "control1": { "witness": "FooChecks.Run", "groups": ["syncer"] } }' -NoNewline:$false

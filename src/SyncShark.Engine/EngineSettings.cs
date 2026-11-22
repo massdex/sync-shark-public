@@ -9,6 +9,8 @@ public sealed record EngineSettings(string ConflictLabelFormat, string ConflictL
     int LogRetentionDays, FirstRunPolicy DefaultFirstRunPolicy,
     int InitialLimiterLevel, string DefaultIgnoreRules, int LogBufferCharacters, int StoreBatchRows)
 {
+    /// <summary>The PC name observed at startup, for local conflict labels only.</summary>
+    public string ComputerName { get; init; } = string.Empty;
     /// <summary>Bounds the amount of state read per page.</summary>
     public int StoragePageSize { get; init; }
     /// <summary>Retry delays when the transport proves that no effect occurred.</summary>

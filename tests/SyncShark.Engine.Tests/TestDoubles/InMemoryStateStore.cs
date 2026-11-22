@@ -316,4 +316,37 @@ public sealed class InMemoryStateStore : IStore
                        select new RenameCandidate(row.Side,row.Entry,saved);
         return Enumerate(candidates.GroupBy(x=>x.Synced).OrderBy(group=>group.Min(x=>PathNames.Depth(x.Moved.Path))).ThenBy(group=>group.Key.LocalKey,StringComparer.Ordinal).SelectMany(group=>group.OrderBy(x=>x.Side)),ct);
     }
+    /// <summary>Replace the old link with both new links and their notice in one transaction.</summary>
+    public Task CommitKeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry second, Notice notice, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();lock(pairs)
+        {
+            if(first.LocalKey==second.LocalKey || first.DropboxKey==second.DropboxKey || before!=null && Records.GetValueOrDefault((pairId,before.LocalKey))!=before || Records.Any(x=>x.Key.Pair==pairId && x.Value!=before && (x.Value.LocalKey==first.LocalKey || x.Value.LocalKey==second.LocalKey || x.Value.DropboxKey==first.DropboxKey || x.Value.DropboxKey==second.DropboxKey))) throw new InvalidDataException("Kept bindings no longer match");
+            SaveNoticeAsync(pairId,notice,ct).GetAwaiter().GetResult();if(before!=null) Records.Remove((pairId,before.LocalKey));Records.Add((pairId,first.LocalKey),first);Records.Add((pairId,second.LocalKey),second);return Task.CompletedTask;
+        }
+    }
+    /// <summary>In one transaction match the reviewed drive notice and publish the chosen pair; only FirstSync resets bindings and first Repair.</summary>
+    public Task<bool> ResolveDriveAsync(PairConfig pair, Notice reviewed, ResolutionChoice choice, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();lock(pairs)
+        {
+            if(choice is not (ResolutionChoice.FirstSync or ResolutionChoice.SyncNormally) || reviewed.Kind!=NoticeKind.DriveChange || !notices.TryGetValue((pair.PairId,reviewed.Id),out var open) || !open.Matches(reviewed)) return Task.FromResult(false);
+            if(choice==ResolutionChoice.FirstSync){foreach(var k in Records.Keys.Where(k=>k.Pair==pair.PairId).ToArray()) Records.Remove(k);firstRepairDone.Remove(pair.PairId);}
+            pairs[pair.PairId]=pair;notices.Remove((pair.PairId,reviewed.Id));return Task.FromResult(true);
+        }
+    }
+    /// <summary>Stream notices whose members overlap the mapped footprint on their own side, including covering ancestors.</summary>
+    public IAsyncEnumerable<Notice> NoticesUnderAsync(string pairId, Scope footprint, CancellationToken ct) => Enumerate(notices.Where(x=>x.Key.Pair==pairId).Select(x=>x.Value).Where(n=>n.Subject.Items.Any(m=>Overlaps(m.Path,m.Side==Side.Local?footprint.LocalPath:footprint.DropboxPath)) || n.Subject.Items.Count==0 && (Overlaps(n.Path,footprint.LocalPath) || Overlaps(n.Path,footprint.DropboxPath))),ct);
+    private static bool Overlaps(string path,string root)=>PathNames.IsSelfOrUnder(path,root)||PathNames.IsSelfOrUnder(root,path);
+    /// <summary>Add or retire only this observed link member; close the pair-wide link notice only when no members remain.</summary>
+    public Task UpdateLinkMemberAsync(string pairId, NoticeItem member, bool present, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();var link=notices.Where(x=>x.Key.Pair==pairId && x.Value.Cause==TextKey.InfoLinks).Select(x=>x.Value).SingleOrDefault();
+        if(link==null && !present) return Task.CompletedTask;
+        link??=new Notice(notices.Keys.Select(k=>k.Id).DefaultIfEmpty().Max()+1,NoticeKind.Info,TextKey.InfoLinks,string.Empty,new([],null),DateTimeOffset.UnixEpoch,false);
+        var items=(present?link.Subject.Items.Append(member).Distinct():link.Subject.Items.Where(x=>x!=member)).ToArray();
+        return items.Length==0 ? CloseNoticeAsync(pairId,link,ct) : SaveNoticeAsync(pairId,link with {Subject=link.Subject with {Items=items}},ct);
+    }
+    /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>
+    public Task<Notice?> NoticeAsync(string pairId, long id, CancellationToken ct) { ct.ThrowIfCancellationRequested();return Task.FromResult(notices.GetValueOrDefault((pairId,id))); }
 }

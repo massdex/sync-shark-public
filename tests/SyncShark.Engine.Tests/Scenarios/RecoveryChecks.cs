@@ -47,6 +47,7 @@ public static class RecoveryChecks
             Check.Require(side.Items.Values.Where(a=>!a.Entry.IsFolder).Select(a=>a.Bytes.Single()).Order().SequenceEqual(folder?new byte[]{1,3}:new byte[]{1,2}),"A version was lost");
             if(folder) Check.Require(side.Items.Values.Single(a=>a.Bytes.SequenceEqual(new byte[]{3})).Entry.Path.EndsWith("/quiet-child",StringComparison.Ordinal),"Missing quiet descendant");
         }
+        if(!folder) Check.Require(x.Pc.Items.Keys.Any(path=>path.Contains(ItemChecks.Settings.ComputerName,StringComparison.Ordinal)) || x.Pc.Items.Keys.Any(path=>path.Contains(ItemChecks.Settings.ConflictLabelDropboxName,StringComparison.Ordinal)),"Conflict label has no source name");
         Check.Require(x.Store.Records.Count==(folder?3:2) && x.Store.OpenNotices.Single().Cause==TextKey.InfoKeptBoth,"Keep-both notice or binding missing");
     }
     public static async Task ChurnAsync()
@@ -70,11 +71,12 @@ public static class RecoveryChecks
     }
     public static async Task RepeatRepairAsync()
     {
-        using var x=new PairState(); await x.InitializeAsync();await x.LinkAsync("item",1);
-        await x.CompareAsync(); long pc=x.Pc.Requests[nameof(ISide.OpenReadAsync)], db=x.Cloud.Requests[nameof(ISide.OpenReadAsync)], commits=x.Store.Requests[nameof(IStore.CommitAsync)];
-        await x.CompareAsync(); x.VerifyLinks();
-        Check.Require(x.Pc.Items.Count==1 && x.Cloud.Items.Count==1 && x.Store.Records.Count==1 && x.Store.OpenNotices.Count==0,"Unchanged pair not preserved");
-        Check.Require(pc==x.Pc.Requests[nameof(ISide.OpenReadAsync)] && db==x.Cloud.Requests[nameof(ISide.OpenReadAsync)] && commits==x.Store.Requests[nameof(IStore.CommitAsync)],"Unchanged second comparison repeated work");
+        using var x=new PairState();await x.Store.SavePairAsync(x.Pair,default);
+        x.Pc.Seed(ItemChecks.File(Side.Local,"steady",1,"steady-id"),[1]);x.Pc.Seed(ItemChecks.File(Side.Local,"edit",1,"edit-id"),[1]);
+        await x.CompareAsync();x.VerifyLinks();Check.Require(x.Store.Records.Count==2 && (await x.Store.RepairStateAsync(x.Pair.PairId,default)).FirstRepairDone,"First Repair did not link both files");
+        var before=x.Cloud.Items["steady"];long writes=x.Cloud.Requests[nameof(ISide.PublishAsync)];long commits=x.Store.Requests[nameof(IStore.CommitAsync)];
+        x.Pc.Items["edit"]=(ItemChecks.File(Side.Local,"edit",2,"edit-id"),[2]);await x.CompareAsync();x.VerifyLinks();
+        Check.Require(x.Cloud.Items["edit"].Bytes.SequenceEqual(new byte[]{2}) && x.Cloud.Items["steady"]==before && x.Cloud.Requests[nameof(ISide.PublishAsync)]==writes+1 && x.Store.Requests[nameof(IStore.CommitAsync)]==commits+1,"Repeat Repair missed the edit or rewrote unchanged work");
     }
     public static async Task ClosedNoticeAsync(bool legacy)
     {
@@ -91,7 +93,7 @@ public static class RecoveryChecks
         using var x=new PairState(); await x.InitializeAsync(); await x.LinkAsync("unrelated",1);
         var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","token",[new("selected","gone",null)]);
         await x.Store.SaveJobAsync(job,default); x.Cloud.JobReplies[job.JobId]=new Queue<JobReply>([new JobReply.Running()]);
-        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         var pending=new List<AcceptedJob>();await foreach(var p in x.Store.JobsAsync(x.Pair.PairId,default)) pending.Add(p);
         Check.Require(pending.Single()==job && x.Cloud.Requests[nameof(ISide.ReadJobAsync)]==1 && x.Store.OpenNotices.Count==0,"Running token lost or repeatedly polled");
         x.VerifyLinks(); Check.Require(x.Pc.Items.Count==1 && x.Cloud.Items.Count==1 && x.Store.Records.Count==1,"Quiet job modified unrelated data");
@@ -103,9 +105,11 @@ public static class RecoveryChecks
         var incoming=ItemChecks.File(Side.Dropbox,"item",2,"db-item");x.Cloud.Items["item"]=(incoming,[2]);
         var altered=ItemChecks.File(Side.Local,"item.stage",3,"stage-id");
         await using var staged=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{3}),altered,previous,default);
+        x.Pc.History.Add((previous,new byte[]{1}));
         var actual=staged.Proof!;
         await x.Store.ArmAsync(x.Pair.PairId,new(new(previous,"volume",previous.ContentHash),saved),new(actual.Path,actual.VolumeId,actual.FileId,actual.Size,incoming.ContentHash),default);
-        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        Check.Require(x.Pc.Requests[nameof(ISide.ReopenStageAsync)]>0 && (await x.Store.ArmedAsync(x.Pair.PairId,default)!=null || x.Store.OpenNotices.Any(n=>n.Kind==NoticeKind.Failure)),"Altered stage was neither verified nor retained for recovery");
         Check.Require(!x.Pc.Items.Values.Any(v=>v.Entry.Path=="item" && v.Bytes.SequenceEqual(new byte[]{3})) && x.Cloud.Items["item"].Bytes.SequenceEqual(new byte[]{2}),"Altered stage published or incoming bytes destroyed");
         Check.Require(!x.Store.Records.Values.Any(v=>v.LocalId==actual.FileId && v.DropboxContentHash==incoming.ContentHash),"Unverified stage linked");
         Check.Require(x.Store.OpenNotices.All(n=>n.Kind==NoticeKind.Failure),"Unrelated notice produced during recovery");
@@ -114,19 +118,22 @@ public static class RecoveryChecks
     {
         using var x=new PairState();await x.Store.SavePairAsync(x.Pair,default);
         const string path="formerly-deleted";var entry=ItemChecks.File(Side.Local,path,1,"pc",folder);x.Pc.Seed(entry,folder?[]:[1]);
+        x.Cloud.Seed(ItemChecks.File(Side.Dropbox,"unrelated",1,"other"),[1]);
+        x.Pc.Seed(ItemChecks.File(Side.Local,"unrelated",1,"pc-other"),[1]);
         x.Cloud.ClockOffset=measured?(TimeSpan.Zero,TimeSpan.Zero):null;
         x.Cloud.DeletedHistory[path]=folder?new DeletionEvidence.DeletedPath(path,path):
             new DeletionEvidence.DeletedFile(path,"cloud","previous","r1",entry.Modified.AddDays(1),null,entry.ContentHash,null);
         await x.CompareAsync();
+        Check.Require(x.Cloud.Requests[nameof(ISide.DeletedAsync)]==1,"Ineligible live name received a history lookup or eligible name was missed");
         if(folder || measured)
         {
-            Check.Require(x.Pc.Items.Count==0 && x.Cloud.Items.Count==0 && x.Pc.History.Single().Entry==entry,"First-sync recycle did not preserve selected version");
-            Check.Require(x.Store.OpenNotices.Count==0 && x.Store.Records.Count==0,"False notice or retained binding");
+            Check.Require(!x.Pc.Items.ContainsKey(path) && !x.Cloud.Items.ContainsKey(path) && x.Pc.History.Single().Entry==entry,"First-sync recycle did not preserve selected version");
+            Check.Require(x.Store.OpenNotices.Count==0 && x.Store.Records.Count==1,"False notice or retained binding");
         }
         else
         {
             Check.Require(x.Pc.Items[path].Bytes.SequenceEqual(new byte[]{1}) && x.Cloud.Items[path].Bytes.SequenceEqual(new byte[]{1}),"Absent clock proof lost a copy");
-            x.VerifyLinks(); Check.Require(x.Store.Records.Count==1 && x.Store.OpenNotices.Single().Cause==TextKey.InfoEditBeatsDelete,"First-sync preservation notice missing");
+            x.VerifyLinks(); Check.Require(x.Store.Records.Count==2 && x.Store.OpenNotices.Single().Cause==TextKey.InfoEditBeatsDelete,"First-sync preservation notice missing");
         }
     }
     public static async Task RefusedRemovalAsync(bool recycle)
@@ -228,19 +235,42 @@ public static class RecoveryChecks
         for(int i=0;i<entries.Length;i++)
             Check.Require(entries[i].GetProperty("path").GetString()==members[i].Member.Id && entries[i].GetProperty("parent_rev").GetString()==members[i].ExpectedRevision,"Lost selected identity or revision");
     }
+    /// <summary>A sole small file replacing a folder must close a session containing its bytes before the selected folder can be removed.</summary>
+    public static async Task StageBeforeFolderAsync()
+    {
+        var wire=new DeleteWire();using var http=new HttpClient(wire);var api=new global::Massdex.SyncShark.Engine.Dropbox.DropboxApi(http,TimeProvider.System,ItemChecks.Settings,_=>{});
+        using var bytes=new MemoryStream(new byte[]{42});var file=ItemChecks.File(Side.Local,"item",42,"pc");var folder=ItemChecks.File(Side.Dropbox,"item",0,"db",true);
+        await using var staged=await new global::Massdex.SyncShark.Engine.Dropbox.UploadContent().StageAsync(api,file.Path,bytes,file,folder,default);
+        Check.Require(staged.SessionId=="session" && !staged.ConsumesSourceOnPublish && staged.ContentHash==file.ContentHash && wire.ClosedUpload && wire.Bodies.Any(b=>b=="*"),"Selected folder replacement returned before staging the closed upload");
+    }
     private sealed class DeleteWire : HttpMessageHandler
     {
         internal List<string> Paths { get; }=[];
         internal List<string> Bodies { get; }=[];
+        internal bool ClosedUpload { get; private set; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct)
         {
             Paths.Add(request.RequestUri!.AbsolutePath);Bodies.Add(await request.Content!.ReadAsStringAsync(ct));
+            if(Paths[^1].Contains("/upload_session/",StringComparison.Ordinal))
+            {
+                if(request.Headers.TryGetValues("Dropbox-API-Arg",out var args)) { using var doc=System.Text.Json.JsonDocument.Parse(args.Single());ClosedUpload|=doc.RootElement.TryGetProperty("close",out var close) && close.GetBoolean(); }
+                return new(System.Net.HttpStatusCode.OK){Content=new StringContent(Paths[^1].EndsWith("/start",StringComparison.Ordinal)?"{\"session_id\":\"session\"}":"null")};
+            }
             var json=Paths[^1].EndsWith("delete_batch",StringComparison.Ordinal)?"""{".tag":"async_job_id","async_job_id":"token"}""":"""{"metadata":{".tag":"folder","name":"member-0","id":"id:selected-0","path_display":"/member-0","path_lower":"/member-0"}}""";
             return new(System.Net.HttpStatusCode.OK){Content=new StringContent(json,System.Text.Encoding.UTF8,"application/json")};
         }
     }
 
-    public static Task A13R1ThenR2KeepLastVersionAsync() => throw new NotImplementedException();
+    public static async Task A13R1ThenR2KeepLastVersionAsync()
+    {
+        var pair=ItemChecks.Pair();var queue=new WorkQueue();var one=ItemChecks.File(Side.Dropbox,"parent/item",1,"same");var two=ItemChecks.File(Side.Dropbox,one.Path,2,one.Id);
+        var first=new Change(Side.Dropbox,ChangeKind.Changed,one.Path,null,one.Id,one,false,false);var second=first with { Observed=two };
+        var inspected=false;await queue.AdmitAsync(pair,new([first,second],"cursor",null),(change,ct)=>{
+            if(change==first) { Check.Require(queue.Held(new("parent","parent")).SequenceEqual(new[]{first,second}),"Dropped or reordered retained revisions before settlement");inspected=true; }
+            return Task.CompletedTask;
+        },null,default);
+        Check.Require(inspected && !queue.Held(new("parent","parent")).Any(),"No admission or stale held evidence after settlement");
+    }
     public static Task A13LateFileCreateAsync() => throw new NotImplementedException();
     public static Task A13LatePopulatedFolderWithoutChildReportsAsync() => throw new NotImplementedException();
     public static Task A13ChildEditedThenDeletedAsync() => throw new NotImplementedException();
@@ -329,7 +359,9 @@ public static class RecoveryChecks
         var occupant=ItemChecks.File(Side.Local,"item",3,"replacement");x.Pc.Seed(occupant,[3]);
         try { await x.Pc.PublishAsync(reopened,null,null,default); throw new InvalidDataException("Overwrote a reused name"); } catch(PathOccupiedException) { }
         Check.Require(x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{3}),"Occupant changed");x.Pc.Items.Remove("item");
-        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        var committed=await x.Store.FindAsync(x.Pair.PairId,Side.Local,PathNames.Key("item"),default);
+        Check.Require(committed?.LocalId==staged.Proof!.FileId && x.Pc.Items["item"].Entry.Id==staged.Proof.FileId && await x.Store.ArmedAsync(x.Pair.PairId,default)==null,"Stage not settled against the published file identity");
         Check.Require(x.Pc.Items["item"].Entry.Modified==source.Modified && x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{2}) && x.Pc.History.Single().Entry==old,"Replay did not preserve the selected versions and stamped time");
         Check.Require(!x.Cloud.Items.ContainsKey(staged.Proof!.Path) && !x.Store.Records.Values.Any(v=>v.LocalPath==staged.Proof.Path || v.DropboxPath==staged.Proof.Path),"Stage synced as a user file");
     }
@@ -338,7 +370,17 @@ public static class RecoveryChecks
     public static Task A42ShellRecycledSubstituteAsync() => throw new NotImplementedException();
     public static Task A42RestoredFileEditedThroughAliasAsync() => throw new NotImplementedException();
     public static Task A42RestartBeforePutBackAsync() => throw new NotImplementedException();
-    public static Task A42LostMoveReplyAsync() => throw new NotImplementedException();
+    /// <summary>Restart with a saved token after its reply was lost. A replacement at the old name is never the selected identity.</summary>
+    private static async Task LostReplyAsync(bool move)
+    {
+        using var x=new PairState();await x.InitializeAsync();var binding=await x.LinkAsync("old",1);var original=x.Cloud.Items["old"];
+        var member=new JobMember(binding.DropboxId,"old",move?"new":null);var job=new AcceptedJob(x.Pair.PairId,move?"files/move_batch/check":"files/delete_batch/check","token",[member]);
+        await x.Store.SaveJobAsync(job,default);x.Cloud.Items.Remove("old");if(move) x.Cloud.Seed(original.Entry with {Path="new"},original.Bytes);else x.Cloud.History.Add(original);
+        var successor=ItemChecks.File(Side.Dropbox,"old",2,"successor");x.Cloud.Seed(successor,[2]);x.Cloud.JobReplies[job.JobId]=new([new JobReply.Invalid()]);
+        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        Check.Require(x.Cloud.Requests[nameof(ISide.ReadJobAsync)]==1 && x.Cloud.Requests[nameof(ISide.ReadByIdAsync)]>0 && x.Cloud.Items["old"].Entry==successor && x.Cloud.Items["old"].Bytes.SequenceEqual(new byte[]{2}) && x.Cloud.Mutations.All(id=>id!=successor.Id),"Restart failed to check the token and selected identity, or mutated a successor");
+    }
+    public static Task A42LostMoveReplyAsync() => LostReplyAsync(true);
     public static Task A42CaseRenameFirstHopAsync() => throw new NotImplementedException();
     public static Task A42CaseRenameSecondHopAsync() => throw new NotImplementedException();
     public static Task A42MidMergeAsync() => throw new NotImplementedException();
@@ -355,7 +397,7 @@ public static class RecoveryChecks
     public static Task A42UnconfirmedMoveAbsentIdAsync() => throw new NotImplementedException();
     public static Task A42UnconfirmedMoveOutsidePairAsync() => throw new NotImplementedException();
     public static Task A42UnconfirmedMoveUnreadableAsync() => throw new NotImplementedException();
-    public static Task A42LostDeleteReplyOldNameReusedAsync() => throw new NotImplementedException();
+    public static Task A42LostDeleteReplyOldNameReusedAsync() => LostReplyAsync(false);
     public static Task A42RestartWithOpenFailureAsync() => throw new NotImplementedException();
     public static Task A42RestartBeforeFolderListingAsync() => throw new NotImplementedException();
     public static Task A42CreateOnlyPutBackOccupiedAsync() => throw new NotImplementedException();
@@ -383,7 +425,9 @@ public static class RecoveryChecks
             await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies[path]=new([new JobReply.Running()]);
         }
         var received=new Change(Side.Dropbox,ChangeKind.Deleted,"selected/child",null,null,null,false,false);
-        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,received,x.Pc,x.Cloud,x.Store,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await new Unfinished().CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,received,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        var pending=new List<AcceptedJob>();await foreach(var token in x.Store.JobsAsync(x.Pair.PairId,default)) pending.Add(token);
+        Check.Require(pending.Count==2 && pending.Any(j=>j.JobId=="selected" && j.Launch.Single().Path=="selected") && x.Cloud.Requests[nameof(ISide.ReadJobAsync)]==1 && x.Cloud.Requests[nameof(ISide.DeleteAsync)]==0,"Running job was settled, resent or polled more than once");
         Check.Require(x.Cloud.JobReplies["selected"].Count==0 && x.Cloud.JobReplies["unrelated"].Count==1,"Path-only news must check exactly the overlapping saved job");
     }
     public static Task A45NoLookupBeforeWakeAsync() => throw new NotImplementedException();
@@ -401,7 +445,11 @@ public static class RecoveryChecks
     public static Task A45QuietJobNextRepairOpportunityAsync() => throw new NotImplementedException();
     public static Task A47SecondStartAttachesAsync() => throw new NotImplementedException();
     public static Task A47LogsWhileHostDownAsync() => throw new NotImplementedException();
-    public static Task A47OtherReadWhileHostDownAsync() => throw new NotImplementedException();
+    public static async Task A47OtherReadWhileHostDownAsync()
+    {
+        using var output=new StringWriter();using var errors=new StringWriter();await global::Massdex.SyncShark.Engine.Edge.Cli.RunAsync(["status"],null!,output,errors,default);
+        Check.Require((output.ToString()+errors.ToString()).Contains(Text.Get(TextKey.HostNotRunning),StringComparison.Ordinal),"Detached status did not distinguish absence from an unavailable status");
+    }
     public static Task A47MutationWhileHostDownAsync() => throw new NotImplementedException();
     public static Task A47PerPairPauseSharedVolumeAsync() => throw new NotImplementedException();
     public static Task A47ResumeFromHeldPositionAsync() => throw new NotImplementedException();

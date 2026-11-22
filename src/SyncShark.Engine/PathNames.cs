@@ -43,7 +43,7 @@ public static class PathNames
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool CaseOnly(string left, string right) => Same(left, right) && left != right;
 
-    /// <summary>A user's case-insensitive text filter against a path; the one owner of the path case rule.</summary>
+    /// <summary>Display-only ordinal case-insensitive filter, not frozen path identity.</summary>
     public static bool Contains(string path, string text) => path.Contains(text, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The raw Dropbox spelling; character substitution is deferred, so no mapping is active here.</summary>
@@ -386,7 +386,7 @@ public static class PathNames
                stem.Length == 4 &&
                (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
                 stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
-               stem[3] is >= '1' and <= '9';
+               stem[3] is >= '1' and <= '9' or '¹' or '²' or '³';
     }
 
     internal static string NormalizeInventoryPath(string value)

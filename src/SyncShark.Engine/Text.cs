@@ -25,6 +25,8 @@ public static class Text
             // Exact declared names only (no numeric spellings, no case folding); a repeated key is an error.
             if (!EnumNames.TryExact<TextKey>(property.Name, out var key)) throw new InvalidDataException(property.Name);
             var template = property.Value.GetString() ?? throw new InvalidDataException(property.Name);
+            foreach (System.Text.RegularExpressions.Match placeholder in System.Text.RegularExpressions.Regex.Matches(template,@"\{([^{}]+)\}"))
+                if(!EnumNames.TryExact<TextArg>(placeholder.Groups[1].Value,out _)) throw new InvalidDataException(placeholder.Value);
             if (!map.TryAdd(key, template)) throw new InvalidDataException(property.Name);
         }
         foreach (var key in Enum.GetValues<TextKey>())

@@ -1,3 +1,4 @@
+using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Run;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
@@ -17,7 +18,7 @@ public static class ReconciliationChecks
         }
     }
     internal static async Task CompareAsync(bool baseline, FileAt[] pc, FileAt[] cloud, FileAt[] finalPc, FileAt[] finalCloud,
-        int links, TextKey[] notices, FirstRunPolicy policy = FirstRunPolicy.NewestWins, string[]? ignores = null, Exclusion[]? exclusions = null)
+        int links, TextKey[] notices, FirstRunPolicy policy = FirstRunPolicy.NewestWins, string[]? ignores = null, Exclusion[]? exclusions = null, bool expectMove=false)
     {
         var pair = ItemChecks.Pair() with { FirstRun = policy, IgnoreRules = ignores ?? [], Exclusions = exclusions ?? [] };
         var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
@@ -26,7 +27,11 @@ public static class ReconciliationChecks
         if (baseline) await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
         if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(
             ItemChecks.File(Side.Local, Original, 1, Side.Local.ToString()), ItemChecks.File(Side.Dropbox, Original, 1, Side.Dropbox.ToString())),null,null,default);
+        var before=new[]{local,remote}.SelectMany(side=>side.Items.Values.Select(v=>(Side:side,v.Entry,v.Bytes))).ToArray();
         await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(), local, remote, store, null,null, default);
+        foreach(var item in before.Where(x=>!x.Side.Items.Values.Any(v=>v.Entry.Id==x.Entry.Id && v.Bytes.SequenceEqual(x.Bytes))))
+            Check.Require(item.Side.History.Any(v=>v.Entry==item.Entry && v.Bytes.SequenceEqual(item.Bytes)),"Displaced version is not recoverable");
+        if(expectMove) Check.Require(remote.Items["renamed"].Entry.Id==before.Single(x=>x.Side==remote).Entry.Id && remote.Requests[nameof(ISide.MoveAsync)]==1 && remote.Requests[nameof(ISide.DeleteAsync)]==0 && remote.Requests[nameof(ISide.PublishAsync)]==0,"Counterpart recreated instead of moved");
         VerifySide(local,finalPc); VerifySide(remote,finalCloud);
         Check.Require(store.Records.Count == links, "Unexpected binding count");
         foreach (var binding in store.Records.Values)
@@ -49,11 +54,11 @@ public static class ReconciliationChecks
     public static Task MoveAndDeleteAsync() => CompareAsync(true, [new("renamed",1)], [], [new("renamed",1)], [new("renamed",1)], 1, [TextKey.InfoMovedDeleted]);
     public static Task MoveAndEditOppositeAsync() => CompareAsync(true, [new("renamed",1)], [new(Original,2)], [new("renamed",1),new(Original,2)], [new("renamed",1),new(Original,2)], 2, [TextKey.InfoMovedEdited]);
     public static Task DifferentDestinationsAsync() => CompareAsync(true, [new("pc-place",1)], [new("cloud-place",1)], [new("pc-place",1),new("cloud-place",1)], [new("pc-place",1),new("cloud-place",1)], 2, [TextKey.InfoMovedTwice]);
-    public static Task MoveOnlyAsync() => CompareAsync(true, [new("renamed",1)], [new(Original,1)], [new("renamed",1)], [new("renamed",1)], 1, []);
+    public static Task MoveOnlyAsync() => CompareAsync(true, [new("renamed",1)], [new(Original,1)], [new("renamed",1)], [new("renamed",1)], 1, [],expectMove:true);
     public static Task CapitalsAsync() => CompareAsync(true, [new("ITEM",1)], [new(Original,1)], [new("ITEM",1)], [new("ITEM",1)], 1, []);
     public static Task DifferentCapitalsAsync() => CompareAsync(true, [new("ITEM",1)], [new("Item",1)], [new("ITEM",1)], [new("Item",1)], 1, [TextKey.InfoCapitalsDiffer]);
     public static Task FolderCapitalsAsync() => CompareAsync(false, [new("Folder",0,true)], [new("folder",0,true)], [new("Folder",0,true)], [new("folder",0,true)], 1, []);
-    public static Task FirstRunAsync(FirstRunPolicy policy, byte winner) => CompareAsync(false, [new(Original,2)], [new(Original,4)], [new(Original,winner)], [new(Original,winner)], 1, [], policy);
+    public static Task FirstRunAsync(FirstRunPolicy policy, byte winner) => CompareAsync(false, [new(Original,policy==FirstRunPolicy.DropboxWins?(byte)5:(byte)2)], [new(Original,4)], [new(Original,winner)], [new(Original,winner)], 1, [], policy);
     public static Task IgnoreAsync() => CompareAsync(false, [new("~$draft",1)], [], [new("~$draft",1)], [], 0, [], ignores:["FileNamePrefix:~$"]);
     public static Task ExcludeKeepAsync() => CompareAsync(false, [new("outside",1)], [], [new("outside",1)], [], 0, [], exclusions:[new(Side.Local,"outside",true)]);
     public static Task ForbiddenNameAsync() => CompareAsync(false, [], [new("CON",1)], [], [new("CON",1)], 0, [TextKey.SkipReservedName]);
@@ -68,7 +73,13 @@ public static class ReconciliationChecks
     public static Task A02OutsideFolderMovedInWithoutChildReportsAsync() => throw new NotImplementedException();
     public static Task A02RestartAfterCreateBeforeListingAsync() => throw new NotImplementedException();
     public static Task A02AddOnlyPopulationNeverDeletesAsync() => throw new NotImplementedException();
-    public static Task A03EqualTrustedTimesAsync() => throw new NotImplementedException();
+    public static Task A03EqualTrustedTimesAsync()
+    {
+        const string pc="Workstation";var settings=ItemChecks.Settings;var at=DateTimeOffset.UnixEpoch;
+        var local=global::Massdex.SyncShark.Engine.Planner.ConflictName.For("item.txt",Side.Local,at,pc,settings,1);var remote=global::Massdex.SyncShark.Engine.Planner.ConflictName.For("item.txt",Side.Dropbox,at,pc,settings,1);
+        Check.Require(local.Contains(pc,StringComparison.Ordinal) && !remote.Contains(pc,StringComparison.Ordinal) && remote.Contains(settings.ConflictLabelDropboxName,StringComparison.Ordinal),"Conflict label lost its source");
+        return RecoveryChecks.KeptVersionsAsync(false);
+    }
     public static Task A03UnequalTrustedTimesAsync() => throw new NotImplementedException();
     public static Task A03ResolveUsePcAsync() => throw new NotImplementedException();
     public static Task A03ResolveUseDropboxAsync() => throw new NotImplementedException();
@@ -76,7 +87,16 @@ public static class ReconciliationChecks
     public static Task A03ResolveRenamePcAsync() => throw new NotImplementedException();
     public static Task A03ResolveRenameDropboxAsync() => throw new NotImplementedException();
     public static Task A03FourEndpointNoticeAsync() => throw new NotImplementedException();
-    public static Task A05SameIdSizeMtimeWriteAfterPublicationAsync() => throw new NotImplementedException();
+    public static async Task A05SameIdSizeMtimeWriteAfterPublicationAsync()
+    {
+        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);var queue=new WorkQueue();using var store=new InMemoryStateStore();var local=new FakeSide(Side.Local);var remote=new FakeSide(Side.Dropbox);
+        var before=ItemChecks.File(Side.Local,"file",1,"pc");var db=ItemChecks.File(Side.Dropbox,"file",1,"db");
+        var after=ItemChecks.File(Side.Local,"file",2,before.Id) with { Modified=before.Modified };
+        local.Seed(after,[2]);remote.Seed(db,[1]);await store.CommitAsync(pair.PairId,null,SyncedEntries.From(before,db),new(1,10),null,default);
+        await store.SaveNoticeAsync(pair.PairId,new(1,NoticeKind.Failure,TextKey.FailChanged,before.Path,new([new(Side.Local,before.Path,before.Id)],Side.Local,new(before.Size,before.Modified.UtcTicks,before.ContentHash)),DateTimeOffset.UnixEpoch,false),default);
+        await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Local,ChangeKind.Changed,after.Path,null,after.Id,after,true,false,11,JournalId:1),local,remote,store,ItemChecks.Population(pair,paths,local,remote,store),ItemChecks.Hop(pair,paths,queue,local,remote,store),default);
+        Check.Require(remote.Items[after.Path].Bytes.SequenceEqual(new byte[]{2}) && remote.History.Any(v=>v.Entry==db),"Stale publication or stamp-only proof hid changed bytes");
+    }
     public static Task A05SameWriteAtPublicationBoundaryAsync() => throw new NotImplementedException();
     public static Task A07DifferentFileEditsAsync() => throw new NotImplementedException();
     public static Task A07TwoKindFlipsToIdenticalFilesAsync() => throw new NotImplementedException();
@@ -106,7 +126,13 @@ public static class ReconciliationChecks
     public static Task A28ExcludeKeepPcAsync() => throw new NotImplementedException();
     public static Task A28ExcludeKeepCloudAsync() => throw new NotImplementedException();
     public static Task A28RecreateInKeepScopeAsync() => throw new NotImplementedException();
-    public static Task A28PreviewWithoutConfirmationAsync() => throw new NotImplementedException();
+    public static async Task A28PreviewWithoutConfirmationAsync()
+    {
+        var pair=ItemChecks.Pair();using var store=new InMemoryStateStore();await store.SavePairAsync(pair,default);var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);
+        db.Seed(ItemChecks.File(Side.Dropbox,"victim",1,"db"),[1]);var host=new Host((_,_)=>Task.FromResult<IStore?>(store),(_,_,_,_)=>(pc,db),ItemChecks.Settings,null!,TimeProvider.System,_=>throw new InvalidOperationException(),(_,_)=>throw new InvalidOperationException());
+        using var output=new StringWriter();await new global::Massdex.SyncShark.Engine.Edge.Commands().ExecuteAsync(["pairs","exclude","--pair",pair.PairId,"--side","dropbox","--rel","victim"],host,output,default);
+        var warning=output.ToString();Check.Require(warning.Contains(Text.Get(TextKey.RecoveryDropboxHistory),StringComparison.OrdinalIgnoreCase) && warning.Contains("retention",StringComparison.OrdinalIgnoreCase) && db.Items.ContainsKey("victim") && db.Requests[nameof(ISide.DeleteAsync)]==0,"Destructive preview did not explain recovery or removed the target");
+    }
     public static Task A28ConfirmedRemovalPcAsync() => throw new NotImplementedException();
     public static Task A28ConfirmedRemovalCloudAsync() => throw new NotImplementedException();
     public static Task A28OnlyKeptSideEditedAsync() => throw new NotImplementedException();

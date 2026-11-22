@@ -5,6 +5,7 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        if(args is ["--literal-sites", var candidate, var release, var output]) { Layout.LiteralsChecks.WriteLiteralSites(candidate,release,output); return 0; }
         var checks = CheckRegistry.All(CheckArguments.Parse(args));
         int passed = 0, missing = 0, failed = 0;
         foreach (var check in checks)
