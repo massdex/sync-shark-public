@@ -42,6 +42,6 @@ public sealed class DropboxSide : ISide
 
 
     /// <inheritdoc/>
-    public Task<IStaged> ReopenStageAsync(StageProof expected, Entry source, CancellationToken ct) => throw new NotImplementedException();
+    public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, Entry source, CancellationToken ct) => throw new NotImplementedException();
     public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive)> RootAsync(CancellationToken ct) => throw new NotImplementedException();
 }

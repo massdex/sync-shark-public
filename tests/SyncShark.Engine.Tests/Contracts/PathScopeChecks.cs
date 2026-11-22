@@ -14,6 +14,8 @@ public static class PathScopeChecks
         Check.Require(!scope.Excludes(null,"Inner/file",false) && !scope.Excludes("RemoteInner/file",null,false),"Unrelated relative spelling crossed endpoints");
         Check.Require(!scope.Excludes(null,"Recycle Bin/item",false),"PC bin leaked into Dropbox matcher");
         Check.Require(scope.Excludes("Inner/file","Elsewhere/file",false),"Mapped PC boundary lost");
+        var unrelated = new Change(Side.Dropbox,ChangeKind.Changed,"Inner/file",null,"db",null,false,false);
+        Check.Require(!scope.ExcludesChange(unrelated,0,static (_,_,_)=>null),"Unbound change inferred a PC boundary from a Dropbox name");
         Check.Require(!scope.Excludes("innermost/file", null, false), "Unrelated sibling");
         return Task.CompletedTask;
     }
@@ -44,5 +46,18 @@ public static class PathScopeChecks
         try { _=new RemovalProof(folder with { IsFolder=false },"volume",null); }
         catch(ArgumentException) { return Task.CompletedTask; }
         throw new InvalidDataException("File victim accepted without content proof");
+    }
+    /// <summary>Empty pair state survives completing its first full Repair, without promoting partial/scoped work.</summary>
+    public static async Task CompletedRepairFactsAsync()
+    {
+        using IStore store=new TestDoubles.InMemoryStateStore();var pair=Scenarios.ItemChecks.Pair();await store.SavePairAsync(pair,default);
+        Check.Require(!(await store.RepairStateAsync(pair.PairId,default)).FirstRepairDone,"New pair was already repaired");
+        var old=await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default);
+        var current=await store.OweRepairAsync(pair.PairId,Side.Dropbox,"gap",default);
+        Check.Require(!await store.FinishRepairAsync(pair.PairId,Side.Dropbox,old,default,completedRepairJson:"{}"),"Stale completion published first Repair");
+        Check.Require(await store.FinishRepairAsync(pair.PairId,Side.Dropbox,current,default,completedRepairJson:"{}"),"Current completion refused");
+        Check.Require(await store.RepairStateAsync(pair.PairId,default)==(true,"{}"),"Empty completed pair lost first-run state or summary");
+        await store.SaveCursorAsync(pair.PairId,"feed",default);await store.PublishDeletedHistoryAsync(pair.PairId,"history",default);
+        Check.Require(await store.CursorAsync(pair.PairId,default)=="feed" && await store.DeletedHistoryAsync(pair.PairId,default)==("history",false),"Feed and history continuations were collapsed");
     }
 }

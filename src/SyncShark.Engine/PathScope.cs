@@ -90,8 +90,10 @@ public sealed class PathScope
         bool Excludes(string path)
         {
             var key = PathNames.KeyFor(side, path);
-            return ExcludesBinding(readSaved(state, side, key)) && (CoversKey(side,key) ||
-                CoversKey(other,PathNames.KeyFor(other, PathNames.MappedDestination(other, path, state, readSaved))));
+            var saved=readSaved(state,side,key);
+            if (saved is not null) return ExcludesBinding(saved);
+            // An unbound source name alone does not prove that a counterpart sits inside a native boundary.
+            return CoversKey(side,key) || excluded.Covers(PathNames.KeyFor(other, PathNames.MappedDestination(other,path,state,readSaved)));
         }
     }
 

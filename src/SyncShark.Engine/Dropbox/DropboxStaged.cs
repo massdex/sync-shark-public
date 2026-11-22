@@ -7,7 +7,7 @@ public sealed class DropboxStaged : IStaged
     private DropboxStaged(string path, Stream? content, string? sessionId, long total, Entry source, string? contentHash) =>
         (Path, Content, SessionId, Total, Source, ContentHash) = (path, content, sessionId, total, source, contentHash);
 
-    /// <summary>Stages a whole stream for one direct upload.</summary>
+    /// <summary>Stages a whole stream for one direct upload only when no target folder must be removed first.</summary>
     public static DropboxStaged Single(string path, Stream content, Entry source) =>
         new(path, content, null, content.Length, source, null);
 

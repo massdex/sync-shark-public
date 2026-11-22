@@ -147,7 +147,7 @@ public sealed class FakeSide(Side side) : ISide
     }
 
     /// <inheritdoc/>
-    public Task<IStaged> ReopenStageAsync(StageProof expected, Entry source, CancellationToken ct) => throw new InvalidOperationException();
+    public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, Entry source, CancellationToken ct) => throw new InvalidOperationException();
     public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive)> RootAsync(CancellationToken ct) => Task.FromResult(Root);
     public (DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive) Root { get; set; }
 }

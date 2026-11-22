@@ -19,7 +19,7 @@ public sealed class LocalSide : ISide
     public Task<string> ContentHashAsync(Entry entry, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Stage operation on the supplied facts.</summary>
     public Task<IStaged> StageAsync(string path, Stream content, Entry source, Entry? selectedTarget, CancellationToken ct) => throw new NotImplementedException();
-    /// <summary>Publish operation on the supplied facts.</summary>
+    /// <summary>Arm the exact note through this pair’s store before recycle; revalidate a selected placeholder on its held handle without hydration. Never publish over a substitute.</summary>
     public Task<RemovalResult> PublishAsync(IStaged staged, Entry? expected, RemovalSelection? selection, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>EnsureFolder operation on the supplied facts.</summary>
     public Task<RemovalResult> EnsureFolderAsync(string path, CancellationToken ct) => throw new NotImplementedException();
@@ -42,6 +42,6 @@ public sealed class LocalSide : ISide
 
 
     /// <inheritdoc/>
-    public Task<IStaged> ReopenStageAsync(StageProof expected, Entry source, CancellationToken ct) => throw new NotImplementedException();
+    public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, Entry source, CancellationToken ct) => throw new NotImplementedException();
     public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive)> RootAsync(CancellationToken ct) => throw new NotImplementedException();
 }

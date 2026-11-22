@@ -42,7 +42,7 @@ public interface ISide
     /// <summary>Recovers attributable file bytes or folder scope; a substitute is never the selected version.</summary>
     Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct);
     /// <summary>Reopens and verifies the exact armed PC stage, not a file found by its old name. PublishAsync then conditionally publishes through the held stage.</summary>
-    Task<IStaged> ReopenStageAsync(StageProof expected, Entry source, CancellationToken ct);
+    Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, Entry source, CancellationToken ct);
     /// <summary>Observes a returned job without submitting its members again.</summary>
     Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct);
 }
