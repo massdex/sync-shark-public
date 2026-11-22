@@ -4,6 +4,8 @@ namespace Massdex.SyncShark.Engine;
 public interface ISide
 {
     Side Side { get; }
+    /// <summary>Notify a journal source when its pair membership changes.</summary>
+    Task SetMembershipAsync(PairConfig pair, bool paused, bool removed, CancellationToken ct) => Task.CompletedTask;
     /// <summary>Native root identity for this side; PC also supplies drive evidence and observed drive type for its scope, recycle and startup trim; Dropbox has no PC drive type. A missing or unreadable root never implies a delete.</summary>
     Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType)> RootAsync(CancellationToken ct);
     /// <summary>The entries under folder `under` ("" = the root; `under` itself is not yielded), in listing order,
@@ -78,7 +80,11 @@ public abstract record JobReply
 {
     public sealed record Running : JobReply;
     public sealed record Invalid : JobReply;
-    public sealed record Terminal(IReadOnlyList<(Entry? Entry, TextKey? Cause, FailureDisposition? Failure)> Members) : JobReply;
+    public sealed record Terminal(IReadOnlyList<(Entry? Entry, TextKey? Cause, FailureDisposition? Failure)> Members) : JobReply
+    {
+        /// <summary>Zero-based indices into Members whose selected ID was observed absent, not proof this request removed it. Reindex when projecting a subset.</summary>
+        public IReadOnlySet<int> AbsentOrdinals { get; init; } = System.Collections.Frozen.FrozenSet<int>.Empty;
+    }
 }
 
 /// <summary>The Executor's selected losing proof together with the exact saved binding it was selected against,

@@ -1,18 +1,26 @@
+using System.Globalization;
 using System.Text;
 using Massdex.SyncShark.Engine.Run;
 
 namespace Massdex.SyncShark.Engine.Tests.Run;
 
-/// <summary>Contract checks for RunLog: every event reaches the file seam, a buffered record is flushed on dispose,
-/// a file failure never reaches the run, and the detached read needs only the file seam (F029, F054).</summary>
+/// <summary>Contract checks for RunLog: the stored record is a UTC timestamp plus five reversible fields in six
+/// fixed columns; a literal backslash-n never collides with a control newline; a typed outcome survives; a failed
+/// write, flush or close still closes the writer exactly once; and the detached read needs only the file seam
+/// (F029, F054, M22).</summary>
 public static class RunLogChecks
 {
     public static Task RunAsync()
     {
-        WritesEachEventThroughTheFileSeam();
-        DisposeFlushesBufferedRecords();
+        WritesCanonicalTimestampedRecord();
+        EscapesLiteralBackslashDistinctFromControl();
+        TypedOutcomeSurvives();
+        DisposeClosesAfterWriteFailure();
+        DisposeClosesAfterFlushFailure();
+        CloseFailureIsContained();
+        DisposeIsIdempotent();
         WriteAfterDisposeIsIgnored();
-        FileFailureStopsWritingWithoutThrowing();
+        OpenFailureIsContained();
         ReadIsDetachedFromAnyWriter();
         ReadForwardsStatusRecordsAndTrailing();
         return Task.CompletedTask;
@@ -22,38 +30,97 @@ public static class RunLogChecks
         string.Empty, string.Empty, string.Empty, string.Empty, string.Empty,
         30, FirstRunPolicy.NewestWins, 0, string.Empty, bufferCharacters, 512);
 
-    private static RunEvent Stage(string what) => new(RunEventKind.Stage, what, string.Empty, string.Empty, string.Empty);
-
-    private static void WritesEachEventThroughTheFileSeam()
+    private static void WritesCanonicalTimestampedRecord()
     {
         var files = new FakeLogFiles();
-        using var log = new RunLog(files, "logs/pair-run.log", Settings(8192));
-        log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", "copied", "Dropbox")
-        {
-            Count = 2,
-        });
-        log.Write(Stage("Reading both sides") with { Ended = true, Count = 1000 });
+        var log = new RunLog(files, "logs/pair-run.log", Settings(8192));
+        log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", "copied", "Dropbox"));
+        log.Write(new RunEvent(RunEventKind.Wait, "Waiting", string.Empty, string.Empty, string.Empty));
+        log.Dispose();
 
-        Check.Require(files.OpenCount == 1, "the writer opens the file exactly once");
-        Check.Require(files.OpenedPath == "logs/pair-run.log", "the writer opens the run's own path");
-        Check.Require(files.OpenedBuffer == 8192, "the configured character buffer reaches the seam");
+        Check.Require(files.OpenCount == 1 && files.OpenedBuffer == 8192, "the configured buffer reaches the seam");
         Check.Require(files.Written.Count == 2, "both events reach the file");
-        Check.Require(files.Written[0].StartsWith("Effect\t", StringComparison.Ordinal),
-            "the per-file line starts with its kind so a reader can select it");
-        Check.Require(files.Written[1].StartsWith("Stage\t", StringComparison.Ordinal), "the stage line starts with its kind");
-        Check.Require(files.Written[1].Contains("1000", StringComparison.Ordinal), "the stage count is logged");
+        var full = files.Written[0].Split(RunLog.FieldSeparator);
+        Check.Require(full.Length == RunLog.RecordFieldCount, "a record has six fixed columns");
+        Check.Require(DateTimeOffset.TryParse(full[0], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind,
+            out var at) && at.Offset == TimeSpan.Zero, "the first column is a UTC round-trip timestamp");
+        Check.Require(full[1] == "Effect" && full[2] == "Uploaded" && full[3] == "alpha/report.txt" &&
+            full[4] == "copied" && full[5] == "Dropbox", "kind, what, path, detail and outcome keep their positions");
+        var empty = files.Written[1].Split(RunLog.FieldSeparator);
+        Check.Require(empty.Length == RunLog.RecordFieldCount && empty[3].Length == 0 && empty[4].Length == 0 &&
+            empty[5].Length == 0, "empty fields keep their column positions");
     }
 
-    private static void DisposeFlushesBufferedRecords()
+    private static void EscapesLiteralBackslashDistinctFromControl()
     {
         var files = new FakeLogFiles();
         var log = new RunLog(files, "logs/pair-run.log", Settings());
-        // An effect line is buffered, not flushed at write time.
-        log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", string.Empty, "Dropbox"));
-        Check.Require(files.Written.Count == 0, "an effect line is buffered until a flush");
+        log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "a\\nb", "a\nb", string.Empty));
         log.Dispose();
+
+        var fields = files.Written[0].Split(RunLog.FieldSeparator);
+        var escapedLiteral = fields[3];
+        var escapedControl = fields[4];
+        Check.Require(escapedLiteral == "a\\\\nb", "a literal backslash-n is reversibly escaped");
+        Check.Require(escapedControl == "a\\nb", "a control newline is escaped");
+        Check.Require(escapedLiteral != escapedControl, "a literal backslash-n never collides with a control newline");
+        Check.Require(RunLog.TryUnescape(escapedLiteral, out var literal) && literal == "a\\nb",
+            "the literal form round-trips");
+        Check.Require(RunLog.TryUnescape(escapedControl, out var control) && control == "a\nb",
+            "the control form round-trips");
+    }
+
+    private static void TypedOutcomeSurvives()
+    {
+        var files = new FakeLogFiles();
+        var log = new RunLog(files, "logs/pair-run.log", Settings());
+        log.Write(new RunEvent(RunEventKind.Issue, "Failure", "alpha/report.txt", "name rejected",
+            "FailDropboxNameRejected"));
+        log.Dispose();
+
+        var fields = files.Written[0].Split(RunLog.FieldSeparator);
+        Check.Require(fields[1] == "Issue" && fields[5] == "FailDropboxNameRejected",
+            "a representative typed outcome is stored unchanged");
+    }
+
+    private static void DisposeClosesAfterWriteFailure()
+    {
+        var files = new FakeLogFiles { FailWrites = true };
+        var log = new RunLog(files, "logs/pair-run.log", Settings());
+        log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", string.Empty, "Dropbox"));
+        log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/other.txt", string.Empty, "Dropbox"));
+        log.Dispose();
+        Check.Require(files.Written.Count == 0, "a write failure stops further writes");
+        Check.Require(files.Writer is { DisposeCount: 1 }, "dispose still closes the writer exactly once");
+    }
+
+    private static void DisposeClosesAfterFlushFailure()
+    {
+        var files = new FakeLogFiles { FailFlush = true };
+        var log = new RunLog(files, "logs/pair-run.log", Settings());
+        log.Write(new RunEvent(RunEventKind.Stage, "Reading both sides", string.Empty, string.Empty, string.Empty));
+        log.Dispose();
+        Check.Require(files.Writer is { DisposeCount: 1 }, "a failed flush does not strand the handle");
+    }
+
+    private static void CloseFailureIsContained()
+    {
+        var files = new FakeLogFiles { FailClose = true };
+        var log = new RunLog(files, "logs/pair-run.log", Settings());
+        log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", string.Empty, "Dropbox"));
+        log.Dispose();
+        Check.Require(files.Writer is { DisposeCount: 1 }, "a close failure is contained and counted once");
+    }
+
+    private static void DisposeIsIdempotent()
+    {
+        var files = new FakeLogFiles();
+        var log = new RunLog(files, "logs/pair-run.log", Settings());
+        log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", string.Empty, "Dropbox"));
+        log.Dispose();
+        log.Dispose();
+        Check.Require(files.Writer is { DisposeCount: 1 }, "dispose closes the writer only once");
         Check.Require(files.Written.Count == 1, "dispose flushes the buffered record instead of stranding it");
-        Check.Require(files.Writer is { Disposed: true }, "dispose closes the writer");
     }
 
     private static void WriteAfterDisposeIsIgnored()
@@ -61,31 +128,22 @@ public static class RunLogChecks
         var files = new FakeLogFiles();
         var log = new RunLog(files, "logs/pair-run.log", Settings());
         log.Dispose();
-        log.Write(Stage("late"));
+        log.Write(new RunEvent(RunEventKind.Stage, "late", string.Empty, string.Empty, string.Empty));
         Check.Require(files.Written.Count == 0, "a write after dispose is ignored, never thrown");
     }
 
-    private static void FileFailureStopsWritingWithoutThrowing()
+    private static void OpenFailureIsContained()
     {
-        var failingWire = new FakeLogFiles { FailWrites = true };
-        using (var log = new RunLog(failingWire, "logs/pair-run.log", Settings()))
-        {
-            log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", string.Empty, "Dropbox"));
-            log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/other.txt", string.Empty, "Dropbox"));
-        }
-        Check.Require(failingWire.Written.Count == 0, "a write failure is contained and stops later writes");
-
-        var failingOpen = new FakeLogFiles { FailOpen = true };
-        using (var log = new RunLog(failingOpen, "logs/pair-run.log", Settings()))
-        {
-            log.Write(Stage("Reading both sides"));
-        }
-        Check.Require(failingOpen.Written.Count == 0, "an open failure is contained and stops writes");
+        var files = new FakeLogFiles { FailOpen = true };
+        var log = new RunLog(files, "logs/pair-run.log", Settings());
+        log.Write(new RunEvent(RunEventKind.Stage, "Reading both sides", string.Empty, string.Empty, string.Empty));
+        log.Dispose();
+        Check.Require(files.Written.Count == 0, "an open failure is contained and stops writes");
     }
 
     private static void ReadIsDetachedFromAnyWriter()
     {
-        var files = new FakeLogFiles { Lines = ["alpha"], Malformed = false };
+        var files = new FakeLogFiles { Lines = ["alpha"] };
         var records = new List<string>();
         // Static call: no RunLog instance, so no writer-shaped object can be constructed for a read.
         var status = RunLog.Read(files, "logs/pair-run.log", (line, _) => records.Add(line), 4096,
@@ -118,14 +176,15 @@ public static class RunLogChecks
     {
         private readonly List<string> _written = [];
         public CapturingWriter? Writer { get; private set; }
-        public string? OpenedPath { get; private set; }
-        public int? OpenedBuffer { get; private set; }
         public int OpenCount { get; private set; }
+        public int? OpenedBuffer { get; private set; }
         public int ReadCount { get; private set; }
         public string? ReadPath { get; private set; }
         public int? ReadBuffer { get; private set; }
         public bool FailOpen { get; init; }
         public bool FailWrites { get; init; }
+        public bool FailFlush { get; init; }
+        public bool FailClose { get; init; }
         public bool Malformed { get; init; }
         public bool Trailing { get; init; }
         public ILogFiles.ReadStatus Status { get; init; } = ILogFiles.ReadStatus.Found;
@@ -135,7 +194,6 @@ public static class RunLogChecks
         public TextWriter Open(string path, int bufferCharacters)
         {
             OpenCount++;
-            OpenedPath = path;
             OpenedBuffer = bufferCharacters;
             if (FailOpen) throw new IOException("open failure");
             Writer = new CapturingWriter(this);
@@ -171,7 +229,7 @@ public static class RunLogChecks
     private sealed class CapturingWriter(FakeLogFiles owner) : TextWriter
     {
         private readonly StringBuilder _pending = new();
-        public bool Disposed { get; private set; }
+        public int DisposeCount { get; private set; }
         public override Encoding Encoding => System.Text.Encoding.UTF8;
 
         public override void WriteLine(string? value)
@@ -182,19 +240,25 @@ public static class RunLogChecks
 
         public override void Flush()
         {
-            owner.Publish(_pending.ToString());
-            _pending.Clear();
+            if (owner.FailFlush) throw new IOException("flush failure");
+            Publish();
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (!Disposed)
+            if (DisposeCount == 0)
             {
-                Disposed = true;
-                owner.Publish(_pending.ToString());
-                _pending.Clear();
+                DisposeCount++;
+                if (owner.FailClose) throw new IOException("close failure");
+                Publish();
             }
             base.Dispose(disposing);
+        }
+
+        private void Publish()
+        {
+            owner.Publish(_pending.ToString());
+            _pending.Clear();
         }
     }
 }

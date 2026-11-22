@@ -17,4 +17,6 @@ public sealed class NoticeTable
     public Task UpdateLinkMemberAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, NoticeItem member, bool present, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>
     public Task<Notice?> NoticeAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, long id, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Save the notice in the caller’s existing transaction.</summary>
+    public Task SaveNoticeAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, Notice notice, CancellationToken ct) => throw new NotImplementedException();
 }
