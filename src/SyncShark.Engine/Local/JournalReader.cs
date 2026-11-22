@@ -3,8 +3,12 @@ namespace Massdex.SyncShark.Engine.Local;
 /// <summary>JournalReader operations for the local module.</summary>
 public sealed class JournalReader
 {
+    /// <summary>Attach membership before any volume read, including paused pairs; a stopped or paused member still holds its oldest unsettled input.</summary>
+    public void Attach(PairConfig pair) => throw new NotImplementedException();
+    /// <summary>Save only the common contiguous volume position after this pair’s settlement, without reading another page.</summary>
+    public Task SettleAsync(PairConfig pair, JournalPosition position, IStore store, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Reads raw ordered changes, stamping each record with its acquired journal ID and retaining the volume, historical parent id and name for each physical hop even when the current relative path is unknown.</summary>
-    public IAsyncEnumerable<ChangePage> ReadAsync(string root, JournalPosition position, EngineSettings settings, CancellationToken ct) => throw new NotImplementedException();
+    public IAsyncEnumerable<ChangePage> ReadAsync(PairConfig pair, JournalPosition position, EngineSettings settings, CancellationToken ct) => throw new NotImplementedException();
 }
 
 /// <summary>Classifies the result of one native USN journal page read.</summary>

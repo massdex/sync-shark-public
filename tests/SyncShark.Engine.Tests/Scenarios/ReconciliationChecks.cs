@@ -26,7 +26,7 @@ public static class ReconciliationChecks
         if (baseline) await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
         if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(
             ItemChecks.File(Side.Local, Original, 1, Side.Local.ToString()), ItemChecks.File(Side.Dropbox, Original, 1, Side.Dropbox.ToString())),null,null,default);
-        await Repair.RunAsync(pair,new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(), local, remote, store, null,null, default);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(), local, remote, store, null,null, default);
         VerifySide(local,finalPc); VerifySide(remote,finalCloud);
         Check.Require(store.Records.Count == links, "Unexpected binding count");
         foreach (var binding in store.Records.Values)

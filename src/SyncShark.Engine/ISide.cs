@@ -35,6 +35,8 @@ public interface ISide
     Task<RemovalResult> CreateFolderExclusiveAsync(string path, CancellationToken ct);
     /// <summary>Reads the next change page and the provider boundary it covers.</summary>
     Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct);
+    /// <summary>Deliver the PC pair’s contiguous settled prefix to the shared volume owner, independently of another read. Only used on Local.</summary>
+    Task SettleJournalAsync(JournalPosition position, CancellationToken ct);
     /// <summary>The latest observed provider clock offset and its uncertainty; null without a measurement.</summary>
     (TimeSpan Offset, TimeSpan Uncertainty)? ClockOffset { get; }
     /// <summary>Substantiated deleted-history evidence for the first comparison; a lookup failure is not absence.</summary>

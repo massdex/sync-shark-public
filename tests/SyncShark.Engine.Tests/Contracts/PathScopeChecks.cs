@@ -41,10 +41,11 @@ public static class PathScopeChecks
         Check.Require((await store.PairAsync(pair.PairId,default))!.OwedScopes!.SequenceEqual([b]),"Wrong mapped footprint cleared");
         Check.Require((await store.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason=="requested","Scoped completion cleared whole-pair debt");
         var inner=pair with { PairId="inner" };await store.SavePairAsync(inner,default);
-        var ordinary=new Notice(1,NoticeKind.Failure,TextKey.PublishFailed,"file",new([new(Side.Local,"file","id")],Side.Local),DateTimeOffset.UnixEpoch,false);
-        var putBack=ordinary with { Id=2,Cause=TextKey.FailPutBack,Path="edit",Subject=new([new(Side.Local,"edit","edit-id")],Side.Local) };
-        await store.SaveNoticeAsync(inner.PairId,ordinary,default);await store.SaveNoticeAsync(inner.PairId,putBack with { Ignored=true },default);
-        Check.Require(await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)])==TextKey.FailPutBack && !(await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Removal released an outstanding put-back or published its scope");
+        var ordinary=new Notice(1,NoticeKind.Failure,TextKey.PublishFailed,"edit",new([new(Side.Local,"edit","new-id")],Side.Local),DateTimeOffset.UnixEpoch,false);
+        var putBack=ordinary with { Id=2,Kind=NoticeKind.PutBack,Cause=TextKey.FailLocalInUse,Path="edit",Subject=new([new(Side.Local,"edit","edit-id")],Side.Local) };
+        await store.SaveNoticeAsync(inner.PairId,putBack with { Ignored=true },default);await store.SaveNoticeAsync(inner.PairId,ordinary,default);
+        Check.Require(store.OpenNotices.Count==2 && store.OpenNotices.Any(n=>n.Ignored && n.Matches(putBack)),"Ordinary failure displaced put-back evidence");
+        Check.Require(await store.RemovePairAsync(inner.PairId,default,[(pair.PairId,a)])==TextKey.PairPutBackOutstanding && !(await store.PairAsync(pair.PairId,default))!.OwedScopes!.Contains(a),"Removal released an outstanding put-back or published its scope");
         await store.CloseNoticeAsync(inner.PairId,putBack,default);
         var job=new AcceptedJob(inner.PairId,"route","token",[]);await store.SaveJobAsync(job,default);
         Check.Require(await store.RemovePairAsync(inner.PairId,default)==TextKey.PairJobOutstanding,"Accepted job lost its removal reason");await store.SettleJobAsync(job,default);

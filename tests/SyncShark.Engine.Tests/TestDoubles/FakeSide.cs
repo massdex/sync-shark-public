@@ -144,6 +144,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
         var folder = Folder(path); Seed(folder, []); return Task.FromResult(new RemovalResult(RemovalOutcome.Published,folder,null));
     }
     /// <summary>ReadChanges operation on the supplied facts.</summary>
+    public Task SettleJournalAsync(JournalPosition position,CancellationToken ct) { ct.ThrowIfCancellationRequested(); Requests.Count(nameof(SettleJournalAsync));return Task.CompletedTask; }
     public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReadChangesAsync));

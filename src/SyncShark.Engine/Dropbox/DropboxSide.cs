@@ -31,7 +31,9 @@ public sealed class DropboxSide : ISide
     public Task<(IdentityLocation Location, bool InScope)?> ReadByIdAsync(string id, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>CreateFolderExclusive operation on the supplied facts.</summary>
     public Task<RemovalResult> CreateFolderExclusiveAsync(string path, CancellationToken ct) => throw new NotImplementedException();
-    /// <summary>ReadChanges operation on the supplied facts.</summary>
+    /// <inheritdoc/>
+    public Task SettleJournalAsync(JournalPosition position, CancellationToken ct) => throw new NotSupportedException();
+    /// <inheritdoc/>
     public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Recover operation on the supplied facts.</summary>
     public Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct) => throw new NotImplementedException();

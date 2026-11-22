@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 
 namespace Massdex.SyncShark.Engine;
 
-/// <summary>One entry on a pair's issue list. A Failure with cause FailPutBack owns the identified edit’s outstanding put-back, even when ignored.</summary>
+/// <summary>One entry on a pair's issue list. A PutBack notice keeps its original failure cause and owns the identified edit’s outstanding put-back, even when ignored.</summary>
 public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path, IssueSubject Subject,
     DateTimeOffset At, bool Dismissed, bool Ignored = false)
 {
@@ -23,7 +23,7 @@ public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path
     {
         if (scopeKey.Length == 0) return true;
         if (Subject.Items.Count == 0)
-            return Kind is NoticeKind.Failure or NoticeKind.Tie or NoticeKind.NameClash &&
+            return Kind is NoticeKind.Failure or NoticeKind.PutBack or NoticeKind.Tie or NoticeKind.NameClash &&
                 PathNames.IsSelfOrUnderKey(PathNames.Key(Path), scopeKey);
         foreach (var item in Subject.Items)
             if (PathNames.IsSelfOrUnderKey(PathNames.KeyFor(item.Side, item.Path), scopeKey)) return true;

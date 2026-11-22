@@ -6,7 +6,7 @@ public sealed class PairTable
     /// <summary>Read operation on the supplied facts.</summary>
     public Task<PairConfig?> ReadAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, CancellationToken ct) => throw new NotImplementedException();
 
-    /// <summary>Publish the pair edit or removal and its returned scopes in this transaction. Return the blocking cause on refusal, null on success.</summary>
+    /// <summary>Publish the pair edit or removal and its returned scopes in the caller’s immediate write transaction. Check the accepted jobs, armed note and PutBack notices through that transaction, not earlier connection reads. Return the blocking cause on refusal, null on success.</summary>
     public Task<TextKey?> PublishAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, PairConfig? replacement, IReadOnlyList<(string Owner,Scope Scope)> returnedScopes, CancellationToken ct) => throw new NotImplementedException();
     public Task<bool> FinishRepairAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Retire only the matching mapped scope at the owner’s Dropbox revision. No first-run bit or full summary is published.</summary>
@@ -31,4 +31,19 @@ public sealed class PairTable
     public Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Clear only the matching victim and stage.</summary>
     public Task DisarmAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct) => throw new NotImplementedException();
+
+    /// <summary>Read or update the existing pair or source facts.</summary>
+    public IAsyncEnumerable<PairConfig> PairsAsync(Microsoft.Data.Sqlite.SqliteConnection db, int pageSize, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read or update the existing pair or source facts.</summary>
+    public Task<JournalPosition?> PositionAsync(Microsoft.Data.Sqlite.SqliteConnection db, string volume, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read or update the existing pair or source facts.</summary>
+    public Task SavePositionAsync(Microsoft.Data.Sqlite.SqliteConnection db, string volume, JournalPosition position, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read or update the existing pair or source facts.</summary>
+    public Task<string?> CursorAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read or update the existing pair or source facts.</summary>
+    public Task SaveCursorAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, string cursor, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read or update the existing pair or source facts.</summary>
+    public Task<long> OweRepairAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Side side, string reason, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read or update the existing pair or source facts.</summary>
+    public Task<(long Revision, string? Reason)> ReadRepairAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Side side, CancellationToken ct) => throw new NotImplementedException();
 }

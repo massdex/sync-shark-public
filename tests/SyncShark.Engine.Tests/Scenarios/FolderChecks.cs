@@ -22,7 +22,7 @@ public static class FolderChecks
         if(!ignored && !excluded && !nested) await store.CommitAsync(pair.PairId,null,SyncedEntries.From(childA,childB),null,null,default);
         var live=edited?ItemChecks.File(Side.Local,child,3,childA.Id):childA;pc.Seed(live,nested?[]:new[]{edited?(byte)3:(byte)1});
         if(unreadable) pc.ReadFailures[child]=new ItemFailedException(child,TextKey.ReadLocalFailed,null);
-        await new FolderDelete().ApplyAsync(pair,paths,parent,Side.Dropbox,pc,cloud,store,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),default);
+        await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,parent,Side.Dropbox,pc,cloud,store,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),default);
         if(ignored)
         {
             Check.Require(pc.Items.Count==0 && cloud.Items.Count==0 && pc.History.Any(x=>x.Entry.Path==child && x.Bytes.SequenceEqual(new byte[]{1})),"Ignored child did not accompany recycled parent");
@@ -46,10 +46,10 @@ public static class FolderChecks
         await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
         var queue=new WorkQueue();var paths=new PathScope(pair,[pair],DriveType.Fixed);
         foreach(var path in new[]{"top-a/link","top-b/link"}) pc.Seed(ItemChecks.File(Side.Local,path,0,path,true) with { Skip=nameof(TextKey.SkipLink) },[]);
-        await Repair.RunAsync(pair,paths,queue,pc,cloud,store,null,null,default);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,null,null,default);
         var notice=store.OpenNotices.Single();Check.Require(notice.Kind==NoticeKind.Info && notice.Cause==TextKey.InfoLinks && notice.Subject.Items.Count==2,"Link summary must contain both members");
         Check.Require(pc.Items.Count==2 && cloud.Items.Count==0 && store.Records.Count==0,"Link followed or copied");
-        pc.Items.Clear();await Repair.RunAsync(pair,paths,queue,pc,cloud,store,null,null,default);Check.Require(store.OpenNotices.Count==0 && cloud.Items.Count==0 && store.Records.Count==0,"Stale link membership");
+        pc.Items.Clear();await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,null,null,default);Check.Require(store.OpenNotices.Count==0 && cloud.Items.Count==0 && store.Records.Count==0,"Stale link membership");
     }
     public static async Task FreshStartAsync()
     {

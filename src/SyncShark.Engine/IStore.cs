@@ -7,15 +7,16 @@ public interface IStore : IDisposable
     Task<PairConfig?> PairAsync(string pairId, CancellationToken ct);
     /// <summary>Publishes configuration and each distinct returned footprint at its owner in one transaction, advancing the existing Repair revision even if the same scope was already owed.</summary>
     Task SavePairAsync(PairConfig pair, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null);
-    /// <summary>Return the exact refusal cause from the publication transaction (accepted job, armed PC note, or FailPutBack failure, including ignored). Null means the pair was removed and its scopes returned atomically; refusal changes neither.</summary>
+    /// <summary>Return the exact refusal cause from the publication transaction (accepted job, armed PC note, or PutBack notice, including ignored). Null means the pair was removed and its scopes returned atomically; refusal changes neither. An unknown pair returns PairUnknown.</summary>
     Task<TextKey?> RemovePairAsync(string pairId, CancellationToken ct, IReadOnlyList<(string Owner, Scope Scope)>? returnedScopes = null);
     /// <summary>Binding projections include the saved PC publication journal and boundary; only the dirty owner compares them.</summary>
     Task<SyncedEntry?> FindAsync(string pairId, Side side, string key, CancellationToken ct);
     IAsyncEnumerable<SyncedEntry> ByIdAsync(string pairId, Side side, string id, CancellationToken ct);
     IAsyncEnumerable<SyncedEntry> DescendantsAsync(string pairId, Side side, string key, CancellationToken ct);
-    /// <summary>Commit the record change and spend the exact acknowledged historical deletion key atomically, even when neither side has a previous binding.</summary>
+    /// <summary>Commit the record change and spend the exact acknowledged historical deletion key atomically, even when neither side has a previous binding. Without a new publication keep the carried boundary only on a same-PC-identity relink.</summary>
     Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, string? spentDeletedKey, CancellationToken ct);
     IAsyncEnumerable<Notice> NoticesAsync(string pairId, CancellationToken ct);
+    /// <summary>Save by pair, path and kind with the members. An unrelated Failure cannot replace a PutBack notice, its cause, exact subject or visibility.</summary>
     Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct);
     Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct);
     Task<JournalPosition?> PositionAsync(string volume, CancellationToken ct);
@@ -37,7 +38,7 @@ public interface IStore : IDisposable
     Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct);
     /// <summary>Capture names only for the Dropbox history acquisition; read its terminal cursor only after the listing finishes successfully.</summary>
     Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, Func<string>? terminalHistoryCursor, CancellationToken ct);
-    /// <summary>Project the notice and cause even for an absent-on-both-sides row; FailPutBack still owns recovery.</summary>
+    /// <summary>Project the notice and cause for each kind at the path. No compare outcome settles PutBack: only its own Retry or a later change of that same item can.</summary>
     IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct);
     Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct);
 

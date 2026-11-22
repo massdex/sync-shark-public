@@ -31,14 +31,22 @@ public sealed class LocalSide : ISide
     public Task<(IdentityLocation Location, bool InScope)?> ReadByIdAsync(string id, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>CreateFolderExclusive operation on the supplied facts.</summary>
     public Task<RemovalResult> CreateFolderExclusiveAsync(string path, CancellationToken ct) => throw new NotImplementedException();
-    /// <summary>Pass the pair’s settled boundary to the volume reader; it alone saves journal_position up to the oldest unsettled input of any member pair.</summary>
+    /// <inheritdoc/>
+    public Task SettleJournalAsync(JournalPosition position, CancellationToken ct) => throw new NotImplementedException();
+    /// <inheritdoc/>
     public Task<ChangePage> ReadChangesAsync(string? cursor, JournalPosition? position, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Recover operation on the supplied facts.</summary>
     public Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>ReadJob operation on the supplied facts.</summary>
     public Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
 
-    public LocalSide(PairConfig pair, Func<PathScope> resolvedScope, EngineSettings settings, IStore store) => throw new NotImplementedException();
+    /// <summary>Compose once per host, so every pair (including paused pairs) attaches to the same journal owner before reads begin.</summary>
+    public static Func<PairConfig,Func<PathScope>,EngineSettings,IStore,LocalSide> Factory()
+    {
+        var journal=new JournalReader();
+        return (pair,scope,settings,store)=>new LocalSide(pair,scope,settings,store,journal);
+    }
+    private LocalSide(PairConfig pair, Func<PathScope> resolvedScope, EngineSettings settings, IStore store, JournalReader journal) => throw new NotImplementedException();
 
 
     /// <inheritdoc/>

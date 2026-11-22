@@ -35,7 +35,7 @@ public static class DependencyChecks
             };
             var names = tree.GetRoot().DescendantNodes().OfType<BaseNamespaceDeclarationSyntax>().Select(n => n.Name.ToString()).ToArray();
             Check.Require(names.Length==1 && names[0]==expectedNamespace, $"{path}: expected namespace {expectedNamespace}");
-            var violation = Violations(compilation, tree, module, Path.GetFileNameWithoutExtension(path)).FirstOrDefault();
+            var violation = Violations(compilation, tree, module, path).FirstOrDefault();
             Check.Require(violation is null, $"{path}: {violation}");
         }
         // Each probe is resolved by the same compiler and checked by the production traversal above.
@@ -92,6 +92,8 @@ public static class DependencyChecks
             ("SyncShark.Cli","Program","_ = typeof(Massdex.SyncShark.Engine.Local.LocalSide);",false),
             ("SyncShark.Cli","Program","_ = typeof(Massdex.SyncShark.Engine.Edge.Commands);",false),
             ("SyncShark","Other","_ = typeof(Massdex.SyncShark.Engine.Storage.Store);",false),
+            ("SyncShark","subfolder/Program","_ = typeof(Massdex.SyncShark.Engine.Storage.Store);",false),
+            ("SyncShark.Cli","subfolder/Program","_ = typeof(Massdex.SyncShark.Engine.Edge.Cli);",false),
             ("SyncShark","Program","_ = typeof(Massdex.SyncShark.Engine.Storage.StoreMove);",true),
             ("SyncShark","Program","_ = typeof(Massdex.SyncShark.Engine.Planner.Decide);",false)
         ];
@@ -100,19 +102,20 @@ public static class DependencyChecks
             var tree=CSharpSyntaxTree.ParseText("class Probe { static void Use() { "+code+" } }");
             var fixture=compilation.AddSyntaxTrees(tree);
             Check.Require(!fixture.GetSemanticModel(tree).GetDiagnostics().Any(d=>d.Severity==DiagnosticSeverity.Error),"Invalid dependency fixture: "+code);
-            Check.Require(!Violations(fixture,tree,module,file).Any()==allowed,$"{module}/{file}: wrong outcome for {code}");
+            Check.Require(!Violations(fixture,tree,module,$"{(module.StartsWith("SyncShark",StringComparison.Ordinal)?"apps":"src/SyncShark.Engine")}/{module}/{file}.cs").Any()==allowed,$"{module}/{file}: wrong outcome for {code}");
         }
         // Inspect a declaration only; this fixture never opens a device or invokes native code.
         var nativeTree=CSharpSyntaxTree.ParseText("class Probe { [System.Runtime.InteropServices.DllImport(\"kernel32.dll\",EntryPoint=\"DeviceIoControl\")] internal static extern int Control(); }");
         var nativeFixture=compilation.AddSyntaxTrees(nativeTree);
         Check.Require(!nativeFixture.GetSemanticModel(nativeTree).GetDiagnostics().Any(d=>d.Severity==DiagnosticSeverity.Error),"Invalid native ownership fixture");
-        Check.Require(!Violations(nativeFixture,nativeTree,"Local","UsnJournal").Any() && Violations(nativeFixture,nativeTree,"Run","Host").Any(),"Native journal ownership");
+        Check.Require(!Violations(nativeFixture,nativeTree,"Local","src/SyncShark.Engine/Local/UsnJournal.cs").Any() && Violations(nativeFixture,nativeTree,"Run","src/SyncShark.Engine/Run/Host.cs").Any(),"Native journal ownership");
         return Task.CompletedTask;
     }
 
     private const string Prefix = "Massdex.SyncShark.Engine";
-    private static IEnumerable<string> Violations(CSharpCompilation compilation,SyntaxTree tree,string module,string file)
+    private static IEnumerable<string> Violations(CSharpCompilation compilation,SyntaxTree tree,string module,string path)
     {
+        var file=Path.GetFileNameWithoutExtension(path);
         var model=compilation.GetSemanticModel(tree);
         var root=tree.GetRoot();
         if(module!="Storage")
@@ -155,8 +158,8 @@ public static class DependencyChecks
                 var other=space==Prefix?"Contracts":space[(Prefix.Length+1)..];
                 bool allowed=module switch
                 {
-                    "SyncShark.Cli" => file=="Program" && (other,name) is ("Edge","Cli") or ("Local","LogFiles") or ("Contracts","ILogFiles" or "ResourceNames"),
-                    "SyncShark" => file=="Program" && (other,name) is ("Storage","Store" or "StoreMove") or ("Dropbox","Connections" or "DropboxSide" or "DropboxApi" or "Dispatcher" or "CredentialStore" or "SignIn") or ("Local","LocalSide" or "RecycleBin" or "LogFiles") or ("Run","Host") or ("Edge","HostServer" or "Commands") or ("Contracts",_),
+                    "SyncShark.Cli" => path=="apps/SyncShark.Cli/Program.cs" && (other,name) is ("Edge","Cli") or ("Local","LogFiles") or ("Contracts","ILogFiles" or "ResourceNames"),
+                    "SyncShark" => path=="apps/SyncShark/Program.cs" && (other,name) is ("Storage","Store" or "StoreMove") or ("Dropbox","Connections" or "DropboxSide" or "DropboxApi" or "Dispatcher" or "CredentialStore" or "SignIn") or ("Local","LocalSide" or "RecycleBin" or "LogFiles") or ("Run","Host") or ("Edge","HostServer" or "Commands") or ("Contracts",_),
                     _ => module==other || other=="Contracts" || (module,other) is ("Executor","Planner") or ("Run","Planner" or "Executor") or ("Edge","Run")
                 };
                 violates=!allowed || (other,name)==("Planner","Moves") && module!="Executor" && (module,file)!=("Planner","Moves") ||

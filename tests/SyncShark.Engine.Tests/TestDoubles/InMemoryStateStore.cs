@@ -52,7 +52,7 @@ public sealed class InMemoryStateStore : IStore
         {
             if (jobs.Keys.Any(k=>k.Pair==pairId)) return Task.FromResult<TextKey?>(TextKey.PairJobOutstanding);
             if (armed.ContainsKey(pairId)) return Task.FromResult<TextKey?>(TextKey.PairPcNoteOutstanding);
-            if (notices.Any(x=>x.Key.Pair==pairId && x.Value is { Kind:NoticeKind.Failure, Cause:TextKey.FailPutBack })) return Task.FromResult<TextKey?>(TextKey.FailPutBack);
+            if (notices.Any(x=>x.Key.Pair==pairId && x.Value.Kind==NoticeKind.PutBack)) return Task.FromResult<TextKey?>(TextKey.PairPutBackOutstanding);
             ValidateOwners(returnedScopes, null, pairId);
             if (!pairs.Remove(pairId)) return Task.FromResult<TextKey?>(TextKey.PairUnknown);
             PublishScopes(returnedScopes);

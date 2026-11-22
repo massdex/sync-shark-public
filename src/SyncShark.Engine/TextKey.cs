@@ -406,7 +406,7 @@ public enum TextKey
     InvalidIgnoreKind,
     UnsupportedIgnoreKind,
     InvalidIgnoreValue,
-    FailPutBack,
+    PairPutBackOutstanding,
     PairJobOutstanding,
     PairPcNoteOutstanding,
     ResultPairNotRemoved,
