@@ -68,6 +68,26 @@ public static class DropboxErrorsChecks
 
     private static JsonElement MoveError(string inner) => Tagged(DropboxProtocol.RelocationError, inner);
 
+    // A full reply whose error payload is present but unusable while the outer object also looks like a union.
+    private static JsonElement MixedEnvelope(object? errorValue) => Element(new Dictionary<string, object?>
+    {
+        [DropboxProtocol.ErrorSummary] = DropboxProtocol.PathNotFound,
+        [DropboxProtocol.Error] = errorValue,
+        [DropboxProtocol.Tag] = DropboxProtocol.Path,
+        [DropboxProtocol.Path] = new Dictionary<string, object?> { [DropboxProtocol.Tag] = "not_found" }
+    });
+
+    // A direct singleton move_v2 RelocationError {.tag: to, to: {.tag: conflict, conflict: {.tag: file}}}.
+    private static JsonElement MoveToConflict() => Element(new Dictionary<string, object>
+    {
+        [DropboxProtocol.Tag] = "to",
+        ["to"] = new Dictionary<string, object>
+        {
+            [DropboxProtocol.Tag] = DropboxProtocol.Conflict,
+            [DropboxProtocol.Conflict] = Union(DropboxProtocol.TagFile)
+        }
+    });
+
     /// <summary>Verifies the DropboxErrors contract through the module surface.</summary>
     public static Task RunAsync()
     {
@@ -84,7 +104,67 @@ public static class DropboxErrorsChecks
         UnknownWrites(errors, writeDispatched, writeNoEffect, writeTransient);
         TransientAndContention(errors, readTransient, readPreDispatchTransient, readPermanent, writeDispatched);
         BatchMembers(errors);
+        RoundThree(errors, writeDispatched);
         return Task.CompletedTask;
+    }
+
+    // Round-3 findings: every expectation is collected so one red run reports each wrong outcome it detects.
+    private static void RoundThree(DropboxErrors errors, DropboxErrors.RequestEvidence writeDispatched)
+    {
+        var failures = new List<string>();
+        void Expect(bool condition, string message) { if (!condition) failures.Add(message); }
+
+        // (1) A present but unusable error payload is never replaced by the outer object's union, so no false absence.
+        Expect(!errors.Classify(HttpStatusCode.Conflict, MixedEnvelope(null), DropboxProtocol.GetMetadata, false, default).Absent,
+            "a null error inside an outer path/not_found union is not absence");
+        Expect(!errors.Classify(HttpStatusCode.Conflict, MixedEnvelope("bad"), DropboxProtocol.GetMetadata, false, default).Absent,
+            "a string error inside an outer path/not_found union is not absence");
+        Expect(!errors.Classify(HttpStatusCode.Conflict, MixedEnvelope(new Dictionary<string, object> { ["x"] = true }),
+                DropboxProtocol.GetMetadata, false, default).Absent,
+            "an untagged error object inside an outer path/not_found union is not absence");
+
+        // (2) The named upload errors are not proof of no write; they stay Unknown.
+        Expect(errors.Classify(HttpStatusCode.Conflict, Reply(string.Empty, Union("properties_error")),
+                DropboxProtocol.Upload, true, writeDispatched).Disposition == FailureDisposition.UnknownEffect,
+            "properties_error on a single upload is not proof of no effect");
+        Expect(errors.ClassifyMember(Union("properties_error"), DropboxProtocol.UploadSessionFinishBatch, true)
+                .Disposition == FailureDisposition.UnknownEffect,
+            "a properties_error member is not proof of no effect");
+        Expect(errors.Classify(HttpStatusCode.Conflict, Reply(string.Empty, Union("lookup_failed")),
+                DropboxProtocol.Upload, true, writeDispatched).Disposition == FailureDisposition.UnknownEffect,
+            "a payload-less lookup_failed on upload is not proof of no effect");
+        Expect(errors.Classify(HttpStatusCode.Conflict, Reply(string.Empty, Union("lookup_failed")),
+                DropboxProtocol.UploadSessionFinish, true, writeDispatched).Disposition == FailureDisposition.UnknownEffect,
+            "a finish lookup_failed without its nested error is not proof of no effect");
+        Expect(errors.Classify(HttpStatusCode.Conflict, SummaryOnly("to/conflict"), DropboxProtocol.Move, false,
+                writeDispatched).Disposition == FailureDisposition.UnknownEffect,
+            "a summary move conflict without its subtype is not proof of no effect");
+
+        // (3) The direct singleton move_v2 union classifies as its refusal (batch wraps; singleton does not).
+        Expect(errors.Classify(HttpStatusCode.Conflict, Reply("too_many_files", Union("too_many_files")),
+                DropboxProtocol.Move, false, default).Cause == TextKey.FailDropboxTooManyFiles,
+            "a direct singleton move too_many_files refusal is attributable");
+        Expect(errors.Classify(HttpStatusCode.Conflict, Reply("from_lookup/not_found", Tagged("from_lookup", "not_found")),
+                DropboxProtocol.Move, false, default).Cause == TextKey.FailChanged,
+            "a direct singleton move from_lookup not_found is a changed target");
+        Expect(errors.Classify(HttpStatusCode.Conflict, Reply("to/conflict/file", MoveToConflict()),
+                DropboxProtocol.Move, false, default).Cause == TextKey.ClashNameTaken,
+            "a direct singleton move to/conflict is a taken name");
+
+        // (4) Only the exact structured invalid_async_job_id on a poll-check route is the invalid-job cause.
+        foreach (var checkRoute in new[]
+                 { DropboxProtocol.DeleteBatchCheck, DropboxProtocol.MoveBatchCheck, DropboxProtocol.CreateFolderBatchCheck })
+            Expect(errors.Classify(HttpStatusCode.Conflict, Reply(string.Empty, Union("invalid_async_job_id")),
+                    checkRoute, false, default).Cause == TextKey.FailDropboxDeleteJobInvalid,
+                "an exact invalid_async_job_id poll-check refusal maps to the invalid-job cause on " + checkRoute);
+        Expect(errors.Classify(HttpStatusCode.Conflict, SummaryOnly("invalid_async_job_id"),
+                DropboxProtocol.DeleteBatchCheck, false, default).Cause != TextKey.FailDropboxDeleteJobInvalid,
+            "a summary-only invalid_async_job_id is not the invalid-job cause");
+        Expect(errors.Classify(HttpStatusCode.Conflict, Reply(string.Empty, Union("invalid_async_job_id")),
+                DropboxProtocol.Upload, true, default).Cause != TextKey.FailDropboxDeleteJobInvalid,
+            "a wrong-route invalid_async_job_id is not the invalid-job cause");
+
+        Check.Require(failures.Count == 0, string.Join("; ", failures));
     }
 
     // Finding 1: only the exact structured miss is absence; a summary-only or malformed/contradictory reply is not.
