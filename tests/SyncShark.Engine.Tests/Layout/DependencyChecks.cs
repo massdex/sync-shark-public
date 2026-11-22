@@ -59,6 +59,21 @@ public static class DependencyChecks
             ("Run","RunLog","_ = System.IO.File.OpenRead(null!);",false),
             ("Run","RunLog","_ = typeof(Massdex.SyncShark.Engine.ILogFiles);",true),
             ("Local","LogFiles","_ = System.IO.File.OpenRead(null!);",true),
+            ("Edge","Commands","_ = System.IO.File.Exists(null);",false),
+            ("Run","RunLog","_ = new System.IO.StreamReader(string.Empty);",false),
+            ("Run","RunLog","_ = new System.IO.StreamReader(Stream.Null);",true),
+            ("Local","LocalSide","_ = new DriveInfo(string.Empty).AvailableFreeSpace;",false),
+            ("Local","VolumeSpace","_ = new DriveInfo(string.Empty).AvailableFreeSpace;",true),
+            ("Local","LocalSide","_ = Massdex.SyncShark.Engine.Local.InUse.Processes(string.Empty);",true),
+            ("Local","RecycleBin","_ = Massdex.SyncShark.Engine.Local.InUse.Processes(string.Empty);",false),
+            ("Planner","Decide","_ = Environment.TickCount64;",false),
+            ("Run","Host","_ = typeof(Massdex.SyncShark.Engine.Dropbox.DropboxSide);",false),
+            ("Edge","Commands","_ = typeof(Massdex.SyncShark.Engine.Run.Host);",true),
+            ("SyncShark.Cli","Other","_ = typeof(Massdex.SyncShark.Engine.Edge.Cli);",false),
+            ("Dropbox","FolderJobs","_ = new HttpClient().Send(new HttpRequestMessage());",false),
+            ("Storage","Store","_ = new DriveInfo(string.Empty).AvailableFreeSpace;",false),
+            ("Planner","Decide","_ = \"SELECT rowid FROM pair\";",false),
+            ("Storage","Schema","_ = \"SELECT rowid FROM pair\";",true),
             ("Edge","Commands","_ = typeof(Massdex.SyncShark.Engine.Executor.Resolve);",false),
             ("Dropbox","SignIn","_ = new HttpClient().GetAsync(string.Empty);",false),
             ("Dropbox","DropboxApi","_ = new HttpClient().GetAsync(string.Empty);",true),
@@ -84,6 +99,25 @@ public static class DependencyChecks
     private static IEnumerable<string> Violations(CSharpCompilation compilation,SyntaxTree tree,string module,string file)
     {
         var model=compilation.GetSemanticModel(tree);
+        var root=tree.GetRoot();
+        if(module!="Storage")
+        {
+            foreach(var literal in root.DescendantNodes().OfType<LiteralExpressionSyntax>())
+                if(literal.Token.Value is string sql && System.Text.RegularExpressions.Regex.IsMatch(sql.TrimStart(), @"^(?:SELECT\s+.+\s+FROM\s+|INSERT\s+INTO\s+|UPDATE\s+\w+\s+SET\s+|DELETE\s+FROM\s+|(?:ALTER|CREATE|DROP)\s+(?:TABLE|INDEX|TRIGGER)\s+|PRAGMA\s+)",System.Text.RegularExpressions.RegexOptions.IgnoreCase)) yield return "SQL outside Storage";
+        }
+        foreach(var creation in root.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())
+        {
+            if(model.GetSymbolInfo(creation).Symbol is not IMethodSymbol ctor) continue;
+            if(ctor.ContainingNamespace.ToDisplayString()=="System.IO" && ctor.ContainingType.Name is "StreamReader" or "StreamWriter" && ctor.Parameters.FirstOrDefault()?.Type.SpecialType==SpecialType.System_String && module is not ("Local" or "Storage") && (module,file)!=("Dropbox","Connections")) yield return "A path-based stream requires its I/O owner";
+        }
+        foreach(var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
+        {
+            var owner=model.GetDeclaredSymbol(method); var native=owner?.GetDllImportData();
+            if(native is null) continue;
+            var entry=native.EntryPointName??owner!.Name;
+            if(native.ModuleName.StartsWith("rstrtmgr",StringComparison.OrdinalIgnoreCase) && (module,file)!=("Local","InUse")) yield return entry;
+            if(entry.StartsWith("GetDiskFreeSpace",StringComparison.Ordinal) && (module,file)!=("Local","VolumeSpace")) yield return entry;
+        }
         foreach(var node in tree.GetRoot().DescendantNodes().OfType<SimpleNameSyntax>())
         {
             var symbol=model.GetSymbolInfo(node).Symbol;
@@ -107,6 +141,8 @@ public static class DependencyChecks
             }
             else if(space.StartsWith("Microsoft.Data.Sqlite",StringComparison.Ordinal) || space=="SQLitePCL") violates=module!="Storage";
             else if(space=="System.Net.Http" && name is "HttpClient" or "HttpMessageInvoker" && (member.Contains("Async",StringComparison.Ordinal) || member=="Send")) violates=(module,file)!=("Dropbox","DropboxApi");
+            else if(space=="System.IO" && name=="DriveInfo" && member is "AvailableFreeSpace" or "TotalFreeSpace") violates=(module,file)!=("Local","VolumeSpace");
+            else if(module=="Planner" && name=="Environment" && member is "TickCount" or "TickCount64") violates=true;
             else if(space=="System.IO" && name is "File" or "Directory" or "FileInfo" or "DirectoryInfo" or "FileStream" or "DriveInfo" or "FileSystemWatcher")
                 violates=module is not ("Local" or "Storage") && (module,file)!=("Dropbox","Connections");
             else if(module=="Planner" && (name=="TimeProvider" || name is "DateTime" or "DateTimeOffset" && member is "Now" or "UtcNow" or "Today" || name=="Stopwatch")) violates=true;
