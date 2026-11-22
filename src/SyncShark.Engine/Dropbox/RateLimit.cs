@@ -102,13 +102,20 @@ public sealed class RateLimit
         }
     }
 
-    /// <summary>The adopted retry schedule after a failure that supplied no positive provider wait (product-0526).</summary>
-    public TimeSpan RetryDelay(int failures)
+    /// <summary>The adopted retry schedule after a failure that supplied no positive provider wait (product-0425/0526).</summary>
+    public TimeSpan RetryDelay(int failures) => RetryDelay(failures, Random.Shared.NextDouble);
+
+    /// <summary>The adopted schedule with an explicit sample in [0,1]; the first delay is exact, later nominal delays
+    /// cap before jitter and then take a symmetric offset (96-144 s at the 120 s cap with 0.2 jitter).</summary>
+    public TimeSpan RetryDelay(int failures, Func<double> sample)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(failures);
-        var seconds = _backoff.InitialBackoffSeconds * Math.Pow(_backoff.BackoffMultiplier, failures);
-        seconds += seconds * _backoff.BackoffJitter * Random.Shared.NextDouble();
-        return TimeSpan.FromSeconds(Math.Min(seconds, _backoff.MaximumBackoffSeconds));
+        ArgumentNullException.ThrowIfNull(sample);
+        if (failures <= 0) return TimeSpan.FromSeconds(_backoff.InitialBackoffSeconds);
+        var nominal = Math.Min(_backoff.InitialBackoffSeconds * Math.Pow(_backoff.BackoffMultiplier, failures),
+            _backoff.MaximumBackoffSeconds);
+        var offset = (2 * sample() - 1) * _backoff.BackoffJitter * nominal;
+        return TimeSpan.FromSeconds(nominal + offset);
     }
 
     /// <summary>Wait a positive provider-requested time on the supplied clock and record it in the run log.</summary>

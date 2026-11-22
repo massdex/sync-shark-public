@@ -163,15 +163,11 @@ public static class DropboxProtocol
         return header is { } first && first > body ? first : body;
     }
 
-    /// <summary>A provider-wait floor and the widest scope its source can prove (applicability table rows B and C).</summary>
+    /// <summary>A source-local provider-wait floor: the longpoll source it was given for, so unrelated work proceeds
+    /// (M13/L203, BC1, A40). There is no account-wide floor; a stated wait binds only the call or source.</summary>
     internal readonly record struct ProviderConstraint(
         (string AccountId, string? RouteName, string? SourceIdentity) Scope,
         long StartedTimestamp, TimeSpan Duration);
-
-    /// <summary>The account-wide floor for any supplied wait (applicability table row B).</summary>
-    internal static ProviderConstraint? ProviderConstraintFor(
-        string accountId, TimeSpan? wait, long startedTimestamp) =>
-        wait is { } supplied ? new((accountId, null, null), startedTimestamp, supplied) : null;
 
     /// <summary>The longpoll cursor floor for an accepted result.backoff (applicability table row C).</summary>
     internal static ProviderConstraint? LongpollConstraintFor(
