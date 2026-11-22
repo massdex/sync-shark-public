@@ -37,6 +37,7 @@ public static class DropboxProtocol
 
     // Documented limits.
     public const int ListPageMaximum = 2000;
+    public const int DeletionHistoryHeadLimit = 1;
 
     // Error summary prefixes.
     /// <summary>Separates the tags inside a 409 error_summary.</summary>
