@@ -161,12 +161,12 @@ public static class ConnectionsChecks
                 var source = Root(scratch, "slotSource");
                 Slot(source, 'a', 2, present: true, new[] { first, second });
                 Directory.CreateDirectory(Path.GetDirectoryName(ListFile(source))!);
-                File.WriteAllText(ListFile(source), LegacySet(first, second)); // stale append beside the authoritative slot
+                File.WriteAllText(ListFile(source), LegacySet(first)); // stale append beside the authoritative slot
                 var target = Root(scratch, "staleCopy");
                 Directory.CreateDirectory(Path.GetDirectoryName(ListFile(target))!);
                 File.Copy(ListFile(source), ListFile(target));
                 Expect(Refuses(() => connections.Verify(source, target, new[] { first })),
-                    "A distinct target that dropped an authoritative connection was accepted");
+                    "A distinct target that dropped an authoritative connection was accepted (required id was present)");
             });
             Case(failures, "byte-identical distinct append target accepted", () =>
             {
