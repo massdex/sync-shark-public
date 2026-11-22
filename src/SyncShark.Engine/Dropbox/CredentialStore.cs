@@ -15,7 +15,8 @@ public sealed class DropboxCredentialUnavailableException(string connectionId)
 
 /// <summary>Stores each Dropbox connection's refresh token in Windows Credential Manager, keyed by its connection id.
 /// <see cref="Save"/> writes the connection's own <c>AccountTarget</c>; <see cref="Read"/> tries that target first, then
-/// the fixed target 0.3.95 used for its first connection (the only legacy target that can exist).</summary>
+/// the fixed target 0.3.95 used for its first connection (the only legacy target that can exist). Callers that open an
+/// account must prove the verified account's derived connection id matches the requested one before trusting either.</summary>
 public sealed class CredentialStore
 {
     /// <summary>The fixed target 0.3.95 used for the first connection's refresh token.</summary>
@@ -80,8 +81,17 @@ public sealed class CredentialStore
         return ReadTarget(target) ?? ReadTarget(RegisteredTarget);
     }
 
+    /// <summary>Reads only the connection's own protected target; never the fixed legacy target.</summary>
+    public string? ReadOwn(string connectionId) => ReadTarget(AccountTarget(connectionId));
+
+    /// <summary>Reads only the fixed legacy target 0.3.95 used for its first connection.</summary>
+    public string? ReadLegacy() => ReadTarget(RegisteredTarget);
+
     /// <summary>Removes the connection's own protected target; a missing credential is not an error.</summary>
     public void Remove(string connectionId) => DeleteTarget(AccountTarget(connectionId));
+
+    /// <summary>Removes the fixed legacy target; only after its owner has been proven.</summary>
+    public void RemoveLegacy() => DeleteTarget(RegisteredTarget);
 
     private static void RequireWindows()
     {

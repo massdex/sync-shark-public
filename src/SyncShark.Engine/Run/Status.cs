@@ -5,4 +5,7 @@ public sealed class Status
 {
     /// <summary>Read the pair’s stored last-Repair summary, including after restart.</summary>
     public Task<string> ReadAsync(IStore store, string? pairId, CancellationToken ct) => throw new NotImplementedException();
+
+    /// <summary>ReadAsync for the selected Status operation.</summary>
+    public Task<string> ReadAsync(IStore store, string? pairId, CancellationToken ct, string? startupWarning) => throw new NotImplementedException();
 }

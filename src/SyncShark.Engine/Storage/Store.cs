@@ -140,4 +140,11 @@ public sealed class Store : IStore
     public Task UpdateLinkMemberAsync(string pairId, NoticeItem member, bool present, CancellationToken ct) => notices.UpdateLinkMemberAsync(Connection, pairId, member, present, ct);
     /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>
     public Task<Notice?> NoticeAsync(string pairId, long id, CancellationToken ct) => notices.NoticeAsync(Connection, pairId, id, ct);
+
+    /// <summary>OpenAsync for the selected Store operation.</summary>
+    public static Task<Store?> OpenAsync(string productRoot, bool firstPairAdd, EngineSettings settings, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Begin tracking scan freshness.</summary>
+    public void BeginScan(string pairId, Guid scanId) => throw new NotImplementedException();
+    /// <summary>Query overlapping scan changes.</summary>
+    public bool ScanTouched(string pairId, Guid scanId, Side side, string path, bool descendants) => throw new NotImplementedException();
 }

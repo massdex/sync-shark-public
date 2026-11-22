@@ -9,9 +9,9 @@ using System.Text.Json;
 namespace Massdex.SyncShark.Engine.Dropbox;
 
 /// <summary>Full-account Dropbox sign-in: opens the browser, receives the loopback return, exchanges the code and reads
-/// the account (all HTTP through <see cref="DropboxApi"/>), then saves the refresh token through
-/// <see cref="CredentialStore"/> before returning the connection id. Browser pages carry the catalog receipt copy,
-/// never a success claim, and never reflect callback values.</summary>
+/// the account (all HTTP through <see cref="DropboxApi"/> and the approved endpoint catalog), checks the granted scope
+/// envelope, then saves the refresh token through <see cref="CredentialStore"/> before returning the connection id.
+/// Browser pages carry the catalog receipt copy, never a success claim, and never reflect callback values.</summary>
 public sealed class SignIn
 {
     /// <summary>The registered Dropbox application key.</summary>
@@ -22,12 +22,15 @@ public sealed class SignIn
     private const int MaximumCallbackLineBytes = 4096;
     private const string BearerScheme = "Bearer";
     private const string OAuthScope = "offline";
+    private const string AuthorizationRoute = "oauth2/authorize";
+    private const string TokenRoute = "oauth2/token";
+    private const string AccountRoute = "users/get_current_account";
 
     /// <summary>Every coordinator uses the same registered loopback callback.</summary>
     public static Uri RedirectUri { get; } =
         new UriBuilder(Uri.UriSchemeHttp, "127.0.0.1", 47821, "/oauth/dropbox/callback/").Uri;
 
-    /// <summary>The full-account permission envelope the registered application requests.</summary>
+    /// <summary>The full-account permission envelope the registered application requests and requires.</summary>
     public static readonly IReadOnlyList<string> RequiredScopes =
     [
         "account_info.read",
@@ -38,6 +41,9 @@ public sealed class SignIn
         "sharing.read",
         "sharing.write"
     ];
+
+    // 0.3.95's default bound on one whole authorization attempt (DropboxOAuth.RunOperations).
+    private static readonly TimeSpan AuthorizationBound = new(0, 5, 0);
 
     // One authorization flow at a time: never queue an invisible second browser flow behind an abandoned first one.
     private static readonly SemaphoreSlim AuthorizationGate = new(1, 1);
@@ -59,51 +65,25 @@ public sealed class SignIn
         {
             var redirect = RedirectUri;
             var (verifier, challenge, state) = CreatePkceFlow();
-            var listener = new TcpListener(IPAddress.Loopback, redirect.Port);
-            try { listener.Start(1); }
-            catch (SocketException) { throw new InvalidOperationException(Text.Get(TextKey.SignInReturnRetry)); }
-            try
+            var code = await ReceiveCallbackAsync(redirect, redirect.AbsolutePath, state, ct, AuthorizationBound,
+                () => StartBrowser(BuildAuthorizationUri(ClientId, redirect, challenge, state)));
+            var token = await TokenAsync(api.SendAsync, new Dictionary<string, string>
             {
-                using var registration = ct.Register(listener.Stop);
-                StartBrowser(BuildAuthorizationUri(ClientId, redirect, challenge, state));
-                string code;
-                var client = await AcceptAsync(listener, ct);
-                try
-                {
-                    var stream = client.GetStream();
-                    try
-                    {
-                        var target = await ReadCallbackTargetAsync(stream, ct);
-                        try { code = ParseCallbackTarget(target, redirect.AbsolutePath, state); }
-                        catch
-                        {
-                            await WritePageAsync(stream, AcknowledgementPage(received: false), ct);
-                            throw;
-                        }
-                        await WritePageAsync(stream, AcknowledgementPage(received: true), ct);
-                    }
-                    finally { await stream.DisposeAsync(); }
-                }
-                finally { client.Dispose(); }
-
-                var token = await TokenAsync(api.SendAsync, new Dictionary<string, string>
-                {
-                    ["code"] = code,
-                    ["grant_type"] = "authorization_code",
-                    ["client_id"] = ClientId,
-                    ["redirect_uri"] = redirect.AbsoluteUri,
-                    ["code_verifier"] = verifier
-                }, connectionId: null, ct);
-                if (string.IsNullOrWhiteSpace(token.RefreshToken))
-                    throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-                var account = await AccountAsync(api.SendAsync, token.AccessToken, ct);
-                if (token.AccountId is not null && !string.Equals(token.AccountId, account.AccountId, StringComparison.Ordinal))
-                    throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-                var connectionId = Connections.CreateConnectionId(account.AccountId);
-                new CredentialStore().Save(connectionId, token.RefreshToken!);
-                return (connectionId, account.AccountId, account.RootNamespaceId, account.HomeNamespaceId);
-            }
-            finally { listener.Stop(); }
+                ["code"] = code,
+                ["grant_type"] = "authorization_code",
+                ["client_id"] = ClientId,
+                ["redirect_uri"] = redirect.AbsoluteUri,
+                ["code_verifier"] = verifier
+            }, connectionId: null, ct);
+            if (string.IsNullOrWhiteSpace(token.RefreshToken))
+                throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
+            if (!GrantAccepted(token.Scopes)) throw new InvalidDataException(Text.Get(TextKey.SignInReturnRetry));
+            var account = await AccountAsync(api.SendAsync, token.AccessToken, ct);
+            if (token.AccountId is not null && !string.Equals(token.AccountId, account.AccountId, StringComparison.Ordinal))
+                throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
+            var connectionId = Connections.CreateConnectionId(account.AccountId);
+            new CredentialStore().Save(connectionId, token.RefreshToken!);
+            return (connectionId, account.AccountId, account.RootNamespaceId, account.HomeNamespaceId);
         }
         finally { AuthorizationGate.Release(); }
     }
@@ -125,7 +105,7 @@ public sealed class SignIn
         return (verifier, challenge, Base64Url(RandomNumberGenerator.GetBytes(32)));
     }
 
-    /// <summary>The authorization page URL for one flow, requesting offline (refresh-token) access.</summary>
+    /// <summary>The authorization page URL for one flow from the approved endpoint catalog, requesting offline access.</summary>
     public static Uri BuildAuthorizationUri(string clientId, Uri redirectUri, string challenge, string state)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientId, nameof(clientId));
@@ -140,7 +120,7 @@ public sealed class SignIn
             ["token_access_type"] = OAuthScope,
             ["scope"] = string.Join(' ', RequiredScopes)
         };
-        return new Uri(AuthorizationEndpoint().AbsoluteUri + "?" +
+        return new Uri(Routes.Endpoint(AuthorizationRoute).AbsoluteUri + "?" +
                        string.Join('&', query.Select(item => Uri.EscapeDataString(item.Key) + "=" + Uri.EscapeDataString(item.Value))));
     }
 
@@ -168,12 +148,139 @@ public sealed class SignIn
         "<main><p>" + WebUtility.HtmlEncode(Text.Get(received ? TextKey.SignInReturnReceived : TextKey.SignInReturnRetry)) +
         "</p></main></body></html>";
 
-    /// <summary>Posts a token form through the supplied sender and returns the parsed token facts.</summary>
-    internal static async Task<(string AccessToken, string? RefreshToken, DateTime ExpiresUtc, string? AccountId)> TokenAsync(
+    /// <summary>The grant's scopes must be exactly the registered envelope (order-insensitive) before any credential is saved.</summary>
+    public static bool GrantAccepted(IEnumerable<string> granted)
+    {
+        ArgumentNullException.ThrowIfNull(granted, nameof(granted));
+        return granted.Where(scope => !string.IsNullOrWhiteSpace(scope)).ToHashSet(StringComparer.Ordinal)
+            .SetEquals(RequiredScopes);
+    }
+
+    /// <summary>Receives one loopback return on the fixed callback: starts listening, opens the browser through
+    /// <paramref name="browser"/>, verifies the return and writes the receipt page. A bound ends an abandoned attempt
+    /// with a retryable timeout so the fixed port and the one-flow gate are free for the next attempt.</summary>
+    public static async Task<string> ReceiveCallbackAsync(Uri redirectUri, string expectedPath, string expectedState,
+        CancellationToken ct, TimeSpan? bound = null, Action? browser = null)
+    {
+        ArgumentNullException.ThrowIfNull(redirectUri, nameof(redirectUri));
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedPath, nameof(expectedPath));
+        var listener = new TcpListener(IPAddress.Loopback, redirectUri.Port);
+        try { listener.Start(1); }
+        catch (SocketException) { throw new InvalidOperationException(Text.Get(TextKey.SignInReturnRetry)); }
+        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (bound is { } limit) attempt.CancelAfter(limit);
+        try
+        {
+            using var registration = attempt.Token.Register(listener.Stop);
+            browser?.Invoke();
+            var client = await AcceptAsync(listener, attempt.Token);
+            try
+            {
+                var stream = client.GetStream();
+                try
+                {
+                    string code;
+                    var target = await ReadCallbackTargetAsync(stream, attempt.Token);
+                    try { code = ParseCallbackTarget(target, expectedPath, expectedState); }
+                    catch
+                    {
+                        await WritePageAsync(stream, AcknowledgementPage(received: false), ct);
+                        throw;
+                    }
+                    await WritePageAsync(stream, AcknowledgementPage(received: true), ct);
+                    return code;
+                }
+                finally { await stream.DisposeAsync(); }
+            }
+            finally { client.Dispose(); }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && bound is not null)
+        {
+            throw new TimeoutException(Text.Get(TextKey.SignInReturnRetry));
+        }
+        finally { listener.Stop(); }
+    }
+
+    /// <summary>Opens a retained connection by id and returns the account namespaces it actually holds; a credential that
+    /// does not derive the requested connection id is refused. A missing credential throws <see cref="DropboxCredentialUnavailableException"/>.</summary>
+    public static async Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)> VerifyAccountAsync(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
+        CredentialStore credentials, string connectionId, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(credentials, nameof(credentials));
+        _ = CredentialStore.AccountTarget(connectionId);
+        var refresh = credentials.Read(connectionId);
+        if (string.IsNullOrWhiteSpace(refresh)) throw new DropboxCredentialUnavailableException(connectionId);
+        var account = await OpenIdentityAsync(send, connectionId, refresh, ct);
+        RequireOwnedConnection(connectionId, account.AccountId);
+        return account;
+    }
+
+    /// <summary>Refreshes a supplied credential and reads its account identity; a revoked refresh token is unavailable.</summary>
+    public static async Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)> OpenIdentityAsync(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
+        string connectionId, string refreshToken, CancellationToken ct)
+    {
+        var opened = await OpenVerifiedAsync(send, connectionId, refreshToken, ct);
+        return (opened.AccountId, opened.RootNamespaceId, opened.HomeNamespaceId);
+    }
+
+    internal static async Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId,
+            string AccessToken, DateTime ExpiresUtc)> OpenVerifiedAsync(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
+        string connectionId, string refreshToken, CancellationToken ct)
+    {
+        _ = CredentialStore.AccountTarget(connectionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(refreshToken, nameof(refreshToken));
+        var token = await TokenAsync(send, new Dictionary<string, string>
+        {
+            ["refresh_token"] = refreshToken,
+            ["grant_type"] = "refresh_token",
+            ["client_id"] = ClientId,
+            ["scope"] = string.Join(' ', RequiredScopes)
+        }, connectionId, ct);
+        var account = await AccountAsync(send, token.AccessToken, ct);
+        return (account.AccountId, account.RootNamespaceId, account.HomeNamespaceId, token.AccessToken, token.ExpiresUtc);
+    }
+
+    /// <summary>Disconnect: removes the connection's own credential, and the fixed legacy credential only once it is
+    /// proven (by the account it opens) to belong to this connection. A credential that cannot be reached now is left
+    /// alone and the removal fails forward, so another account's credential is never deleted.</summary>
+    public static async Task DisconnectAsync(
+        Func<string, CancellationToken, Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)>> verify,
+        CredentialStore credentials, string connectionId, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(verify, nameof(verify));
+        ArgumentNullException.ThrowIfNull(credentials, nameof(credentials));
+        _ = CredentialStore.AccountTarget(connectionId);
+        var ownsCredential = credentials.ReadOwn(connectionId) is not null;
+        var legacy = credentials.ReadLegacy();
+        if (legacy is not null)
+        {
+            try
+            {
+                var account = await verify(legacy, ct);
+                if (Connections.CreateConnectionId(account.AccountId) == connectionId) credentials.RemoveLegacy();
+            }
+            catch (DropboxCredentialUnavailableException)
+            {
+                // A revoked token cannot be used again; it belongs to no live account and is removed.
+                credentials.RemoveLegacy();
+            }
+        }
+        if (ownsCredential) credentials.Remove(connectionId);
+    }
+
+    /// <summary>Posts a token form through the supplied sender and returns the parsed token facts and granted scopes.</summary>
+    internal static async Task<(string AccessToken, string? RefreshToken, DateTime ExpiresUtc, string? AccountId,
+            IReadOnlyList<string> Scopes)> TokenAsync(
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
         IReadOnlyDictionary<string, string> form, string? connectionId, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, TokenEndpoint()) { Content = new FormUrlEncodedContent(form) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint(TokenRoute))
+        {
+            Content = new FormUrlEncodedContent(form)
+        };
         using var response = await send(request, ct);
         if (!response.IsSuccessStatusCode)
         {
@@ -189,7 +296,10 @@ public sealed class SignIn
         var refreshToken = root.TryGetProperty("refresh_token", out var refresh) ? refresh.GetString() : null;
         var expiresIn = root.TryGetProperty("expires_in", out var expires) ? expires.GetInt32() : 14400;
         var accountId = root.TryGetProperty("account_id", out var account) ? account.GetString() : null;
-        return (accessToken, refreshToken, DateTime.UtcNow.AddSeconds(expiresIn), accountId);
+        var scopes = root.TryGetProperty("scope", out var scope) && scope.ValueKind == JsonValueKind.String
+            ? (scope.GetString() ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            : [];
+        return (accessToken, refreshToken, DateTime.UtcNow.AddSeconds(expiresIn), accountId, scopes);
     }
 
     /// <summary>Reads the opened account's identity; incomplete identity information refuses.</summary>
@@ -197,7 +307,7 @@ public sealed class SignIn
         Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
         string accessToken, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, AccountEndpoint())
+        using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint(AccountRoute))
         {
             Content = new StringContent("null", Encoding.UTF8, "application/json")
         };
@@ -212,28 +322,10 @@ public sealed class SignIn
             RequiredIdentity(rootInfo, "home_namespace_id"));
     }
 
-    /// <summary>Opens an already-retained connection by its id: refreshes from the protected token and returns the
-    /// account namespaces it actually holds. A missing credential throws <see cref="DropboxCredentialUnavailableException"/>.</summary>
-    public static async Task<(string AccountId, string RootNamespaceId, string HomeNamespaceId)> VerifyAccountAsync(
-        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send,
-        CredentialStore credentials, string connectionId, CancellationToken ct)
+    private static void RequireOwnedConnection(string connectionId, string accountId)
     {
-        ArgumentNullException.ThrowIfNull(send, nameof(send));
-        ArgumentNullException.ThrowIfNull(credentials, nameof(credentials));
-        _ = CredentialStore.AccountTarget(connectionId);
-        var refresh = credentials.Read(connectionId);
-        if (string.IsNullOrWhiteSpace(refresh)) throw new DropboxCredentialUnavailableException(connectionId);
-        var token = await TokenAsync(send, new Dictionary<string, string>
-        {
-            ["refresh_token"] = refresh,
-            ["grant_type"] = "refresh_token",
-            ["client_id"] = ClientId,
-            ["scope"] = string.Join(' ', RequiredScopes)
-        }, connectionId, ct);
-        var account = await AccountAsync(send, token.AccessToken, ct);
-        if (token.AccountId is not null && !string.Equals(token.AccountId, account.AccountId, StringComparison.Ordinal))
-            throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-        return account;
+        if (Connections.CreateConnectionId(accountId) != connectionId)
+            throw new InvalidOperationException(Text.Get(TextKey.RootDropboxScopeChanged));
     }
 
     private static string RequiredIdentity(JsonElement element, string name) =>
@@ -271,7 +363,6 @@ public sealed class SignIn
                    error.ValueKind == JsonValueKind.String && error.GetString() is "invalid_grant";
         }
         catch (InvalidDataException) { return false; }
-        catch (JsonException) { return false; }
     }
 
     private static async Task<TcpClient> AcceptAsync(TcpListener listener, CancellationToken ct)
@@ -326,11 +417,6 @@ public sealed class SignIn
         Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true })?.Dispose();
     }
 
-    private static Uri AuthorizationEndpoint() => Endpoint("www.dropbox.com", "oauth2/authorize");
-    private static Uri TokenEndpoint() => Endpoint("api.dropboxapi.com", "oauth2/token");
-    private static Uri AccountEndpoint() => Endpoint("api.dropboxapi.com", "2/users/get_current_account");
-    private static Uri Endpoint(string host, string path) => new UriBuilder(Uri.UriSchemeHttps, host, -1, path).Uri;
-
     private static Dictionary<string, string> ParseQuery(string query)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -348,8 +434,8 @@ public sealed class SignIn
 }
 
 /// <summary>Refreshes and caches one connection's access token from its stored refresh token, and verifies on every
-/// refresh that the authorization still belongs to the pair's saved account and namespaces. The composition root
-/// passes its "send" as <see cref="DropboxApi.SendAsync"/> and gives the source to the API for authenticated requests.</summary>
+/// refresh that the authorization still belongs to the requested connection, account and namespaces. The composition
+/// root passes its "send" as <see cref="DropboxApi.SendAsync"/> or builds the delegate with <see cref="SignIn.AccessTokenSource"/>.</summary>
 public sealed class RefreshingAccessTokenSource
 {
     private readonly Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> _send;
@@ -393,22 +479,14 @@ public sealed class RefreshingAccessTokenSource
             if (_accessToken is not null && DateTime.UtcNow < _refreshAtUtc) return _accessToken;
             var refresh = _credentials.Read(_connectionId);
             if (string.IsNullOrWhiteSpace(refresh)) throw new DropboxCredentialUnavailableException(_connectionId);
-            var token = await SignIn.TokenAsync(_send, new Dictionary<string, string>
-            {
-                ["refresh_token"] = refresh,
-                ["grant_type"] = "refresh_token",
-                ["client_id"] = SignIn.ClientId,
-                ["scope"] = string.Join(' ', SignIn.RequiredScopes)
-            }, _connectionId, ct);
-            if (token.AccountId is not null && !string.Equals(token.AccountId, _expected.AccountId, StringComparison.Ordinal))
-                throw new InvalidOperationException(Text.Get(TextKey.RootDropboxScopeChanged));
-            var account = await SignIn.AccountAsync(_send, token.AccessToken, ct);
+            var account = await SignIn.OpenVerifiedAsync(_send, _connectionId, refresh, ct);
             if (!string.Equals(account.AccountId, _expected.AccountId, StringComparison.Ordinal) ||
                 !string.Equals(account.RootNamespaceId, _expected.RootNamespaceId, StringComparison.Ordinal) ||
-                !string.Equals(account.HomeNamespaceId, _expected.HomeNamespaceId, StringComparison.Ordinal))
+                !string.Equals(account.HomeNamespaceId, _expected.HomeNamespaceId, StringComparison.Ordinal) ||
+                Connections.CreateConnectionId(account.AccountId) != _connectionId)
                 throw new InvalidOperationException(Text.Get(TextKey.RootDropboxScopeChanged));
-            _accessToken = token.AccessToken;
-            _refreshAtUtc = token.ExpiresUtc.AddMinutes(-5);
+            _accessToken = account.AccessToken;
+            _refreshAtUtc = account.ExpiresUtc.AddMinutes(-5);
             return _accessToken;
         }
         finally { _gate.Release(); }
