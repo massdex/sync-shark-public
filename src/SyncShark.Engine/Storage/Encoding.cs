@@ -30,4 +30,6 @@ public static class Encoding
     public static IEnumerable<string> DecodeDeletedNames(Stream input, int count, string lastKey, string? after) => throw new NotImplementedException();
     /// <summary>Encode a versioned value for storage.</summary>
     public static string Envelope<T>(T value) => throw new NotImplementedException();
+    /// <summary>Decode the stored subject of one indexed notice member.</summary>
+    public static IssueSubject DecodeMemberSubject(string envelope) => throw new NotImplementedException();
 }

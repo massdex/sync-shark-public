@@ -17,4 +17,10 @@ public sealed class WorkQueue
     public sealed class Unsettled : Exception { }
     /// <summary>Check both settled source prefixes against boundaries captured at the physical hop.</summary>
     public bool CoversHop((JournalPosition? Local, string? Dropbox) throughHop) => throw new NotImplementedException();
+    /// <summary>Invalidate one source's coverage on reset before draining earlier work.</summary>
+    public void LoseCoverage(Side source) => throw new NotImplementedException();
+    /// <summary>Retry the original retained input or prepared operation within the selected scope.</summary>
+    public Task<bool> RetryHeldAsync(Scope? scope, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read the published scope when a queued callback executes.</summary>
+    public PathScope CurrentScope(PathScope fallback) => throw new NotImplementedException();
 }

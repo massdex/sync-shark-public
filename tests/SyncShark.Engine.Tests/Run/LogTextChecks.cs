@@ -17,6 +17,15 @@ public static class LogTextChecks
         RenderTypedFailure();
         RenderTypedStageEnd();
         RenderEffectAsReadable();
+        var move = LogText.Format(new RunEvent(RunEventKind.Effect, "", "new.txt", "old.txt", "") { Action = ActionKind.MoveLocal });
+        Check.Require(move.Contains(Text.Get(TextKey.HumanCardFrom, (TextArg.Path, "old.txt"))) &&
+            move.Contains(Text.Get(TextKey.HumanCardTo, (TextArg.Path, "new.txt"))), "a move shows its two endpoints");
+        var stop = LogText.Format(new RunEvent(RunEventKind.Failed, "", "", "", "") { Error = new OperationCanceledException() });
+        Check.Require(stop.Contains(Text.Get(TextKey.HumanAttentionStoppedResult)), "a cancellation reports a stop, not a failure");
+        var notice = LogText.Format(new RunEvent(RunEventKind.Issue, "", "item", "", "") { Cause = TextKey.FailDropboxNameRejected });
+        Check.Require(notice.Contains(Text.Get(TextKey.FailDropboxNameRejected, (TextArg.Path, "item"))), "a cause alone supplies a readable reason");
+        var provider = LogText.Format(new RunEvent(RunEventKind.ProviderRequest, "", "", "arbitrary body", "done"));
+        Check.Require(provider.Length == 0, "a completed provider diagnostic is not a user outcome");
         return Task.CompletedTask;
     }
 
@@ -24,7 +33,7 @@ public static class LogTextChecks
     {
         foreach (var kind in Enum.GetValues<RunEventKind>())
         {
-            var text = LogText.Format(new RunEvent(kind, "what", string.Empty, string.Empty, string.Empty));
+            var text = LogText.Format(new RunEvent(kind, "what", string.Empty, "progress", string.Empty));
             Check.Require(text.Length > 0, $"the {kind} projection is never empty");
         }
     }
@@ -32,7 +41,7 @@ public static class LogTextChecks
     private static void ProjectPresentFacts()
     {
         var text = LogText.Format(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", "copied", "Dropbox"));
-        Check.Require(text.Contains("alpha/report.txt", StringComparison.Ordinal), "the projected file is shown");
+        Check.Require(text.Contains("alpha/report.txt", StringComparison.Ordinal) && text.Contains(Text.Get(TextKey.HumanOperationUpload), StringComparison.Ordinal) && !text.Contains(Text.Get(TextKey.HumanResultReplaced), StringComparison.Ordinal), "an untyped upload is not a successful replace");
     }
 
     private static void OmitEmptyFacts()
@@ -62,16 +71,17 @@ public static class LogTextChecks
             string.Empty) { Error = new IOException("boom") });
         Check.Require(text.Contains(Text.Get(TextKey.HumanError), StringComparison.Ordinal),
             "a typed failure renders the error label, not a raw kind word");
-        Check.Require(text.Contains("boom", StringComparison.Ordinal) &&
+        Check.Require(!text.Contains("boom", StringComparison.Ordinal) && text.Contains("HRESULT", StringComparison.Ordinal) &&
             text.Contains("alpha/report.txt", StringComparison.Ordinal), "a typed failure renders its reason and file");
     }
 
     private static void RenderTypedStageEnd()
     {
-        var text = LogText.Format(new RunEvent(RunEventKind.Stage, "Reading both sides", string.Empty, string.Empty,
-            string.Empty) { Ended = true, Count = 42 });
+        var text = LogText.Format(new RunEvent(RunEventKind.Stage, "Reading both sides", string.Empty, "observations",
+            string.Empty) { Ended = true, Count = 42, Total = 51 });
         Check.Require(text.Contains("Reading both sides", StringComparison.Ordinal) &&
-            text.Contains("Complete", StringComparison.Ordinal), "a typed stage end renders its name and completion");
+            text.Contains("42", StringComparison.Ordinal) && text.Contains("51", StringComparison.Ordinal) &&
+            text.Contains("observations", StringComparison.Ordinal) && text.Contains("Complete", StringComparison.Ordinal), "a typed stage end renders its name and completion");
     }
 
     private static void RenderEffectAsReadable()

@@ -77,7 +77,8 @@ public static class RunLogChecks
         var fields = WriteOne(new RunEvent(RunEventKind.Failed, string.Empty, "alpha/report.txt", string.Empty,
             string.Empty) { Error = new IOException("boom") });
         Check.Require(fields[2] == "IOException", "a failure delivered only by Error names the exception type");
-        Check.Require(fields[4].Contains("boom", StringComparison.Ordinal), "a failure delivered only by Error keeps its reason");
+        Check.Require(fields[4].Contains("HRESULT", StringComparison.Ordinal) && !string.Join(" ", fields).Contains("boom", StringComparison.Ordinal),
+            "a stored failure keeps the type and error code, never exception text");
     }
 
     private static void ProjectsTypedCause()
@@ -126,8 +127,9 @@ public static class RunLogChecks
         var files = new FakeLogFiles { FailFlush = true };
         var log = new RunLog(files, "logs/pair-run.log", Settings());
         log.Write(new RunEvent(RunEventKind.Stage, "Reading both sides", string.Empty, string.Empty, string.Empty));
+        log.Write(new RunEvent(RunEventKind.Stage, "later", string.Empty, string.Empty, string.Empty));
         log.Dispose();
-        Check.Require(files.Writer is { FlushAttempts: 1 }, "the boundary flush was attempted");
+        Check.Require(files.Writer is { WriteAttempts: 1, FlushAttempts: 1 }, "the boundary flush was attempted");
         Check.Require(files.Writer is { DisposeAttempts: 1 }, "a failed flush does not strand the handle");
     }
 
