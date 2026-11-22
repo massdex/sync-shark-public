@@ -188,7 +188,7 @@ public sealed class JournalReader
                     passed=probe.Count==0 ? next.NextUsn : probe[0].Usn!.Value;
                 }
                 catch(Exception error) when (error is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or ChangedUnderneathException or ItemFailedException) { /* Unproved range remains in NTFS. */ }
-                lock(gate) if (other.Paused && other.Read==from) other.Read=other.Settled=from with { NextUsn=passed };
+                lock(gate) if (other.Paused && other.Read==from) other.Read=other.Settled=new JournalPosition(from.JournalId,passed);
             }
             lock(gate)
             {
