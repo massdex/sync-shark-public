@@ -4,6 +4,8 @@ namespace Massdex.SyncShark.Engine;
 public interface ISide
 {
     Side Side { get; }
+    /// <summary>Read the actual settled journal prefix for this member, or null if unavailable.</summary>
+    Task<JournalPosition?> SettledJournalAsync(CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Notify a journal source when its pair membership changes.</summary>
     Task SetMembershipAsync(PairConfig pair, bool paused, bool removed, CancellationToken ct) => Task.CompletedTask;
     /// <summary>Native root identity for this side; PC also supplies drive evidence and observed drive type for its scope, recycle and startup trim; Dropbox has no PC drive type. A missing or unreadable root never implies a delete.</summary>
@@ -79,6 +81,9 @@ public sealed record JobMember(string? Id, string Path, string? Destination)
     /// <summary>Request a new name rather than adopting an existing folder.</summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
     public bool ExclusiveCreate { get; init; }
+    /// <summary>Original action for this launch member; absent on legacy jobs and never inferred from the route.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ActionKind? Origin { get; init; }
 }
 /// <summary>A provider observation; an invalid job does not imply any particular member outcome.</summary>
 public abstract record JobReply

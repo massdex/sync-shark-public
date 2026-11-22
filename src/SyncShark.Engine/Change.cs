@@ -24,6 +24,9 @@ public sealed record Change(
     string? Volume = null, string? HistoricalParentId = null, string? HistoricalName = null,
     string? OldParentId = null, string? OldName = null, ulong? JournalId = null)
 {
+    /// <summary>Path established by a matching armed victim when the journal supplied no path.</summary>
+    public string? AffectedPath { get; init; }
+
     /// <summary>Only on a report borrowed from WorkQueue.Held: acknowledge this exact queue entry after its version is settled. The queue then suppresses independent child application; merely reading the report, or a failed put-back needing it on Retry, never acknowledges it.</summary>
     [System.Text.Json.Serialization.JsonIgnore]
     public Action? ConsumeHeld { get; init; }

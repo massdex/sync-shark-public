@@ -34,11 +34,13 @@ public static class CredentialStoreChecks
             store.Save(first, "refresh-fixture-two");
             Check.Require(store.ReadOwn(first) == "refresh-fixture-two", "A re-saved token was not read");
 
-            // The fixed legacy target is distinct from every connection's own target.
+            // The fixed legacy target is distinct from every connection's own target; own-first stays pinned.
             LegacyFixture.Write("legacy-fixture");
             Check.Require(store.ReadLegacy() == "legacy-fixture" && store.ReadOwn(second) is null,
                 "The legacy target was not read or leaked into another connection's own target");
             Check.Require(store.Read(second) == "legacy-fixture", "Read did not fall back to the only legacy target");
+            Check.Require(store.Read(first) == "refresh-fixture-two",
+                "The first account did not read its own credential ahead of the legacy entry");
             store.RemoveLegacy();
             Check.Require(store.ReadLegacy() is null, "RemoveLegacy kept the fixed target");
         }

@@ -5,10 +5,10 @@ using Massdex.SyncShark.Engine.Dropbox;
 
 namespace Massdex.SyncShark.Engine.Tests.Dropbox;
 
-/// <summary>Contract checks for Connections: the explicit empty-list value is disjoint from legacy input and a save
-/// cannot revive old slots; distinct targets must carry the authoritative set (BC8/R47) and an append target its exact
-/// bytes; the predecessor's appended records and slot payloads are structurally validated before acceptance; in-place
-/// upgrades never overwrite evidence; Verify and the next Read agree.</summary>
+/// <summary>Contract checks for Connections: one canonical array representation ([] is the empty list, disjoint from
+/// every legacy log); the predecessor's typed payloads are validated before a record replaces the prefix or a slot is
+/// selected; slot-only sources are authoritative without append bytes; in-place Verify and the next Read agree; distinct
+/// targets keep BC8/R47; in-place evidence is never overwritten.</summary>
 public static class ConnectionsChecks
 {
     private const int MaximumStateBytes = 1024 * 1024;
@@ -23,7 +23,68 @@ public static class ConnectionsChecks
         {
             var connections = new Connections();
 
-            // A blank legacy line is valid legacy input; only an empty JSON array line marks our empty list.
+            // The predecessor's typed payload is validated before a record replaces the prefix or a slot is selected.
+            var legacy = Root(scratch, "legacy");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(legacy))!);
+            File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecord(1, "set", TypedTimeBinding(second), null));
+            Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
+                "A wrong-typed time field replaced the earlier valid set");
+            var structSlot = Root(scratch, "structSlot");
+            Slot(structSlot, 'a', 1, present: true, new[] { first });
+            SlotWithBinding(structSlot, 'b', 2, TypedTimeBinding(second));
+            Check.Require(connections.Read(structSlot).SequenceEqual(new[] { first }),
+                "A wrong-typed higher slot generation was selected");
+            File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecord(1, "set", TypedRetainedBinding(second), null));
+            Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
+                "A wrong-typed retained record replaced the earlier valid set");
+            File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecord(1, "set", NumericAccountBinding(second), null));
+            Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
+                "A numeric account id replaced the earlier valid set");
+            var numericSlot = Root(scratch, "numericSlot");
+            Slot(numericSlot, 'a', 1, present: true, new[] { first });
+            SlotWithBinding(numericSlot, 'b', 2, NumericAccountBinding(second));
+            Check.Require(connections.Read(numericSlot).SequenceEqual(new[] { first }),
+                "A wrong-typed higher slot generation was selected");
+            // A tombstone must still decode a supplied value the predecessor would reject.
+            File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyDelete(TypedTimeBinding(second)));
+            Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
+                "A tombstone with a wrong-typed supplied value was applied");
+
+            // R47: a slot-only source is authoritative; a same-set append target is accepted without append bytes.
+            var slotAuthority = Root(scratch, "slotAuthority");
+            Slot(slotAuthority, 'a', 1, present: true, new[] { second });
+            var appendSameSet = Root(scratch, "appendSameSet");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(appendSameSet))!);
+            File.WriteAllText(ListFile(appendSameSet), LegacySet(second));
+            var appendBytes = File.ReadAllBytes(ListFile(appendSameSet));
+            Check.Require(connections.Verify(slotAuthority, appendSameSet, new[] { second }) is null,
+                "A slot-only source refused a same-set append target for lack of append bytes");
+            Check.Require(File.ReadAllBytes(ListFile(appendSameSet)).AsSpan().SequenceEqual(appendBytes),
+                "A slot-only verification overwrote the accepted target");
+            var appendOtherSet = Root(scratch, "appendOtherSet");
+            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(appendOtherSet))!);
+            File.WriteAllText(ListFile(appendOtherSet), LegacySet(third));
+            var refused = false;
+            try { connections.Verify(slotAuthority, appendOtherSet, new[] { second }); }
+            catch (InvalidDataException) { refused = true; }
+            Check.Require(refused, "A slot-only source accepted a target with a different set");
+
+            // In place: an occupied canonical list that diverges from the slots refuses before publication.
+            var inPlaceConflict = Root(scratch, "inPlaceConflict");
+            Slot(inPlaceConflict, 'a', 1, present: true, new[] { first, second });
+            connections.Save(inPlaceConflict, new[] { first });
+            refused = false;
+            try { connections.Verify(inPlaceConflict, inPlaceConflict, new[] { second }); }
+            catch (InvalidDataException) { refused = true; }
+            Check.Require(refused, "An in-place canonical list that hides a slot connection was accepted");
+            var inPlaceEqual = Root(scratch, "inPlaceEqual");
+            Slot(inPlaceEqual, 'a', 1, present: true, new[] { first });
+            connections.Save(inPlaceEqual, new[] { first });
+            Check.Require(connections.Verify(inPlaceEqual, inPlaceEqual, new[] { first }) is null &&
+                          connections.Read(inPlaceEqual).SequenceEqual(new[] { first }),
+                "An equal in-place canonical list and slot were refused or disagreed with Read");
+
+            // A blank legacy line is valid legacy input; the canonical array is what tells an empty list apart.
             var blankLegacy = Root(scratch, "blankLegacy");
             Slot(blankLegacy, 'a', 1, present: true, new[] { first });
             Directory.CreateDirectory(Path.GetDirectoryName(ListFile(blankLegacy))!);
@@ -31,41 +92,11 @@ public static class ConnectionsChecks
             Check.Require(connections.Verify(blankLegacy, blankLegacy, new[] { first }) is null &&
                           connections.Read(blankLegacy).SequenceEqual(new[] { first }),
                 "A blank legacy line was treated as our empty list instead of the authoritative slot");
-            Check.Require(connections.Read(blankLegacy).SequenceEqual(new[] { first }),
-                "A blank legacy log did not expose the slot the Verify used");
             connections.Save(blankLegacy, Array.Empty<string>());
             Check.Require(connections.Read(blankLegacy).Count == 0,
                 "Saving an empty list did not override the old slots");
-            Check.Require(File.ReadAllText(ListFile(blankLegacy)).Trim() == "[]",
-                "The empty list is not the explicit empty JSON array value");
 
-            // R47: an append-authoritative source and a same-set canonical target with different bytes are both kept.
-            var r47Source = Root(scratch, "r47Source");
-            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(r47Source))!);
-            File.WriteAllText(ListFile(r47Source), LegacyRecovery("evidence.json") + LegacySet(first));
-            var r47Target = Root(scratch, "r47Target");
-            connections.Save(r47Target, new[] { first });
-            var sourceBytes = File.ReadAllBytes(ListFile(r47Source));
-            var targetBytes = File.ReadAllBytes(ListFile(r47Target));
-            Check.Require(connections.Verify(r47Source, r47Target, new[] { first }) is null,
-                "A same-set canonical target with different bytes was refused instead of kept under R47");
-            Check.Require(File.ReadAllBytes(ListFile(r47Source)).AsSpan().SequenceEqual(sourceBytes) &&
-                          File.ReadAllBytes(ListFile(r47Target)).AsSpan().SequenceEqual(targetBytes),
-                "R47 verification overwrote one side");
-
-            // The predecessor's typed payload is validated before a record replaces the prefix or a slot is selected.
-            var legacy = Root(scratch, "legacy");
-            Directory.CreateDirectory(Path.GetDirectoryName(ListFile(legacy))!);
-            File.WriteAllText(ListFile(legacy), LegacySet(first) + LegacyRecord(1, "set", NumericAccountBinding(second), null));
-            Check.Require(connections.Read(legacy).SequenceEqual(new[] { first }),
-                "A wrong-typed payload replaced the earlier valid set");
-            var structSlot = Root(scratch, "structSlot");
-            Slot(structSlot, 'a', 1, present: true, new[] { first });
-            SlotWithBinding(structSlot, 'b', 2, NumericAccountBinding(second));
-            Check.Require(connections.Read(structSlot).SequenceEqual(new[] { first }),
-                "A wrong-typed higher slot generation was selected");
-
-            // BC8: a byte-identical distinct target that omits an authoritative slot connection must refuse.
+            // BC8/R47: a distinct target must carry the authoritative set; an append target its exact bytes.
             var slotSource = Root(scratch, "slotSource");
             Slot(slotSource, 'a', 2, present: true, new[] { first, second });
             Directory.CreateDirectory(Path.GetDirectoryName(ListFile(slotSource))!);
@@ -73,12 +104,11 @@ public static class ConnectionsChecks
             var staleCopy = Root(scratch, "staleCopy");
             Directory.CreateDirectory(Path.GetDirectoryName(ListFile(staleCopy))!);
             File.Copy(ListFile(slotSource), ListFile(staleCopy));
-            var refused = false;
+            refused = false;
             try { connections.Verify(slotSource, staleCopy, new[] { first }); }
             catch (InvalidDataException) { refused = true; }
             Check.Require(refused, "A distinct target that dropped an authoritative connection was accepted");
 
-            // A distinct append target is accepted only byte-identically and with the same set.
             var appendSource = Root(scratch, "appendSource");
             Directory.CreateDirectory(Path.GetDirectoryName(ListFile(appendSource))!);
             File.WriteAllText(ListFile(appendSource), LegacySet(first));
@@ -94,6 +124,17 @@ public static class ConnectionsChecks
             try { connections.Verify(appendSource, sameIdsOtherBytes, new[] { first }); }
             catch (InvalidDataException) { refused = true; }
             Check.Require(refused, "A distinct append target with different bytes was accepted");
+
+            // R47: an append-authoritative source and a same-set canonical target with different bytes are both kept.
+            var r47Target = Root(scratch, "r47Target");
+            connections.Save(r47Target, new[] { first });
+            var sourceBytes = File.ReadAllBytes(ListFile(appendSource));
+            var targetBytes = File.ReadAllBytes(ListFile(r47Target));
+            Check.Require(connections.Verify(appendSource, r47Target, new[] { first }) is null,
+                "A same-set canonical target with different bytes was refused instead of kept under R47");
+            Check.Require(File.ReadAllBytes(ListFile(appendSource)).AsSpan().SequenceEqual(sourceBytes) &&
+                          File.ReadAllBytes(ListFile(r47Target)).AsSpan().SequenceEqual(targetBytes),
+                "R47 verification overwrote one side");
 
             // A distinct absent target copies the authoritative append log's bytes, not a normalized rewrite.
             var copySource = Root(scratch, "copySource");
@@ -126,13 +167,12 @@ public static class ConnectionsChecks
             Check.Require(connections.Read(zeroLegacy).SequenceEqual(new[] { first }),
                 "A zero-byte legacy log did not resolve the same slot the Verify used");
 
-            // In place with only slots: a create-only list is published and cleanup removes it.
+            // In place with only slots: the slot set is authoritative and no file is created.
             var slotOnly = Root(scratch, "slotOnly");
             Slot(slotOnly, 'a', 1, present: true, new[] { first, second });
-            var cleanup = connections.Verify(slotOnly, slotOnly, new[] { first, second });
-            Check.Require(cleanup is not null && connections.Read(slotOnly).SequenceEqual(Sorted(first, second)),
-                "An in-place slot-only root did not publish its authoritative set");
-            cleanup!();
+            Check.Require(connections.Verify(slotOnly, slotOnly, new[] { first, second }) is null &&
+                          connections.Read(slotOnly).SequenceEqual(Sorted(first, second)),
+                "An in-place slot-only root did not expose its authoritative set");
 
             // In place with only the legacy log: nothing is published.
             var legacyOnly = Root(scratch, "legacyOnly");
@@ -153,14 +193,6 @@ public static class ConnectionsChecks
             try { connections.Verify(appendSource, distinctTarget, new[] { first }); }
             catch (InvalidDataException) { refused = true; }
             Check.Require(refused, "A different canonical distinct target was accepted");
-
-            // A distinct slot-only source with a legacy target refuses.
-            var slotOnlySource = Root(scratch, "slotOnlySource");
-            Slot(slotOnlySource, 'a', 1, present: true, new[] { second });
-            refused = false;
-            try { connections.Verify(slotOnlySource, identical, new[] { second }); }
-            catch (InvalidDataException) { refused = true; }
-            Check.Require(refused, "A distinct legacy target was accepted for a slot-only source");
 
             // A newer slot deletion overrides the legacy log.
             var tomb = Root(scratch, "tomb");
@@ -297,6 +329,23 @@ public static class ConnectionsChecks
             ["AdditionalConnections"] = Array.Empty<object>()
         });
 
+    private static string TypedTimeBinding(string explicitId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["ConnectionId"] = explicitId,
+            ["AccountId"] = "acct-typed",
+            ["ConnectedUtc"] = "not-a-date",
+            ["AdditionalConnections"] = Array.Empty<object>()
+        });
+
+    private static string TypedRetainedBinding(string explicitId) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["ConnectionId"] = explicitId,
+            ["AccountId"] = "acct-typed",
+            ["RetainedConnections"] = new[] { new Dictionary<string, object?> { ["ConnectionId"] = 123 } }
+        });
+
     /// <summary>Writes one 0.3.95 alternating slot with the predecessor's record shape and payload hash.</summary>
     private static string Slot(string root, char slot, long generation, bool present, string[] ids, string? hash = null) =>
         SlotWithBinding(root, slot, generation, present ? BindingJson(ids[0], "acct-slot", ids.Skip(1).ToArray()) : null,
@@ -331,19 +380,23 @@ public static class ConnectionsChecks
 
     private static string LegacySetWithBinding(string bindingJson) => LegacyRecord(1, "set", bindingJson, null);
 
+    private static string LegacyDelete(string? suppliedValueJson = null) =>
+        LegacyRecord(1, "delete", suppliedValueJson, null, payload: "delete");
+
     private static string LegacyRecovery(string? evidenceFile) =>
         LegacyRecord(1, "recovery", null,
             evidenceFile is null ? "{}" : JsonSerializer.Serialize(new Dictionary<string, object?> { ["EvidenceFile"] = evidenceFile }));
 
-    private static string LegacyRecord(object schema, string operation, string? valueJson, string? recoveryJson)
+    private static string LegacyRecord(object schema, string operation, string? valueJson, string? recoveryJson,
+        string? payload = null)
     {
-        var payload = recoveryJson ?? valueJson ?? "delete";
+        var hashed = payload ?? recoveryJson ?? valueJson ?? "delete";
         return JsonSerializer.Serialize(new Dictionary<string, object?>
         {
             ["SchemaVersion"] = schema,
             ["Operation"] = operation,
             ["Value"] = valueJson is null ? null : JsonSerializer.Deserialize<JsonElement>(valueJson),
-            ["PayloadSha256"] = Hex(SHA256.HashData(Encoding.UTF8.GetBytes(payload))),
+            ["PayloadSha256"] = Hex(SHA256.HashData(Encoding.UTF8.GetBytes(hashed))),
             ["Recovery"] = recoveryJson is null ? null : JsonSerializer.Deserialize<JsonElement>(recoveryJson)
         }) + "\n";
     }

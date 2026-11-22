@@ -4,7 +4,7 @@ namespace Massdex.SyncShark.Engine.Planner;
 public static class FolderDeletes
 {
     /// <summary>Decide whether to remove the folder given its observed contents and protected descendants.</summary>
-    public static SyncAction For(Row row, bool holdsProtectedItem, TextKey? unreadableCause = null) => throw new NotImplementedException();
+    public static SyncAction For(Row row, bool holdsProtectedItem, TextKey? unreadableCause, FirstRunPolicy policy, DateTimeOffset comparedAt, bool localContentDirty) => throw new NotImplementedException();
 
     /// <summary>Classify for the selected FolderDeletes operation.</summary>
     public static FolderVerdict Classify(bool excluded, bool nestedRoot, bool link, bool unreadable, bool movedOut) => throw new NotImplementedException();
