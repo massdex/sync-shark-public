@@ -7,4 +7,7 @@ public static class Render
     public static string Notice(Notice notice) => throw new NotImplementedException();
     /// <summary>Event operation on the supplied facts.</summary>
     public static string Event(RunEvent value) => throw new NotImplementedException();
+
+    /// <summary>Notice for the selected Render operation.</summary>
+    public static string Notice(Notice notice, string pair, IEnumerable<string> choices) => throw new NotImplementedException();
 }

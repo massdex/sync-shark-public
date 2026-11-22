@@ -7,4 +7,6 @@ public sealed class StoreMove
     public Task MoveAsync(string predecessorRoot, string productRoot, Func<string,string,IReadOnlyList<string>,Action?> verifyConnections, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>For the first explicit pair add only, build and verify an attempt-local empty image and publish its closed file create-only.</summary>
     public Task CreateAsync(string productRoot, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Return a post-publication cleanup warning separately from a refused move.</summary>
+    public Task<string?> MoveWithOutcomeAsync(string predecessorRoot, string productRoot, Func<string, string, IReadOnlyList<string>, Action?> verifyConnections, CancellationToken ct) => throw new NotImplementedException();
 }

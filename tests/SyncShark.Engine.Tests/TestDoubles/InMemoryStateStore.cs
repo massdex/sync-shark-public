@@ -6,6 +6,7 @@ public sealed class InMemoryStateStore : IStore
     public Dictionary<(string Pair, string LocalKey), SyncedEntry> Records { get; } = new();
     public RequestCounters Requests { get; } = new();
     private readonly Dictionary<(string Pair,long Id),Notice> notices = [];
+    private long lastNoticeId;
     public IReadOnlyCollection<Notice> OpenNotices => notices.Values;
     private readonly Dictionary<string,PairConfig> pairs = [];
     private readonly Dictionary<string,JournalPosition> positions = [];
@@ -106,10 +107,13 @@ public sealed class InMemoryStateStore : IStore
     /// <summary>SaveNotice operation on the supplied facts.</summary>
     public Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct) {
         ct.ThrowIfCancellationRequested();
-        var slot=notices.Where(x=>x.Key.Pair==pairId).Select(x=>x.Value).FirstOrDefault(n=>n.Path==notice.Path && n.Kind==notice.Kind);
-        var id=slot?.Id??notice.Id;
-        if(slot is null && notices.ContainsKey((pairId,id))) throw new InvalidDataException("Notice id belongs to another slot");
-        notices[(pairId,id)]=notice with { Id=id };return Task.CompletedTask;
+        lock (pairs)
+        {
+            var slot=notices.Where(x=>x.Key.Pair==pairId).Select(x=>x.Value).FirstOrDefault(n=>n.Path==notice.Path && n.Kind==notice.Kind);
+            var id=slot?.Id ?? checked(++lastNoticeId);
+            notices[(pairId,id)]=notice with { Id=id };
+        }
+        return Task.CompletedTask;
     }
     /// <summary>CloseNotice operation on the supplied facts.</summary>
     public Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct)
@@ -343,7 +347,7 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested();var link=notices.Where(x=>x.Key.Pair==pairId && x.Value.Cause==TextKey.InfoLinks).Select(x=>x.Value).SingleOrDefault();
         if(link==null && !present) return Task.CompletedTask;
-        link??=new Notice(notices.Keys.Select(k=>k.Id).DefaultIfEmpty().Max()+1,NoticeKind.Info,TextKey.InfoLinks,string.Empty,new([],null),DateTimeOffset.UnixEpoch,false);
+        link??=new Notice(0,NoticeKind.Info,TextKey.InfoLinks,string.Empty,new([],null),DateTimeOffset.UnixEpoch,false);
         var items=(present?link.Subject.Items.Append(member).Distinct():link.Subject.Items.Where(x=>x!=member)).ToArray();
         return items.Length==0 ? CloseNoticeAsync(pairId,link,ct) : SaveNoticeAsync(pairId,link with {Subject=link.Subject with {Items=items}},ct);
     }

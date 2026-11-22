@@ -3,9 +3,11 @@ using System.Text.Json;
 
 namespace Massdex.SyncShark.Engine.Dropbox;
 
-/// <summary>The 409 mapping of section 5.4, by error_summary prefix. One owner classifies every Dropbox reply:
-/// a single response and each member of a batch reply, from its route and the request evidence. A documented,
-/// well-shaped refusal proves no effect; anything else is an unknown outcome for a dispatched write, never a refusal.</summary>
+/// <summary>The 409 mapping of section 5.4. Structured provider evidence is authoritative; a documented summary-only
+/// refusal counts only with a complete tag and its required subtype. An inconclusive reply (a malformed or
+/// contradictory token, an unknown tag, a missing subtype) is an unknown outcome for a dispatched write, never proof of
+/// no effect. One owner classifies a single response and each member of a batch reply from its route and request
+/// evidence.</summary>
 public sealed class DropboxErrors
 {
     /// <summary>What the caller observed about the request that produced a failure. ProvenNoEffect is the caller's
@@ -14,15 +16,16 @@ public sealed class DropboxErrors
 
     /// <summary>One classified failure: the cause, the disposition, whether it is an attributable refusal that proves
     /// the write had no effect (a folder split may act on it), and whether a usable observation proved the target
-    /// identity absent (a read's documented miss, or a by-id delete member's exact structured path_lookup/not_found;
-    /// absence is never the same as our request having deleted it).</summary>
+    /// identity absent. Absence means a get_metadata's exact structured path/not_found, or a by-id delete's exact
+    /// structured path_lookup/not_found; it is never the same as our request having deleted it (its effect stays
+    /// Unknown), and a caller carries a delete absence only when its own request addressed the selected id.</summary>
     public readonly record struct Classified(
         TextKey Cause, FailureDisposition Disposition, bool ProvenNoEffect, bool Absent = false);
 
     /// <summary>Classify one single response. <paramref name="body"/> is the parsed reply. A documented write
-    /// contention takes the write rule on any status; a documented refusal proves no effect; absence needs the exact
-    /// documented miss. Otherwise the request evidence decides, and an unproved dispatched write stays unknown.
-    /// <paramref name="expectedIsNull"/> is true when a free target was required (an add or a create).</summary>
+    /// contention takes the write rule on any status; a well-shaped structured refusal proves no effect; a documented
+    /// summary-only refusal counts only when no error payload is present; absence needs the exact structured miss.
+    /// Otherwise the request evidence decides, and an unproved dispatched write stays unknown.</summary>
     public Classified Classify(HttpStatusCode status, JsonElement body, string route, bool expectedIsNull,
         RequestEvidence evidence)
     {
@@ -30,22 +33,30 @@ public sealed class DropboxErrors
         var summary = Summary(body);
         var failure = Failure(body);
         var structured = UnionTag(failure) is not null;
+        var payloadPresent = HasErrorPayload(body);
 
         // Reason-first: documented write contention takes the write rule on any status (product-0518/0546).
-        if (IsMutatingRoute(route) && DocumentsWriteThrottle(summary, failure))
+        if (IsMutatingRoute(route) && DocumentsWriteThrottle(summary, failure, payloadPresent))
             return new Classified(TextKey.WaitTooManyWrites, FailureDisposition.TemporaryNoEffect, true);
 
         if (status == HttpStatusCode.Conflict)
         {
-            // Structured evidence decides absence; the summary fallback must be the exact documented summary.
-            if (route == DropboxProtocol.GetMetadata && IsExactAbsence(summary, failure))
+            // Absence only from the exact structured miss; a summary-only or malformed lookup is not absence.
+            if (route == DropboxProtocol.GetMetadata && IsStructuredNotFound(failure))
                 return new Classified(TextKey.DropboxRefused, FailureDisposition.Permanent, true, Absent: true);
 
-            if (IsUploadRoute(route))
+            if (IsMutatingRoute(route))
             {
-                // A structured refusal is authoritative; when it proves nothing we do not fall back to the summary.
                 if (structured)
-                    return WriteRefusal(failure, expectedIsNull) ?? Unclassified(evidence);
+                {
+                    // A well-shaped refusal counts; an inconclusive one falls back to the caller's proof.
+                    if (StructuredRefusal(route, failure, expectedIsNull) is { } refusal &&
+                        (refusal.Absent || refusal.Disposition != FailureDisposition.UnknownEffect))
+                        return refusal;
+                    return Unclassified(evidence);
+                }
+                // A present but unusable error payload is never replaced by the summary.
+                if (payloadPresent) return Unclassified(evidence);
                 return SingleSummaryRefusal(route, summary, expectedIsNull) ?? Unclassified(evidence);
             }
 
@@ -55,34 +66,44 @@ public sealed class DropboxErrors
         return Unclassified(evidence);
     }
 
-    /// <summary>Classify one member of a batch reply body (HTTP 200 with a per-member failure union). Only the
-    /// upload-finish and create routes use the write-union decoding; a delete member proves no outcome; an unknown tag,
-    /// malformed member or unrecognized route stays Unknown so only its own position is affected.</summary>
+    /// <summary>Classify one member of a batch reply body (HTTP 200 with a per-member failure union). Delete, move,
+    /// upload-finish and create-folder members use the route's own decode; an unknown tag, malformed member or
+    /// unrecognized route stays Unknown so only its own position is affected.</summary>
     public Classified ClassifyMember(JsonElement failure, string route, bool expectedIsNull)
     {
         ArgumentNullException.ThrowIfNull(route);
-        var tag = UnionTag(failure);
-        if (route is DropboxProtocol.DeleteBatch or DropboxProtocol.DeleteBatchCheck) return DeleteMember(failure);
-        if (route is DropboxProtocol.MoveBatch or DropboxProtocol.MoveBatchCheck) return MoveMember(failure, tag);
-        if (route == DropboxProtocol.UploadSessionFinishBatch)
-            return WriteRefusal(failure, expectedIsNull) ?? Unproven();
-        return Unproven();
+        return StructuredRefusal(route, failure, expectedIsNull) ?? Unproven();
     }
 
     /// <summary>The frozen two-argument surface: no route or request evidence, so an unclassified refusal.</summary>
     public FailureDisposition Classify(HttpStatusCode status, JsonElement error) =>
         Classify(status, error, string.Empty, false, default).Disposition;
 
-    // A write outside a 409, or an unprovable 409, follows the request evidence: an unsent request is permanent; a read
-    // is temporary only on positive transient evidence (so a decided 500 stays a failure); a dispatched write that the
-    // caller did not prove had no effect is unknown, and a proved no-effect write is temporary only when transient.
+    // The route's own structured refusal decode, shared by the single and member paths. Null only when the route's
+    // write union proves nothing (the caller then uses its evidence or treats the member as Unknown).
+    private static Classified? StructuredRefusal(string route, JsonElement failure, bool expectedIsNull)
+    {
+        if (route is DropboxProtocol.Delete or DropboxProtocol.DeleteBatch or DropboxProtocol.DeleteBatchCheck)
+            return DeleteMember(failure);
+        if (route is DropboxProtocol.Move or DropboxProtocol.MoveBatch or DropboxProtocol.MoveBatchCheck)
+            return MoveMember(failure, UnionTag(failure));
+        if (IsUploadRoute(route))
+            return WriteRefusal(failure, expectedIsNull,
+                route is DropboxProtocol.CreateFolder or DropboxProtocol.CreateFolderBatch or
+                    DropboxProtocol.CreateFolderBatchCheck);
+        return null;
+    }
+
+    // A failure outside a 409, or an inconclusive one: a read follows its transient evidence (log-only retry when
+    // positive, so a decided 500 stays a failure); an unsent write is permanent; a dispatched write the caller did not
+    // prove had no effect is unknown; a proved no-effect write is temporary only when transient.
     private static Classified Unclassified(RequestEvidence evidence)
     {
-        if (!evidence.Dispatched)
-            return new Classified(TextKey.DropboxRefused, FailureDisposition.Permanent, true);
         if (evidence.Read)
             return new Classified(TextKey.DropboxRefused,
                 evidence.Transient ? FailureDisposition.TemporaryNoEffect : FailureDisposition.Permanent, true);
+        if (!evidence.Dispatched)
+            return new Classified(TextKey.DropboxRefused, FailureDisposition.Permanent, true);
         if (!evidence.ProvenNoEffect)
             return new Classified(TextKey.DropboxRefused, FailureDisposition.UnknownEffect, false);
         return new Classified(TextKey.DropboxRefused,
@@ -97,25 +118,28 @@ public sealed class DropboxErrors
     {
         if (route == DropboxProtocol.Download && Prefixed(summary, DropboxProtocol.PathNotFound))
             return Refused(TextKey.FailChanged);
-        if (route == DropboxProtocol.Delete && Prefixed(summary, DropboxProtocol.PathLookupNotFound))
-            return Refused(TextKey.FailChanged);
         if (route == DropboxProtocol.Move && Prefixed(summary, DropboxProtocol.FromLookupNotFound))
             return Refused(TextKey.FailChanged);
         if (route == DropboxProtocol.Move && Prefixed(summary, DropboxProtocol.ToConflict))
             return Refused(TextKey.ClashNameTaken);
         if (route == DropboxProtocol.Move && Prefixed(summary, DropboxProtocol.TooManyFiles))
             return Refused(TextKey.FailDropboxTooManyFiles);
+        // A conflict needs its documented subtype segment; a bare or unknown subtype proves nothing.
         if ((route is DropboxProtocol.Upload or DropboxProtocol.UploadSessionFinish) &&
-            Prefixed(summary, DropboxProtocol.PathConflict))
+            (Prefixed(summary, DropboxProtocol.PathConflictFile) ||
+             Prefixed(summary, DropboxProtocol.PathConflictFolder)))
             return Refused(expectedIsNull ? TextKey.ClashNameTaken : TextKey.FailChanged);
-        if (route == DropboxProtocol.CreateFolder && Prefixed(summary, DropboxProtocol.PathConflict))
+        if ((route is DropboxProtocol.CreateFolder or DropboxProtocol.CreateFolderBatch or
+                DropboxProtocol.CreateFolderBatchCheck) &&
+            (Prefixed(summary, DropboxProtocol.PathConflictFolder) ||
+             Prefixed(summary, DropboxProtocol.PathConflictFile)))
             return Refused(TextKey.ClashNameTaken);
         return WriteCause(route, summary) is { } cause ? Refused(cause) : null;
     }
 
-    // Decode one structured write union (an upload or create member, single or batch). A refusal counts only when it
-    // is route-appropriate and well shaped; an unknown tag, a missing conflict subtype or an unknown reason is null.
-    private static Classified? WriteRefusal(JsonElement failure, bool expectedIsNull)
+    // Decode one structured write union (an upload, upload-finish or create member, single or batch). A refusal counts
+    // only when it is well shaped: a conflict carries its required subtype, and malformed_path carries its string.
+    private static Classified? WriteRefusal(JsonElement failure, bool expectedIsNull, bool createFolder)
     {
         var tag = UnionTag(failure);
         if (tag is null) return null;
@@ -128,16 +152,24 @@ public sealed class DropboxErrors
         if (writeTag is null) return null;
         if (writeTag == DropboxProtocol.Conflict)
             return IsWellFormedConflict(write)
-                ? Refused(expectedIsNull ? TextKey.ClashNameTaken : TextKey.FailChanged)
+                ? Refused(createFolder || expectedIsNull ? TextKey.ClashNameTaken : TextKey.FailChanged)
                 : null;
         if (writeTag == DropboxProtocol.TooManyWriteOperations)
             return new Classified(TextKey.WaitTooManyWrites, FailureDisposition.TemporaryNoEffect, true);
-        return IsDocumentedWriteReason(writeTag) ? Refused(CauseOf(writeTag)) : null;
+        if (writeTag == DropboxProtocol.MalformedPath)
+            return write.TryGetProperty(DropboxProtocol.MalformedPath, out var malformed) &&
+                malformed.ValueKind is JsonValueKind.String or JsonValueKind.Null
+                    ? Refused(TextKey.FailDropboxNameRejected) : null;
+        if (writeTag == DropboxProtocol.DisallowedName) return Refused(TextKey.FailDropboxNameRejected);
+        if (writeTag == DropboxProtocol.NoWritePermission) return Refused(TextKey.FailDropboxNoPermission);
+        if (writeTag == DropboxProtocol.InsufficientSpace) return Refused(TextKey.FailDropboxNoSpace);
+        if (writeTag is DropboxProtocol.TeamFolder or DropboxProtocol.OperationSuppressed)
+            return Refused(TextKey.DropboxRefused);
+        return null;
     }
 
-    // No DeleteError tag proves the effect was not applied, so every delete member's effect stays Unknown. The one
-    // exception is the exact structured by-id path_lookup/not_found: it proves the selected identity is gone (Absent),
-    // which is not the same as our request having deleted it, so the effect remains Unknown.
+    // No DeleteError tag proves our effect, so a delete member's effect stays Unknown. The one exception, the exact
+    // structured by-id path_lookup/not_found, proves the selected identity is gone (Absent) without proving our delete.
     private static Classified DeleteMember(JsonElement failure)
     {
         var tag = UnionTag(failure);
@@ -170,33 +202,35 @@ public sealed class DropboxErrors
         DropboxProtocol.TagOther or DropboxProtocol.PropertiesError or DropboxProtocol.PayloadTooLarge or
         DropboxProtocol.ContentHashMismatch or DropboxProtocol.LookupFailed;
 
-    private static bool IsDocumentedWriteReason(ReadOnlySpan<char> tag) =>
-        tag.SequenceEqual(DropboxProtocol.MalformedPath) || tag.SequenceEqual(DropboxProtocol.DisallowedName) ||
-        tag.SequenceEqual(DropboxProtocol.NoWritePermission) || tag.SequenceEqual(DropboxProtocol.InsufficientSpace) ||
-        tag.SequenceEqual(DropboxProtocol.TeamFolder) || tag.SequenceEqual(DropboxProtocol.OperationSuppressed);
-
     private static bool IsWellFormedConflict(JsonElement write) =>
         write.TryGetProperty(DropboxProtocol.Conflict, out var conflict) &&
         UnionTag(conflict) is DropboxProtocol.TagFile or DropboxProtocol.TagFolder or DropboxProtocol.FileAncestor;
 
     private static bool IsUploadRoute(string route) => route is
         DropboxProtocol.Upload or DropboxProtocol.UploadSessionStart or DropboxProtocol.UploadSessionAppend or
-        DropboxProtocol.UploadSessionFinish or DropboxProtocol.UploadSessionFinishBatch or DropboxProtocol.CreateFolder;
+        DropboxProtocol.UploadSessionFinish or DropboxProtocol.UploadSessionFinishBatch or DropboxProtocol.CreateFolder or
+        DropboxProtocol.CreateFolderBatch or DropboxProtocol.CreateFolderBatchCheck;
 
     // Every route that can change the provider's state, so the reason-first write-contention rule applies.
     private static bool IsMutatingRoute(string route) => route is
         DropboxProtocol.Upload or DropboxProtocol.UploadSessionStart or DropboxProtocol.UploadSessionAppend or
         DropboxProtocol.UploadSessionFinish or DropboxProtocol.UploadSessionFinishBatch or DropboxProtocol.CreateFolder or
-        DropboxProtocol.Delete or DropboxProtocol.DeleteBatch or DropboxProtocol.DeleteBatchCheck or
-        DropboxProtocol.Move or DropboxProtocol.MoveBatch or DropboxProtocol.MoveBatchCheck;
+        DropboxProtocol.CreateFolderBatch or DropboxProtocol.CreateFolderBatchCheck or DropboxProtocol.Delete or
+        DropboxProtocol.DeleteBatch or DropboxProtocol.DeleteBatchCheck or DropboxProtocol.Move or
+        DropboxProtocol.MoveBatch or DropboxProtocol.MoveBatchCheck;
 
-    // A documented write contention, by the structured union (top level or nested WriteError) or a complete summary tag.
-    private static bool DocumentsWriteThrottle(string summary, JsonElement failure)
+    // A documented write contention, from the structured union (top level, or the WriteError under path/reason) or a
+    // complete summary tag only when no error payload is present (a malformed payload never trusts the summary).
+    private static bool DocumentsWriteThrottle(string summary, JsonElement failure, bool payloadPresent)
     {
         if (UnionTag(failure) == DropboxProtocol.TooManyWriteOperations) return true;
         if (WriteError(failure) is { } write && UnionTag(write) == DropboxProtocol.TooManyWriteOperations) return true;
+        if (payloadPresent) return false;
         return HasSegment(summary, DropboxProtocol.TooManyWriteOperations);
     }
+
+    private static bool HasErrorPayload(JsonElement body) =>
+        body.ValueKind == JsonValueKind.Object && body.TryGetProperty(DropboxProtocol.Error, out _);
 
     /// <summary>The error_summary for an object reply that carries a string, else empty; never throws on shape.</summary>
     private static string Summary(JsonElement body) =>
@@ -247,14 +281,8 @@ public sealed class DropboxErrors
         tag is not null &&
         tag.AsSpan().SequenceEqual(DropboxProtocol.PathNotFound.AsSpan(DropboxProtocol.Path.Length + 1));
 
-    // Absence needs a usable observation: the exact structured 409 path/not_found when a structured error is present,
-    // else the exact summary. A prefix match or a contradictory structured refusal is not absence (M14/BC21).
-    private static bool IsExactAbsence(string summary, JsonElement failure)
-    {
-        if (failure.ValueKind == JsonValueKind.Object) return IsStructuredNotFound(failure);
-        return summary.AsSpan().SequenceEqual(DropboxProtocol.PathNotFound);
-    }
-
+    /// <summary>True only for the exact structured 409 path/not_found union; a summary prefix or a malformed payload is
+    /// never absence (M14/BC21).</summary>
     private static bool IsStructuredNotFound(JsonElement failure) =>
         UnionTag(failure) == DropboxProtocol.Path &&
         failure.TryGetProperty(DropboxProtocol.Path, out var lookup) && lookup.ValueKind == JsonValueKind.Object &&
@@ -316,7 +344,7 @@ public sealed class DropboxErrors
         };
     }
 
-    /// <summary>The specific cause of a documented write refusal for route, else null (not a proven refusal).</summary>
+    /// <summary>The specific cause of a documented summary write refusal for route, else null (not a proven refusal).</summary>
     private static TextKey? WriteCause(string route, string summary) => route switch
     {
         DropboxProtocol.Upload or DropboxProtocol.UploadSessionFinish or DropboxProtocol.CreateFolder =>
@@ -336,8 +364,13 @@ public sealed class DropboxErrors
         var end = rest.IndexOf(DropboxProtocol.ErrorSummarySeparator);
         // Complete segment only: "no_write_permission_extra" is a different reason.
         var reason = end < 0 ? rest : rest[..end];
-        return IsDocumentedWriteReason(reason) ? CauseOf(reason) : null;
+        return IsDocumentedSummaryReason(reason) ? CauseOf(reason) : null;
     }
+
+    private static bool IsDocumentedSummaryReason(ReadOnlySpan<char> tag) =>
+        tag.SequenceEqual(DropboxProtocol.MalformedPath) || tag.SequenceEqual(DropboxProtocol.DisallowedName) ||
+        tag.SequenceEqual(DropboxProtocol.NoWritePermission) || tag.SequenceEqual(DropboxProtocol.InsufficientSpace) ||
+        tag.SequenceEqual(DropboxProtocol.TeamFolder) || tag.SequenceEqual(DropboxProtocol.OperationSuppressed);
 
     /// <summary>The cause of a documented write-refusal tag; team_folder and operation_suppressed are ordinary refusals.</summary>
     private static TextKey CauseOf(ReadOnlySpan<char> tag)

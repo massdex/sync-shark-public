@@ -17,6 +17,8 @@ public static class DropboxProtocol
     public const string UploadSessionAppend = "files/upload_session/append_v2";
     public const string UploadSessionFinish = "files/upload_session/finish";
     public const string CreateFolder = "files/create_folder_v2";
+    public const string CreateFolderBatch = "files/create_folder_batch";
+    public const string CreateFolderBatchCheck = "files/create_folder_batch/check";
     public const string Delete = "files/delete_v2";
     public const string DeleteBatch = "files/delete_batch";
     public const string DeleteBatchCheck = "files/delete_batch/check";
@@ -36,6 +38,7 @@ public static class DropboxProtocol
     public const char ErrorSummarySeparator = '/';
     public const string PathNotFound = "path/not_found";
     public const string PathConflict = "path/conflict";
+    public const string PathConflictFile = "path/conflict/file";
     public const string PathConflictFolder = "path/conflict/folder";
     public const string PathLookupNotFound = "path_lookup/not_found";
     public const string FromLookupNotFound = "from_lookup/not_found";
