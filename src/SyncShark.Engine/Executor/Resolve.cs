@@ -16,7 +16,7 @@ public sealed class Resolve
         {
             // Only kinds the choice table lets Dismiss close; RootIdentity, DriveChange and PutBack are never dismissed
             // (M12/product-0107; R8/R24). PutBack is settled only by its own Retry or a later change of the same item.
-            if (stored.Kind is NoticeKind.RootIdentity or NoticeKind.DriveChange) return; // DELIBERATE RED MUTATION: Dismiss settles a PutBack
+            if (stored.Kind is NoticeKind.PutBack or NoticeKind.RootIdentity or NoticeKind.DriveChange) return;
             await notices.CloseAsync(store, pair.PairId, stored, ct);
             return;
         }

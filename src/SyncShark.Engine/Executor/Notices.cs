@@ -29,5 +29,5 @@ public sealed class Notices
     /// notice is never closed here: only its own successful Retry or a later change of the same identified item settles
     /// it (R8/R24), and those act through the retry/change owner, not this general close path.</summary>
     public Task CloseAsync(IStore store, string pairId, Notice expected, CancellationToken ct) =>
-        store.CloseNoticeAsync(pairId, expected, ct); // DELIBERATE RED MUTATION: generic close settles a PutBack
+        expected.Kind == NoticeKind.PutBack ? Task.CompletedTask : store.CloseNoticeAsync(pairId, expected, ct);
 }
