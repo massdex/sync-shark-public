@@ -45,6 +45,10 @@ public sealed class DropboxErrors
             if (route == DropboxProtocol.GetMetadata && IsStructuredNotFound(failure))
                 return new Classified(TextKey.DropboxRefused, FailureDisposition.Permanent, true, Absent: true);
 
+            // An exact structured invalid_async_job_id on a poll-check route is the invalid-job cause (BC21/product-0099).
+            if (IsJobCheckRoute(route) && UnionTag(failure) == DropboxProtocol.InvalidAsyncJobId)
+                return new Classified(TextKey.FailDropboxDeleteJobInvalid, FailureDisposition.Permanent, false);
+
             if (IsMutatingRoute(route))
             {
                 if (structured)
@@ -86,11 +90,12 @@ public sealed class DropboxErrors
         if (route is DropboxProtocol.Delete or DropboxProtocol.DeleteBatch or DropboxProtocol.DeleteBatchCheck)
             return DeleteMember(failure);
         if (route is DropboxProtocol.Move or DropboxProtocol.MoveBatch or DropboxProtocol.MoveBatchCheck)
-            return MoveMember(failure, UnionTag(failure));
+            return MoveMember(failure, UnionTag(failure),
+                batch: route is DropboxProtocol.MoveBatch or DropboxProtocol.MoveBatchCheck);
         if (IsUploadRoute(route))
             return WriteRefusal(failure, expectedIsNull,
-                route is DropboxProtocol.CreateFolder or DropboxProtocol.CreateFolderBatch or
-                    DropboxProtocol.CreateFolderBatchCheck);
+                createFolder: route is DropboxProtocol.CreateFolder or DropboxProtocol.CreateFolderBatch,
+                finish: route is DropboxProtocol.UploadSessionFinish or DropboxProtocol.UploadSessionFinishBatch);
         return null;
     }
 
@@ -120,7 +125,10 @@ public sealed class DropboxErrors
             return Refused(TextKey.FailChanged);
         if (route == DropboxProtocol.Move && Prefixed(summary, DropboxProtocol.FromLookupNotFound))
             return Refused(TextKey.FailChanged);
-        if (route == DropboxProtocol.Move && Prefixed(summary, DropboxProtocol.ToConflict))
+        if (route == DropboxProtocol.Move &&
+            (Prefixed(summary, DropboxProtocol.ToConflictFile) ||
+             Prefixed(summary, DropboxProtocol.ToConflictFolder) ||
+             Prefixed(summary, DropboxProtocol.ToConflictFileAncestor)))
             return Refused(TextKey.ClashNameTaken);
         if (route == DropboxProtocol.Move && Prefixed(summary, DropboxProtocol.TooManyFiles))
             return Refused(TextKey.FailDropboxTooManyFiles);
@@ -139,14 +147,25 @@ public sealed class DropboxErrors
 
     // Decode one structured write union (an upload, upload-finish or create member, single or batch). A refusal counts
     // only when it is well shaped: a conflict carries its required subtype, and malformed_path carries its string.
-    private static Classified? WriteRefusal(JsonElement failure, bool expectedIsNull, bool createFolder)
+    private static Classified? WriteRefusal(JsonElement failure, bool expectedIsNull, bool createFolder, bool finish)
     {
         var tag = UnionTag(failure);
         if (tag is null) return null;
         if (tag == DropboxProtocol.TooManyWriteOperations)
             return new Classified(TextKey.WaitTooManyWrites, FailureDisposition.TemporaryNoEffect, true);
         if (tag != DropboxProtocol.Path)
-            return IsDocumentedTopLevel(tag) ? Refused(TextKey.DropboxRefused) : null;
+        {
+            // other/payload_too_large/content_hash_mismatch are documented top-level refusals. properties_error may leave
+            // the file uploaded without properties (not proof of no effect); lookup_failed belongs to finish and needs
+            // its nested error. Everything else proves nothing.
+            if (tag is DropboxProtocol.TagOther or DropboxProtocol.PayloadTooLarge or DropboxProtocol.ContentHashMismatch)
+                return Refused(TextKey.DropboxRefused);
+            if (tag == DropboxProtocol.LookupFailed && finish &&
+                failure.TryGetProperty(DropboxProtocol.LookupFailed, out var lookup) &&
+                lookup.ValueKind == JsonValueKind.Object && UnionTag(lookup) is not null)
+                return Refused(TextKey.DropboxRefused);
+            return null;
+        }
         if (WriteError(failure) is not { } write) return null;
         var writeTag = UnionTag(write);
         if (writeTag is null) return null;
@@ -185,22 +204,20 @@ public sealed class DropboxErrors
         return new Classified(cause, FailureDisposition.UnknownEffect, false);
     }
 
-    private static Classified MoveMember(JsonElement failure, string? tag)
+    private static Classified MoveMember(JsonElement failure, string? tag, bool batch)
     {
         if (tag == DropboxProtocol.TooManyWriteOperations)
             return new Classified(TextKey.WaitTooManyWrites, FailureDisposition.TemporaryNoEffect, true);
-        if (tag == DropboxProtocol.RelocationError &&
-            failure.TryGetProperty(DropboxProtocol.RelocationError, out var relocation) &&
-            MoveCause(relocation) is { } known)
-            return new Classified(known,
-                known == TextKey.WaitTooManyWrites
-                    ? FailureDisposition.TemporaryNoEffect : FailureDisposition.Permanent, true);
-        return Unproven();
+        // A move batch member wraps the RelocationError under relocation_error; move_v2's own error is the union itself.
+        var relocation = failure;
+        if (batch && (tag != DropboxProtocol.RelocationError ||
+                      !failure.TryGetProperty(DropboxProtocol.RelocationError, out relocation)))
+            return Unproven();
+        return MoveCause(relocation) is { } known
+            ? new Classified(known, known == TextKey.WaitTooManyWrites
+                ? FailureDisposition.TemporaryNoEffect : FailureDisposition.Permanent, true)
+            : Unproven();
     }
-
-    private static bool IsDocumentedTopLevel(string tag) => tag is
-        DropboxProtocol.TagOther or DropboxProtocol.PropertiesError or DropboxProtocol.PayloadTooLarge or
-        DropboxProtocol.ContentHashMismatch or DropboxProtocol.LookupFailed;
 
     private static bool IsWellFormedConflict(JsonElement write) =>
         write.TryGetProperty(DropboxProtocol.Conflict, out var conflict) &&
@@ -209,15 +226,18 @@ public sealed class DropboxErrors
     private static bool IsUploadRoute(string route) => route is
         DropboxProtocol.Upload or DropboxProtocol.UploadSessionStart or DropboxProtocol.UploadSessionAppend or
         DropboxProtocol.UploadSessionFinish or DropboxProtocol.UploadSessionFinishBatch or DropboxProtocol.CreateFolder or
-        DropboxProtocol.CreateFolderBatch or DropboxProtocol.CreateFolderBatchCheck;
+        DropboxProtocol.CreateFolderBatch;
+
+    // The poll-check routes; an exact structured invalid_async_job_id on these is the invalid-job cause (BC21).
+    private static bool IsJobCheckRoute(string route) => route is
+        DropboxProtocol.DeleteBatchCheck or DropboxProtocol.MoveBatchCheck or DropboxProtocol.CreateFolderBatchCheck;
 
     // Every route that can change the provider's state, so the reason-first write-contention rule applies.
     private static bool IsMutatingRoute(string route) => route is
         DropboxProtocol.Upload or DropboxProtocol.UploadSessionStart or DropboxProtocol.UploadSessionAppend or
         DropboxProtocol.UploadSessionFinish or DropboxProtocol.UploadSessionFinishBatch or DropboxProtocol.CreateFolder or
-        DropboxProtocol.CreateFolderBatch or DropboxProtocol.CreateFolderBatchCheck or DropboxProtocol.Delete or
-        DropboxProtocol.DeleteBatch or DropboxProtocol.DeleteBatchCheck or DropboxProtocol.Move or
-        DropboxProtocol.MoveBatch or DropboxProtocol.MoveBatchCheck;
+        DropboxProtocol.CreateFolderBatch or DropboxProtocol.Delete or DropboxProtocol.DeleteBatch or
+        DropboxProtocol.Move or DropboxProtocol.MoveBatch;
 
     // A documented write contention, from the structured union (top level, or the WriteError under path/reason) or a
     // complete summary tag only when no error payload is present (a malformed payload never trusts the summary).
@@ -244,8 +264,10 @@ public sealed class DropboxErrors
     private static JsonElement Failure(JsonElement body)
     {
         if (body.ValueKind != JsonValueKind.Object) return default;
-        if (body.TryGetProperty(DropboxProtocol.Error, out var error) && error.ValueKind == JsonValueKind.Object)
-            return error;
+        // A present error payload is authoritative: an unusable one is rejected, never replaced by the outer object.
+        if (body.TryGetProperty(DropboxProtocol.Error, out var error))
+            return error.ValueKind == JsonValueKind.Object ? error : default;
+        // Only a bare union (no error member) is itself the failure input from a batch/member caller.
         return UnionTag(body) is not null ? body : default;
     }
 

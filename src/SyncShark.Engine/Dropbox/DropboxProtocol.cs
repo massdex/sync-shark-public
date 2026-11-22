@@ -43,6 +43,9 @@ public static class DropboxProtocol
     public const string PathLookupNotFound = "path_lookup/not_found";
     public const string FromLookupNotFound = "from_lookup/not_found";
     public const string ToConflict = "to/conflict";
+    public const string ToConflictFile = "to/conflict/file";
+    public const string ToConflictFolder = "to/conflict/folder";
+    public const string ToConflictFileAncestor = "to/conflict/file_ancestor";
     public const string PathLookup = "path_lookup";
     public const string PathWrite = "path_write";
     public const string TooManyWriteOperations = "too_many_write_operations";
