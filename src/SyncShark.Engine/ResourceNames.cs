@@ -39,9 +39,6 @@ public static class ResourceNames
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static string NewId() => Guid.NewGuid().ToString(IdFormat);
 
-    /// <summary>A typed transient attempt identity, minted by the common identity owner.</summary>
-    public static Guid NewAttemptId() => Guid.NewGuid();
-
     /// <summary>A typed transient scan token, minted by the common identity owner.</summary>
     public static Guid NewScanToken() => Guid.NewGuid();
 }

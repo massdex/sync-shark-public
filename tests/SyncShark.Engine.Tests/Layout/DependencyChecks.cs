@@ -87,6 +87,7 @@ public static class DependencyChecks
             ("Dropbox","SignIn","_ = new HttpClient().GetAsync(string.Empty);",false),
             ("Dropbox","DropboxApi","_ = new HttpClient().GetAsync(string.Empty);",true),
             ("Dropbox","FolderJobs","_ = typeof(Massdex.SyncShark.Engine.Planner.Moves);",false),
+            ("SyncShark.Cli","Program","_ = Massdex.SyncShark.Engine.ResourceNames.CliExecutable;",true),
             ("SyncShark.Cli","Program","_ = typeof(Massdex.SyncShark.Engine.Local.LogFiles);",true),
             ("SyncShark.Cli","Program","_ = typeof(Massdex.SyncShark.Engine.Local.LocalSide);",false),
             ("SyncShark.Cli","Program","_ = typeof(Massdex.SyncShark.Engine.Edge.Commands);",false),
@@ -101,6 +102,11 @@ public static class DependencyChecks
             Check.Require(!fixture.GetSemanticModel(tree).GetDiagnostics().Any(d=>d.Severity==DiagnosticSeverity.Error),"Invalid dependency fixture: "+code);
             Check.Require(!Violations(fixture,tree,module,file).Any()==allowed,$"{module}/{file}: wrong outcome for {code}");
         }
+        // Inspect a declaration only; this fixture never opens a device or invokes native code.
+        var nativeTree=CSharpSyntaxTree.ParseText("class Probe { [System.Runtime.InteropServices.DllImport(\"kernel32.dll\",EntryPoint=\"DeviceIoControl\")] internal static extern int Control(); }");
+        var nativeFixture=compilation.AddSyntaxTrees(nativeTree);
+        Check.Require(!nativeFixture.GetSemanticModel(nativeTree).GetDiagnostics().Any(d=>d.Severity==DiagnosticSeverity.Error),"Invalid native ownership fixture");
+        Check.Require(!Violations(nativeFixture,nativeTree,"Local","UsnJournal").Any() && Violations(nativeFixture,nativeTree,"Run","Host").Any(),"Native journal ownership");
         return Task.CompletedTask;
     }
 
@@ -131,6 +137,9 @@ public static class DependencyChecks
             if(native is null) continue;
             var entry=native.EntryPointName??owner!.Name;
             if(native.ModuleName?.StartsWith("rstrtmgr",StringComparison.OrdinalIgnoreCase)==true && (module,file)!=("Local","InUse")) yield return entry;
+            var library=Path.GetFileNameWithoutExtension(native.ModuleName??string.Empty);
+            if(module!="Local" && (library.Equals("kernel32",StringComparison.OrdinalIgnoreCase) || library.Equals("kernelbase",StringComparison.OrdinalIgnoreCase) || library.Equals("shell32",StringComparison.OrdinalIgnoreCase)) &&
+                System.Text.RegularExpressions.Regex.IsMatch(entry,@"^(?:DeviceIoControl|(?:CreateFile(?:2)?|MoveFile(?:Ex|WithProgress)?|DeleteFile|CopyFile(?:Ex|2)?|ReplaceFile|GetFileAttributes(?:Ex)?|SetFileAttributes|CreateDirectory(?:Ex)?|RemoveDirectory|SHFileOperation)[AW]?|OpenFileById|GetFileInformationByHandle(?:Ex)?|SetFileInformationByHandle)$",System.Text.RegularExpressions.RegexOptions.IgnoreCase)) yield return entry;
             if(entry.StartsWith("GetDiskFreeSpace",StringComparison.Ordinal) && (module,file)!=("Local","VolumeSpace")) yield return entry;
         }
         foreach(var node in tree.GetRoot().DescendantNodes().OfType<SimpleNameSyntax>())
@@ -146,7 +155,7 @@ public static class DependencyChecks
                 var other=space==Prefix?"Contracts":space[(Prefix.Length+1)..];
                 bool allowed=module switch
                 {
-                    "SyncShark.Cli" => file=="Program" && (other,name) is ("Edge","Cli") or ("Local","LogFiles") or ("Contracts","ILogFiles"),
+                    "SyncShark.Cli" => file=="Program" && (other,name) is ("Edge","Cli") or ("Local","LogFiles") or ("Contracts","ILogFiles" or "ResourceNames"),
                     "SyncShark" => file=="Program" && (other,name) is ("Storage","Store" or "StoreMove") or ("Dropbox","Connections" or "DropboxSide" or "DropboxApi" or "Dispatcher" or "CredentialStore" or "SignIn") or ("Local","LocalSide" or "RecycleBin" or "LogFiles") or ("Run","Host") or ("Edge","HostServer" or "Commands") or ("Contracts",_),
                     _ => module==other || other=="Contracts" || (module,other) is ("Executor","Planner") or ("Run","Planner" or "Executor") or ("Edge","Run")
                 };

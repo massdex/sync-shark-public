@@ -14,14 +14,14 @@ public sealed class Host
     /// <summary>Whether this pair may start work under the global and per-pair pause settings.</summary>
     public bool IsPaused(string pairId) => throw new NotImplementedException();
 
-    /// <summary>The store factory opens an existing image without creating one unless first pairs add explicitly requests creation. Host supplies its current pair set to adapter construction. Intake, planning and the PC side share the pair scope built from that set and the same observed PC drive type.</summary>
-    public Host(Func<bool,CancellationToken,Task<IStore?>> openStore, Func<PairConfig,IReadOnlyList<PairConfig>,(ISide Local,ISide Dropbox)> sides, EngineSettings settings, ILogFiles logs, TimeProvider clock, Func<CancellationToken,Task<string>> connect, Func<string,CancellationToken,Task> disconnect) => throw new NotImplementedException();
+    /// <summary>The store factory opens an existing image without creating one unless first pairs add explicitly requests creation. The factory receives an accessor, not a scope builder. RootAsync reads the PC drive type without using scope. Before admitting work, Host builds one PathScope from that observation and its current pair set; the accessor returns that instance to Local and Host passes it to Run and Executor. Scope changes are published before the next entry.</summary>
+    public Host(Func<bool,CancellationToken,Task<IStore?>> openStore, Func<PairConfig,Func<PathScope>,(ISide Local,ISide Dropbox)> sides, EngineSettings settings, ILogFiles logs, TimeProvider clock, Func<CancellationToken,Task<string>> connect, Func<string,CancellationToken,Task> disconnect) => throw new NotImplementedException();
 
     public IAsyncEnumerable<PairConfig> PairsAsync(CancellationToken ct) => throw new NotImplementedException();
     public Task AddPairAsync(PairConfig pair,CancellationToken ct) => throw new NotImplementedException();
     public Task<bool> RemovePairAsync(string pairId,CancellationToken ct) => throw new NotImplementedException();
     public Task BindAsync(string pairId,CancellationToken ct) => throw new NotImplementedException();
-    /// <summary>Preview includes the recovery place for the selected removal side, using its existing observation: managed root-bin path, Windows bin or Dropbox history. No removal means no recovery place.</summary>
+    /// <summary>Preview includes the recovery place for the selected removal side, using its existing observation: the managed root-bin path, or Text.Get for the Windows bin or Dropbox history. No removal means no recovery place.</summary>
     public Task<(bool Applied,long CopyFiles,long CopyBytes,long RemoveFiles,long RemoveBytes,string? RecoveryPlace,TextKey? Cause)> SetExclusionAsync(string pairId,Exclusion exclusion,bool include,bool confirmed,CancellationToken ct) => throw new NotImplementedException();
     public Task SetIgnoresAsync(string pairId,IReadOnlyList<string> rules,CancellationToken ct) => throw new NotImplementedException();
     public Task RepairAsync(string pairId,CancellationToken ct) => throw new NotImplementedException();

@@ -605,6 +605,35 @@ function Invoke-PreReviewCheck {
     Invoke-Native -FileName 'python' -Arguments $arguments -WorkingDirectory $Root
 }
 
+# Match the current runner's named output to the registry; no output for a name is not a pass.
+function Get-RunnerEvidence([string]$Registry, [string]$Output) {
+    $expected = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    $seen = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+    $group = $null
+    foreach ($line in $Registry -split "`n") {
+        if ($line -cmatch '^\s*\["([^"]+)"\]\s*=') { $group=$Matches[1] }
+        elseif ($line -cmatch '^\s*new\("([^"]+)",') { $expected.Add($Matches[1],$group) }
+    }
+    if (-not $expected.Count) { throw 'Empty engine-check registry.' }
+    foreach ($line in $Output -split '\r?\n') {
+        if ($line -cnotmatch '^(PASS|NOT IMPLEMENTED|FAIL) (.+)$') { continue }
+        $status=$Matches[1]; $name=$Matches[2]
+        if ($status -ceq 'FAIL') { $name=($name -split ': ',2)[0] }
+        if (-not $expected.ContainsKey($name)) { throw "Unexpected engine-check result: $name" }
+        $seen.Add($name,$status)
+    }
+    $evidence=@{}
+    $priority=@{ success=0; 'not-implemented'=1; missing=2; failure=3 }
+    foreach ($entry in $expected.GetEnumerator()) {
+        $name=$entry.Key; $key=$entry.Value
+        $value=if (-not $seen.ContainsKey($name)) { 'missing' } elseif ($seen[$name] -ceq 'PASS') { 'success' } elseif ($seen[$name] -ceq 'FAIL') { 'failure' } else { 'not-implemented' }
+        if (-not $evidence.ContainsKey($key) -or $priority[$value] -gt $priority[$evidence[$key]]) { $evidence[$key]=$value }
+        if ($name -ceq 'Layout/Dependencies') { $evidence['layout']=$value }
+        if ($value -ne 'success') { Write-Host "  $value $name" }
+    }
+    $evidence
+}
+
 function Get-StaticFenceState {
     param([string]$Root, [string]$ExePath)
     # Locate an existing build output and say whether it is older than the sources.
@@ -651,7 +680,7 @@ function Invoke-OwnershipSelfTest {
             Assert-True ($row.Groups -cin @('all', 'none') -or @($row.Groups -split ' ' | Where-Object { @($realGroups.Keys) -cnotcontains $_ }).Count -eq 0) 'C5 every cell has valid grammar'
         }
         $cases = @(
-            @{ Id = 'C1'; Path = 'src/SyncShark.Engine/Storage/Store.cs'; Want = @('storage','acceptance') },
+            @{ Id = 'C1'; Path = 'src/SyncShark.Engine/Storage/Store.cs'; Want = @('storage','acceptance','call-budget') },
             @{ Id = 'C2'; Path = 'src/SyncShark.Engine/Dropbox/DropboxReplyShapes.cs'; Want = $hosted },
             @{ Id = 'C3'; Path = 'src/SyncShark.Engine/engine-settings.json'; Status = 'D'; Want = $hosted },
             @{ Id = 'C4'; Path = 'src/SyncShark.Engine/PathScope.cs'; Want = $hosted },
@@ -1442,35 +1471,31 @@ Write-Host ('CI CHECK GROUPS  ' + ($hostedSelected -join ', '))
 if ($liveSelected.Count -gt 0) {
     Write-Host ('  live route only (do not put in .ci-lane.json): ' + ($liveSelected -join ', '))
 }
-if (-not $RunTests) {
-    Write-Host '  (not executed: the default gate runs no tests; pass -RunTests only for an approved run)'
+if (-not ($RunTests -or $StaticFence)) {
+    Write-Host '  (not executed: an approved run is required)'
 } else {
-    # One fixed path for the build's configuration, matching CI's Debug build.
     $exe = Join-Path $Repo 'tests/SyncShark.Engine.Tests/bin/Debug/net8.0-windows/SyncShark.Engine.Tests.exe'
-    $runGroups = $hostedSelected
-    if ($IncludeLive) { $runGroups = @($hostedSelected + $liveSelected) }
-    if ($buildOk -and (Test-Path -LiteralPath $exe -PathType Leaf)) {
+    $fresh = Get-StaticFenceState -Root $Repo -ExePath $exe
+    if (-not $buildOk -or -not $fresh.Exists -or $fresh.Stale) {
+        $script:Attention.Add('engine test executable missing, stale or not built')
+    } else {
         $runRoot = Join-Path $ScratchRoot ([guid]::NewGuid().ToString('N'))
         try {
             New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
-            foreach ($group in $runGroups) {
-                $run = Invoke-Native -FileName $exe -Arguments ('--engine-checks ' + $group) -WorkingDirectory $Repo -Environment @{
-                    TEMP = $runRoot; TMP = $runRoot; SYNCSHARK_TEST_ROOT = $runRoot
-                }
-                $script:CheckResults[$group] = if ($run.ExitCode -eq 0) { 'success' } else { 'failure' }
-                if ($run.ExitCode -eq 0) { Write-Host "  PASS $group" }
-                else {
-                    Write-Host "  FAIL $group"
-                    ($run.Output -split "`n" | Where-Object { $_ -match '^(FAIL|SKIP|PASS) ' } | Select-Object -Last 30) | ForEach-Object { Write-Host ('    ' + $_) }
-                    $script:Attention.Add("check group '$group' failed")
-                }
+            $inventory = Join-Path $Repo 'CLI-CAPABILITIES.md'
+            $run = Invoke-Native -FileName $exe -Arguments ('"{0}" "{1}"' -f $Repo,$inventory) -WorkingDirectory $Repo -Environment @{
+                TEMP = $runRoot; TMP = $runRoot; SYNCSHARK_TEST_ROOT = $runRoot
             }
-        } finally {
-            Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    } else {
-        Write-Host '  CHECK GROUPS skipped: test executable not found'
-        $script:Attention.Add('test executable not found')
+            $registryText = Get-HeadFileText -Root $Repo -Commit $headFull -Path 'tests/SyncShark.Engine.Tests/CheckRegistry.cs'
+            if ($RunTests) { $script:RequiredChecks = @(($script:RequiredChecks + $hostedSelected) | Sort-Object -Unique) }
+            $byGroup = Get-RunnerEvidence -Registry $registryText -Output $run.Output
+            foreach ($key in $byGroup.Keys) {
+                $script:CheckResults[$key] = $byGroup[$key]
+                Write-Host "  $($byGroup[$key]) $key"
+            }
+            if ($run.ExitCode -ne 0) { $script:Attention.Add("engine checks exited $($run.ExitCode)") }
+            foreach ($key in $byGroup.Keys) { if ($byGroup[$key] -eq 'failure') { $script:Attention.Add("engine group '$key' failed") } }
+        } finally { Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -1607,45 +1632,6 @@ if ($repeats.Count -eq 0) { Write-Host 'REPEATS  none: no 40+ character expressi
 else {
     Write-Host 'REPEATS  ATTENTION (advisory, not a failure): a long expression repeats 5+ times'
     foreach ($finding in $repeats) { Write-Host "  $finding" }
-}
-
-# 3e. Reuse existing binaries only when local execution was explicitly requested.
-# Otherwise the mandatory summary is INCOMPLETE, never a waiver of the fences.
-if ($StaticFence -or $RunTests) {
-    $fenceSets = @(
-        @{ Exe = 'tests/SyncShark.Engine.Tests/bin/Debug/net8.0-windows/SyncShark.Engine.Tests.exe'; Groups = @(Get-MandatoryEngineGroups); Arguments = '--engine-checks ' },
-        @{ Exe = 'tests/SyncShark.Core.Tests/bin/Debug/net8.0/SyncShark.Core.Tests.exe'; Groups = @('layout'); Arguments = '--engine-layout-checks' }
-    )
-    foreach ($set in $fenceSets) {
-        $pending = @($set.Groups | Where-Object { -not $script:CheckResults.ContainsKey($_) })
-        if (-not $pending.Count) { continue }
-        $fenceExe = Join-Path $Repo $set.Exe
-        $fence = Get-StaticFenceState -Root $Repo -ExePath $fenceExe
-        if (-not $fence.Exists -or $fence.Stale) {
-            Write-Host "STATIC FENCE  INCOMPLETE  missing or stale assembly: $fenceExe (build it first)"
-            continue
-        }
-        $fenceRoot = Join-Path $ScratchRoot ([guid]::NewGuid().ToString('N'))
-        try {
-            New-Item -ItemType Directory -Force -Path $fenceRoot | Out-Null
-            foreach ($group in $pending) {
-                $arguments = $set.Arguments
-                if ($group -ne 'layout') { $arguments += $group }
-                $run = Invoke-Native -FileName $fenceExe -Arguments $arguments -WorkingDirectory $Repo -Environment @{
-                    TEMP = $fenceRoot; TMP = $fenceRoot; SYNCSHARK_TEST_ROOT = $fenceRoot
-                }
-                $script:CheckResults[$group] = if ($run.ExitCode -eq 0) { 'success' } else { 'failure' }
-                if ($run.ExitCode -eq 0) { Write-Host "STATIC FENCE  PASS  $group" }
-                else {
-                    Write-Host "STATIC FENCE  FAIL  $group"
-                    ($run.Output -split "`n" | Select-Object -Last 30) | ForEach-Object { Write-Host ('    ' + $_) }
-                    $script:Attention.Add("static fence group '$group' failed")
-                }
-            }
-        } finally {
-            Remove-Item -LiteralPath $fenceRoot -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
 }
 
 # 4. Design-doc drift.

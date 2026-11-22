@@ -14,4 +14,8 @@ public sealed class PairTable
 
 
     public Task<(bool FirstRepairDone, string? LastRepairJson)> RepairStateAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>On lost journal continuity only, install the fresh volume boundary and increment the Local Repair revision/reason of every affected pair in one transaction.</summary>
+    public Task ResetJournalAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>On Dropbox reset only, install its fresh cursor and increment that pair’s Dropbox Repair revision/reason in one transaction.</summary>
+    public Task ResetCursorAsync(Microsoft.Data.Sqlite.SqliteTransaction tx, string pairId, string fresh, string reason, CancellationToken ct) => throw new NotImplementedException();
 }

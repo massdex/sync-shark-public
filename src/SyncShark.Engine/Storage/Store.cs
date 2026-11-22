@@ -71,7 +71,7 @@ public sealed class Store : IStore
     /// <summary>Read deleted-name publication state independently of the change-feed cursor.</summary>
     public Task<(string? Cursor, bool Owed)> DeletedHistoryAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
 
-    /// <summary>Publish the completed deleted-name listing and its cursor together.</summary>
+    /// <summary>Fold only this completed history acquisition and publish its own terminal cursor with it. An ordinary or incomplete scan cannot publish history.</summary>
     public Task PublishDeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct) => throw new NotImplementedException();
 
     /// <summary>Read the unspent name from the existing delta, scratch and block homes.</summary>
@@ -82,4 +82,10 @@ public sealed class Store : IStore
 
     /// <summary>Indexed exact-path notice lookup; no whole-pair notice scan on the item path.</summary>
     public IAsyncEnumerable<Notice> NoticesAtAsync(string pairId, string pathKey, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>On lost journal continuity only, install the fresh volume boundary and increment the Local Repair revision/reason of every affected pair in one transaction.</summary>
+    public Task ResetJournalAsync(string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>On Dropbox reset only, install its fresh cursor and increment that pair’s Dropbox Repair revision/reason in one transaction.</summary>
+    public Task ResetCursorAsync(string pairId, string fresh, string reason, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Stream the existing scan’s move candidates before ordinary differences, ordered by shallowest candidate of the binding then by binding so all its observed sides are adjacent.</summary>
+    public IAsyncEnumerable<RenameCandidate> RenamesAsync(string pairId, Guid scanId, Scope? scope, CancellationToken ct) => throw new NotImplementedException();
 }

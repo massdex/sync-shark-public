@@ -14,8 +14,9 @@ public static class ItemChecks
         using var digest = new ContentHash(); digest.Append(bytes); var hash = digest.Finish();
         var a = new Entry("file", false, bytes.Length, DateTimeOffset.UnixEpoch, "local", "", hash, null);
         var b = a with { Id = "remote", Revision = "rev" }; local.Seed(a, bytes); remote.Seed(b, bytes);
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);
         using var store = new InMemoryStateStore();
-        await ItemSync.ApplyAsync(pair, new Change(Side.Dropbox, ChangeKind.Changed, b.Path, null, b.Id, b, false, false), local, remote, store,ItemChecks.Population(pair,local,remote,store),CancellationToken.None);
+        await ItemSync.ApplyAsync(pair,paths, new Change(Side.Dropbox, ChangeKind.Changed, b.Path, null, b.Id, b, false, false), local, remote, store,Population(pair,paths,local,remote,store),Hop(pair,paths,local,remote,store),CancellationToken.None);
         Check.Require(local.Items.Count == 1 && remote.Items.Count == 1 && local.Items[a.Path].Bytes.SequenceEqual(bytes) && remote.Items[b.Path].Bytes.SequenceEqual(bytes), "Final paths and bytes");
         Check.Require(store.Records.Values.Single() == SyncedEntries.From(a, b) && store.OpenNotices.Count == 0, "Binding and notices");
         Check.Require(local.Requests[nameof(ISide.OpenReadAsync)] == 0 && remote.Requests[nameof(ISide.OpenReadAsync)] == 0, "Unexpected transfer");
@@ -32,14 +33,15 @@ public static class ItemChecks
     public static async Task ChangeAsync(bool baseline, byte? pc, byte? cloud, Side source, byte? expected, TextKey? notice = null, bool folder = false)
     {
         var pair = Pair(); var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);
         using var store = new InMemoryStateStore(); const string path = "item";
         var oldA = File(Side.Local, path, 1, "local", folder); var oldB = File(Side.Dropbox, path, 1, "cloud", folder);
         if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(oldA,oldB),null,null,default);
         if (pc is { } a) local.Seed(File(Side.Local,path,a,oldA.Id,folder),folder ? [] : [a]);
         if (cloud is { } b) remote.Seed(File(Side.Dropbox,path,b,oldB.Id,folder),folder ? [] : [b]);
         var from = source == Side.Local ? local : remote; var observed = from.Items.GetValueOrDefault(path).Entry;
-        await ItemSync.ApplyAsync(pair, new Change(source, observed == null ? ChangeKind.Deleted : ChangeKind.Changed,
-            path,null,source == Side.Local ? oldA.Id : oldB.Id,observed,source == Side.Local && !folder,observed == null),local,remote,store,ItemChecks.Population(pair,local,remote,store),default);
+        await ItemSync.ApplyAsync(pair,paths, new Change(source, observed == null ? ChangeKind.Deleted : ChangeKind.Changed,
+            path,null,source == Side.Local ? oldA.Id : oldB.Id,observed,source == Side.Local && !folder,observed == null),local,remote,store,Population(pair,paths,local,remote,store),Hop(pair,paths,local,remote,store),default);
         foreach (var side in new[] { local,remote })
         {
             Check.Require(side.Items.Count == (expected.HasValue ? 1 : 0), $"Unexpected {side.Side} paths");
@@ -51,6 +53,8 @@ public static class ItemChecks
         if (baseline && expected != 1 && (pc == 1 || cloud == 1))
             Check.Require((pc == 1 ? local : remote).History.Any(v => v.Entry.Path == path && (folder || v.Bytes.SequenceEqual(new byte[]{1}))), "Displaced version not recoverable");
     }
-    internal static Func<Scope,Side,Recovery.Folder,CancellationToken,Task> Population(PairConfig pair,ISide local,ISide cloud,IStore store) =>
-        (scope,side,folder,ct)=>global::Massdex.SyncShark.Engine.Run.AutoSync.PopulateAsync(pair,scope,side,folder,local,cloud,store,ct);
+    internal static Func<Scope,Side,Recovery.Folder,CancellationToken,Task> Population(PairConfig pair,PathScope paths,ISide local,ISide cloud,IStore store) =>
+        (scope,side,folder,ct)=>global::Massdex.SyncShark.Engine.Run.AutoSync.PopulateAsync(pair,paths,scope,side,folder,local,cloud,store,ct);
+    internal static Func<SyncedEntry,Scope,Scope,CancellationToken,Task> Hop(PairConfig pair,PathScope paths,ISide local,ISide cloud,IStore store) =>
+        (binding,before,after,ct)=>global::Massdex.SyncShark.Engine.Run.Repair.RunAsync(pair,paths,local,cloud,store,before,(binding,before,after),ct);
 }

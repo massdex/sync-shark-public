@@ -89,4 +89,15 @@ public static class PathScopeChecks
         await store.CommitAsync(pair.PairId,null,null,null,spentDeletedKey:key,ct:default);
         Check.Require(!await store.DeletedNameAsync(pair.PairId,null,key,default),"Unbound first-run history was not spent");
     }
+    public static async Task SourceResetAsync()
+    {
+        using IStore store=new TestDoubles.InMemoryStateStore();var a=Scenarios.ItemChecks.Pair();var b=a with {PairId="other"};
+        await store.SavePairAsync(a,default);await store.SavePairAsync(b,default);var boundary=new JournalPosition(2,9);
+        await store.ResetJournalAsync("volume",boundary,[a.PairId,b.PairId],"gap",default);
+        Check.Require(await store.PositionAsync("volume",default)==boundary && await store.ReadRepairAsync(a.PairId,Side.Local,default)==(1L,"gap") && await store.ReadRepairAsync(b.PairId,Side.Local,default)==(1L,"gap"),"Volume reset lost a member obligation");
+        try { await store.ResetJournalAsync("volume",new(3,1),[a.PairId,"unknown"],"new gap",default);throw new InvalidDataException("Reset accepted an unknown pair"); } catch(InvalidDataException error) when(error.Message=="Unknown volume member") { }
+        Check.Require(await store.PositionAsync("volume",default)==boundary && (await store.ReadRepairAsync(a.PairId,Side.Local,default)).Revision==1,"Failed reset partially committed");
+        await store.ResetCursorAsync(a.PairId,"new-base","reset",default);
+        Check.Require(await store.CursorAsync(a.PairId,default)=="new-base" && await store.ReadRepairAsync(a.PairId,Side.Dropbox,default)==(1L,"reset") && (await store.ReadRepairAsync(b.PairId,Side.Dropbox,default)).Revision==0,"Dropbox reset reached wrong pair");
+    }
 }

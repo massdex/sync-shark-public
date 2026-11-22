@@ -4,5 +4,5 @@ namespace Massdex.SyncShark.Engine.Executor;
 public sealed class FolderDelete
 {
     /// <summary>Dispatch a selected folder through ISide; propagate Pending and retain the binding until its member and evidence settle.</summary>
-    public Task ApplyAsync(PairConfig pair, SyncedEntry folder, Side deleting, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, CancellationToken ct) => throw new NotImplementedException();
+    public Task ApplyAsync(PairConfig pair, PathScope paths, SyncedEntry folder, Side deleting, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope,CancellationToken,Task> compareOldBinding, CancellationToken ct) => throw new NotImplementedException();
 }

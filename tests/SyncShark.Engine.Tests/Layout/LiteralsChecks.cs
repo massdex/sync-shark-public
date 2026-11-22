@@ -25,6 +25,9 @@ public static class LiteralsChecks
         Check.Require(!Offends("class A { void M() { writer.WriteLine(Text.Get(key)); } }","A.cs",words,context),"Catalog-backed message rejected");
         foreach(var valid in new[]{"ListOptions opts = new(false,false); opts.Events?.Invoke(new(default,string.Empty,string.Empty,Text.Get(key),string.Empty));", "if(attempt is >= OwnedAttemptLimit) Stop();","if(attempt>=settings.Attempts) Stop();","if(backoff*(1+jitter)>limit) Stop();","if(parts.Length>=2) Read();","_ = new RunEvent(kind,what,path,Text.Get(key),outcome);"})
             Check.Require(!Offends("class A { void M() { "+valid+" } }","A.cs",words,context),"Owned or structural value rejected: "+valid);
+        Check.Require(Offends("static class Render { static string Notice() => \"Retry this file\"; }","Render.cs",words,context),"Unowned renderer return was accepted");
+        Check.Require(Offends("static class Render { static string Event() { return $\"Retry {count} items\"; } }","Render.cs",words,context),"Unowned renderer return block was accepted");
+        Check.Require(!Offends("static class Render { static string Notice() => Text.Get(key); }","Render.cs",words,context),"Catalog-backed renderer return was rejected");
         foreach (var folder in new[] { "src", "apps" })
             foreach (var file in Directory.EnumerateFiles(Path.Combine(input.Root, folder), "*.cs", SearchOption.AllDirectories))
             {
@@ -38,6 +41,9 @@ public static class LiteralsChecks
         var tree = CSharpSyntaxTree.ParseText(source);var root=tree.GetRoot(); SemanticModel? model=null;
         static bool Emits(InvocationExpressionSyntax call) => call.Expression is MemberAccessExpressionSyntax access && access.Name.Identifier.ValueText is "Write" or "WriteLine" or "LogInformation" or "LogWarning" or "LogError";
         static bool Message(ExpressionSyntax expr) => expr.DescendantNodesAndSelf().Any(n=>n is InterpolatedStringTextSyntax part && part.TextToken.ValueText.Any(char.IsLetter) || n is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.StringLiteralExpression) && literal.Token.ValueText.Any(char.IsLetter));
+        if(file=="Render.cs")
+            foreach(var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>().Where(m=>m.ReturnType is PredefinedTypeSyntax type && type.Keyword.IsKind(SyntaxKind.StringKeyword)))
+                if(method.ExpressionBody is {} arrow && Message(arrow.Expression) || method.Body?.DescendantNodes().OfType<ReturnStatementSyntax>().Any(ret=>ret.Expression is {} expr && Message(expr))==true) return true;
         foreach(var call in root.DescendantNodes().OfType<InvocationExpressionSyntax>().Where(Emits))
             if(call.ArgumentList.Arguments.Any(a=>Message(a.Expression))) return true;
         foreach(var obj in root.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())

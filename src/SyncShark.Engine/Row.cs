@@ -16,6 +16,9 @@ public sealed record Row(string Key, Entry? Local, Entry? Dropbox, SyncedEntry? 
         IReadOnlyList<Entry> extra, string? localHash)
         : this(key, local, dropbox, synced, extra, localHash, null!) => Context = context(this);
 
+    /// <summary>Measured Dropbox time minus PC time, with uncertainty, only for comparing a server deletion against the PC file stamp. No measurement means no confirmed later deletion.</summary>
+    public (TimeSpan Offset, TimeSpan Uncertainty)? DeletionClock { get; init; }
+
     // An absent observation still has an exact path; its comparison key cannot recover the spelling.
     internal string? ObservationPath { get; init; }
 

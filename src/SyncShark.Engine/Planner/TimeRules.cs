@@ -9,4 +9,6 @@ public static class TimeRules
     public static bool SameSecond(DateTimeOffset left, DateTimeOffset right) => throw new NotImplementedException();
     /// <summary>Unreliable operation on the supplied facts.</summary>
     public static bool Unreliable(DateTimeOffset time, DateTimeOffset comparedAt) => throw new NotImplementedException();
+    /// <summary>Returns false without a measured sample or when the difference falls within its uncertainty. Never correct client-modified timestamps.</summary>
+    public static bool DefinitelyDeletedLater(DateTimeOffset localModified, DateTimeOffset serverDeleted, (TimeSpan Offset,TimeSpan Uncertainty)? deletionClock) => throw new NotImplementedException();
 }

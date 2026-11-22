@@ -112,31 +112,31 @@ public sealed class InMemoryStateStore : IStore
     public Task<JournalPosition?> PositionAsync(string volume, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        return Task.FromResult(positions.GetValueOrDefault(volume));
+        lock(pairs) return Task.FromResult(positions.GetValueOrDefault(volume));
     }
     /// <summary>SavePosition operation on the supplied facts.</summary>
     public Task SavePositionAsync(string volume, JournalPosition position, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        positions[volume] = position; return Task.CompletedTask;
+        lock(pairs) positions[volume] = position; return Task.CompletedTask;
     }
     /// <summary>Cursor operation on the supplied facts.</summary>
     public Task<string?> CursorAsync(string pairId, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        return Task.FromResult(cursors.GetValueOrDefault(pairId));
+        lock(pairs) return Task.FromResult(cursors.GetValueOrDefault(pairId));
     }
     /// <summary>SaveCursor operation on the supplied facts.</summary>
     public Task SaveCursorAsync(string pairId, string cursor, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        cursors[pairId]=cursor; return Task.CompletedTask;
+        lock(pairs) cursors[pairId]=cursor; return Task.CompletedTask;
     }
     /// <summary>OweRepair operation on the supplied facts.</summary>
     public Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        lock(pairs) { var revision=repairs.GetValueOrDefault((pairId,side)).Revision+1; repairs[(pairId,side)]=(revision,reason); return Task.FromResult(revision); }
+        lock(pairs) { return Task.FromResult(Owe(pairId,side,reason)); }
     }
     /// <summary>FinishRepair operation on the supplied facts.</summary>
     public Task<(long Revision,string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct)
@@ -276,5 +276,32 @@ public sealed class InMemoryStateStore : IStore
         foreach(var x in projected) Records.Remove((pairId,x.Before.LocalKey));
         foreach(var x in projected) Records.Add((pairId,x.After.LocalKey),x.After);
         return Task.CompletedTask;
+    }
+    private long Owe(string pairId,Side side,string reason)
+    {
+        var revision=repairs.GetValueOrDefault((pairId,side)).Revision+1;repairs[(pairId,side)]=(revision,reason);return revision;
+    }
+    public Task ResetJournalAsync(string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();var ids=affectedPairs.Distinct(StringComparer.Ordinal).ToArray();
+        lock(pairs) { if(ids.Any(id=>!pairs.ContainsKey(id))) throw new InvalidDataException("Unknown volume member");
+            foreach(var id in ids) Owe(id,Side.Local,reason); positions[volume]=fresh; }
+        return Task.CompletedTask;
+    }
+    public Task ResetCursorAsync(string pairId, string fresh, string reason, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();lock(pairs) { if(!pairs.ContainsKey(pairId)) throw new InvalidDataException("Unknown pair");
+            Owe(pairId,Side.Dropbox,reason);cursors[pairId]=fresh; } return Task.CompletedTask;
+    }
+    public IAsyncEnumerable<RenameCandidate> RenamesAsync(string pairId, Guid scanId, Scope? scope, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();var bindings=Records.Where(x=>x.Key.Pair==pairId).Select(x=>x.Value)
+            .SelectMany(v=>new[]{(Side.Local,v.LocalId,v),(Side.Dropbox,v.DropboxId,v)}).Where(x=>x.Item2.Length!=0).ToLookup(x=>(x.Item1,x.Item2),x=>x.v);
+        var candidates=from row in scan where row.Key.Pair==pairId && row.Key.Scan==scanId
+                       from saved in bindings[(row.Key.Side,row.Value.Id)]
+                       where row.Value.IsFolder==saved.IsFolder && row.Value.Path!=saved.PathOn(row.Key.Side) &&
+                         (scope==null || PathNames.IsSelfOrUnder(saved.LocalPath,scope.LocalPath) || PathNames.IsSelfOrUnder(saved.DropboxPath,scope.DropboxPath) || PathNames.IsSelfOrUnder(row.Value.Path,row.Key.Side==Side.Local?scope.LocalPath:scope.DropboxPath))
+                       select new RenameCandidate(row.Key.Side,row.Value,saved);
+        return Enumerate(candidates.GroupBy(x=>x.Synced).OrderBy(group=>group.Min(x=>PathNames.Depth(x.Moved.Path))).ThenBy(group=>group.Key.LocalKey,StringComparer.Ordinal).SelectMany(group=>group.OrderBy(x=>x.Side)),ct);
     }
 }
