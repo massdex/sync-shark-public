@@ -40,7 +40,7 @@ public sealed class DropboxErrors
         var summary = !hasError && body.ValueKind == JsonValueKind.Object && !body.TryGetProperty(DropboxProtocol.Tag, out _)
             ? Summary(body) : string.Empty;
         // RateLimitError is an untagged struct. An unrelated tagged error may carry its own reason.
-        if (IsMutatingRoute(route) && (Prefixed(summary, DropboxProtocol.TooManyWriteOperations) || IsRateLimitContention(failure)))
+        if (Prefixed(summary, DropboxProtocol.TooManyWriteOperations) || IsRateLimitContention(failure))
             return Contention();
 
         Classified? decoded = hasError ? route switch
@@ -222,13 +222,6 @@ public sealed class DropboxErrors
     // The poll-check routes; an exact structured invalid_async_job_id on these is the invalid-job cause (BC21).
     private static bool IsJobCheckRoute(string route) => route is
         DropboxProtocol.DeleteBatchCheck or DropboxProtocol.MoveBatchCheck or DropboxProtocol.CreateFolderBatchCheck;
-
-    // Every route that can change the provider's state, so the reason-first write-contention rule applies.
-    private static bool IsMutatingRoute(string route) => route is
-        DropboxProtocol.Upload or DropboxProtocol.UploadSessionStart or DropboxProtocol.UploadSessionAppend or
-        DropboxProtocol.UploadSessionFinish or DropboxProtocol.UploadSessionFinishBatch or DropboxProtocol.CreateFolder or
-        DropboxProtocol.CreateFolderBatch or DropboxProtocol.Delete or DropboxProtocol.DeleteBatch or
-        DropboxProtocol.Move or DropboxProtocol.MoveBatch;
 
     private static bool IsRateLimitContention(JsonElement failure) =>
         failure.ValueKind == JsonValueKind.Object && !failure.TryGetProperty(DropboxProtocol.Tag, out _) &&
