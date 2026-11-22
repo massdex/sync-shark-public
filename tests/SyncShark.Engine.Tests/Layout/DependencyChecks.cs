@@ -115,7 +115,7 @@ public static class DependencyChecks
             var owner=model.GetDeclaredSymbol(method); var native=owner?.GetDllImportData();
             if(native is null) continue;
             var entry=native.EntryPointName??owner!.Name;
-            if(native.ModuleName.StartsWith("rstrtmgr",StringComparison.OrdinalIgnoreCase) && (module,file)!=("Local","InUse")) yield return entry;
+            if(native.ModuleName?.StartsWith("rstrtmgr",StringComparison.OrdinalIgnoreCase)==true && (module,file)!=("Local","InUse")) yield return entry;
             if(entry.StartsWith("GetDiskFreeSpace",StringComparison.Ordinal) && (module,file)!=("Local","VolumeSpace")) yield return entry;
         }
         foreach(var node in tree.GetRoot().DescendantNodes().OfType<SimpleNameSyntax>())
