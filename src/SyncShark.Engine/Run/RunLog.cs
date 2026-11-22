@@ -118,7 +118,7 @@ public sealed class RunLog : IDisposable
         // Failed.Detail can be Exception.Message even when the producer supplies no Exception.
         // Acquisition and throttling already filled their wait sentence from the scheduled delay.
         var preparedWait = value.Kind == RunEventKind.Wait && value.Detail.Length != 0 &&
-            value.Cause is TextKey.WaitTooManyRequests;
+            value.Cause is TextKey.WaitTooManyRequests or TextKey.WaitSourceRetry;
         var detail = !preparedWait && value.Error is { } failure ? FailureReason(failure) :
             value.Kind == RunEventKind.Failed && value.Cause.HasValue ? string.Empty : value.Detail;
         if (!preparedWait && value.Cause is { } reason)
