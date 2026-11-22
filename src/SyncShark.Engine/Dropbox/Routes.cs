@@ -85,8 +85,9 @@ public static class Routes
         foreach (var item in root.GetProperty("routes").EnumerateArray())
         {
             var name = item.GetProperty("name").GetString() ?? throw new InvalidDataException(ResourceNames.Routes);
-            var host = item.GetProperty("host").GetString() ?? throw new InvalidDataException(ResourceNames.Routes);
-            if (!hosts.TryGetValue(host, out var hostBase)) throw new InvalidDataException(ResourceNames.Routes);
+            var hostText = item.GetProperty("host").GetString();
+            if (string.IsNullOrEmpty(hostText)) throw new InvalidDataException(ResourceNames.Routes);
+            if (!hosts.TryGetValue(hostText, out var hostBase)) throw new InvalidDataException(ResourceNames.Routes);
             var style = item.GetProperty("style").GetString() switch
             {
                 "rpc" => Style.Rpc,
