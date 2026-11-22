@@ -1,0 +1,102 @@
+# Verify the actual standalone launcher payload, not the retired in-app download helper.
+[CmdletBinding(DefaultParameterSetName='Payload')]
+param([Parameter(Mandatory,ParameterSetName='Payload')][string]$Setup,
+    [Parameter(Mandatory,ParameterSetName='Ownership')][ValidateSet('Shell','Stage')][string]$OwnershipCheck)
+$ErrorActionPreference = 'Stop'
+if ($OwnershipCheck) {
+    $installer = Join-Path (Split-Path $PSScriptRoot) 'Installer'
+    if ($OwnershipCheck -eq 'Shell') {
+        $shell = [IO.File]::ReadAllText((Join-Path $installer 'SyncSharkSetup.cs'))
+        if ($shell -match 'Directory\.Delete\s*\([^,]+,\s*true\s*\)') { throw 'Shell cleanup selects unproved children for recursive removal.' }
+        # Run the real shell with a harmless embedded setup script. Its marker is not owned by the shell.
+        $case = Join-Path ([IO.Path]::GetTempPath()) ('setup-shell-' + [guid]::NewGuid().ToString('N'))
+        [void][IO.Directory]::CreateDirectory($case)
+        $probe = Join-Path $case 'setup.ps1'; $record = Join-Path $case 'extracted.txt'
+        [IO.File]::WriteAllText($probe, 'param($Payload) if ([IO.File]::ReadAllText($Payload) -cne "fixture") {exit 3}; [IO.File]::WriteAllText((Join-Path $PSScriptRoot "foreign.txt"),"preserved"); [IO.File]::WriteAllText($env:SETUP_FIXTURE_RECORD,$PSScriptRoot); exit 23')
+        $archive = Join-Path $case 'payload.zip'; [IO.File]::WriteAllText($archive,'fixture')
+        $exe = Join-Path $case 'setup.exe'; $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+        $resources = @("/resource:$archive,payload.zip", "/resource:$probe,setup.ps1")
+        foreach ($name in 'SetupFileSystem.cs','SetupMessages.cs','setup-strings.xml') { $resources += ("/resource:" + (Join-Path $installer $name) + ',' + $name) }
+        & $compiler /nologo /target:exe /reference:System.Xml.dll ("/out:" + $exe) @resources (Join-Path $installer 'SyncSharkSetup.cs') (Join-Path $installer 'SetupMessages.cs')
+        if ($LASTEXITCODE -ne 0) { throw 'Fixture shell compilation failed.' }
+        $saved = $env:SETUP_FIXTURE_RECORD
+        try { $env:SETUP_FIXTURE_RECORD = $record; $child = Start-Process $exe -PassThru -Wait; try { $code = $child.ExitCode } finally { $child.Dispose() } }
+        finally { $env:SETUP_FIXTURE_RECORD = $saved }
+        if ($code -ne 23 -or [IO.File]::ReadAllText((Join-Path ([IO.File]::ReadAllText($record)) 'foreign.txt')) -cne 'preserved') { throw 'Shell did not run its extracted setup and retain unowned content.' }
+    } else {
+        . (Join-Path $installer 'setup.ps1') -FunctionsOnly
+        # The same payload must publish once. A second attempt may not discard its unproved staging contents.
+        $case = Join-Path ([IO.Path]::GetTempPath()) ('setup-ownership-' + [guid]::NewGuid().ToString('N'))
+        $payload = Join-Path $case 'payload'; $installRoot = Join-Path $case 'installation'
+        [IO.Directory]::CreateDirectory($payload) | Out-Null
+        $source = Join-Path $case 'fixture.cs'
+        [IO.File]::WriteAllText($source, 'using System.Reflection; [assembly:AssemblyInformationalVersion("1.2.3")] class Program { static void Main() {} }')
+        $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+        & $compiler /nologo /target:exe ("/out:" + (Join-Path $payload 'Sync Shark.exe')) $source
+        if ($LASTEXITCODE -ne 0) { throw 'Synthetic setup member did not compile.' }
+        [IO.File]::WriteAllText((Join-Path $payload 'fixture.txt'),'fixture')
+        $archive = Join-Path $case 'fixture.zip'; Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $archive
+        Invoke-SetupInstall $archive $installRoot
+        try { Invoke-SetupInstall $archive $installRoot } catch {
+            if (-not $_.Exception.Message.Contains([Massdex.SyncShark.SetupMessages]::Text('version.occupied',[object[]]@()))) { throw }
+        }
+        $stages = @([IO.Directory]::EnumerateDirectories((Join-Path $installRoot 'versions/.staging')))
+        if ($stages.Count -ne 1 -or [IO.File]::ReadAllText((Join-Path $stages[0] 'fixture.txt')) -cne 'fixture' -or
+            [IO.File]::ReadAllText((Join-Path $installRoot 'active/fixture.txt')) -cne 'fixture') { throw 'Published or retained payload was lost.' }
+        $issues = @()
+        # A 0.3.95 predecessor has only the old host name. The candidate must still use its new name.
+        try {
+            $legacy = Join-Path $case 'legacy'; [void][IO.Directory]::CreateDirectory($legacy)
+            Copy-Item (Join-Path $payload 'Sync Shark.exe') (Join-Path $legacy 'SyncShark.exe')
+            Assert-SetupUpgrade ([version]'1.2.4') $legacy
+            try { Assert-SetupUpgrade ([version]'1.2.2') $legacy; throw 'Legacy downgrade accepted.' } catch { if (-not $_.Exception.Message.Contains([Massdex.SyncShark.SetupMessages]::Text('version.upgrade',[object[]]@()))) { throw } }
+        } catch { $issues += "Legacy predecessor upgrade: $_" }
+        # Keep the fixture's ready 1.2.3 host; interrupt 1.2.4 immediately before switching active.
+        $candidate = Join-Path $case 'candidate'; [void][IO.Directory]::CreateDirectory($candidate)
+        [IO.File]::WriteAllText($source,[IO.File]::ReadAllText($source).Replace('1.2.3','1.2.4'))
+        & $compiler /nologo /target:exe ("/out:" + (Join-Path $candidate 'Sync Shark.exe')) $source
+        if ($LASTEXITCODE -ne 0) { throw 'Synthetic candidate compilation failed.' }
+        [IO.File]::WriteAllText((Join-Path $candidate 'fixture.txt'),'candidate')
+        $upgradeZip = Join-Path $case 'candidate.zip'; Compress-Archive -Path (Join-Path $candidate '*') -DestinationPath $upgradeZip
+        $variant = Join-Path $case 'interruption'; [void][IO.Directory]::CreateDirectory($variant)
+        foreach ($name in 'SetupFileSystem.cs','SetupMessages.cs','setup-strings.xml') { Copy-Item (Join-Path $installer $name) $variant }
+        $before = [IO.File]::ReadAllText((Join-Path $installer 'setup.ps1')); $boundary = '$active.Retarget('
+        $index = $before.LastIndexOf($boundary,[StringComparison]::Ordinal)
+        if ($index -lt 0) { throw 'Pointer switch interruption did not bind.' }
+        $after = $before.Insert($index,'[Environment]::Exit(23); ')
+        [IO.File]::WriteAllText((Join-Path $variant 'setup.ps1'),$after)
+        $childScript = Join-Path $variant 'invoke.ps1'
+        [IO.File]::WriteAllText($childScript, 'param($Zip,$Root) . (Join-Path $PSScriptRoot setup.ps1) -FunctionsOnly; Invoke-SetupInstall $Zip $Root')
+        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $childScript $upgradeZip $installRoot
+        if ($LASTEXITCODE -ne 23 -or [IO.File]::ReadAllText((Join-Path $installRoot 'active/fixture.txt')) -cne 'fixture') { throw 'Interrupted setup disturbed predecessor.' }
+        & (Join-Path $installRoot 'active/Sync Shark.exe'); if ($LASTEXITCODE -ne 0) { throw 'Predecessor no longer runnable.' }
+        if (Test-Path -LiteralPath (Join-Path $installRoot 'versions/setup-transaction.jsonl')) { $issues += 'Interrupted install created a switch journal.' }
+        Invoke-SetupInstall $upgradeZip $installRoot
+        if ([IO.File]::ReadAllText((Join-Path $installRoot 'active/fixture.txt')) -cne 'candidate') { throw 'Rerun failed to publish the complete version.' }
+        # Package and uninstall the artifact actually emitted by the house builder. The OS registration is a separate boundary.
+        Copy-Item (Join-Path $candidate 'Sync Shark.exe') (Join-Path $candidate 'syncshark.exe')
+        foreach ($name in 'Sync Shark.dll','syncshark.dll','SyncShark.Engine.dll','Sync Shark.deps.json','syncshark.deps.json','Sync Shark.runtimeconfig.json','syncshark.runtimeconfig.json') { [IO.File]::WriteAllText((Join-Path $candidate $name),'fixture') }
+        $built = Join-Path $case 'built'; & (Join-Path $PSScriptRoot 'Build-SyncSharkSetup.ps1') -PublishedApp $candidate -OutputDirectory $built
+        $artifact = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes((Join-Path $built 'SyncShark-Setup-v1.2.4.exe')))
+        $stream = $artifact.GetManifestResourceStream('payload.zip'); $zipPath=Join-Path $case 'built.zip'; $dest=[IO.File]::Create($zipPath)
+        try { $stream.CopyTo($dest) } finally { $dest.Dispose(); $stream.Dispose() }
+        $isolated = Join-Path $case 'installed-package'; Invoke-SetupInstall $zipPath $isolated
+        & (Join-Path $PSScriptRoot 'Test-SyncSharkUninstall.ps1') -Root $isolated
+        if ($issues.Count) { throw ($issues -join '; ') }
+    }
+    return
+}
+Add-Type -AssemblyName System.IO.Compression
+$assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($Setup))
+$stream = $assembly.GetManifestResourceStream('payload.zip')
+try {
+    $zip = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Read)
+    try {
+        $executables = @($zip.Entries | Where-Object { $_.FullName -like '*.exe' })
+        if ($executables.Count -ne 2) { throw 'Only the host and CLI may ship as executable entry points.' }
+        foreach ($name in @('Sync Shark.exe', 'syncshark.exe')) {
+            $entry = $zip.GetEntry($name)
+            if ($null -eq $entry -or $entry.Length -eq 0) { throw "Standalone setup omitted executable: $name" }
+        }
+    } finally { $zip.Dispose() }
+} finally { $stream.Dispose() }
