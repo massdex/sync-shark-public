@@ -30,8 +30,13 @@ public static class Routes
     /// <summary>The number of files the provider permits in one relocation.</summary>
     public static int RelocationFiles => Embedded.Value.RelocationFiles;
 
-    /// <summary>The absolute endpoint of a route from its host base and name.</summary>
-    public static Uri Endpoint(string name) => Info(name).Endpoint;
+    /// <summary>Resolve an endpoint without classifying an OAuth bootstrap URL as an API route.</summary>
+    public static Uri Endpoint(string name) => name switch
+    {
+        DropboxProtocol.AuthorizationPath => new UriBuilder(Uri.UriSchemeHttps, DropboxProtocol.AuthorizationHost) { Path = name }.Uri,
+        DropboxProtocol.TokenPath => new UriBuilder(Uri.UriSchemeHttps, DropboxProtocol.TokenHost) { Path = name }.Uri,
+        _ => Info(name).Endpoint
+    };
 
     /// <summary>The catalog route whose endpoint exactly matches, or null for a non-catalog (bootstrap) endpoint.</summary>
     public static string? NameOf(Uri? endpoint)

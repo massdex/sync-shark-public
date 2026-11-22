@@ -19,6 +19,16 @@ public static class RoutesChecks
             "https://api.dropboxapi.com/2/users/get_space_usage", "space usage endpoint");
         Check.Require(Routes.Endpoint("files/download").AbsoluteUri ==
             "https://content.dropboxapi.com/2/files/download", "content host endpoint");
+        foreach (var (path, url) in new[]
+        {
+            ("oauth2/authorize", "https://www.dropbox.com/oauth2/authorize"),
+            ("oauth2/token", "https://api.dropboxapi.com/oauth2/token")
+        })
+        {
+            var endpoint = Routes.Endpoint(path);
+            Check.Require(endpoint.AbsoluteUri == url && Routes.NameOf(endpoint) is null,
+                "OAuth endpoint is incorrect or was classified as a catalog route");
+        }
         Check.Require(Routes.StyleOf("files/upload") == Routes.Style.Upload, "upload style");
         Check.Require(Routes.StyleOf("files/download") == Routes.Style.Download, "download style");
         Check.Require(Routes.StyleOf("files/list_folder") == Routes.Style.Rpc, "rpc style");

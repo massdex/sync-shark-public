@@ -24,37 +24,15 @@ public static class DropboxApiChecks
         Check.Require(wire.Paths.Count == 0, "a rejected call reached the transport");
     }
 
-    /// <summary>INTEGRATION-CHECK (needs W10's real RateLimit, DropboxProtocol and DropboxErrors; R29). Passes at F1,
-    /// returns NOT IMPLEMENTED in the lane. Wired into the F1 harness when the registry adds it.</summary>
+    /// <summary>Checks transport binding, receiver timing, storage replies and classified refusals.</summary>
     public static async Task SendPathAsync()
     {
         var settings = SettingsParser.Load();
 
-        // Clock: exact signed offset and full-RTT-plus-one-second uncertainty from a successful dated reply.
-        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
-        var rtt = TimeSpan.FromSeconds(5);
-        var serverDate = DateTimeOffset.UnixEpoch.AddSeconds(100);
-        var clockWire = new Wire
-        {
-            Clock = clock,
-            Advance = rtt,
-            Date = serverDate,
-            Body = "{\"used\":1,\"allocation\":{\".tag\":\"individual\",\"allocated\":2}}"
-        };
-        using (var clockHttp = new HttpClient(clockWire))
-        {
-            var clockApi = new DropboxApi(clockHttp, clock, settings, _ => { },
-                _ => new ValueTask<string?>("token"), "root-id");
-            var (used, allocated) = await clockApi.SpaceUsageAsync(CancellationToken.None);
-            Check.Require(used == 1 && allocated == 2, "individual space usage decode");
-            Check.Require(clockWire.Bodies.Count == 1 && clockWire.Bodies[0] == "null", "void wire body is not JSON null");
-            var sample = clockApi.ClockOffset ?? throw new InvalidDataException("clock sample not recorded");
-            Check.Require(sample.Offset == serverDate - clock.GetUtcNow(), "clock offset wrong");
-            Check.Require(sample.Uncertainty == rtt + TimeSpan.FromSeconds(1), "clock uncertainty wrong");
-        }
+        await CheckReadRepliesAsync(settings);
 
         // The prepared path uses the same binding: each account's own token, and the same verified root.
-        var preparedWire = new Wire { Body = "{}", Date = serverDate };
+        var preparedWire = new Wire();
         using (var preparedHttp = new HttpClient(preparedWire))
         {
             var preparedApi = new DropboxApi(preparedHttp, TimeProvider.System, settings, _ => { },
@@ -77,14 +55,97 @@ public static class DropboxApiChecks
         {
             var refusalApi = new DropboxApi(refusalHttp, TimeProvider.System, settings, _ => { },
                 _ => new ValueTask<string?>("token"), "root-id");
-            var upload = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/upload"))
+            using var upload = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/upload"))
             {
                 Content = new StreamContent(caller)
             };
             upload.Content!.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
             using var refusedResponse = await refusalApi.SendAsync(upload, CancellationToken.None);
             Check.Require(refusedResponse.StatusCode == HttpStatusCode.Conflict, "prepared refusal status not returned");
+            Check.Require(await refusedResponse.Content.ReadAsStringAsync() == refusalWire.Body, "prepared refusal body changed");
             Check.Require(!caller.Disposed, "a refused send closed the caller-owned upload source");
+        }
+    }
+
+    private static async Task CheckReadRepliesAsync(EngineSettings settings)
+    {
+        // Clock: exact signed offset and full-RTT-plus-one-second uncertainty from a successful dated reply.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var gap = TimeSpan.FromSeconds(7);
+        var receiptClock = new ReceiptClock(clock, gap);
+        var rtt = TimeSpan.FromSeconds(5);
+        var serverDate = DateTimeOffset.UnixEpoch.AddSeconds(100);
+        var clockWire = new Wire
+        {
+            Clock = clock,
+            Advance = rtt,
+            Date = serverDate,
+            Body = "{\"used\":1,\"allocation\":{\".tag\":\"individual\",\"allocated\":2}}"
+        };
+        using (var clockHttp = new HttpClient(clockWire))
+        {
+            var clockApi = new DropboxApi(clockHttp, receiptClock, settings, _ => { },
+                _ => new ValueTask<string?>("token"), "root-id");
+            var (used, allocated) = await clockApi.SpaceUsageAsync(CancellationToken.None);
+            Check.Require(used == 1 && allocated == 2, "individual space usage decode");
+            Check.Require(clockWire.Bodies.Count == 1 && clockWire.Bodies[0] == "null", "void wire body is not JSON null");
+            var sample = clockApi.ClockOffset ?? throw new InvalidDataException("clock sample not recorded");
+            Check.Require(sample.Offset == serverDate - (DateTimeOffset.UnixEpoch + rtt), "clock offset wrong");
+            Check.Require(sample.Uncertainty == rtt + gap + TimeSpan.FromSeconds(1), "clock uncertainty wrong");
+            await CheckReadRefusalsAsync(clockApi, clockWire, serverDate);
+            Check.Require(clockApi.ClockOffset == sample, "a later dated refusal replaced the sample");
+            clockWire.Status = 200;
+            clockWire.Body = """{"used":1,"allocation":{".tag":"team","used":7,"allocated":11}}""";
+            Check.Require(await clockApi.SpaceUsageAsync(default) == (7, 11), "team usage came from the account");
+            foreach (var (usedBytes, allocatedBytes) in new[] { (-1, 2), (1, -2) })
+            {
+                clockWire.Body = System.Text.Json.JsonSerializer.Serialize(new { used = usedBytes, allocation = new { allocated = allocatedBytes } });
+                try { await clockApi.SpaceUsageAsync(default); }
+                catch (InvalidDataException) { continue; }
+                throw new InvalidDataException("negative storage amount accepted");
+            }
+        }
+    }
+
+    private static async Task CheckReadRefusalsAsync(DropboxApi clockApi, Wire clockWire, DateTimeOffset serverDate)
+    {
+        clockWire.Status = 429;
+        clockWire.Date = serverDate.AddDays(1);
+        clockWire.Body = """{"error":{"retry_after":13}}""";
+        clockWire.HeaderWait = TimeSpan.FromSeconds(2);
+        try
+        {
+            await clockApi.SpaceUsageAsync(default);
+            throw new InvalidDataException("busy read accepted");
+        }
+        catch (ItemFailedException error)
+        {
+            Check.Require(error.Disposition == FailureDisposition.TemporaryNoEffect &&
+                error.ProviderWait == TimeSpan.FromSeconds(13) && error.ProviderWaitStarted.HasValue,
+                "busy read lost its nested provider delay or retry disposition");
+        }
+        clockWire.Body = "{";
+        try
+        {
+            await clockApi.SpaceUsageAsync(default);
+            throw new InvalidDataException("malformed busy read accepted");
+        }
+        catch (ItemFailedException error) when (error.Disposition == FailureDisposition.TemporaryNoEffect &&
+            error.ProviderWait == clockWire.HeaderWait) { }
+        clockWire.Status = 409;
+        foreach (var (payload, reset) in new[]
+        {
+            ("""{"error":{".tag":"reset"}}""", true),
+            ("""{"error":{".tag":"other"}}""", false),
+            ("""{"error":{".tag":"other"},"error_summary":"reset/..."}""", false),
+            ("""{"error_summary":42}""", false)
+        })
+        {
+            clockWire.Body = payload;
+            try { using var unused = await clockApi.CallJsonAsync("files/list_folder/continue", "{}", default); }
+            catch (ListingCursorResetException) when (reset) { continue; }
+            catch (ItemFailedException) when (!reset) { continue; }
+            throw new InvalidDataException("continuation refusal accepted");
         }
     }
 
@@ -100,11 +161,25 @@ public static class DropboxApiChecks
         }
     }
 
+    // A scheduler pause immediately after sampling wall time must be included in the elapsed bound.
+    private sealed class ReceiptClock(FakeTimeProvider clock, TimeSpan gap) : TimeProvider
+    {
+        public override long TimestampFrequency => clock.TimestampFrequency;
+        public override long GetTimestamp() => clock.GetTimestamp();
+        public override DateTimeOffset GetUtcNow()
+        {
+            var wall = clock.GetUtcNow();
+            clock.Advance(gap);
+            return wall;
+        }
+    }
+
     private sealed class Wire : HttpMessageHandler
     {
         internal int Status { get; set; } = 200;
         internal string Body { get; set; } = "{}";
         internal DateTimeOffset? Date { get; set; }
+        internal TimeSpan? HeaderWait { get; set; }
         internal TimeSpan Advance { get; set; }
         internal FakeTimeProvider? Clock { get; set; }
         internal List<string> Paths { get; } = [];
@@ -124,11 +199,18 @@ public static class DropboxApiChecks
             Clock?.Advance(Advance);
             var response = new HttpResponseMessage((HttpStatusCode)Status)
             {
-                Content = new StringContent(Body, Encoding.UTF8, "application/json")
+                Content = new StreamContent(new SplitReply(Encoding.UTF8.GetBytes(Body)))
             };
+            if (HeaderWait is { } wait) response.Headers.RetryAfter = new RetryConditionHeaderValue(wait);
             if (Date is { } date) response.Headers.Date = date;
             return response;
         }
+    }
+
+    private sealed class SplitReply(byte[] bytes) : MemoryStream(bytes, writable: false)
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) =>
+            base.ReadAsync(buffer[..Math.Min(buffer.Length, 3)], ct);
     }
 
     private sealed class TrackingStream : MemoryStream

@@ -77,15 +77,17 @@ public static class ResponseStreamChecks
         // A source-dispose failure must not block response release and is rethrown after cleanup (not lost).
         var responseContent = new TrackingContent();
         var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = responseContent };
+        var closeError = new IOException();
         var thrown = new List<ResponseStream.BodyOutcome>();
         try
         {
-            await using (var body = new ResponseStream().Open(response, new ThrowingDisposeStream(),
+            await using (var body = new ResponseStream().Open(response, new ThrowingDisposeStream(closeError),
                 CancellationToken.None, thrown.Add))
             {
             }
+            throw new InvalidDataException("source close error swallowed");
         }
-        catch (IOException)
+        catch (IOException error) when (ReferenceEquals(error, closeError))
         {
         }
         Check.Require(responseContent.Disposed, "response content survived a source-dispose failure");
@@ -93,10 +95,11 @@ public static class ResponseStreamChecks
             "a source-dispose failure did not end the body as abandoned");
 
         // A throwing observer runs outside the read classifier: its exception propagates as itself, once.
-        var observerCalls = 0;
+        var observerError = new InvalidOperationException();
+        var observed = new List<ResponseStream.BodyOutcome>();
         await using (var body = new ResponseStream().Open(new HttpResponseMessage(HttpStatusCode.OK),
             new TrackingStream(new byte[] { 9 }), CancellationToken.None,
-            _ => { observerCalls++; throw new InvalidOperationException("observer"); }))
+            outcome => { observed.Add(outcome); throw observerError; }))
         {
             try
             {
@@ -106,11 +109,11 @@ public static class ResponseStreamChecks
                 }
                 throw new InvalidDataException("observer throw swallowed");
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException error) when (ReferenceEquals(error, observerError))
             {
             }
         }
-        Check.Require(observerCalls == 1, "observer was not invoked exactly once");
+        Check.Require(observed is [ResponseStream.BodyOutcome.Completed], "observer did not receive one completion");
     }
 
     private sealed class TrackingStream : MemoryStream
@@ -195,7 +198,7 @@ public static class ResponseStreamChecks
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
-    private sealed class ThrowingDisposeStream : Stream
+    private sealed class ThrowingDisposeStream(IOException error) : Stream
     {
         public override bool CanRead => true;
         public override bool CanSeek => false;
@@ -220,9 +223,9 @@ public static class ResponseStreamChecks
 
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 
-        protected override void Dispose(bool disposing) => throw new IOException();
+        protected override void Dispose(bool disposing) => throw error;
 
-        public override ValueTask DisposeAsync() => throw new IOException();
+        public override ValueTask DisposeAsync() => throw error;
     }
 
     private sealed class TrackingContent : HttpContent
