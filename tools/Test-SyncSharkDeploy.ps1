@@ -194,7 +194,7 @@ function Write-Observations($Ctx) {
     foreach ($build in $Ctx.builds.Values) {
         $installer=Join-Path $build.root ('release-'+$build.pv.Split('+')[0]+'/deploy-scripts/Install-SyncShark.ps1')
         $all[(Get-SyncSharkNormalizedPath $installer)] = New-Observation
-        foreach ($name in 'Sync Shark.exe', 'SyncShark.exe', 'SyncShark.dll', 'SyncShark.Core.dll', 'SyncShark.Engine.dll', 'SyncSharkDiscovery.exe', 'SyncShark.Explorer.dll') {
+        foreach ($name in $(if ($build.pv.StartsWith('0.3.95+')) { @('SyncShark.exe','SyncShark.dll','SyncShark.Core.dll','SyncShark.Engine.dll','SyncSharkDiscovery.exe','SyncShark.Explorer.dll') } else { @('Sync Shark.exe','syncshark.exe') })) {
             $path = Get-SyncSharkNormalizedPath (Join-Path $build.out $name)
             $all[$path] = if ($Ctx.overrides.Contains($path)) { $Ctx.overrides[$path] } else { New-Observation }
         }
