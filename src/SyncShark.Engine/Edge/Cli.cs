@@ -18,8 +18,6 @@ public static class Cli
     /// <summary>A transient failure, such as a refused resolve.</summary>
     public const int TransientExitCode = 1;
 
-    private const int LogBufferBytes = 64 * 1024;
-
     private static readonly Lazy<Catalog> CatalogData = new(LoadCatalog, LazyThreadSafetyMode.ExecutionAndPublication);
 
     internal static Catalog Definitions => CatalogData.Value;
@@ -34,9 +32,9 @@ public static class Cli
             return UsageExitCode;
         }
 
-        // A detached log read never reaches the host.
+        // A detached log read never reaches the host; Edge.Commands owns it and forwards to RunLog.Read (R19).
         if (invocation.CommandKey == CommandKeys.Logs)
-            return ReadLog(invocation, files, output, ct);
+            return Commands.ReadLogs(invocation, files, output, ct);
 
         var code = await new HostClient().SendAsync(args, output, ct).ConfigureAwait(false);
         // A read served by the host reports a definite absence as HostNotRunning; a mutation lets HostClient act on it.
@@ -113,30 +111,6 @@ public static class Cli
         output.WriteLine(Text.Get(TextKey.HostNotRunning));
         return HostAbsentExitCode;
     }
-
-    private static int ReadLog(CliInvocation invocation, ILogFiles files, TextWriter output, CancellationToken ct)
-    {
-        var pair = invocation.Value(OptionKeys.Pair);
-        var run = invocation.Value(OptionKeys.Run);
-        if (pair is null || run is null) return UsageExitCode;
-
-        var folder = ResourceNames.LogDirectory(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
-        var path = files.Resolve(folder, pair, run);
-        if (path is null)
-        {
-            WriteLogMissing(output, pair, run);
-            return 0;
-        }
-
-        var status = files.Read(path, (line, _) => output.WriteLine(line), LogBufferBytes, ct, out _);
-        if (status == ILogFiles.ReadStatus.Found) return 0;
-        if (status == ILogFiles.ReadStatus.NotFound) { WriteLogMissing(output, pair, run); return 0; }
-        output.WriteLine(Text.Get(TextKey.HumanLogUnreadable));
-        return 0;
-    }
-
-    private static void WriteLogMissing(TextWriter output, string pair, string run) =>
-        output.WriteLine(Text.Get(TextKey.HumanLogNotFound, (TextArg.Pair, pair), (TextArg.Run, run)));
 
     private static bool IsRead(string key) =>
         key == CommandKeys.Status || key == CommandKeys.Notices || key == CommandKeys.PairsList ||

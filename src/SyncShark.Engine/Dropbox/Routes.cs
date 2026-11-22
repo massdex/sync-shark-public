@@ -13,4 +13,23 @@ public static class Routes
 
     /// <summary>Endpoint operation on the supplied facts.</summary>
     public static Uri Endpoint(string name) => throw new NotImplementedException();
+
+    /// <summary>StyleOf for the selected Routes operation.</summary>
+    public static Style StyleOf(string name) => throw new NotImplementedException();
+    /// <summary>PolicyOf for the selected Routes operation.</summary>
+    public static Policy PolicyOf(string name) => throw new NotImplementedException();
+    /// <summary>SpecialOf for the selected Routes operation.</summary>
+    public static Special? SpecialOf(string name) => throw new NotImplementedException();
+    /// <summary>IsNoAuth for the selected Routes operation.</summary>
+    public static bool IsNoAuth(string name) => throw new NotImplementedException();
+    /// <summary>VoidArg for the selected Routes operation.</summary>
+    public static bool VoidArg(string name) => throw new NotImplementedException();
+    /// <summary>ArgHeader for the selected Routes operation.</summary>
+    public static string ArgHeader(string json) => throw new NotImplementedException();
+    /// <summary>Classifies style for the selected operation.</summary>
+    public enum Style { Rpc, Upload, Download }
+    /// <summary>Classifies policy for the selected operation.</summary>
+    public enum Policy { Read, Write, Denied }
+    /// <summary>Classifies special for the selected operation.</summary>
+    public enum Special { Continue, AsyncCheck, UploadSession, Longpoll }
 }

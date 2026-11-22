@@ -50,6 +50,29 @@ public static class CommandsChecks
             notices.Contains("ReadLocalFailed", StringComparison.Ordinal), "notice group lost its kind or cause");
         Check.Require(notices.Contains("7", StringComparison.Ordinal) && notices.Contains("Child", StringComparison.Ordinal),
             "notice line lost its id or path");
+        // R19 item (2): per-file (Effect) records print only with --show-files.
+        Check.Require(!Commands.ShowLogRecord("Effect upload Child", false), "per-file Effect line must stay hidden without --show-files");
+        Check.Require(Commands.ShowLogRecord("Effect upload Child", true), "per-file Effect line must show with --show-files");
+        Check.Require(Commands.ShowLogRecord("Stage scan", false), "ordinary line must show without --show-files");
+
+        // R19 item (1): the detached logs read is owned by Edge.Commands and renders not-found without a host.
+        var logsInvocation = Cli.Parse(["logs", "--pair", "p1", "--run", "r1"]);
+        Check.Require(logsInvocation is not null, "logs did not parse");
+        using var logOutput = new StringWriter();
+        Commands.ReadLogs(logsInvocation!, new AbsentLogFiles(), logOutput, default);
+        Check.Require(logOutput.ToString().Contains(
+            Text.Get(TextKey.HumanLogNotFound, (TextArg.Pair, "p1"), (TextArg.Run, "r1")), StringComparison.Ordinal),
+            "detached log read did not render HumanLogNotFound");
+
         return Task.CompletedTask;
+    }
+
+    private sealed class AbsentLogFiles : ILogFiles
+    {
+        public TextWriter Open(string path, int bufferCharacters) => throw new NotSupportedException();
+        public string? Resolve(string folder, string pairId, string runId) => null;
+        public ILogFiles.ReadStatus Read(string path, Action<string, bool> record, int bufferBytes, CancellationToken ct,
+            out bool unfinishedTrailingRecord) => throw new NotSupportedException();
+        public void Prune(string folder, TimeSpan olderThan, DateTimeOffset now) => throw new NotSupportedException();
     }
 }

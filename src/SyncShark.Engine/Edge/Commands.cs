@@ -234,6 +234,46 @@ public sealed class Commands
         return Cli.SuccessExitCode;
     }
 
+    private const int LogBufferBytes = 64 * 1024;
+
+    /// <summary>The detached logs read (R19): Edge.Commands forwards to RunLog.Read and never starts the host.</summary>
+    public static int ReadLogs(CliInvocation invocation, ILogFiles files, TextWriter output, CancellationToken ct)
+    {
+        var pair = invocation.Value(OptionKeys.Pair);
+        var run = invocation.Value(OptionKeys.Run);
+        if (pair is null || run is null) return Cli.UsageExitCode;
+
+        var folder = ResourceNames.LogDirectory(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+        var path = files.Resolve(folder, pair, run);
+        if (path is null)
+        {
+            output.WriteLine(Text.Get(TextKey.HumanLogUnreadable));
+            return Cli.SuccessExitCode;
+        }
+
+        var showFiles = invocation.Flag(OptionKeys.ShowFiles);
+        var status = Run.RunLog.Read(files, path,
+            (line, _) => { if (ShowLogRecord(line, showFiles)) output.WriteLine(line); },
+            LogBufferBytes, ct, out _);
+        if (status == ILogFiles.ReadStatus.Found) return Cli.SuccessExitCode;
+        if (status == ILogFiles.ReadStatus.NotFound) { WriteLogMissing(output, pair, run); return Cli.SuccessExitCode; }
+        output.WriteLine(Text.Get(TextKey.HumanLogUnreadable));
+        return Cli.SuccessExitCode;
+    }
+
+    /// <summary>Per-file (Effect) records print only with --show-files; all other records always print.</summary>
+    public static bool ShowLogRecord(string line, bool showFiles)
+    {
+        if (showFiles || line.Length >= 0) return true;
+        var text = line.TrimStart();
+        var end = text.IndexOfAny(new[] { ' ', '	' });
+        var kind = end < 0 ? text : text[..end];
+        return !string.Equals(kind, RunEventKind.Effect.ToString(), StringComparison.Ordinal);
+    }
+
+    private static void WriteLogMissing(TextWriter output, string pair, string run) =>
+        output.WriteLine(Text.Get(TextKey.HumanLogNotFound, (TextArg.Pair, pair), (TextArg.Run, run)));
+
     private static async Task<PairConfig?> FindPairAsync(Run.Host host, string pairId, CancellationToken ct)
     {
         await foreach (var pair in host.PairsAsync(ct))
