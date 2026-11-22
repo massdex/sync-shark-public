@@ -29,9 +29,12 @@ public static class Program
             var host = new Host(Open, (pair,store,scope,events) => {
                 var api = new DropboxApi(transport, clock, settings, events);
                 return (local(pair,scope,settings,store), new DropboxSide(pair,scope,api,new Dispatcher(api,store)));
-            }, settings, logs, clock, ct => signIn.ConnectAsync(accounts,ct), (id,ct) => {
-                ct.ThrowIfCancellationRequested(); credentials.Remove(id);
-                connections.Save(root, connections.Read(root).Where(key => key != id).ToArray()); return Task.CompletedTask;
+            }, settings, logs, clock, async ct => {
+                var id = await signIn.ConnectAsync(accounts,ct);
+                connections.Save(root, connections.Read(root).Append(id).Distinct(StringComparer.Ordinal).ToArray()); return id;
+            }, (id,ct) => {
+                ct.ThrowIfCancellationRequested(); connections.Save(root, connections.Read(root).Where(key => key != id).ToArray());
+                credentials.Remove(id); return Task.CompletedTask;
             });
             var serving = server.ServeAsync(host, lifetime.Token);
             try {

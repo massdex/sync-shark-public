@@ -92,7 +92,7 @@ public sealed class HostServer(string? pipeName = null) : IDisposable
             using var peer = Process.GetProcessById(checked((int)pid)); using var own = Process.GetCurrentProcess();
             if (pid == own.Id || peer.SessionId != own.SessionId || !OpenProcessToken(peer.SafeHandle, 8, out var token)) return false;
             using (token) using (var other = new WindowsIdentity(token.DangerousGetHandle())) using (var me = WindowsIdentity.GetCurrent()) {
-                if (me.User == null || !me.User.Equals(other.User)) return false;
+                if (me.User is not { } selfSid || other.User is not { } peerSid || !selfSid.Equals(peerSid)) return false;
             }
             var actual = Image(peer); var local = Image(own);
             return actual != null && local != null && string.Equals(Path.GetDirectoryName(actual), Path.GetDirectoryName(local), StringComparison.OrdinalIgnoreCase) &&

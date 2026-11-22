@@ -24,7 +24,7 @@ public sealed class HostClient(string? pipeName = null)
     }
 
     /// <summary>Run the one-command protocol on an already authenticated stream.</summary>
-    internal static async Task<(int? ExitCode, bool ReceivedExit)> ExchangeAsync(Stream pipe, string[] args, TextWriter output, TextWriter error, CancellationToken ct)
+    public static async Task<(int? ExitCode, bool ReceivedExit)> ExchangeAsync(Stream pipe, string[] args, TextWriter output, TextWriter error, CancellationToken ct)
     {
         byte[] request = [PipeFrame.Arguments, ..JsonSerializer.SerializeToUtf8Bytes(args)];
         try {
