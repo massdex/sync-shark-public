@@ -261,7 +261,8 @@ public sealed class Commands
 
     /// <summary>The destructive-exclusion warning: the recovery destination together with the recovery period.</summary>
     public static string RenderExclusionPreview(string path, Side side, long copyFiles, long copyBytes,
-        long removeFiles, long removeBytes, string recoveryPlace) => recoveryPlace;
+        long removeFiles, long removeBytes, string recoveryPlace) =>
+        recoveryPlace;
 
     /// <summary>The removed-pair sentence.</summary>
     public static string RenderPairRemoved(string pairId) => Text.Get(TextKey.ResultPairRemoved, (TextArg.Pair, pairId));

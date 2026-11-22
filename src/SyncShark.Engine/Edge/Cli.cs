@@ -30,7 +30,7 @@ public static class Cli
 
         // A detached log read never reaches the host.
         if (invocation.CommandKey == CommandKeys.Logs)
-            return await ReadLogAsync(invocation, files, output, ct).ConfigureAwait(false);
+            return ReadLog(invocation, files, output, ct);
 
         var code = await new HostClient().SendAsync(args, output, ct).ConfigureAwait(false);
         // A read served by the host reports a definite absence as HostNotRunning; a mutation lets HostClient act on it.
@@ -105,7 +105,7 @@ public static class Cli
         return HostAbsentExitCode;
     }
 
-    private static async Task<int> ReadLogAsync(CliInvocation invocation, ILogFiles files, TextWriter output, CancellationToken ct)
+    private static int ReadLog(CliInvocation invocation, ILogFiles files, TextWriter output, CancellationToken ct)
     {
         var pair = invocation.Value(OptionKeys.Pair);
         var run = invocation.Value(OptionKeys.Run);
