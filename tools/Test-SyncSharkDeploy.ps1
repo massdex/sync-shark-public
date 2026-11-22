@@ -57,8 +57,8 @@ static class Stub {
             case "--cli engine host stop --yes": return Stop();
             case "--cli engine host status --json":
                 if (Flag("statusFail")) { Console.Error.WriteLine("stub: status refused"); return 1; }
-                Json(new { state = Hosts().Length > 0 ? "StatusWatching" : "StatusUnavailable", message = "stub" }); return 0;
-            case "--cli engine status --json": Json(new { items = Flag("empty") ? Array.Empty<object>() : new object[] { new { pair = new { pairId="pair-a", enabled=true }, pendingPresent=Flag("pending") || (Flag("pendingAfterStop") && File.Exists(StopFile)) } } }); return 0;
+                Json(new { state = Flag("busy") ? "StatusStillWorking" : Hosts().Length > 0 ? "StatusWatching" : "StatusUnavailable", message = "stub" }); return 0;
+            case "--cli engine status --json": Json(new { items = Flag("empty") ? Array.Empty<object>() : new object[] { new { pair = new { pairId="pair-a", enabled=true }, pendingPresent=Flag("pending") } } }); return 0;
             case "--cli engine pairs list --json": Json(new { pairs = Flag("empty") ? Array.Empty<object>() : new object[] { new { id = "pair-a", enabled = true } } }); return 0;
             case "--cli engine settings list --json":
                 var root = B("recoveryRoot");
@@ -194,7 +194,18 @@ function New-Context([int]$Number) {
     foreach ($dir in 'state', 'engine', 'v2\logs\autosync') { [void][IO.Directory]::CreateDirectory((Join-Path $ctx.data $dir)) }
     [void][IO.Directory]::CreateDirectory($ctx.state); [void][IO.Directory]::CreateDirectory($ctx.launchers)
     [IO.File]::WriteAllText((Join-Path $ctx.data 'state\instance.lock'), 'lock')
-    $bytes = [byte[]]::new(65536); [Security.Cryptography.RandomNumberGenerator]::Fill($bytes); [IO.File]::WriteAllBytes((Join-Path $ctx.data 'engine\state.db'), $bytes)
+    @'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.executescript("""PRAGMA user_version=16;
+        CREATE TABLE pair(id INTEGER PRIMARY KEY,pair_id TEXT,pending_json TEXT);
+        CREATE TABLE folder_removal_submission(pair_id INTEGER,submission_id TEXT,phase TEXT);
+        CREATE TABLE folder_removal(pair_id INTEGER,operation_id TEXT,active INTEGER);
+        INSERT INTO pair VALUES(1,'pair-a',NULL);
+        INSERT INTO folder_removal_submission VALUES(1,'settled','Terminal');
+        INSERT INTO folder_removal VALUES(1,'completed',0);""")
+'@ | & python -I - (Join-Path $ctx.data 'engine/state.db')
+    if ($LASTEXITCODE -ne 0) { throw 'Fixture database creation failed.' }
     [IO.File]::WriteAllText((Join-Path $ctx.data 'v2\logs\autosync\autosync.log'), "2026-01-01T00:00:00.0000000+00:00 host start`n")
     [IO.File]::WriteAllText((Join-Path $root 'product-root.txt'), $ctx.data)
     # Launchers are written first: the builds below give any on-write scanner time to release them.
@@ -348,19 +359,31 @@ F 1 'backup byte flipped: no data effect, refused' {
     Expect (@(@($j.errors) -like '*does not verify*').Count -gt 0) 'backup verification refused'
     Expect ((Get-DataId $ctx) -ceq $before -and (Get-LauncherHashes $ctx) -ceq $launchers) 'no data or launcher effect'
 }
-F 48 'pending predecessor work leaves the host and active pointer untouched' {
+F 48 'busy predecessor leaves the host and active pointer untouched' {
     $ctx=Use (New-Context 48)
     Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{'0.3.75'=@{pending=$true}}
+    Set-Behavior $ctx @{'0.3.75'=@{busy=$true}}
     $r=Deploy $ctx
-    Expect ($r.Exit -ne 0 -and $r.Log -like '*Unfinished or unknown work*') 'pending work reported'
+    Expect ($r.Exit -ne 0 -and $r.Log -like '*not idle*') 'busy host reported'
     Expect (@(Get-Stubs $ctx '--core v2 --engine-host').Count -eq 1 -and !(Test-Path -LiteralPath (Join-Path $ctx.root 'active'))) 'no stop or switch'
 }
-F 49 'work discovered after graceful stop prevents the switch' {
-    $ctx=Use (New-Context 49); Start-Host $ctx $ctx.old
-    Set-Behavior $ctx @{'0.3.75'=@{pendingAfterStop=$true}}
+F 49 'post-drain inventory reports every outstanding record before switching' {
+    $ctx=Use (New-Context 49)
+    $db=Join-Path $ctx.data 'engine/state.db'
+    @'
+import sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.executescript("""UPDATE pair SET pending_json='{}';
+        INSERT INTO folder_removal_submission VALUES(1,'job-one','Accepted'),(1,'job-two','Accepted');
+        INSERT INTO folder_removal VALUES(1,'folder-one',1);""")
+'@ | & python -I - $db
+    if ($LASTEXITCODE -ne 0) { throw 'Could not seed unfinished fixture.' }
+    $before=Get-SyncSharkTreeIdentity (Split-Path -Parent $db)
+    Start-Host $ctx $ctx.old # The command still reports idle, so only the stopped inventory catches these records.
     $r=Deploy $ctx; $j=Get-Journal $ctx
-    Expect ($j.stopRequested -and $r.Log -like '*Unfinished or unknown work*' -and !(Test-Path -LiteralPath (Join-Path $ctx.root 'active'))) 'final status prevented publication'
+    Expect ($j.stopRequested -and $r.Exit -ne 0 -and $r.Log -like '*inventory did not clear*') 'refusal occurred after graceful stop'
+    foreach ($item in 'pending pair','job-one','job-two','folder-one') { Expect ($r.Log.Contains($item)) "missing inventory finding: $item" }
+    Expect (!(Test-Path -LiteralPath (Join-Path $ctx.root 'active')) -and (Get-SyncSharkTreeIdentity (Split-Path -Parent $db)) -ceq $before) 'no switch or store change'
 }
 F 50 'startup refusal with zero pairs cannot close healthy' {
     $ctx=Use (New-Context 50); Start-Host $ctx $ctx.old

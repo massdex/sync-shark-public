@@ -1,4 +1,5 @@
 # One-process deploy of a Sync Shark build (DESIGN-ONE-DEPLOY-11A with its addenda).
+# Requires Windows, PowerShell 7.4+ and Python 3 with SQLite for the one-time offline inventory.
 # Deploy:  pwsh -File <candidate outputDirectory>\tools\Deploy-SyncShark.ps1 -Build <candidate build root> -LauncherDir <launcher folder>
 # Recover: ... -Recover          Close a blocked transaction: ... -Close -Disposition <d>
 # Operating condition: no GUI, CLI, launcher or Repair use until the transaction is closed; refuse without effects otherwise.
@@ -356,14 +357,43 @@ function Invoke-Cli([string]$Purpose, [string]$Exe, [string]$Arguments) {
     [pscustomobject]@{ Exit = $result.Exit; Json = $json }
 }
 function Get-PairsKey($Json) { if ($null -eq $Json) { return '' }; (@($Json.data.pairs) | ForEach-Object { "$($_.id)|$($_.enabled)" } | Sort-Object -CaseSensitive) -join ';' }
-function Assert-FinishedWork {
-    $reply=Invoke-Cli 'unfinished-work' $script:journal.predecessor.exe 'engine status --json'
-    if ($reply.Exit -ne 0 -or !$reply.Json.ok -or $reply.Json.data.items -isnot [array]) { throw 'Unconfirmed predecessor status; not switching.' }
-    $pairs=foreach ($item in $reply.Json.data.items) {
-        if ($item.pendingPresent -isnot [bool] -or $item.pendingPresent) { throw "Unfinished or unknown work for $($item.pair.pairId); not switching." }
-        "$($item.pair.pairId)|$($item.pair.enabled)"
-    }
-    if ((($pairs | Sort-Object -CaseSensitive) -join ';') -cne $script:journal.snapshot.pairs) { throw 'Incomplete predecessor status.' }
+function Assert-FinishedWork([string]$Database) {
+    # The instance lock remains held through inventory and publication. Never let SQLite create a sidecar at the source.
+    @'
+import contextlib, json, pathlib, shutil, sqlite3, sys, tempfile
+source = pathlib.Path(sys.argv[1]).resolve(strict=True)
+with contextlib.ExitStack() as stack:
+    image = source
+    options = "?mode=ro&immutable=1"
+    sidecars = [suffix for suffix in ("-wal", "-journal") if pathlib.Path(str(source) + suffix).exists()]
+    if sidecars:
+        # Immutable reads can miss WAL commits. Read the stopped image with its journals in a disposable directory;
+        # never copy the shared-memory index or allow SQLite to maintain it next to the predecessor.
+        image = pathlib.Path(stack.enter_context(tempfile.TemporaryDirectory(dir=sys.argv[2]))) / source.name
+        for suffix in ["", *sidecars]:
+            shutil.copyfile(str(source) + suffix, str(image) + suffix)
+        options = "?mode=ro"
+    db = stack.enter_context(contextlib.closing(sqlite3.connect(image.as_uri() + options, uri=True)))
+    db.execute("BEGIN")
+    version, = db.execute("PRAGMA user_version").fetchone()
+    if version != 16:
+        sys.exit(f"Expected predecessor schema 16, found {version}; not switching.")
+    found = False
+    for kind, pair, item in db.execute("""
+        SELECT 'pending pair', pair_id, id FROM pair WHERE pending_json IS NOT NULL
+        UNION ALL
+        SELECT 'accepted submission', coalesce(p.pair_id, s.pair_id), s.submission_id
+        FROM folder_removal_submission AS s LEFT JOIN pair AS p ON p.id=s.pair_id WHERE s.phase='Accepted'
+        UNION ALL
+        SELECT 'active folder removal', coalesce(p.pair_id, r.pair_id), r.operation_id
+        FROM folder_removal AS r LEFT JOIN pair AS p ON p.id=r.pair_id WHERE r.active=1
+    """):
+        print(json.dumps({"unfinished":kind,"pair":pair,"item":item}, ensure_ascii=True))
+        found = True
+    if found:
+        sys.exit(2)
+'@ | & python -I - $Database $script:txRoot | ForEach-Object { Say $_ }
+    if ($LASTEXITCODE -ne 0) { throw 'Stopped predecessor inventory did not clear; not switching.' }
 }
 function Get-PairsKeyText([string]$Out) {
     if ($Out.Trim() -ceq 'There are no pairs yet.') { return '' }
@@ -723,13 +753,11 @@ function Invoke-Forward {
     if ($pairs.Exit -ne 0 -or $null -eq $pairs.Json) { throw 'engine pairs list failed.' }
     $j.snapshot.pairs = Get-PairsKey $pairs.Json
 
-    Assert-FinishedWork
-    if (!$testMode) { throw 'Cutover not cleared: predecessor status does not prove provider submissions are settled.' }
     Mark 'snapshot'
     # Step 2: stop the running generation with its own CLI, then hold the instance lock.
     Stop-Running $generation
     $script:lockStream = [IO.File]::Open($script:lockPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
-    Assert-FinishedWork
+    Assert-FinishedWork (Join-Path $script:dataTarget 'engine/state.db')
     Mark 'stopped'
     # Step 3: backup.
     $bytes = Measure-Data $j.backup.source
