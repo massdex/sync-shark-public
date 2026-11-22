@@ -99,7 +99,11 @@ public sealed class RunLog : IDisposable
         var escaped = new StringBuilder(value.Length);
         escaped.Append(value.AsSpan(0, first));
         for (var index = first; index < value.Length; index++)
-            escaped.Append(EscapeChar(value[index]));
+        {
+            var character = value[index];
+            if (char.IsControl(character)) escaped.Append(EscapeChar(character));
+            else escaped.Append(character);
+        }
         return escaped.ToString();
     }
 
