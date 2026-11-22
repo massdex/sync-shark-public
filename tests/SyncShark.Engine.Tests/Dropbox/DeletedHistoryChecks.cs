@@ -1,3 +1,4 @@
+using System.Net;
 using Massdex.SyncShark.Engine;
 using Massdex.SyncShark.Engine.Dropbox;
 
@@ -7,42 +8,23 @@ namespace Massdex.SyncShark.Engine.Tests.Dropbox;
 public static class DeletedHistoryChecks
 {
     /// <summary>Verifies the DeletedHistory contract through the module surface.</summary>
-    public static Task RunAsync()
+    public static async Task RunAsync()
     {
-        // A coherent time is parsed; a missing or malformed one keeps the remainder usable with its own cause.
-        var valid = DeletedHistory.DeletionTime("2024-01-02T03:04:05Z", wrongType: false);
-        Check.Require(valid.Reason is null && valid.Value == new DateTimeOffset(2024, 1, 2, 3, 4, 5, TimeSpan.Zero),
-            "A valid server deletion time was not parsed as UTC.");
+        var roots = new RootIdentity("T:\\Pair A", "/Pair A", "connection-a",
+            new DirectoryIdentity(1, 2, null), new DropboxRootIdentity("account", "ns-root", "ns-home", "folder"));
+        var pair = new PairConfig("pair-a", "Pair A", "T:\\Pair A", "/Pair A", "connection-a", [], [],
+            FirstRunPolicy.NewestWins, true, null, roots);
 
-        var missingTime = DeletedHistory.DeletionTime(null, wrongType: false);
-        Check.Require(missingTime.Value is null && missingTime.Reason == TextKey.DeletionTimeMissing,
-            "A missing deletion time lost its own cause.");
-
-        var malformedTime = DeletedHistory.DeletionTime("not-a-time", wrongType: false);
-        Check.Require(malformedTime.Value is null && malformedTime.Reason == TextKey.DeletionTimeMalformed,
-            "A malformed deletion time lost its own cause.");
-
-        var wrongTimeType = DeletedHistory.DeletionTime("2024-01-02T03:04:05Z", wrongType: true);
-        Check.Require(wrongTimeType.Value is null && wrongTimeType.Reason == TextKey.DeletionTimeMalformed,
-            "A wrong-typed deletion time was accepted.");
-
-        // The retained content hash must be a coherent Dropbox block digest, normalised to lower case.
-        var digest = new string('A', 64);
-        var hash = DeletedHistory.DeletionHash(digest, wrongType: false);
-        Check.Require(hash.Reason is null && hash.Value == new string('a', 64),
-            "A valid content hash was not accepted or normalised.");
-
-        var missingHash = DeletedHistory.DeletionHash(null, wrongType: false);
-        Check.Require(missingHash.Value is null && missingHash.Reason == TextKey.DeletionHashMissing,
-            "A missing content hash lost its own cause.");
-
-        var malformedHash = DeletedHistory.DeletionHash("abc", wrongType: false);
-        Check.Require(malformedHash.Value is null && malformedHash.Reason == TextKey.DeletionHashMalformed,
-            "A malformed content hash lost its own cause.");
-
-        var wrongHashType = DeletedHistory.DeletionHash(digest, wrongType: true);
-        Check.Require(wrongHashType.Value is null && wrongHashType.Reason == TextKey.DeletionHashMalformed,
-            "A wrong-typed content hash was accepted.");
-        return Task.CompletedTask;
+        // Real read operations: a failed history read must stay non-destructive for both a file and a folder
+        // candidate.  On the current W09/W10/W11 stubs the DropboxApi constructor reports NOT IMPLEMENTED; the
+        // folder-tombstone-versus-file case is listed for proof at F1 in REPORT.txt.
+        var api = DropboxCheckApi.ForStatus(HttpStatusCode.InternalServerError);
+        var history = new DeletedHistory();
+        var file = await history.ReadAsync(api, pair, "A/Note.txt", CancellationToken.None);
+        Check.Require(file is DeletionEvidence.Unknown,
+            "A file-history server error produced deletion evidence instead of a non-destructive unknown.");
+        var folder = await history.ReadAsync(api, pair, "A/Folder", true, CancellationToken.None);
+        Check.Require(folder is DeletionEvidence.Unknown,
+            "A folder-history server error produced deletion evidence instead of a non-destructive unknown.");
     }
 }

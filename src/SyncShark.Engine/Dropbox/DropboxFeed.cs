@@ -6,15 +6,39 @@ public sealed class DropboxFeed
     // The feed asks for the whole tree with deletions so a tombstone is never mistaken for an unread item.
     private static readonly ListOptions FeedOptions = new(Recursive: true, IncludeOutOfScope: false, IncludeDeleted: true);
 
-    /// <summary>Read operation on the supplied facts.</summary>
+    /// <summary>Live read of the pair's change feed. A caught-up page with no changes waits on the one provider
+    /// longpoll instead of returning so a caller's next request cannot hot-poll a quiet root.</summary>
     public async Task<ChangePage> ReadAsync(DropboxApi api, PairConfig pair, string? cursor, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(api);
         ArgumentNullException.ThrowIfNull(pair);
         var listing = new DropboxListing();
-        // A pair without a cursor takes a fresh base with get_latest_cursor before resuming from it.
-        var from = cursor ?? await listing.CaptureCursorAsync(api, pair, FeedOptions, ct).ConfigureAwait(false);
-        return await listing.ReadChangePageAsync(api, pair, from, ct).ConfigureAwait(false);
+        var current = string.IsNullOrWhiteSpace(cursor)
+            ? await listing.CaptureCursorAsync(api, pair, FeedOptions, ct).ConfigureAwait(false)
+            : cursor!;
+        var cycle = new ContinuationCycle();
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var page = await listing.ReadChangePageAsync(api, pair, current, ct).ConfigureAwait(false);
+            if (page.Changes.Count > 0) return page;
+            if (!page.CaughtUp)
+            {
+                // Advancing continuation with no entries: a repeated cursor is a classified source failure.
+                if (string.IsNullOrWhiteSpace(page.Cursor) || cycle.Repeats(current, page.Cursor!))
+                    throw SourceFailure(pair);
+                current = page.Cursor!;
+                continue;
+            }
+            // Caught up with no changes: wait for the provider signal, one outstanding longpoll, then continue.
+            if (string.IsNullOrWhiteSpace(page.Cursor)) throw SourceFailure(pair);
+            current = page.Cursor!;
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (await api.LongpollAsync(current, ct).ConfigureAwait(false)) break;
+            }
+        }
     }
 
     /// <summary>Maps decoded entries to ordered change notices. Scope, ignore and exclusion routing happens at intake,
@@ -32,6 +56,9 @@ public sealed class DropboxFeed
         }
         return changes;
     }
+
+    private static InventoryIncompleteException SourceFailure(PairConfig pair) =>
+        new(Text.Get(TextKey.ReadDropboxFailed, (TextArg.Path, pair.DropboxRoot), (TextArg.Message, "")), null);
 }
 
 /// <summary>Detects a repeating change continuation in constant space, shared by every continuation reader.</summary>

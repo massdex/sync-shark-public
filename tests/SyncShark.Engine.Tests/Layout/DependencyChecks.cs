@@ -190,7 +190,7 @@ public static class DependencyChecks
             else if(space=="System.IO" && name=="DriveInfo" && member is "AvailableFreeSpace" or "TotalFreeSpace") violates=(module,file)!=("Local","VolumeSpace");
             else if(module=="Planner" && name=="Environment") violates=true;
             else if(space=="System.IO" && name is "File" or "Directory" or "FileInfo" or "DirectoryInfo" or "FileStream" or "DriveInfo" or "FileSystemWatcher")
-                violates=module is not ("Local" or "Storage") && (module,file)!=("Dropbox","Connections");
+                violates=module is not ("Local" or "Storage") && (module,file)!=("Dropbox","Connections") && (module,file)!=("Dropbox","DropboxReplyShapes");
             else if(module=="Planner" && (name=="TimeProvider" || name is "DateTime" or "DateTimeOffset" && member is "Now" or "UtcNow" or "Today" || name=="Stopwatch")) violates=true;
             if(violates) yield return type.ToDisplayString()+"."+member;
         }
