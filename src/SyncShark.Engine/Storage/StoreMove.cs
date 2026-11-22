@@ -20,24 +20,24 @@ public sealed class StoreMove
     private static void Execute(SqliteConnection db,string sql,SqliteTransaction? tx=null){using var cmd=db.CreateCommand();cmd.CommandText=sql;cmd.Transaction=tx;cmd.ExecuteNonQuery();}
     private static void Checkpoint(SqliteConnection db)
     {
-        using var cmd=db.CreateCommand();cmd.CommandText="PRAGMA wal_checkpoint(TRUNCATE)";using var rd=cmd.ExecuteReader();if(!rd.Read()||rd.GetInt32(0)!=0)throw new IOException("SQLite checkpoint was busy");
+        using var cmd=db.CreateCommand();cmd.CommandText="PRAGMA wal_checkpoint(TRUNCATE)";using var rd=cmd.ExecuteReader();if(!rd.Read()||rd.GetInt32(0)!=0)throw new IOException(Text.Get(TextKey.FailLocalInUse,(TextArg.Path,db.DataSource)));
     }
     private static void Verify(SqliteConnection db,int version,SqliteTransaction? tx=null)
     {
-        if(!Equals(Scalar(db,"PRAGMA user_version",tx),(long)version)||!Equals(Scalar(db,"PRAGMA integrity_check",tx),"ok")||Scalar(db,"PRAGMA foreign_key_check",tx)!=null)throw new InvalidDataException("Store integrity or format check failed");
+        if(!Equals(Scalar(db,"PRAGMA user_version",tx),(long)version)||!Equals(Scalar(db,"PRAGMA integrity_check",tx),"ok")||Scalar(db,"PRAGMA foreign_key_check",tx)!=null)throw new InvalidDataException(Text.Get(TextKey.FailStoreMutation,(TextArg.Path,db.DataSource)));
         if(version==Schema.Version){using var cmd=db.CreateCommand();cmd.Transaction=tx;cmd.CommandText="SELECT p.def_json,s.local_published_usn,h.last_key,j.next_usn,m.skip_cause,a.launch FROM pair p,synced_entry s,discovery_deleted_block h,journal_position j,issue_member m,accepted_job a LIMIT 0";using var reader=cmd.ExecuteReader();}
     }
-    private static int Version(string path){using var db=Open(path,SqliteOpenMode.ReadOnly);var v=Convert.ToInt32(Scalar(db,"PRAGMA user_version"));if(v!=16 && v!=Schema.Version)throw new InvalidDataException("Unexpected store version");return v;}
+    private static int Version(string path){using var db=Open(path,SqliteOpenMode.ReadOnly);var v=Convert.ToInt32(Scalar(db,"PRAGMA user_version"));if(v!=16 && v!=Schema.Version)throw new InvalidDataException(Text.Get(v<16?TextKey.StateSchemaTooOld:TextKey.StateSchemaTooNew,(TextArg.Path,path)));return v;}
     private static List<string> Required(SqliteConnection db)
     {
-        using var cmd=db.CreateCommand();cmd.CommandText="SELECT DISTINCT json_extract(def_json,'$.ConnectionId') FROM pair";using var rd=cmd.ExecuteReader();var ids=new List<string>();while(rd.Read()){if(rd.IsDBNull(0)||rd.GetString(0).Length==0)throw new InvalidDataException("Missing pair connection");ids.Add(rd.GetString(0));}return ids;
+        using var cmd=db.CreateCommand();cmd.CommandText="SELECT DISTINCT json_extract(def_json,'$.ConnectionId') FROM pair";using var rd=cmd.ExecuteReader();var ids=new List<string>();while(rd.Read()){if(rd.IsDBNull(0)||rd.GetString(0).Length==0)throw new InvalidDataException(Text.Get(TextKey.StateRootBindingInvalid));ids.Add(rd.GetString(0));}return ids;
     }
     private static string Stage(string target)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);var path=target+"."+DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ",System.Globalization.CultureInfo.InvariantCulture)+"."+Guid.NewGuid().ToString("N")+".new";
         using var file=new FileStream(path,FileMode.CreateNew,FileAccess.Write,FileShare.None);return path;
     }
-    private static void Closed(string path){if(Occupied(path+"-wal")||Occupied(path+"-shm")||Occupied(path+"-journal"))throw new IOException("Store still has an open sidecar");}
+    private static void Closed(string path){if(Occupied(path+"-wal")||Occupied(path+"-shm")||Occupied(path+"-journal"))throw new IOException(Text.Get(TextKey.FailLocalInUse,(TextArg.Path,path)));}
     private static void RemoveStage(string path){File.Delete(path);File.Delete(path+"-wal");File.Delete(path+"-shm");File.Delete(path+"-journal");}
 
     /// <summary>Publish the closed verified v17 stage, upgrading v16 in one transaction; Schema.Create only builds an empty schema.</summary>
@@ -47,17 +47,17 @@ public sealed class StoreMove
     public Task<string?> MoveWithOutcomeAsync(string predecessorRoot,string productRoot,Func<string,string,IReadOnlyList<string>,Action?> verifyConnections,CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();var root=Path.TrimEndingDirectorySeparator(Path.GetFullPath(productRoot));var target=StoreFile(root);var backup=Path.Combine(Path.GetDirectoryName(target)!,Backup);var pointer=Path.Combine(predecessorRoot,"product-root.txt");var sourceRoot=root;bool hasPointer=Occupied(pointer);
-        if(hasPointer){var lines=File.ReadAllLines(pointer);if(lines.Length!=1||!Path.IsPathFullyQualified(lines[0]))throw new InvalidDataException("Invalid product root pointer");sourceRoot=Path.TrimEndingDirectorySeparator(Path.GetFullPath(lines[0]));}
+        if(hasPointer){var lines=File.ReadAllLines(pointer);if(lines.Length!=1||!Path.IsPathFullyQualified(lines[0]))throw new InvalidDataException(Text.Get(TextKey.StateRootBindingInvalid));sourceRoot=Path.TrimEndingDirectorySeparator(Path.GetFullPath(lines[0]));}
         bool external=!string.Equals(root,sourceRoot,StringComparison.OrdinalIgnoreCase);var externalPath=StoreFile(sourceRoot);var hasTarget=Occupied(target);var hasBackup=Occupied(backup);
         var version=hasTarget?Version(target):0;
-        if(hasBackup&&Version(backup)!=16 || external&&(!Occupied(externalPath)||Version(externalPath)!=16||hasBackup))throw new InvalidDataException("Conflicting or missing predecessor image");
+        if(hasBackup&&Version(backup)!=16 || external&&(!Occupied(externalPath)||Version(externalPath)!=16||hasBackup))throw new InvalidDataException(Text.Get(TextKey.RecoveryStageLocationBlocked,(TextArg.Place,externalPath)));
         if(version==Schema.Version)
         {
             if(hasPointer){using var published=Open(target,SqliteOpenMode.ReadOnly);Verify(published,Schema.Version);if(external){using var old=Open(externalPath,SqliteOpenMode.ReadOnly);Verify(old,16);}verifyConnections(sourceRoot,root,Required(published));}
             return Task.FromResult(RemovePointer());
         }
-        if(hasTarget&&(external||hasBackup))throw new InvalidDataException("More than one predecessor image");
-        if(!hasTarget&&!hasBackup&&!external){if(hasPointer)throw new InvalidDataException("Dangling product root pointer");Closed(target);return Task.FromResult<string?>(null);}
+        if(hasTarget&&(external||hasBackup))throw new InvalidDataException(Text.Get(TextKey.RecoveryStageLocationBlocked,(TextArg.Place,target)));
+        if(!hasTarget&&!hasBackup&&!external){if(hasPointer)throw new InvalidDataException(Text.Get(TextKey.RecoveryStageLocationBlocked,(TextArg.Place,pointer)));Closed(target);return Task.FromResult<string?>(null);}
         var source=external?externalPath:hasBackup?backup:target;if(!hasTarget)Closed(target);var stage=Stage(target);Action? cleanup=null;bool publishedStage=false,replacing=false;
         try
         {
@@ -81,7 +81,7 @@ public sealed class StoreMove
     /// <summary>Create a verified empty database for the first explicit pair add, without replacing an existing file.</summary>
     public Task CreateAsync(string productRoot,CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();var target=StoreFile(productRoot);if(Occupied(target)||Occupied(Path.Combine(Path.GetDirectoryName(target)!,Backup))||Occupied(Path.Combine(productRoot,"product-root.txt")))throw new IOException("Store already exists or requires migration");Closed(target);var stage=Stage(target);
+        ct.ThrowIfCancellationRequested();var target=StoreFile(productRoot);if(Occupied(target)||Occupied(Path.Combine(Path.GetDirectoryName(target)!,Backup))||Occupied(Path.Combine(productRoot,"product-root.txt")))throw new IOException(Text.Get(TextKey.ClashNameTaken,(TextArg.Path,target)));Closed(target);var stage=Stage(target);
         try{using(var db=Open(stage,SqliteOpenMode.ReadWrite)){Execute(db,Schema.Pragmas);using(var tx=db.BeginTransaction()){Execute(db,Schema.Create,tx);Execute(db,$"PRAGMA user_version={Schema.Version}",tx);Verify(db,Schema.Version,tx);tx.Commit();}Checkpoint(db);}Closed(stage);ct.ThrowIfCancellationRequested();Closed(target);File.Move(stage,target,false);}
         finally{RemoveStage(stage);}return Task.CompletedTask;
     }
@@ -107,7 +107,7 @@ public sealed class StoreMove
         {
             ct.ThrowIfCancellationRequested();var cols=string.Join(",",Names("SELECT name FROM pragma_table_xinfo('"+table+"') WHERE hidden=0").Select(Quote));var where=table=="issue_member"?" WHERE issue_id IS NOT NULL":"";
             Execute(db,"INSERT INTO "+table+"("+cols+") SELECT "+cols+" FROM old_"+table+where,tx);
-            if(!Equals(Scalar(db,"SELECT count(*) FROM "+table,tx),Scalar(db,"SELECT count(*) FROM old_"+table+where,tx)))throw new InvalidDataException("Migration count mismatch: "+table);
+            if(!Equals(Scalar(db,"SELECT count(*) FROM "+table,tx),Scalar(db,"SELECT count(*) FROM old_"+table+where,tx)))throw new InvalidDataException(Text.Get(TextKey.FailStoreMutation,(TextArg.Path,table)));
         }
         Execute(db,"""
             INSERT INTO issue(pair_id,kind,cause,path,subject_json,at_ticks,dismissed)
@@ -116,18 +116,18 @@ public sealed class StoreMove
             DELETE FROM issue WHERE kind=4 AND NOT EXISTS(SELECT 1 FROM issue_member m WHERE m.issue_id=issue.issue_id) AND EXISTS(SELECT 1 FROM old_issue_member m WHERE m.issue_id=issue.issue_id AND m.skip_cause='SkipLink');
             UPDATE sqlite_sequence SET seq=max(seq,coalesce((SELECT seq FROM sqlite_sequence WHERE name='old_issue'),0)) WHERE name='issue';
             """,tx);
-        if(!Equals(Scalar(db,"SELECT count(*) FROM old_issue_member o LEFT JOIN issue_member m USING(member_id) LEFT JOIN issue i ON m.issue_id=i.issue_id WHERE o.issue_id IS NOT NULL AND (m.member_id IS NULL OR (o.skip_cause IS NOT 'SkipLink' AND m.issue_id!=o.issue_id) OR (o.skip_cause='SkipLink' AND (i.cause IS NOT 'InfoLinks' OR i.kind!=3 OR i.pair_id!=o.pair_id)))",tx),0L))throw new InvalidDataException("Notice migration changed a member");
+        if(!Equals(Scalar(db,"SELECT count(*) FROM old_issue_member o LEFT JOIN issue_member m USING(member_id) LEFT JOIN issue i ON m.issue_id=i.issue_id WHERE o.issue_id IS NOT NULL AND (m.member_id IS NULL OR (o.skip_cause IS NOT 'SkipLink' AND m.issue_id!=o.issue_id) OR (o.skip_cause='SkipLink' AND (i.cause IS NOT 'InfoLinks' OR i.kind!=3 OR i.pair_id!=o.pair_id)))",tx),0L))throw new InvalidDataException(Text.Get(TextKey.FailStoreMutation,(TextArg.Path,nameof(NoticeItem))));
         Execute(db,"""
             INSERT INTO accepted_job(pair_id,route,job_id,launch)
             SELECT f.pair_id,'files/move_batch/check_v2',f.job_id,(SELECT json_group_array(json_object('Id',json_extract(j.value,'$[0]'),'Path',CASE WHEN f.source_path='' THEN '' ELSE f.source_path||'/' END||json_extract(j.value,'$[1]'),'Destination',CASE WHEN f.destination_path='' THEN '' ELSE f.destination_path||'/' END||json_extract(j.value,'$[1]'))) FROM json_each(f.launch) j ORDER BY j.key) FROM folder_move f WHERE f.job_id IS NOT NULL;
             INSERT INTO accepted_job(pair_id,route,job_id,launch)
             SELECT s.pair_id,'files/delete_batch/check',s.job_id,(SELECT json_group_array(json_object('Id',g.id,'Path',g.path,'Destination',NULL)) FROM (SELECT json_extract(i.expected_json,'$.Value.Id') id,i.path FROM folder_removal_item i WHERE i.submission_id=s.submission_id ORDER BY i.submission_member) g) FROM folder_removal_submission s WHERE s.phase='Accepted';
             """,tx);
-        if(!Equals(Scalar(db,"SELECT count(*) FROM accepted_job a WHERE json_array_length(launch)=0 OR EXISTS(SELECT 1 FROM json_each(a.launch) j WHERE length(coalesce(json_extract(j.value,'$.Id'),''))=0 OR length(coalesce(json_extract(j.value,'$.Path'),''))=0)",tx),0L))throw new InvalidDataException("Incomplete accepted job membership");
+        if(!Equals(Scalar(db,"SELECT count(*) FROM accepted_job a WHERE json_array_length(launch)=0 OR EXISTS(SELECT 1 FROM json_each(a.launch) j WHERE length(coalesce(json_extract(j.value,'$.Id'),''))=0 OR length(coalesce(json_extract(j.value,'$.Path'),''))=0)",tx),0L))throw new InvalidDataException(Text.Get(TextKey.FailStoreMutation,(TextArg.Path,nameof(AcceptedJob))));
         Execute(db,"DROP TABLE old_issue_member",tx);
         foreach(var table in rebuilt.Where(t=>t!="issue_member"))Execute(db,"DROP TABLE old_"+table,tx);
         foreach(var table in retired)Execute(db,"DROP TABLE "+table,tx);
-        foreach(var (table,count) in counts)if(!Equals(count,Scalar(db,"SELECT count(*) FROM "+table,tx)))throw new InvalidDataException("Store migration changed "+table);
+        foreach(var (table,count) in counts)if(!Equals(count,Scalar(db,"SELECT count(*) FROM "+table,tx)))throw new InvalidDataException(Text.Get(TextKey.FailStoreMutation,(TextArg.Path,table)));
         Execute(db,$"PRAGMA user_version={Schema.Version}",tx);Verify(db,Schema.Version,tx);tx.Commit();Execute(db,"PRAGMA foreign_keys=ON");
         List<string> Names(string sql){using var cmd=db.CreateCommand();cmd.Transaction=tx;cmd.CommandText=sql;using var rd=cmd.ExecuteReader();var names=new List<string>();while(rd.Read())names.Add(rd.GetString(0));return names;}
     }

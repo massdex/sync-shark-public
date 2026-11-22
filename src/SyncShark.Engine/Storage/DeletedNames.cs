@@ -1,7 +1,6 @@
 using Microsoft.Data.Sqlite;
 using System.Collections.Concurrent;
 using System.IO.Compression;
-using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace Massdex.SyncShark.Engine.Storage;
@@ -10,12 +9,12 @@ namespace Massdex.SyncShark.Engine.Storage;
 public sealed class DeletedNames
 {
     private const string Pair = "(SELECT id FROM pair WHERE pair_id=$p)";
-    private static readonly ConditionalWeakTable<SqliteConnection,ConcurrentDictionary<(string,Guid),string>> Cursors=new();
-    internal static void Completed(SqliteConnection db,string pair,Guid scan,string cursor)
+    private readonly ConcurrentDictionary<(string,Guid),string> cursors=new();
+    internal void Completed(string pair,Guid scan,string cursor)
     {
-        ArgumentException.ThrowIfNullOrEmpty(cursor); Cursors.GetOrCreateValue(db)[(pair,scan)]=cursor;
+        ArgumentException.ThrowIfNullOrEmpty(cursor); cursors[(pair,scan)]=cursor;
     }
-    internal static void Forget(SqliteConnection db,string pair,Guid scan) => Cursors.GetOrCreateValue(db).TryRemove((pair,scan),out _);
+    internal void Forget(string pair,Guid scan) => cursors.TryRemove((pair,scan),out _);
     internal static byte[] Token(string pair,Guid scan) => [..scan.ToByteArray(),..System.Text.Encoding.UTF8.GetBytes(pair)];
 
     /// <summary>Read exact deletion evidence for a file, respecting its spent mask.</summary>
@@ -33,7 +32,7 @@ public sealed class DeletedNames
             else
             {
                 if(scanId is Guid id){using var scratch=StorageCommand.Create(db,null,"SELECT 1 FROM scan_state.deleted_name WHERE scan_id=$s AND path_key=$k",("$s",Token(pairId,id)),("$k",candidate));if(await scratch.ExecuteScalarAsync(ct)!=null)return true;}
-                if(cursor!=null){using var block=StorageCommand.Create(db,null,"SELECT last_key,name_count,rowid FROM discovery_deleted_block WHERE pair_id="+Pair+" AND last_key >= $k ORDER BY last_key LIMIT 1",("$p",pairId),("$k",candidate));using var reader=await block.ExecuteReaderAsync(ct);if(await reader.ReadAsync(ct)){using var bytes=new SqliteBlob(db,"discovery_deleted_block","names",reader.GetInt64(2),true);bool found=false;foreach(var name in DecodeDeletedNames(bytes,reader.GetInt32(1),reader.GetString(0),null))found|=name==candidate;if(found)return true;}}
+                if(cursor!=null){using var block=StorageCommand.Create(db,null,"SELECT last_key,name_count,rowid,(SELECT max(last_key) FROM discovery_deleted_block prior WHERE prior.pair_id=b.pair_id AND prior.last_key<b.last_key) FROM discovery_deleted_block b WHERE pair_id="+Pair+" AND last_key >= $k ORDER BY last_key LIMIT 1",("$p",pairId),("$k",candidate));using var reader=await block.ExecuteReaderAsync(ct);if(await reader.ReadAsync(ct)){using var bytes=new SqliteBlob(db,"discovery_deleted_block","names",reader.GetInt64(2),true);bool found=false;foreach(var name in DecodeDeletedNames(bytes,reader.GetInt32(1),reader.GetString(0),reader.IsDBNull(3)?null:reader.GetString(3)))found|=name==candidate;if(found)return true;}}
             }
             if(!isFolder)break;
         }
@@ -43,17 +42,17 @@ public sealed class DeletedNames
     public async Task<(string? Cursor,bool Owed)> ReadStateAsync(SqliteConnection db,string pairId,CancellationToken ct)
     {
         using var cmd=StorageCommand.Create(db,null,"SELECT deleted_history_cursor,deleted_history_owed FROM pair WHERE pair_id=$p","$p",pairId);
-        using var row=await cmd.ExecuteReaderAsync(ct);if(!await row.ReadAsync(ct))throw new InvalidOperationException("Missing pair");return(row.IsDBNull(0)?null:row.GetString(0),row.GetBoolean(1));
+        using var row=await cmd.ExecuteReaderAsync(ct);if(!await row.ReadAsync(ct))throw new InvalidOperationException(Text.Get(TextKey.PairUnknown,(TextArg.Pair,pairId)));return(row.IsDBNull(0)?null:row.GetString(0),row.GetBoolean(1));
     }
     /// <summary>Publish the exact terminal cursor recorded by the completed listing for this pair and scan.</summary>
-    public Task PublishAsync(SqliteConnection db,string pairId,Guid scanId,CancellationToken ct) => Cursors.GetOrCreateValue(db).TryGetValue((pairId,scanId),out var cursor)?PublishAsync(db,pairId,scanId,cursor,ct):throw new InvalidOperationException("Incomplete history acquisition");
+    public Task PublishAsync(SqliteConnection db,string pairId,Guid scanId,CancellationToken ct) => cursors.TryGetValue((pairId,scanId),out var cursor)?PublishAsync(db,pairId,scanId,cursor,ct):throw new InvalidOperationException(Text.Get(TextKey.RepairSuperseded));
     /// <summary>Fold only the completed named history acquisition and publish its terminal cursor atomically.</summary>
     public async Task PublishAsync(SqliteConnection db,string pairId,Guid scanId,string terminalCursor,CancellationToken ct)
     {
-        if(!Cursors.GetOrCreateValue(db).TryGetValue((pairId,scanId),out var cursor)||cursor!=terminalCursor)throw new InvalidOperationException("History acquisition is incomplete or stale");
+        if(!cursors.TryGetValue((pairId,scanId),out var cursor)||cursor!=terminalCursor)throw new InvalidOperationException(Text.Get(TextKey.RepairSuperseded));
         using var tx=db.BeginTransaction();var token=Token(pairId,scanId);
         using var state=StorageCommand.Create(db,tx,"SELECT deleted_history_cursor FROM pair WHERE pair_id=$p","$p",pairId);
-        var prior=await state.ExecuteScalarAsync(ct)??throw new InvalidOperationException("Missing pair");
+        var prior=await state.ExecuteScalarAsync(ct)??throw new InvalidOperationException(Text.Get(TextKey.PairUnknown,(TextArg.Pair,pairId)));
         if(prior is DBNull)
         {
             using var clear=StorageCommand.Create(db,tx,"DELETE FROM discovery_deleted_block WHERE pair_id="+Pair,"$p",pairId);await clear.ExecuteNonQueryAsync(ct);
@@ -67,7 +66,7 @@ public sealed class DeletedNames
             using var retire=StorageCommand.Create(db,tx,"DELETE FROM discovery_deleted_delta WHERE pair_id="+Pair+" AND spent=0","$p",pairId);await retire.ExecuteNonQueryAsync(ct);
         }
         else{using var merge=StorageCommand.Create(db,tx,"INSERT OR IGNORE INTO discovery_deleted_delta(pair_id,path_key) SELECT "+Pair+",path_key FROM scan_state.deleted_name WHERE scan_id=$s",("$p",pairId),("$s",token));await merge.ExecuteNonQueryAsync(ct);}
-        using var publish=StorageCommand.Create(db,tx,"UPDATE pair SET deleted_history_cursor=$c,deleted_history_owed=0 WHERE pair_id=$p",("$p",pairId),("$c",cursor));await publish.ExecuteNonQueryAsync(ct);tx.Commit();Forget(db,pairId,scanId);
+        using var publish=StorageCommand.Create(db,tx,"UPDATE pair SET deleted_history_cursor=$c,deleted_history_owed=0 WHERE pair_id=$p",("$p",pairId),("$c",cursor));await publish.ExecuteNonQueryAsync(ct);tx.Commit();Forget(pairId,scanId);
     }
     private const int MaximumDeletedKeyBytes=32768*3;
     private static readonly UTF8Encoding HistoryUtf8=new(false,true);

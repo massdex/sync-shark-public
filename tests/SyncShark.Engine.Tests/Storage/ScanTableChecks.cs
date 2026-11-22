@@ -14,5 +14,7 @@ public static class ScanTableChecks
         await scans.ClearScanAsync(db,"p",clear,default);var names=new List<string?>();
         await foreach(var row in scans.CompareAsync(db,"p",keep,null,(_,_) => (true,false),1,default)) names.Add(row.Row.Local?.Path);
         Check.Require(names.SequenceEqual(new[]{"kept"}),"Clear removed another acquisition or compare lost a row");
+        scans.Touch("p",Side.Local,"parent/file",false);scans.Touch("p",Side.Dropbox,"tree",true);
+        Check.Require(scans.Touched("p",keep,Side.Local,"parent",true) && !scans.Touched("p",keep,Side.Local,"parent",false) && scans.Touched("p",keep,Side.Dropbox,"tree/child",false) && !scans.Touched("p",keep,Side.Dropbox,"treehouse",true),"Commit footprint crossed a boundary or missed a descendant");
     }
 }

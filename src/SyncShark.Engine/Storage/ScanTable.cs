@@ -9,6 +9,31 @@ namespace Massdex.SyncShark.Engine.Storage;
 /// <summary>Stores each Repair listing and compares its observed endpoints with saved bindings.</summary>
 public sealed class ScanTable
 {
+    /// <summary>The deletion history and completed cursors belonging to this store, across its read and write connections.</summary>
+    public DeletedNames History { get; } = new();
+
+    private readonly Dictionary<(string Pair,Guid Scan),(SortedSet<string> Exact,PrefixSet Trees)[]> active=new();
+
+    /// <summary>Begin tracking commits before taking this acquisition's listing boundary.</summary>
+    public void Begin(string pairId,Guid scanId)
+    {
+        lock(active)if(!active.ContainsKey((pairId,scanId)))active.Add((pairId,scanId),[(new(StringComparer.Ordinal),new()),(new(StringComparer.Ordinal),new())]);
+    }
+    /// <summary>Whether a committed notice replacement needs its original footprints for an active scan.</summary>
+    public bool HasActive(string pairId){lock(active)return active.Keys.Any(key=>key.Pair==pairId);}
+
+    /// <summary>Mark a committed physical endpoint on every active acquisition of its pair.</summary>
+    public void Touch(string pairId,Side side,string path,bool subtree)
+    {
+        var key=PathNames.KeyFor(side,path);
+        lock(active)foreach(var (owner,marks) in active){if(owner.Pair!=pairId)continue;marks[(int)side].Exact.Add(key);if(subtree)marks[(int)side].Trees.Add(key);}
+    }
+    /// <summary>Test exact and covering commits, plus descendant commits when a folder is being settled.</summary>
+    public bool Touched(string pairId,Guid scanId,Side side,string path,bool descendants)
+    {
+        var key=PathNames.KeyFor(side,path);lock(active){if(!active.TryGetValue((pairId,scanId),out var marks))return true;
+            var (exact,trees)=marks[(int)side];return exact.Contains(key)||trees.ResponsibilityOverlaps(key,false)||descendants&&(key.Length==0?exact.Count!=0:PathNames.HasDescendantKey(exact,key));}
+    }
     private const string Pair="(SELECT id FROM pair WHERE pair_id=$p)";
     private const string Slice="pair_id="+Pair+" AND scan_id=$s";
     private const string Seen="SELECT * FROM scan_state.scan WHERE "+Slice;
@@ -21,10 +46,11 @@ public sealed class ScanTable
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(batchRows);
         if(terminalHistoryCursor!=null && side!=Side.Dropbox)throw new ArgumentException(nameof(side));
-        if(terminalHistoryCursor!=null)DeletedNames.Forget(db,pairId,scanId);
+        Begin(pairId,scanId);
+        if(terminalHistoryCursor!=null)History.Forget(pairId,scanId);
         var token=DeletedNames.Token(pairId,scanId);var batch=new List<Listed>();
         await foreach(var row in rows.WithCancellation(ct)){batch.Add(row);if(batch.Count==batchRows)Flush();}Flush();
-        if(terminalHistoryCursor!=null)DeletedNames.Completed(db,pairId,scanId,terminalHistoryCursor());
+        if(terminalHistoryCursor!=null)History.Completed(pairId,scanId,terminalHistoryCursor());
         void Flush()
         {
             if(batch.Count==0)return;using var tx=db.BeginTransaction();
@@ -47,18 +73,54 @@ public sealed class ScanTable
     /// <summary>Clear only this pair's acquisition rows, scratch names and pending terminal cursor.</summary>
     public async Task ClearScanAsync(SqliteConnection db,string pairId,Guid scanId,CancellationToken ct)
     {
-        using var tx=db.BeginTransaction();using var cmd=StorageCommand.Create(db,tx,"DELETE FROM scan_state.scan WHERE "+Slice+"; DELETE FROM scan_state.deleted_name WHERE scan_id=$n",("$p",pairId),("$s",scanId.ToByteArray()),("$n",DeletedNames.Token(pairId,scanId)));await cmd.ExecuteNonQueryAsync(ct);tx.Commit();DeletedNames.Forget(db,pairId,scanId);
+        using var tx=db.BeginTransaction();using var cmd=StorageCommand.Create(db,tx,"DELETE FROM scan_state.scan WHERE "+Slice+"; DELETE FROM scan_state.deleted_name WHERE scan_id=$n",("$p",pairId),("$s",scanId.ToByteArray()),("$n",DeletedNames.Token(pairId,scanId)));await cmd.ExecuteNonQueryAsync(ct);tx.Commit();History.Forget(pairId,scanId);lock(active)active.Remove((pairId,scanId));
     }
     private static string Hash(SqliteDataReader r,int i)=>r.GetValue(i) is byte[] b?Convert.ToHexString(b).ToLowerInvariant():r.GetString(i);
     private static Entry EntryAt(SqliteDataReader r,int i)=>new(r.GetString(i),r.GetBoolean(i+1),r.GetInt64(i+2),new DateTimeOffset(r.GetInt64(i+3),TimeSpan.Zero),r.GetString(i+4),r.GetString(i+5),Hash(r,i+6),r.IsDBNull(i+7)?null:r.GetString(i+7),r.GetBoolean(i+8));
     private static SyncedEntry BindingAt(SqliteDataReader r,int i)=>new SyncedEntry(PathNames.Key(r.GetString(i)),r.GetString(i),r.GetString(i+1),r.GetString(i+2),r.GetBoolean(i+3),r.GetString(i+4),r.GetInt64(i+5),r.GetInt64(i+6),r.GetString(i+7),Hash(r,i+8)){LocalPublished=r.IsDBNull(i+9)||r.IsDBNull(i+10)?null:new(unchecked((ulong)r.GetInt64(i+9)),unchecked((ulong)r.GetInt64(i+10)))};
     private static bool InScope(Scope? scope,string local,string cloud)=>scope==null || PathNames.IsSelfOrUnder(local,scope.LocalPath)||PathNames.IsSelfOrUnder(cloud,scope.DropboxPath);
-    private const string ComparePrefix="WITH saved AS NOT MATERIALIZED ("+Saved+"), observed AS NOT MATERIALIZED (SELECT x.*,CASE WHEN x.side=1 THEN coalesce(b.lk,x.key) ELSE x.key END k FROM ("+Seen+") x LEFT JOIN saved b ON x.side=1 AND b.dropbox_key_delta=x.key), members AS NOT MATERIALIZED (SELECT i.*,m.side,m.path_key,m.identity,m.subject_json member_json,coalesce(b.lk,m.path_key,pathkey(i.path)) k FROM issue i LEFT JOIN issue_member m ON i.issue_id=m.issue_id LEFT JOIN saved b ON m.side=1 AND b.dropbox_key_delta=m.path_key WHERE i.pair_id="+Pair+"), keys AS (SELECT lk k FROM saved WHERE lk>$after UNION SELECT k FROM observed WHERE k>$after UNION SELECT k FROM members WHERE k>$after ORDER BY k LIMIT $take) ";
+    // Pull at most one page from each indexed key range. A mapped cloud observation joins its saved
+    // binding at the PC key; an unrelated cloud file reusing that PC spelling remains a separate free row.
+    private const string ComparePrefix = "WITH saved AS NOT MATERIALIZED ("+Saved+"), seen AS NOT MATERIALIZED ("+Seen+"),"+"""
+        members AS NOT MATERIALIZED (
+          SELECT i.*,m.side,m.path_key,m.identity,m.subject_json member_json,coalesce(b.lk,m.path_key,pathkey(i.path)) k
+          FROM issue i LEFT JOIN issue_member m ON m.issue_id=i.issue_id LEFT JOIN saved b ON m.side=1 AND b.dropbox_key_delta=m.path_key
+          WHERE i.pair_id=(SELECT id FROM pair WHERE pair_id=$p)),
+        keys AS (
+          SELECT k FROM (SELECT lk k FROM saved WHERE lk>$after ORDER BY lk LIMIT $take)
+          UNION SELECT k FROM (SELECT pathkey(path) k FROM seen WHERE side=0 AND pathkey(path)>$after ORDER BY pathkey(path) LIMIT $take)
+          UNION SELECT k FROM (SELECT pathkey(path) k FROM seen WHERE side=1 AND key_delta IS NULL AND pathkey(path)>$after
+            AND NOT EXISTS(SELECT 1 FROM saved b WHERE b.dropbox_key_delta=pathkey(seen.path)) ORDER BY pathkey(path) LIMIT $take)
+          UNION SELECT k FROM (SELECT DISTINCT key_delta k FROM seen WHERE side=1 AND key_delta>$after
+            AND NOT EXISTS(SELECT 1 FROM saved b WHERE b.dropbox_key_delta=seen.key_delta) ORDER BY key_delta LIMIT $take)
+          UNION SELECT k FROM (SELECT DISTINCT k FROM members WHERE k>$after ORDER BY k LIMIT $take) ORDER BY k LIMIT $take)
+        """;
+    private const string CompareRows = """
+        ,groups AS (
+          SELECT keys.k,1 bound FROM keys JOIN saved b ON b.lk=keys.k
+          UNION ALL SELECT k,0 FROM keys WHERE NOT EXISTS(SELECT 1 FROM saved b WHERE b.lk=keys.k)
+          OR (EXISTS(SELECT 1 FROM saved b WHERE b.lk=keys.k AND b.dropbox_key<>keys.k)
+          AND NOT EXISTS(SELECT 1 FROM saved b WHERE b.dropbox_key_delta=keys.k)
+          AND EXISTS(SELECT 1 FROM seen x WHERE x.side=1 AND x.key=keys.k)))
+        SELECT g.k,
+        """+SavedFields+",x.side,"+EntryFields+"""
+        ,(SELECT first_repair_done FROM pair WHERE pair_id=$p),g.bound FROM groups g
+        LEFT JOIN saved b ON g.bound=1 AND b.lk=g.k
+        LEFT JOIN scan_state.scan x ON x.rowid IN (
+          SELECT rowid FROM scan_state.scan WHERE pair_id=(SELECT id FROM pair WHERE pair_id=$p) AND scan_id=$s AND side=0 AND pathkey(path)=g.k
+            AND (g.bound=1 OR NOT EXISTS(SELECT 1 FROM saved l WHERE l.lk=g.k))
+          UNION ALL SELECT rowid FROM scan_state.scan WHERE pair_id=(SELECT id FROM pair WHERE pair_id=$p) AND scan_id=$s AND side=1 AND key_delta IS NULL AND pathkey(path)=coalesce(b.dropbox_key,g.k)
+            AND (g.bound=1 OR NOT EXISTS(SELECT 1 FROM saved d WHERE d.dropbox_key_delta=g.k))
+          UNION ALL SELECT rowid FROM scan_state.scan WHERE pair_id=(SELECT id FROM pair WHERE pair_id=$p) AND scan_id=$s AND side=1 AND key_delta=coalesce(b.dropbox_key,g.k)
+            AND (g.bound=1 OR NOT EXISTS(SELECT 1 FROM saved d WHERE d.dropbox_key_delta=g.k)))
+        ORDER BY g.k,g.bound DESC,x.side,x.path
+        """;
 
     /// <summary>Read pages of complete bindings, including notice-only rows and independently retained put-back notices.</summary>
     public async IAsyncEnumerable<(Row Row,IReadOnlyList<Projection> Notices)> CompareAsync(SqliteConnection db,string pairId,Guid scanId,Scope? scope,Func<Side,string,(bool Covered,bool Touched)> evidence,int pageSize,[EnumeratorCancellation] CancellationToken ct)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pageSize);string? after=null;
+        (bool Covered,bool Touched) Proof(Side side,string path,bool descendants){var result=evidence(side,path);return(result.Covered,result.Touched||Touched(pairId,scanId,side,path,descendants));}
         while(true)
         {
             var page=new List<(Row,IReadOnlyList<Projection>)>();using(var tx=db.BeginTransaction(deferred:true))
@@ -69,22 +131,22 @@ public sealed class ScanTable
                 using(var rd=await cmd.ExecuteReaderAsync(ct))while(await rd.ReadAsync(ct))
                 {
                     var key=rd.GetString(0);var subject=JsonSerializer.Deserialize<IssueSubject>(rd.GetString(5))??throw new InvalidDataException();var notice=new Notice(rd.GetInt64(1),(NoticeKind)rd.GetInt32(2),Enum.Parse<TextKey>(rd.GetString(3)),rd.GetString(4),subject,new(rd.GetInt64(6),TimeSpan.Zero),rd.GetBoolean(7),rd.GetBoolean(8));NoticeItem? member=null;
-                    if(!rd.IsDBNull(10)){using var json=JsonDocument.Parse(rd.GetString(10));var value=json.RootElement.GetProperty("Value");var side=(Side)rd.GetInt32(9);var memberKey=rd.GetString(11);foreach(var item in value.GetProperty("Items").EnumerateArray()){var path=item.GetProperty("Path").GetString()??throw new InvalidDataException();if(PathNames.KeyFor(side,path)==memberKey){member=new(side,path,item.GetProperty("Id").GetString()??string.Empty);break;}}if(member==null)throw new InvalidDataException("Notice member does not match its stored footprint");}
+                    if(!rd.IsDBNull(10)){using var json=JsonDocument.Parse(rd.GetString(10));var value=json.RootElement.GetProperty("Value");var side=(Side)rd.GetInt32(9);var memberKey=rd.GetString(11);foreach(var item in value.GetProperty("Items").EnumerateArray()){var path=item.GetProperty("Path").GetString()??throw new InvalidDataException();if(PathNames.KeyFor(side,path)==memberKey){member=new(side,path,item.GetProperty("Id").GetString()??string.Empty);break;}}if(member==null)throw new InvalidDataException(nameof(NoticeItem));}
                     if(!notices.TryGetValue(key,out var list))notices[key]=list=[];list.Add((notice,member));
                 }
-                string? last=null;Entry? local=null,cloud=null;SyncedEntry? saved=null;List<Entry> extra=[];bool first=false;
-                using(var cmd=Page("SELECT keys.k,"+SavedFields+",x.side,"+EntryFields+",(SELECT first_repair_done FROM pair WHERE pair_id=$p) FROM keys LEFT JOIN saved b ON b.lk=keys.k LEFT JOIN observed x ON x.k=keys.k ORDER BY keys.k,x.side,x.path"))
+                string? last=null;bool bound=false;Entry? local=null,cloud=null;SyncedEntry? saved=null;List<Entry> extra=[];bool first=false;
+                using(var cmd=Page(CompareRows))
                 using(var rd=await cmd.ExecuteReaderAsync(ct))while(await rd.ReadAsync(ct))
                 {
-                    var key=rd.GetString(0);if(last!=key){Finish();last=key;saved=rd.IsDBNull(1)?null:BindingAt(rd,1);local=null;cloud=null;extra=[];first=!rd.GetBoolean(22);}
+                    var key=rd.GetString(0);if(last!=key||bound!=rd.GetBoolean(23)){Finish();last=key;bound=rd.GetBoolean(23);saved=rd.IsDBNull(1)?null:BindingAt(rd,1);local=null;cloud=null;extra=[];first=!rd.GetBoolean(22);}
                     if(!rd.IsDBNull(12)){var entry=EntryAt(rd,13);if(rd.GetInt32(12)==0)local=entry;else if(cloud==null)cloud=entry;else extra.Add(entry);}
                 }
                 Finish();if(last==null)yield break;after=last;tx.Commit();
                 void Finish()
                 {
-                    if(last==null)return;var lp=local?.Path??saved?.LocalPath??last;var dp=cloud?.Path??saved?.DropboxPath??last;if(!InScope(scope,lp,dp))return;var l=evidence(Side.Local,lp);var d=evidence(Side.Dropbox,dp);
-                    var projection=new List<Projection>();if(notices.TryGetValue(last,out var list))foreach(var(n,m) in list){var proof=m==null?(l.Covered&&d.Covered,l.Touched||d.Touched):evidence(m.Side,m.Path);projection.Add((n,m,proof.Item1,proof.Item2));}
-                    page.Add((new Row(last,local,cloud,saved,extra,null,RowContext.Neutral with{FirstRun=first,CompleteInventory=l.Covered&&d.Covered}),projection));
+                    if(last==null)return;var lp=local?.Path??saved?.LocalPath??last;var dp=cloud?.Path??saved?.DropboxPath??last;if(!InScope(scope,lp,dp))return;var folder=local?.IsFolder==true||cloud?.IsFolder==true||saved?.IsFolder==true;var l=Proof(Side.Local,lp,folder);var d=Proof(Side.Dropbox,dp,folder);
+                    var projection=new List<Projection>();if(notices.TryGetValue(last,out var list))foreach(var(n,m) in list){var proof=m==null?(l.Covered&&d.Covered,l.Touched||d.Touched):Proof(m.Side,m.Path,folder);projection.Add((n,m,proof.Item1,proof.Item2));}
+                    page.Add((new Row(last,local,cloud,saved,extra,null,RowContext.Neutral with{FirstRun=first,CompleteInventory=l.Covered&&d.Covered&&!l.Touched&&!d.Touched}),projection));
                 }
             }
             foreach(var result in page)yield return result;
