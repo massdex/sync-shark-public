@@ -78,12 +78,14 @@ public static class LogText
             "Replaced" => ActionKind.ReplaceKind, _ => ActionKind.None,
         });
         var side = item.Side ?? (EnumNames.TryExact<Side>(item.Outcome, out var endSide) ? endSide : (Side?)null);
-        var card = RunLog.IsCommittedEffect(item.Outcome) ? CardText(action) : null;
+        var move = action is ActionKind.MoveLocal or ActionKind.MoveDropbox or ActionKind.MoveUnlinked;
+        var committed = RunLog.IsCommittedEffect(item.Outcome);
+        if (move && committed && (item.Detail.Length == 0 || item.Path.Length == 0)) return string.Empty;
+        var card = committed ? CardText(action) : null;
         var heading = card is { } known ? Text.Get(TextKey.HumanCardHeading, (TextArg.Time, clock),
             (TextArg.Label, Text.Get(TextKey.HumanOkLabel)), (TextArg.Operation, Text.Get(known.Operation))) :
             Text.Get(TextKey.HumanStageHeading, (TextArg.Time, clock), (TextArg.Name, RunLog.EscapeDisplay(item.What)));
         var builder = new StringBuilder(heading);
-        var move = action is ActionKind.MoveLocal or ActionKind.MoveDropbox or ActionKind.MoveUnlinked;
         if (card.HasValue && (move || action == ActionKind.KeepBoth))
         {
             AppendLine(builder, move ? TextKey.HumanCardFrom : TextKey.HumanCardOriginal, TextArg.Path, item.Detail);

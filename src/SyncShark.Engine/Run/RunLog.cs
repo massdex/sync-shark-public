@@ -116,9 +116,13 @@ public sealed class RunLog : IDisposable
             else if (value.Action is { } action) what = action.ToString();
         }
         // Failed.Detail can be Exception.Message even when the producer supplies no Exception.
-        var detail = value.Error is { } failure ? FailureReason(failure) :
+        // Acquisition and throttling already filled their wait sentence from the scheduled delay.
+        var preparedWait = value.Kind == RunEventKind.Wait && value.Detail.Length != 0 &&
+            (value.Cause is TextKey.WaitTooManyRequests or TextKey.WaitSourceRetry ||
+             value.Cause is null && value.What == nameof(ISide.ReadChangesAsync));
+        var detail = !preparedWait && value.Error is { } failure ? FailureReason(failure) :
             value.Kind == RunEventKind.Failed && value.Cause.HasValue ? string.Empty : value.Detail;
-        if (value.Cause is { } reason)
+        if (!preparedWait && value.Cause is { } reason)
         {
             var named = Text.Get(reason, (TextArg.Path, value.Path), (TextArg.Message, string.Empty));
             detail = detail.Length == 0 ? named : named + FactJoiner + detail;
