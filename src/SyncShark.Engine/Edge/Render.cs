@@ -21,7 +21,7 @@ public static class Render
     private static string Links(Notice notice)
     {
         if (notice.LinkCount is not int count || notice.LinkFolders is not { } folders)
-            throw new InvalidDataException(nameof(Notice.LinkCount));
+            throw new InvalidDataException(nameof(notice.LinkCount));
         return Text.Get(TextKey.InfoLinks, (TextArg.Count, count.ToString(CultureInfo.InvariantCulture)),
             (TextArg.Folders, string.Join(", ", folders)));
     }
