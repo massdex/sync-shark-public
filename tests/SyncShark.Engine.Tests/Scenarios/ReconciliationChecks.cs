@@ -23,7 +23,7 @@ public static class ReconciliationChecks
         var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
         using var store = new InMemoryStateStore(); Seed(local,pc); Seed(remote,cloud);
         await store.SavePairAsync(pair, default);
-        if (baseline) await store.FinishRepairAsync(pair.PairId,Side.Dropbox,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default),default,completedRepairJson:"{}");
+        if (baseline) await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
         if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(
             ItemChecks.File(Side.Local, Original, 1, Side.Local.ToString()), ItemChecks.File(Side.Dropbox, Original, 1, Side.Dropbox.ToString())), null, default);
         await Repair.RunAsync(pair, local, remote, store, null, default);

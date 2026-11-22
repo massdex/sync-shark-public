@@ -4,5 +4,5 @@ namespace Massdex.SyncShark.Engine.Local;
 public static class DriveIdentity
 {
     /// <summary>Read operation on the supplied facts.</summary>
-    public static DirectoryIdentity Read(string root) => throw new NotImplementedException();
+    public static (DirectoryIdentity Identity, DriveType Type) Read(string root) => throw new NotImplementedException();
 }

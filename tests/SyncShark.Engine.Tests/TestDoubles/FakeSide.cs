@@ -77,7 +77,15 @@ public sealed class FakeSide(Side side) : ISide
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(StageAsync));
         return Copy();
-        async Task<IStaged> Copy() { using var bytes = new MemoryStream(); await content.CopyToAsync(bytes, ct); return new Stage(path, bytes.ToArray(), source); }
+        async Task<IStaged> Copy()
+        {
+            using var stream=new MemoryStream(); await content.CopyToAsync(stream,ct); var bytes=stream.ToArray();
+            if (Side!=Side.Local) return new Stage(path,bytes,source);
+            var id=$"stage-{++nextId}";var at=path+"."+id;using var hash=new ContentHash();hash.Append(bytes);
+            var proof=new StageProof(at,"volume",id,bytes.LongLength,hash.Finish());
+            Seed(source with { Path=at,Id=id,Size=bytes.LongLength,ContentHash=proof.ContentHash },bytes);
+            return new Stage(path,bytes,source) { Proof=proof };
+        }
     }
     /// <summary>Publish operation on the supplied facts.</summary>
     public Task<RemovalResult> PublishAsync(IStaged staged, Entry? expected, RemovalSelection? selection, CancellationToken ct)
@@ -87,6 +95,7 @@ public sealed class FakeSide(Side side) : ISide
         else if (Items.ContainsKey(stage.Path)) throw new PathOccupiedException(stage.Path);
         using var digest = new ContentHash(); digest.Append(stage.Bytes);
         var entry = stage.Source with { Path = stage.Path, Id = expected?.Id ?? $"{Side}-{++nextId}", Revision = $"r{++nextId}", ContentHash = digest.Finish() };
+        if(stage.Proof is { } proof && Items.TryGetValue(proof.Path,out var held) && held.Entry.Id==proof.FileId) Items.Remove(proof.Path);
         Items[stage.Path] = (entry, stage.Bytes.ToArray()); return Task.FromResult(new RemovalResult(RemovalOutcome.Published, entry, null));
     }
     /// <summary>EnsureFolder operation on the supplied facts.</summary>
@@ -147,7 +156,15 @@ public sealed class FakeSide(Side side) : ISide
     }
 
     /// <inheritdoc/>
-    public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, Entry source, CancellationToken ct) => throw new InvalidOperationException();
-    public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive)> RootAsync(CancellationToken ct) => Task.FromResult(Root);
-    public (DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive) Root { get; set; }
+    public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReopenStageAsync));
+        if(Side!=Side.Local || expected.VolumeId!="volume" || !Items.TryGetValue(expected.Path,out var held) || held.Entry.IsFolder || held.Entry.Id!=expected.FileId || held.Bytes.LongLength!=expected.Size)
+            throw new ChangedUnderneathException(expected.Path);
+        using var hash=new ContentHash();hash.Append(held.Bytes);
+        if(hash.Finish()!=expected.ContentHash)throw new ChangedUnderneathException(expected.Path);
+        return Task.FromResult<IStaged>(new Stage(armedVictim.Proof.Expected.Path,held.Bytes.ToArray(),held.Entry){Proof=expected});
+    }
+    public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType)> RootAsync(CancellationToken ct) => Task.FromResult(Root);
+    public (DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType) Root { get; set; }
 }

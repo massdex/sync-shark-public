@@ -18,7 +18,7 @@ public sealed class Store : IStore
     /// <summary>Descendants operation on the supplied facts.</summary>
     public IAsyncEnumerable<SyncedEntry> DescendantsAsync(string pairId, Side side, string key, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Commit operation on the supplied facts.</summary>
-    public Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, CancellationToken ct) => throw new NotImplementedException();
+    public Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, CancellationToken ct, string? spentDeletedKey = null) => throw new NotImplementedException();
     /// <summary>Notices operation on the supplied facts.</summary>
     public IAsyncEnumerable<Notice> NoticesAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>SaveNotice operation on the supplied facts.</summary>
@@ -37,7 +37,9 @@ public sealed class Store : IStore
     public Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>FinishRepair operation on the supplied facts.</summary>
     public Task<(long Revision, string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct) => throw new NotImplementedException();
-    public Task<bool> FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct, Scope? scope = null, string? completedRepairJson = null) => throw new NotImplementedException();
+    public Task<bool> FinishRepairAsync(string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Retire only the matching mapped scope at the owner’s Dropbox revision. No first-run bit or full summary is published.</summary>
+    public Task<bool> FinishRepairAsync(string pairId, Scope scope, long revision, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>SaveJob operation on the supplied facts.</summary>
     public Task SaveJobAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Jobs operation on the supplied facts.</summary>
@@ -51,11 +53,11 @@ public sealed class Store : IStore
     /// <summary>Disarm operation on the supplied facts.</summary>
     public Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>AddScan operation on the supplied facts.</summary>
-    public Task AddScanAsync(string pairId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct) => throw new NotImplementedException();
+    public Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Compare operation on the supplied facts.</summary>
-    public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct) => throw new NotImplementedException();
+    public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>ClearScan operation on the supplied facts.</summary>
-    public Task ClearScanAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
+    public Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Dispose operation on the supplied facts.</summary>
     public void Dispose() => throw new NotImplementedException();
 

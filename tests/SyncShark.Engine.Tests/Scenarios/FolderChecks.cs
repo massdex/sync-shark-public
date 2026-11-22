@@ -12,7 +12,7 @@ public static class FolderChecks
         const string root="folder"; const string child="folder/child";
         var pair=ItemChecks.Pair() with { IgnoreRules=ignored?["FileName:child"]:[], Exclusions=excluded?[new(Side.Local,child,true)]:[] };
         var pc=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox);using var store=new InMemoryStateStore();
-        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,Side.Dropbox,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default),default,completedRepairJson:"{}");
+        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
         if(nested) await store.SavePairAsync(pair with { PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"folder","child"),DropboxRoot=pair.DropboxRoot+"/folder/child" },default);
         var a=ItemChecks.File(Side.Local,root,0,"parent-a",true);var b=ItemChecks.File(Side.Dropbox,root,0,"parent-b",true);
         var parent=SyncedEntries.From(a,b);await store.CommitAsync(pair.PairId,null,parent,null,default); pc.Seed(a,[]);
@@ -41,7 +41,7 @@ public static class FolderChecks
     public static async Task LinksAsync()
     {
         var pair=ItemChecks.Pair();var pc=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox);using var store=new InMemoryStateStore();
-        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,Side.Dropbox,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default),default,completedRepairJson:"{}");
+        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
         foreach(var path in new[]{"top-a/link","top-b/link"}) pc.Seed(ItemChecks.File(Side.Local,path,0,path,true) with { Skip=nameof(TextKey.SkipLink) },[]);
         await Repair.RunAsync(pair,pc,cloud,store,null,default);
         var notice=store.OpenNotices.Single();Check.Require(notice.Kind==NoticeKind.Info && notice.Cause==TextKey.InfoLinks && notice.Subject.Items.Count==2,"Link summary must contain both members");

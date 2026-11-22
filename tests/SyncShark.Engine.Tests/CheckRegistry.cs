@@ -14,6 +14,7 @@ public static class CheckRegistry
             new("Fixtures/ReleaseSchema", Scenarios.StoreMoveChecks.CreateFixtureAsync)
         ],
         ["contracts"] = [
+            new("Contracts/acquisition isolation and spent name", Contracts.PathScopeChecks.AcquisitionIsolationAsync),
             new("Contracts/completed repair facts", Contracts.PathScopeChecks.CompletedRepairFactsAsync),
             new("Contracts/scoped revision", Contracts.PathScopeChecks.MatchingRevisionAsync),
             new("Contracts/folder selection proof", Contracts.PathScopeChecks.FolderProofAsync),

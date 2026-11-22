@@ -38,10 +38,10 @@ public sealed class LocalSide : ISide
     /// <summary>ReadJob operation on the supplied facts.</summary>
     public Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct) => throw new NotImplementedException();
 
-    public LocalSide(PairConfig pair, PathScope scope, EngineSettings settings, IStore store) => throw new NotImplementedException();
+    public LocalSide(PairConfig pair, Func<DriveType,PathScope> scopeFromVolume, EngineSettings settings, IStore store) => throw new NotImplementedException();
 
 
     /// <inheritdoc/>
-    public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, Entry source, CancellationToken ct) => throw new NotImplementedException();
-    public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive)> RootAsync(CancellationToken ct) => throw new NotImplementedException();
+    public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, CancellationToken ct) => throw new NotImplementedException();
+    public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType)> RootAsync(CancellationToken ct) => throw new NotImplementedException();
 }

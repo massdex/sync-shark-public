@@ -7,7 +7,7 @@ public static class Schema
     public const int Version = 17;
     /// <summary>Connection configuration for the durable store.</summary>
     public const string Pragmas = "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;";
-    /// <summary>Creates the durable tables, indexes and root-change trigger.</summary>
+    /// <summary>Creates the durable tables, indexes and root-change trigger on a fresh image only; never run on an existing store.</summary>
     public const string Create = """
         CREATE TABLE pair(id INTEGER PRIMARY KEY, pair_id TEXT NOT NULL UNIQUE, def_json TEXT NOT NULL, pending_json TEXT,
           last_repair_json TEXT, first_repair_done INTEGER NOT NULL DEFAULT 0,

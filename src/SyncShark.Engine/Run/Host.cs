@@ -3,8 +3,8 @@ namespace Massdex.SyncShark.Engine.Run;
 /// <summary>Host operations for the run module.</summary>
 public sealed class Host
 {
-    /// <summary>Completes after one finite pass over work available at start, including one check per known token; does not drain later arrivals. The composition root can then trim participating removable volumes.</summary>
-    public Task StartAsync(CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Completes after one finite pass over work available at start, including one check per known token; does not drain later arrivals. Returns the participating volume roots and types observed by their local adapters, once per volume, for startup trim.</summary>
+    public Task<IReadOnlyList<(string VolumeRoot, DriveType Type)>> StartAsync(CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Stop operation on the supplied facts.</summary>
     public Task StopAsync(CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Pause operation on the supplied facts.</summary>
@@ -21,7 +21,7 @@ public sealed class Host
     public Task AddPairAsync(PairConfig pair,CancellationToken ct) => throw new NotImplementedException();
     public Task<bool> RemovePairAsync(string pairId,CancellationToken ct) => throw new NotImplementedException();
     public Task BindAsync(string pairId,CancellationToken ct) => throw new NotImplementedException();
-    public Task SetExclusionAsync(string pairId,Exclusion exclusion,bool include,bool confirmed,TextWriter output,CancellationToken ct) => throw new NotImplementedException();
+    public Task<(bool Applied,long CopyFiles,long CopyBytes,long RemoveFiles,long RemoveBytes,TextKey? Cause)> SetExclusionAsync(string pairId,Exclusion exclusion,bool include,bool confirmed,CancellationToken ct) => throw new NotImplementedException();
     public Task SetIgnoresAsync(string pairId,IReadOnlyList<string> rules,CancellationToken ct) => throw new NotImplementedException();
     public Task RepairAsync(string pairId,CancellationToken ct) => throw new NotImplementedException();
     public Task<string> StatusAsync(string? pairId,CancellationToken ct) => throw new NotImplementedException();

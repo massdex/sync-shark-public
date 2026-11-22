@@ -4,5 +4,5 @@ namespace Massdex.SyncShark.Engine.Executor;
 public sealed class Resolve
 {
     /// <summary>Apply operation on the supplied facts.</summary>
-    public Task ApplyAsync(PairConfig pair, Notice expected, ResolutionChoice choice, string? name, ISide local, ISide dropbox, IStore store, CancellationToken ct) => throw new NotImplementedException();
+    public Task ApplyAsync(PairConfig pair, Notice expected, ResolutionChoice choice, string? name, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, CancellationToken ct) => throw new NotImplementedException();
 }

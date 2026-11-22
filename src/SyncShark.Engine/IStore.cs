@@ -12,7 +12,8 @@ public interface IStore : IDisposable
     Task<SyncedEntry?> FindAsync(string pairId, Side side, string key, CancellationToken ct);
     IAsyncEnumerable<SyncedEntry> ByIdAsync(string pairId, Side side, string id, CancellationToken ct);
     IAsyncEnumerable<SyncedEntry> DescendantsAsync(string pairId, Side side, string key, CancellationToken ct);
-    Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, CancellationToken ct);
+    /// <summary>Commit the record change and spend the exact acknowledged historical deletion key atomically, even when neither side has a previous binding.</summary>
+    Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, CancellationToken ct, string? spentDeletedKey = null);
     IAsyncEnumerable<Notice> NoticesAsync(string pairId, CancellationToken ct);
     Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct);
     Task CloseNoticeAsync(string pairId, Notice expected, CancellationToken ct);
@@ -23,17 +24,19 @@ public interface IStore : IDisposable
     Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct);
     /// <summary>Read the existing source revision and whole-pair reason before acquisition.</summary>
     Task<(long Revision, string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct);
-    /// <summary>Call only on completed comparison; scoped completion uses the owner’s Dropbox source row. Full completion records its summary and first_repair_done atomically. Compare the original revision and retire only the matching scope, or the whole-pair reason when scope is null. A stale completion does nothing.</summary>
-    Task<bool> FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct, Scope? scope = null, string? completedRepairJson = null);
+    /// <summary>Only the completion ending the entire two-sided Repair can publish its required summary and first_repair_done. Match both captured revisions and clear the observed reasons in the same transaction; a stale completion publishes nothing.</summary>
+    Task<bool> FinishRepairAsync(string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct);
+    /// <summary>Retire only the matching mapped scope at the owner’s Dropbox revision. No first-run bit or full summary is published.</summary>
+    Task<bool> FinishRepairAsync(string pairId, Scope scope, long revision, CancellationToken ct);
     Task SaveJobAsync(AcceptedJob job, CancellationToken ct);
     IAsyncEnumerable<AcceptedJob> JobsAsync(string pairId, CancellationToken ct);
     Task SettleJobAsync(AcceptedJob job, CancellationToken ct);
     Task ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct);
     Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(string pairId, CancellationToken ct);
     Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct);
-    Task AddScanAsync(string pairId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct);
-    IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct);
-    Task ClearScanAsync(string pairId, CancellationToken ct);
+    Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct);
+    IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct);
+    Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct);
 
     /// <summary>Read the persisted full-first-Repair bit and last summary without inferring them from record count.</summary>
     Task<(bool FirstRepairDone, string? LastRepairJson)> RepairStateAsync(string pairId, CancellationToken ct);

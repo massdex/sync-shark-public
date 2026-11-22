@@ -19,7 +19,7 @@ public static class RecoveryChecks
             Pc.Seed(pc,[value]); Cloud.Seed(cloud,[value]); var row=SyncedEntries.From(pc,cloud);
             await Store.CommitAsync(Pair.PairId,null,row,null,default); return row;
         }
-        internal async Task InitializeAsync() { await Store.SavePairAsync(Pair,default); await Store.FinishRepairAsync(Pair.PairId,Side.Dropbox,await Store.OweRepairAsync(Pair.PairId,Side.Dropbox,"requested",default),default,completedRepairJson:"{}"); }
+        internal async Task InitializeAsync() { await Store.SavePairAsync(Pair,default); await Store.FinishRepairAsync(Pair.PairId,(0,await Store.OweRepairAsync(Pair.PairId,Side.Dropbox,"requested",default)),"{}",default); }
         internal Task CompareAsync() => Repair.RunAsync(Pair,Pc,Cloud,Store,null,default);
         internal void VerifyLinks()
         {
@@ -290,7 +290,21 @@ public static class RecoveryChecks
     public static Task A41MatchingRootRestoredAsync() => throw new NotImplementedException();
     public static Task A41ExplicitBindMatchingAsync() => throw new NotImplementedException();
     public static Task A41BindDifferentRootRefusedAsync() => throw new NotImplementedException();
-    public static Task A42ReplaceMissingTargetValidStageAsync() => throw new NotImplementedException();
+    public static async Task A42ReplaceMissingTargetValidStageAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();var saved=await x.LinkAsync("item",1);
+        var old=x.Pc.Items["item"].Entry;var source=ItemChecks.File(Side.Dropbox,"different-source-spelling",2,"incoming");
+        await using var staged=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{2}),source,old,default);
+        var victim=new RemovalSelection(new(old,"volume",old.ContentHash),saved);await x.Store.ArmAsync(x.Pair.PairId,victim,staged.Proof,default);
+        await x.Pc.DeleteAsync(old,victim,default);x.Cloud.Items.Clear();
+        var note=(await x.Store.ArmedAsync(x.Pair.PairId,default))!.Value;
+        await using var reopened=await x.Pc.ReopenStageAsync(note.Victim,note.Stage!,default);
+        var occupant=ItemChecks.File(Side.Local,"item",3,"replacement");x.Pc.Seed(occupant,[3]);
+        try { await x.Pc.PublishAsync(reopened,null,null,default); throw new InvalidDataException("Overwrote a reused name"); } catch(PathOccupiedException) { }
+        Check.Require(x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{3}),"Occupant changed");x.Pc.Items.Remove("item");
+        await new Unfinished().CheckAsync(x.Pair,x.Pc,x.Cloud,x.Store,ItemChecks.Population(x.Pair,x.Pc,x.Cloud,x.Store),default);
+        Check.Require(x.Pc.Items["item"].Entry.Modified==source.Modified && x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{2}) && x.Pc.History.Single().Entry==old,"Replay did not preserve the selected versions and stamped time");
+    }
     public static Task A42SameIdSizeAlteredStageAsync() => throw new NotImplementedException();
     public static Task A42AlteredFinalNotLinkedAsync() => throw new NotImplementedException();
     public static Task A42ShellRecycledSubstituteAsync() => throw new NotImplementedException();

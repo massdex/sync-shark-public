@@ -10,7 +10,7 @@ public static class CallBudgetChecks
     {
         var pair = ItemChecks.Pair(); var pc = new FakeSide(Side.Local); var cloud = new FakeSide(Side.Dropbox);
         using var store = new InMemoryStateStore();
-        await store.SavePairAsync(pair, default); await store.FinishRepairAsync(pair.PairId,Side.Dropbox,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default),default,completedRepairJson:"{}");
+        await store.SavePairAsync(pair, default); await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
         for (int i=0;i<size;i++)
         {
             string path = $"file-{i}"; var local = ItemChecks.File(Side.Local,path,1,$"local-{i}"); var remote = ItemChecks.File(Side.Dropbox,path,1,$"cloud-{i}");

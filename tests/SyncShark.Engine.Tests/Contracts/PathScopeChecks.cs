@@ -8,14 +8,20 @@ public static class PathScopeChecks
         const string root = @"T:\";
         var outer = new PairConfig("a", "A", root, "/A", "test", [], [], FirstRunPolicy.NewestWins, true, null);
         var inner = outer with { PairId = "b", LocalRoot = Path.Combine(root, "Inner"), DropboxRoot = "/A/RemoteInner" };
-        var scope = new PathScope(outer, [outer, inner], volumeBin: Path.Combine(root, ResourceNames.RootBinFolder));
+        var scope = new PathScope(outer, [outer, inner], DriveType.Removable);
         Check.Require(scope.Excludes("inner/file", null, false) && scope.Excludes(null, "RemoteInner/file", false), "Nested roots");
         Check.Require(scope.Excludes("Recycle Bin/item", null, false) && !scope.Excludes("Recycle Bin Extra/item", null, false), "Volume bin boundary");
         Check.Require(!scope.Excludes(null,"Inner/file",false) && !scope.Excludes("RemoteInner/file",null,false),"Unrelated relative spelling crossed endpoints");
         Check.Require(!scope.Excludes(null,"Recycle Bin/item",false),"PC bin leaked into Dropbox matcher");
         Check.Require(scope.Excludes("Inner/file","Elsewhere/file",false),"Mapped PC boundary lost");
-        var unrelated = new Change(Side.Dropbox,ChangeKind.Changed,"Inner/file",null,"db",null,false,false);
-        Check.Require(!scope.ExcludesChange(unrelated,0,static (_,_,_)=>null),"Unbound change inferred a PC boundary from a Dropbox name");
+        var incoming = new Change(Side.Dropbox,ChangeKind.Changed,"Inner/file",null,"db",null,false,false);
+        Check.Require(scope.ExcludesChange(incoming,0,static (_,_,_)=>null),"Unbound change entered PC nested root");
+        Check.Require(scope.ExcludesChange(incoming with { Path="Recycle Bin/item" },0,static (_,_,_)=>null),"Unbound change entered the PC bin");
+        var parent = new SyncedEntry("INNER","Inner","CLOUD","Cloud",true,"local",0,0,"cloud","");
+        Check.Require(scope.ExcludesChange(incoming with { Path="Cloud/new" },parent,static (p,side,key)=>side==Side.Dropbox && key==p.DropboxKey?p:null),"Mapped child entered nested root");
+        var saved = parent with { LocalKey="OUTSIDE/FILE",LocalPath="Outside/file",DropboxKey="INNER/FILE",DropboxPath="Inner/file" };
+        Check.Require(!scope.ExcludesChange(incoming,saved,static (p,side,key)=>side==Side.Dropbox && key==p.DropboxKey?p:null),"Coincidental spelling excluded a safe saved endpoint");
+        Check.Require(!new PathScope(outer,[outer],DriveType.Fixed).ExcludesChange(incoming with { Path="Recycle Bin/item" },0,static (_,_,_)=>null),"Native-bin volume treated as removable");
         Check.Require(!scope.Excludes("innermost/file", null, false), "Unrelated sibling");
         return Task.CompletedTask;
     }
@@ -29,9 +35,9 @@ public static class PathScopeChecks
         var edited=(await store.PairAsync(pair.PairId,default))!;
         Check.Require(edited.OwedScopes!.Count==2,"Scope set is not distinct");
         await store.SavePairAsync(edited,default,[(pair.PairId,a)]);
-        Check.Require(!await store.FinishRepairAsync(pair.PairId,Side.Dropbox,original.Revision,default,a),"Old comparison consumed reissued scope");
+        Check.Require(!await store.FinishRepairAsync(pair.PairId,a,original.Revision,default),"Old comparison consumed reissued scope");
         var current=await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default);
-        Check.Require(await store.FinishRepairAsync(pair.PairId,Side.Dropbox,current,default,a),"Matching completion refused");
+        Check.Require(await store.FinishRepairAsync(pair.PairId,a,current,default),"Matching completion refused");
         Check.Require((await store.PairAsync(pair.PairId,default))!.OwedScopes!.SequenceEqual([b]),"Wrong mapped footprint cleared");
         Check.Require((await store.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason=="requested","Scoped completion cleared whole-pair debt");
     }
@@ -54,10 +60,24 @@ public static class PathScopeChecks
         Check.Require(!(await store.RepairStateAsync(pair.PairId,default)).FirstRepairDone,"New pair was already repaired");
         var old=await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default);
         var current=await store.OweRepairAsync(pair.PairId,Side.Dropbox,"gap",default);
-        Check.Require(!await store.FinishRepairAsync(pair.PairId,Side.Dropbox,old,default,completedRepairJson:"{}"),"Stale completion published first Repair");
-        Check.Require(await store.FinishRepairAsync(pair.PairId,Side.Dropbox,current,default,completedRepairJson:"{}"),"Current completion refused");
+        Check.Require(!await store.FinishRepairAsync(pair.PairId,(0,old),"{}",default),"Stale completion published first Repair");
+        Check.Require(await store.FinishRepairAsync(pair.PairId,(0,current),"{}",default),"Current completion refused");
         Check.Require(await store.RepairStateAsync(pair.PairId,default)==(true,"{}"),"Empty completed pair lost first-run state or summary");
         await store.SaveCursorAsync(pair.PairId,"feed",default);await store.PublishDeletedHistoryAsync(pair.PairId,"history",default);
         Check.Require(await store.CursorAsync(pair.PairId,default)=="feed" && await store.DeletedHistoryAsync(pair.PairId,default)==("history",false),"Feed and history continuations were collapsed");
+    }
+    public static async Task AcquisitionIsolationAsync()
+    {
+        using var fake=new TestDoubles.InMemoryStateStore();IStore store=fake;var pair=Scenarios.ItemChecks.Pair();
+        var first=ResourceNames.NewScanToken();var second=ResourceNames.NewScanToken();
+        static async IAsyncEnumerable<Listed> Listing(string path) { await Task.CompletedTask;yield return new Listed(path,Scenarios.ItemChecks.File(Side.Local,path,1,path)); }
+        await store.AddScanAsync(pair.PairId,first,Side.Local,Listing("first"),default);
+        await store.AddScanAsync(pair.PairId,second,Side.Local,Listing("second"),default);
+        await store.ClearScanAsync(pair.PairId,first,default);
+        var rows=new List<Row>();await foreach(var row in store.CompareAsync(pair.PairId,second,null,(_,_) => (true,false),default)) rows.Add(row.Row);
+        Check.Require(rows.Count==1 && rows[0].Local?.Path=="second","Clearing one acquisition changed another acquisition");
+        var key=PathNames.Key("unbound");fake.DeletedNames.Add((pair.PairId,key));
+        await store.CommitAsync(pair.PairId,null,null,null,default,spentDeletedKey:key);
+        Check.Require(!await store.DeletedNameAsync(pair.PairId,key,default),"Unbound first-run history was not spent");
     }
 }

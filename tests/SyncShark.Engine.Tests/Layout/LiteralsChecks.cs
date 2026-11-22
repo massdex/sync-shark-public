@@ -1,3 +1,4 @@
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
@@ -12,10 +13,15 @@ public static class LiteralsChecks
         Check.Require(!Offends("class A { void Fail() => throw new Exception(nameof(A)); }", "A.cs"), "Name expression rejected");
         using var data=typeof(Text).Assembly.GetManifestResourceStream(ResourceNames.Cli) ?? throw new InvalidDataException(ResourceNames.Cli);
         using var catalog=System.Text.Json.JsonDocument.Parse(data);
-        var words=catalog.RootElement.GetProperty("commands").EnumerateArray().SelectMany(r=>r.GetProperty("command").GetString()!.Split(' ')).ToHashSet(StringComparer.Ordinal);
-        foreach(var probe in new[]{"switch (arg) { case \"repair\": break; }", "Console.WriteLine(\"Ready to sync\");", "writer.WriteLine($\"Retry {count} items\");", "await Task.Delay(300);", "var retryDelay = 5;"})
+        var commands=catalog.RootElement.GetProperty("commands").EnumerateArray();
+        var words=commands.SelectMany(row=>System.Text.RegularExpressions.Regex.Replace(row.GetProperty("usage").GetString()!,"<[^>]*>",string.Empty)
+            .Split(new[]{' ','[',']','|'},StringSplitOptions.RemoveEmptyEntries))
+            .Concat(catalog.RootElement.GetProperty("choices").EnumerateArray().Select(v=>v.GetString()!)).ToHashSet(StringComparer.Ordinal);
+        foreach(var probe in new[]{"switch (arg) { case \"repair\": break; }", "Console.WriteLine(\"Ready to sync\");", "writer.WriteLine($\"Retry {count} items\");", "await Task.Delay(300);", "var retryDelay = 5;", "if (attempt >= 5) Stop();", "switch (arg) { case \"--first-sync\": break; }", "if(arg==\"newest\") Stop();", "_ = new RunEvent(kind, what, path, \"Retry this file\", outcome);", "RunEvent report = new(kind, what, path, $\"Retry {count} items\", outcome);"})
             Check.Require(Offends("class A { void M() { "+probe+" } }","A.cs",words),"Undetected hard-coded value: "+probe);
         Check.Require(!Offends("class A { void M() { writer.WriteLine(Text.Get(key)); } }","A.cs",words),"Catalog-backed message rejected");
+        foreach(var valid in new[]{"if(attempt>=settings.Attempts) Stop();","if(parts.Length>=2) Read();","_ = new RunEvent(kind,what,path,Text.Get(key),outcome);"})
+            Check.Require(!Offends("class A { void M() { "+valid+" } }","A.cs",words),"Owned or structural value rejected: "+valid);
         foreach (var folder in new[] { "src", "apps" })
             foreach (var file in Directory.EnumerateFiles(Path.Combine(input.Root, folder), "*.cs", SearchOption.AllDirectories))
             {
@@ -28,9 +34,15 @@ public static class LiteralsChecks
     {
         var root = CSharpSyntaxTree.ParseText(source).GetRoot();
         static bool Emits(InvocationExpressionSyntax call) => call.Expression is MemberAccessExpressionSyntax access && access.Name.Identifier.ValueText is "Write" or "WriteLine" or "LogInformation" or "LogWarning" or "LogError";
+        static bool Message(ExpressionSyntax expr) => expr.DescendantNodesAndSelf().Any(n=>n is InterpolatedStringTextSyntax part && part.TextToken.ValueText.Any(char.IsLetter) || n is LiteralExpressionSyntax literal && literal.Token.Value is string s && s.Any(char.IsLetter));
         foreach(var call in root.DescendantNodes().OfType<InvocationExpressionSyntax>().Where(Emits))
-            foreach(var arg in call.ArgumentList.Arguments)
-                if(arg.Expression.DescendantNodesAndSelf().Any(n=>n is InterpolatedStringTextSyntax part && part.TextToken.ValueText.Any(char.IsLetter) || n is LiteralExpressionSyntax literal && literal.Token.Value is string s && s.Any(char.IsLetter))) return true;
+            if(call.ArgumentList.Arguments.Any(a=>Message(a.Expression))) return true;
+        foreach(var obj in root.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())
+        {
+            var target=obj is ObjectCreationExpressionSyntax typed ? typed.Type.ToString() :
+                obj.FirstAncestorOrSelf<VariableDeclarationSyntax>()?.Type.ToString() ?? obj.FirstAncestorOrSelf<MethodDeclarationSyntax>()?.ReturnType.ToString();
+            if(target?.Split('.').Last()=="RunEvent" && obj.ArgumentList?.Arguments.Any(a=>Message(a.Expression))==true) return true;
+        }
         foreach (var literal in root.DescendantNodes().OfType<LiteralExpressionSyntax>())
         {
             if (literal.Token.Value is string text && (text.StartsWith("https://", StringComparison.Ordinal) ||
@@ -39,6 +51,8 @@ public static class LiteralsChecks
             if(literal.Token.Value is int or long or float or double or decimal)
             {
                 if(literal.Ancestors().OfType<InvocationExpressionSyntax>().Any(i=>i.Expression is MemberAccessExpressionSyntax a && a.Name.Identifier.ValueText is "Delay" or "Sleep" or "FromMilliseconds" or "FromSeconds" or "FromMinutes")) return true;
+                var comparison=literal.Ancestors().OfType<BinaryExpressionSyntax>().FirstOrDefault(b=>b.OperatorToken.Text is ">=" or ">" or "<=" or "<" or "==" or "!=");
+                if(comparison!=null && comparison.DescendantNodes().OfType<IdentifierNameSyntax>().Any(n=>System.Text.RegularExpressions.Regex.IsMatch(n.Identifier.ValueText,"attempt|retr(y|ies)|timeout|backoff|delay",System.Text.RegularExpressions.RegexOptions.IgnoreCase))) return true;
                 var variable=literal.Ancestors().OfType<VariableDeclaratorSyntax>().FirstOrDefault()?.Identifier.ValueText;
                 if(variable!=null && System.Text.RegularExpressions.Regex.IsMatch(variable,"retry|retries|delay|backoff|timeout",System.Text.RegularExpressions.RegexOptions.IgnoreCase)) return true;
             }

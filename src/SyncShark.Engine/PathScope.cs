@@ -1,10 +1,10 @@
 namespace Massdex.SyncShark.Engine;
 
 /// <summary>What is in sync for one pair: ignore rules, exclusions and nested pairs (section 2.3, D12, D25).
-/// Exclusions and nested roots are compared as local-spelling keys, whichever side they belong to.</summary>
+/// Configured exclusions are bilateral. Native nested roots and the PC bin are checked against their own mapped endpoint.</summary>
 public sealed class PathScope
 {
-    private readonly string? volumeBin;
+    private readonly DriveType localDriveType;
     private readonly PairConfig pair;
     private readonly IReadOnlyList<PairConfig> allPairs;
     private readonly string? defaultIgnoreRules;
@@ -19,12 +19,17 @@ public sealed class PathScope
 
     /// <summary>Builds the scope of one pair; other enabled pairs nested inside it are held out of sync.
     /// <paramref name="defaultIgnoreRules"/> uses the pair rule syntax; null applies none.</summary>
-    public PathScope(PairConfig pair, IReadOnlyList<PairConfig> allPairs, string? defaultIgnoreRules = null, string? volumeBin = null)
+    public PathScope(PairConfig pair, IReadOnlyList<PairConfig> allPairs, DriveType localDriveType, string? defaultIgnoreRules = null)
     {
         this.pair = pair;
-        this.volumeBin = volumeBin;
-        if (volumeBin is not null && PathNames.RelativeUnderLocalRoot(pair.LocalRoot, volumeBin) is { } bin)
-            localBoundaries.Add(PathNames.Key(bin));
+        this.localDriveType = localDriveType;
+        if (localDriveType == DriveType.Removable)
+        {
+            var root = PathNames.NormalizeLocalPath(pair.LocalRoot);
+            var bin = Path.Combine(Path.GetPathRoot(root)!, ResourceNames.RootBinFolder);
+            if (PathNames.RelativeUnderLocalRoot(root, bin) is { } relative) localBoundaries.Add(PathNames.Key(relative));
+            else if (PathNames.Same(root, bin) || PathNames.RelativeUnderLocalRoot(bin, root) is not null) localBoundaries.Add(string.Empty);
+        }
         this.allPairs = allPairs;
         this.defaultIgnoreRules = defaultIgnoreRules;
         ignoreRules = IgnoreRule.Normalize(IgnoreRule.Parse(defaultIgnoreRules ?? "")
@@ -49,7 +54,7 @@ public sealed class PathScope
         dropboxNestedRootKeys = CacheNestedRootKeys(dropboxNestedRoots, Side.Dropbox);
     }
 
-    /// <summary>True when either side's path is ignored or inside an exclusion or nested root.</summary>
+    /// <summary>Checks only the supplied actual endpoints. For a missing counterpart use LeavesScope to derive the mapped endpoint first.</summary>
     public bool Excludes(string? localPath, string? dropboxPath, bool isFolder) =>
         localPath is not null && ExcludesPath(localPath, isFolder, isDropbox: false) ||
         dropboxPath is not null && ExcludesPath(dropboxPath, isFolder, isDropbox: true);
@@ -67,15 +72,13 @@ public sealed class PathScope
 
     /// <summary>True when an exclusion or nested root covers the key, whichever side the key belongs to. Ignore
     /// rules are not consulted.</summary>
-    public bool CoversKey(Side side,string key) => excluded.Covers(key) || (side==Side.Local ? localBoundaries : dropboxBoundaries).Covers(key);
+    public bool CoversKey(Side side,string key) => excluded.Covers(key) || (side==Side.Local ? localBoundaries : dropboxBoundaries).ResponsibilityOverlaps(key, false);
 
-    /// <summary>True when the binding is absent or both of its sides lie under an exclusion or nested root.</summary>
+    /// <summary>True when the binding is absent or either actual endpoint lies under its applicable boundaries.</summary>
     public bool ExcludesBinding(SyncedEntry? binding) =>
         binding is null || CoversKey(Side.Local,binding.LocalKey) || CoversKey(Side.Dropbox,binding.DropboxKey);
 
-    /// <summary>True when a queued change names only paths under exclusions or nested roots: each of its paths, the
-    /// saved binding at it and its mapped counterpart. A change crossing the boundary, or one whose binding or
-    /// counterpart reaches into scope, is not.</summary>
+    /// <summary>True only when each reported spelling is excluded. A saved binding supplies both actual endpoints; an unbound child uses the nearest mapped ancestor or the normal spelling fallback.</summary>
     public bool ExcludesChange<T>(Change notice, T state, Func<T, Side, string, SyncedEntry?> readSaved)
     {
         if (notice.Path is null) return false; // Unresolved historical binding is not proof of exclusion.
@@ -92,8 +95,8 @@ public sealed class PathScope
             var key = PathNames.KeyFor(side, path);
             var saved=readSaved(state,side,key);
             if (saved is not null) return ExcludesBinding(saved);
-            // An unbound source name alone does not prove that a counterpart sits inside a native boundary.
-            return CoversKey(side,key) || excluded.Covers(PathNames.KeyFor(other, PathNames.MappedDestination(other,path,state,readSaved)));
+            // Even without an exact binding, the destination of a new item is an actual write boundary.
+            return CoversKey(side,key) || CoversKey(other, PathNames.KeyFor(other, PathNames.MappedDestination(other,path,state,readSaved)));
         }
     }
 
@@ -125,7 +128,7 @@ public sealed class PathScope
     /// <summary>The same scope minus that one exclusion; used only by ExclusionRunner.</summary>
     public PathScope Without(Exclusion e) => new(
         pair with { Exclusions = pair.Exclusions.Where(exclusion => exclusion != e).ToArray() }, allPairs,
-        defaultIgnoreRules, volumeBin);
+        localDriveType, defaultIgnoreRules);
 
     // A lost race builds an identical immutable value once; the scope's inputs never change after construction.
     private PathScope? configured;
@@ -138,7 +141,7 @@ public sealed class PathScope
         get
         {
             if (pair.Exclusions.Count == 0) return this;
-            return configured ??= new(pair with { Exclusions = [] }, allPairs, defaultIgnoreRules, volumeBin);
+            return configured ??= new(pair with { Exclusions = [] }, allPairs, localDriveType, defaultIgnoreRules);
         }
     }
 
@@ -150,7 +153,7 @@ public sealed class PathScope
         {
             IgnoreRules = [],
             Exclusions = pair.Exclusions.Where(e => e != exclusion).ToArray()
-        }, allPairs, volumeBin: volumeBin);
+        }, allPairs, localDriveType);
 
     private bool ExcludesPath(string path, bool isFolder, bool isDropbox) =>
         IgnoreRule.IsIgnored(path, isFolder, ignoreRules) ||

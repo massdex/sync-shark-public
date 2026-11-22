@@ -13,7 +13,7 @@ public sealed class InMemoryStateStore : IStore
     private readonly Dictionary<(string, Side),(long Revision,string? Reason)> repairs = [];
     private readonly Dictionary<(string Pair,string Route,string Token),AcceptedJob> jobs = [];
     private readonly Dictionary<string,(RemovalSelection Victim, StageProof? Stage)> armed = [];
-    private readonly Dictionary<(string Pair,Side Side,string Key),Entry> scan = [];
+    private readonly Dictionary<(string Pair,Guid Scan,Side Side,string Key),Entry> scan = [];
     private readonly HashSet<string> firstRepairDone = [];
     private readonly Dictionary<string,string> summaries=[];
     private readonly Dictionary<string,string> historyCursor=[];
@@ -85,12 +85,13 @@ public sealed class InMemoryStateStore : IStore
         return Enumerate(Records.Where(v => v.Key.Pair == pairId && PathNames.IsUnderKey(v.Value.KeyOn(side),key)).Select(v => v.Value),ct);
     }
     /// <summary>Commit operation on the supplied facts.</summary>
-    public Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, CancellationToken ct)
+    public Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, CancellationToken ct, string? spentDeletedKey = null)
     {
         ct.ThrowIfCancellationRequested();
         Requests.Count(nameof(CommitAsync));
         if (before != null && !Records.Remove((pairId, before.LocalKey))) throw new InvalidDataException("Missing previous binding");
         if (after != null) Records[(pairId, after.LocalKey)] = after;
+        if (spentDeletedKey!=null) DeletedNames.Remove((pairId,spentDeletedKey));
         return Task.CompletedTask;
     }
     /// <summary>Notices operation on the supplied facts.</summary>
@@ -140,23 +141,23 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested(); lock(pairs) return Task.FromResult(repairs.GetValueOrDefault((pairId,side)));
     }
-    public Task<bool> FinishRepairAsync(string pairId, Side side, long revision, CancellationToken ct, Scope? scope = null, string? completedRepairJson = null)
+    public Task<bool> FinishRepairAsync(string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();
+        ct.ThrowIfCancellationRequested();ArgumentException.ThrowIfNullOrWhiteSpace(completedRepairJson);
         lock(pairs)
         {
-            if(!repairs.TryGetValue((pairId,side),out var owed) || owed.Revision!=revision) return Task.FromResult(false);
-            if(scope is null)
-            {
-                repairs[(pairId,side)]=(revision,null);
-                if(completedRepairJson!=null) { firstRepairDone.Add(pairId);summaries[pairId]=completedRepairJson; }
-            }
-            else
-            {
-                if(side!=Side.Dropbox || !pairs.TryGetValue(pairId,out var pair) || pair.OwedScopes?.Contains(scope)!=true) return Task.FromResult(false);
-                pairs[pairId]=pair with { OwedScopes=pair.OwedScopes.Where(x=>x!=scope).ToArray() };
-            }
-            return Task.FromResult(true);
+            if(repairs.GetValueOrDefault((pairId,Side.Local)).Revision!=revisions.Local || repairs.GetValueOrDefault((pairId,Side.Dropbox)).Revision!=revisions.Dropbox) return Task.FromResult(false);
+            repairs[(pairId,Side.Local)]=(revisions.Local,null);repairs[(pairId,Side.Dropbox)]=(revisions.Dropbox,null);
+            firstRepairDone.Add(pairId);summaries[pairId]=completedRepairJson;return Task.FromResult(true);
+        }
+    }
+    public Task<bool> FinishRepairAsync(string pairId, Scope scope, long revision, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();ArgumentNullException.ThrowIfNull(scope);
+        lock(pairs)
+        {
+            if(repairs.GetValueOrDefault((pairId,Side.Dropbox)).Revision!=revision || !pairs.TryGetValue(pairId,out var pair) || pair.OwedScopes?.Contains(scope)!=true) return Task.FromResult(false);
+            pairs[pairId]=pair with { OwedScopes=pair.OwedScopes.Where(x=>x!=scope).ToArray() };return Task.FromResult(true);
         }
     }
     /// <summary>SaveJob operation on the supplied facts.</summary>
@@ -196,13 +197,13 @@ public sealed class InMemoryStateStore : IStore
         if(armed.TryGetValue(pairId,out var note) && note.Victim==expected && note.Stage==expectedStage) armed.Remove(pairId); return Task.CompletedTask;
     }
     /// <summary>AddScan operation on the supplied facts.</summary>
-    public async Task AddScanAsync(string pairId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct)
+    public async Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        await foreach(var row in rows.WithCancellation(ct)) if(row.Entry is { } entry) scan[(pairId,side,PathNames.KeyFor(side,row.Path))]=entry;
+        await foreach(var row in rows.WithCancellation(ct)) if(row.Entry is { } entry) scan[(pairId,scanId,side,PathNames.KeyFor(side,row.Path))]=entry;
     }
     /// <summary>Compare operation on the supplied facts.</summary>
-    public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct)
+    public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         var remoteKeys=Records.Where(x=>x.Key.Pair==pairId).Select(x=>x.Value).ToDictionary(v=>v.DropboxKey,v=>v.LocalKey,PathNames.Comparer);
@@ -210,14 +211,14 @@ public sealed class InMemoryStateStore : IStore
         var members=notices.Where(v=>v.Key.Pair==pairId).SelectMany(v=>v.Value.Subject.Items.Count==0 ?
             new[]{(Key:PathNames.Key(v.Value.Path),Notice:v.Value,Member:(NoticeItem?)null)} :
             v.Value.Subject.Items.Select(m=>(Key:Canonical(m.Side,m.Path),Notice:v.Value,Member:(NoticeItem?)m))).ToLookup(x=>x.Key,PathNames.Comparer);
-        var keys=scan.Where(x=>x.Key.Pair==pairId).Select(x=>Canonical(x.Key.Side,x.Value.Path)).Concat(Records.Keys.Where(k=>k.Pair==pairId).Select(k=>k.LocalKey)).Concat(members.Select(x=>x.Key)).Distinct(PathNames.Comparer).Order(StringComparer.Ordinal);
+        var keys=scan.Where(x=>x.Key.Pair==pairId && x.Key.Scan==scanId).Select(x=>Canonical(x.Key.Side,x.Value.Path)).Concat(Records.Keys.Where(k=>k.Pair==pairId).Select(k=>k.LocalKey)).Concat(members.Select(x=>x.Key)).Distinct(PathNames.Comparer).Order(StringComparer.Ordinal);
         return Enumerate(Rows(),ct);
         IEnumerable<(Row,IReadOnlyList<(Notice,NoticeItem?,bool,bool)>)> Rows()
         {
             foreach(var key in keys)
             {
                 var saved=Records.GetValueOrDefault((pairId,key));
-                var local=scan.GetValueOrDefault((pairId,Side.Local,saved?.LocalKey??key));var cloud=scan.GetValueOrDefault((pairId,Side.Dropbox,saved?.DropboxKey??key));
+                var local=scan.GetValueOrDefault((pairId,scanId,Side.Local,saved?.LocalKey??key));var cloud=scan.GetValueOrDefault((pairId,scanId,Side.Dropbox,saved?.DropboxKey??key));
                 var lp=local?.Path??saved?.LocalPath??key;var dp=cloud?.Path??saved?.DropboxPath??key;
                 if(scope!=null && !PathNames.IsSelfOrUnder(lp,scope.LocalPath) && !PathNames.IsSelfOrUnder(dp,scope.DropboxPath)) continue;
                 var l=evidence(Side.Local,lp);var d=evidence(Side.Dropbox,dp);
@@ -227,10 +228,10 @@ public sealed class InMemoryStateStore : IStore
         }
     }
     /// <summary>ClearScan operation on the supplied facts.</summary>
-    public Task ClearScanAsync(string pairId, CancellationToken ct)
+    public Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        foreach(var key in scan.Keys.Where(k=>k.Pair==pairId).ToArray()) scan.Remove(key); return Task.CompletedTask;
+        foreach(var key in scan.Keys.Where(k=>k.Pair==pairId && k.Scan==scanId).ToArray()) scan.Remove(key); return Task.CompletedTask;
     }
     /// <summary>Dispose operation on the supplied facts.</summary>
     private static async IAsyncEnumerable<T> Enumerate<T>(IEnumerable<T> values, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)

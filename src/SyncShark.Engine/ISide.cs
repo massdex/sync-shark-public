@@ -4,8 +4,8 @@ namespace Massdex.SyncShark.Engine;
 public interface ISide
 {
     Side Side { get; }
-    /// <summary>Native root identity for this side; PC also supplies drive evidence. A missing or unreadable root never implies a delete.</summary>
-    Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive)> RootAsync(CancellationToken ct);
+    /// <summary>Native root identity for this side; PC also supplies drive evidence and observed drive type for its scope, recycle and startup trim; Dropbox has no PC drive type. A missing or unreadable root never implies a delete.</summary>
+    Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType)> RootAsync(CancellationToken ct);
     /// <summary>The entries under folder `under` ("" = the root; `under` itself is not yielded), in listing order,
     /// skipped entries included. options.Recursive: the whole subtree, else direct children.
     /// options.IncludeOutOfScope: ignored, excluded and nested-root entries are yielded too, and walked into
@@ -41,8 +41,8 @@ public interface ISide
     Task<DeletionEvidence> DeletedAsync(string path, CancellationToken ct);
     /// <summary>Recovers attributable file bytes or folder scope; a substitute is never the selected version.</summary>
     Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct);
-    /// <summary>Reopens and verifies the exact armed PC stage, not a file found by its old name. PublishAsync then conditionally publishes through the held stage.</summary>
-    Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, Entry source, CancellationToken ct);
+    /// <summary>Reopens only the armed victim’s stage, verified by held volume/id, size and full digest. Its own stamped metadata supplies the source time. Ordinary redecision precedes create-only publication; no live source Entry is required.</summary>
+    Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, CancellationToken ct);
     /// <summary>Observes a returned job without submitting its members again.</summary>
     Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct);
 }

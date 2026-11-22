@@ -78,6 +78,12 @@ public static class DependencyChecks
             ("Planner","Decide","_ = \"SELECT rowid FROM pair\";",false),
             ("Storage","Schema","_ = \"SELECT rowid FROM pair\";",true),
             ("Edge","Commands","_ = typeof(Massdex.SyncShark.Engine.Executor.Resolve);",false),
+            ("SyncShark","Program","_ = new Massdex.SyncShark.Engine.Dropbox.Dispatcher(null!,null!);",true),
+            ("SyncShark.Cli","Program","_ = new Massdex.SyncShark.Engine.Dropbox.Dispatcher(null!,null!);",false),
+            ("Dropbox","SignIn","var l=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);l.Start(1);_ = l.AcceptTcpClientAsync();l.Stop();",true),
+            ("Dropbox","SignIn","_ = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any,0);",false),
+            ("Dropbox","SignIn","var c=new System.Net.Sockets.TcpClient();_ = c.ConnectAsync(System.Net.IPAddress.Loopback,1);",false),
+            ("Dropbox","FolderJobs","var l=new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback,0);l.Start();",false),
             ("Dropbox","SignIn","_ = new HttpClient().GetAsync(string.Empty);",false),
             ("Dropbox","DropboxApi","_ = new HttpClient().GetAsync(string.Empty);",true),
             ("Dropbox","FolderJobs","_ = typeof(Massdex.SyncShark.Engine.Planner.Moves);",false),
@@ -111,6 +117,12 @@ public static class DependencyChecks
         foreach(var creation in root.DescendantNodes().OfType<BaseObjectCreationExpressionSyntax>())
         {
             if(model.GetSymbolInfo(creation).Symbol is not IMethodSymbol ctor) continue;
+            if(ctor.ContainingNamespace.ToDisplayString()=="System.Net.Sockets" && (module,file)!=("Dropbox","DropboxApi"))
+            {
+                var address=creation.ArgumentList?.Arguments.FirstOrDefault()?.Expression;
+                var value=address==null ? null : model.GetSymbolInfo(address).Symbol;
+                if((module,file)!=("Dropbox","SignIn") || ctor.ContainingType.Name!="TcpListener" || value?.ContainingType?.ToDisplayString()!="System.Net.IPAddress" || value.Name is not ("Loopback" or "IPv6Loopback")) yield return "Socket construction outside its owner or non-loopback return address";
+            }
             if(ctor.ContainingNamespace.ToDisplayString()=="System.IO" && ctor.ContainingType.Name is "StreamReader" or "StreamWriter" && ctor.Parameters.FirstOrDefault()?.Type.SpecialType==SpecialType.System_String && module is not ("Local" or "Storage") && (module,file)!=("Dropbox","Connections")) yield return "A path-based stream requires its I/O owner";
         }
         foreach(var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
@@ -135,7 +147,7 @@ public static class DependencyChecks
                 bool allowed=module switch
                 {
                     "SyncShark.Cli" => file=="Program" && (other,name) is ("Edge","Cli") or ("Local","LogFiles") or ("Contracts","ILogFiles"),
-                    "SyncShark" => file=="Program" && (other,name) is ("Storage","Store" or "StoreMove") or ("Dropbox","Connections" or "DropboxSide" or "DropboxApi" or "CredentialStore" or "SignIn") or ("Local","LocalSide" or "RecycleBin" or "LogFiles") or ("Run","Host") or ("Edge","HostServer" or "Commands") or ("Contracts",_),
+                    "SyncShark" => file=="Program" && (other,name) is ("Storage","Store" or "StoreMove") or ("Dropbox","Connections" or "DropboxSide" or "DropboxApi" or "Dispatcher" or "CredentialStore" or "SignIn") or ("Local","LocalSide" or "RecycleBin" or "LogFiles") or ("Run","Host") or ("Edge","HostServer" or "Commands") or ("Contracts",_),
                     _ => module==other || other=="Contracts" || (module,other) is ("Executor","Planner") or ("Run","Planner" or "Executor") or ("Edge","Run")
                 };
                 violates=!allowed || (other,name)==("Planner","Moves") && module!="Executor" && (module,file)!=("Planner","Moves") ||
@@ -144,7 +156,14 @@ public static class DependencyChecks
             }
             else if(space.StartsWith("Microsoft.Data.Sqlite",StringComparison.Ordinal) || space=="SQLitePCL") violates=module!="Storage";
             else if(module=="Planner" && (space=="System.Net" || space.StartsWith("System.Net.",StringComparison.Ordinal))) violates=true;
-            else if((space=="System.Net.Sockets" || space=="System.Net" && name is "HttpWebRequest" or "WebRequest" or "WebClient" or "HttpListener" or "Dns") && symbol is IMethodSymbol) violates=(module,file)!=("Dropbox","DropboxApi");
+            else if((space=="System.Net.Sockets" || space=="System.Net" && name is "HttpWebRequest" or "WebRequest" or "WebClient" or "HttpListener" or "Dns") && symbol is IMethodSymbol)
+            {
+                bool receive=(module,file)==("Dropbox","SignIn") && space=="System.Net.Sockets" && (name,member) is
+                    ("TcpListener",".ctor" or "Start" or "AcceptTcpClientAsync" or "Stop" or "Dispose") or
+                    ("TcpClient","GetStream" or "Dispose" or "Close") or
+                    ("NetworkStream","ReadAsync" or "WriteAsync" or "FlushAsync" or "DisposeAsync" or "Dispose");
+                violates=(module,file)!=("Dropbox","DropboxApi") && !receive;
+            }
             else if(space=="System.Net.Http" && name is "HttpClient" or "HttpMessageInvoker" && (member.Contains("Async",StringComparison.Ordinal) || member=="Send")) violates=(module,file)!=("Dropbox","DropboxApi");
             else if(space=="System.IO" && name=="DriveInfo" && member is "AvailableFreeSpace" or "TotalFreeSpace") violates=(module,file)!=("Local","VolumeSpace");
             else if(module=="Planner" && name=="Environment" && member is "TickCount" or "TickCount64") violates=true;
