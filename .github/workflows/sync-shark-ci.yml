@@ -1,0 +1,42 @@
+name: Sync Shark CI
+
+on:
+  # Never add pull_request or pull_request_target: lane routing is push/dispatch only.
+  push:
+    branches:
+      - 'claude-code/v2-*'
+      - 'main'
+      - 'ci/**'
+      - 'quick/**'
+  workflow_dispatch:
+
+# One run per branch: a new commit cancels the run it supersedes.
+concurrency:
+  group: sync-shark-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build and run all checks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.427'
+      - name: Reject personal literals
+        shell: pwsh
+        run: ./tools/ci/check-personal-literals.ps1
+      - name: Build all four projects from their locks
+        shell: pwsh
+        run: ./tools/ci/build-projects.ps1 -SourceRevision $env:GITHUB_SHA
+      - name: Run every check with the exported capability inventory
+        shell: pwsh
+        run: |
+          $inventory = (Get-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'CLI-CAPABILITIES.md') -ErrorAction Stop).FullName
+          & dotnet tests/SyncShark.Engine.Tests/bin/Release/net8.0-windows/SyncShark.Engine.Tests.dll $env:GITHUB_WORKSPACE $inventory
+          exit $LASTEXITCODE

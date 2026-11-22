@@ -1,0 +1,122 @@
+{
+  "commands": [
+    {
+      "command": "pairs list",
+      "usage": "pairs list",
+      "effect": "List the configured pairs."
+    },
+    {
+      "command": "pairs add",
+      "usage": "pairs add --name <name> --local <folder> --path <folder> --account <id> [--first-sync newest|pc|dropbox]",
+      "effect": "Add a pair and select how its first comparison treats differences."
+    },
+    {
+      "command": "pairs remove",
+      "usage": "pairs remove --pair <id>",
+      "effect": "Remove the configuration, not the files. Report unfinished recovery before removal."
+    },
+    {
+      "command": "pairs bind",
+      "usage": "pairs bind --pair <id> --yes",
+      "effect": "Confirm the observed root identities for this pair."
+    },
+    {
+      "command": "pairs exclude",
+      "usage": "pairs exclude --pair <id> --side local|dropbox --rel <path> [--keep] [--yes]",
+      "effect": "Keep the selected copy out of sync. Without --keep, preview the removal and recovery information before confirming."
+    },
+    {
+      "command": "pairs include",
+      "usage": "pairs include --pair <id> --side local|dropbox --rel <path>",
+      "effect": "Remove the exclusion and compare the newly included scope."
+    },
+    {
+      "command": "pairs exclusions",
+      "usage": "pairs exclusions --pair <id>",
+      "effect": "List the configured exclusions."
+    },
+    {
+      "command": "ignores list",
+      "usage": "ignores list --pair <id>",
+      "effect": "List the ignore rules."
+    },
+    {
+      "command": "ignores set",
+      "usage": "ignores set --pair <id> --rules <rules>",
+      "effect": "Replace this pair’s ignore rules."
+    },
+    {
+      "command": "host start",
+      "usage": "host start",
+      "effect": "Start the background host or attach to the one already running."
+    },
+    {
+      "command": "host stop",
+      "usage": "host stop",
+      "effect": "Stop the background host."
+    },
+    {
+      "command": "status",
+      "usage": "status [--pair <id>]",
+      "effect": "Read current status without starting the host."
+    },
+    {
+      "command": "pause",
+      "usage": "pause [--pair <id>]",
+      "effect": "Pause one pair or all pairs until resume or restart."
+    },
+    {
+      "command": "resume",
+      "usage": "resume [--pair <id>]",
+      "effect": "Resume one pair or all pairs."
+    },
+    {
+      "command": "repair",
+      "usage": "repair --pair <id>",
+      "effect": "Compare both sides against the saved records."
+    },
+    {
+      "command": "notices",
+      "usage": "notices --pair <id> [--ignored]",
+      "effect": "List current notices."
+    },
+    {
+      "command": "resolve",
+      "usage": "resolve --pair <id> --issue <number> --reviewed <token> --choice <choice> [--name <name>]",
+      "effect": "Apply an available choice to the reviewed notice."
+    },
+    {
+      "command": "logs",
+      "usage": "logs --pair <id> --run <id> [--show-files]",
+      "effect": "Read run logs, optionally including individual file operations."
+    },
+    {
+      "command": "accounts connect",
+      "usage": "accounts connect",
+      "effect": "Connect a Dropbox account through browser sign-in."
+    },
+    {
+      "command": "accounts disconnect",
+      "usage": "accounts disconnect --account <id>",
+      "effect": "Disconnect the account and pause affected pairs without deleting files."
+    }
+  ],
+  "choices": [
+    "use-local",
+    "use-dropbox",
+    "keep-both",
+    "dismiss",
+    "rename-incoming",
+    "replace-existing",
+    "keep-local",
+    "keep-dropbox",
+    "rename-local",
+    "rename-dropbox",
+    "retry",
+    "first-sync",
+    "sync-normally",
+    "bind-roots",
+    "ignore",
+    "unignore"
+  ]
+}
