@@ -72,8 +72,8 @@ public static class ResolveChecks
         // lane reports no fake pass; when implemented it must carry the composition-supplied PC name.
         try
         {
-            var label = Planner.ConflictName.For("f.txt", Side.Local, DateTimeOffset.UnixEpoch, settings.ComputerName,
-                settings, 1);
+            var label = Massdex.SyncShark.Engine.Planner.ConflictName.For("f.txt", Side.Local, DateTimeOffset.UnixEpoch,
+                settings.ComputerName, settings, 1);
             Check.Require(label.Contains(settings.ComputerName, StringComparison.Ordinal),
                 "The generated conflict label lacks the composition-supplied PC name");
         }
