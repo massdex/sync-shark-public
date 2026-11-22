@@ -211,7 +211,9 @@ public sealed class Connections
     {
         if (!File.Exists(path)) return Array.Empty<string>();
         var bytes = File.ReadAllBytes(path);
+        var lines = TerminatedLines(bytes);
         var ids = new List<string>();
+        var isCanonical = -1;
         var remainder = bytes.Length > 0 && bytes[^1] != (byte)'\n';
         foreach (var line in lines)
         {
