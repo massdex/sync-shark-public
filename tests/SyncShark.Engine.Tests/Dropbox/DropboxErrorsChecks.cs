@@ -243,6 +243,16 @@ public static class DropboxErrorsChecks
             "structured download miss is changed, not absent");
         Expect(Http(DropboxProtocol.Download, Reply("path/not_found", Tagged("path", "not_file"))).Cause != TextKey.FailChanged,
             "structured download wins");
+        var oversized = Union(DropboxProtocol.TooManyFiles);
+        var split = refused with { Cause = TextKey.FailDropboxTooManyFiles };
+        Expect(Http(DropboxProtocol.Delete, Reply("", oversized)) == split, "oversized singleton delete refusal");
+        foreach (var route in new[] { DropboxProtocol.DeleteBatch, DropboxProtocol.DeleteBatchCheck })
+        {
+            Expect(errors.ClassifyMember(oversized, route, false) == split, route + " oversized delete member");
+            Expect(Http(route, Reply("", oversized)) == unknown, route + " whole reply cannot authorize a split");
+        }
+        Expect(Http(DropboxProtocol.Delete, SummaryOnly(DropboxProtocol.TooManyFiles)) == unknown,
+            "delete summary does not prove a size refusal");
         Expect(Http(DropboxProtocol.Delete, Reply("", permission)) == denied, "singleton delete permission");
         Expect(Http(DropboxProtocol.Delete, SummaryOnly("path_write/no_write_permission")) == denied, "delete summary permission");
         Expect(errors.ClassifyMember(permission, DropboxProtocol.DeleteBatch, false) == denied, "member delete permission");
