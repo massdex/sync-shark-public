@@ -54,17 +54,22 @@ public static class LogTextChecks
             $"suppressed records must not allocate a display clock: provider bytes={providerBytes}; move bytes={moveBytes}");
 
         // An uncommon control must escape by appending the prefix and the formatted digits in place; the old
-        // encoder built a concatenated prefix-plus-digits string first, one extra allocation per character. The
-        // shared escape loop serves both the stored and readable encoders, so measuring one proves the other.
+        // round-11 encoder built a concatenated prefix-plus-digits string first, one extra allocation per
+        // character. The shared escape loop serves both encoders, so measuring one proves the other. The exact
+        // expected text is a fixture literal repeated at the chosen count (never the encoder's own output), and
+        // the comparison runs outside the measured interval so only the escape call's bytes are counted.
         const int controls = 4096;
         const int bytesPerEscapedControl = 90;
+        const string escapedControl = "\\u001b";
         var unusual = new string('\u001b', controls);
         _ = RunLog.EscapeDisplay(unusual);
         var beforeEscape = GC.GetAllocatedBytesForCurrentThread();
-        var escapedLength = RunLog.EscapeDisplay(unusual).Length;
+        var escaped = RunLog.EscapeDisplay(unusual);
         var escapeBytes = GC.GetAllocatedBytesForCurrentThread() - beforeEscape;
-        Check.Require(escapedLength == controls * 6 && escapeBytes < controls * bytesPerEscapedControl,
-            $"a control run escapes in place without an intermediate string: length={escapedLength}; " +
+        var expected = string.Concat(Enumerable.Repeat(escapedControl, controls));
+        var exact = escaped == expected;
+        Check.Require(exact && escapeBytes < controls * bytesPerEscapedControl,
+            $"a control run escapes in place, exactly and without an intermediate string: matches={exact}; " +
             $"bytes={escapeBytes}; budget={controls * bytesPerEscapedControl}");
     }
 
