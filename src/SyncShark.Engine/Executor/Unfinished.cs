@@ -8,7 +8,7 @@ public sealed class Unfinished
     private readonly SemaphoreSlim refresh=new(1);
     /// <summary>The reader has projected both endpoints through the removal capture.</summary>
     public Func<(JournalPosition? Local,string? Dropbox),bool>? AcquiredThrough { get; set; }
-    private bool loaded, recoveringLive, recoverAgain;
+    private bool loaded;
     private readonly Dictionary<(string Route,string Id),JobReply.Terminal> finished=[];
     private readonly Dictionary<(string Route,string Id),(JournalPosition? Local,string? Dropbox)> bounds=[];
     private readonly Dictionary<(string Route,string Id),HashSet<int>> settled=[], split=[];
@@ -243,16 +243,7 @@ public sealed class Unfinished
     /// <summary>Recover the armed removal, if any, against its recorded identity and endpoints.</summary>
     internal async Task RecoverStageAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,ISide local,ISide dropbox,IStore store,Func<Scope,IEnumerable<Change>> heldInput,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct)
     {
-        lock(jobs) { if(recoveringLive) {recoverAgain=true;return;} recoveringLive=true; }
-        try
-        {
-            while(true)
-            {
-                await RecoverOneStageAsync(pair,settings,events,paths,local,dropbox,store,heldInput,populate,compareOldBinding,ct,null);
-                lock(jobs) { if(recoverAgain) {recoverAgain=false;continue;} recoveringLive=false;return; }
-            }
-        }
-        catch {lock(jobs) {recoveringLive=false;recoverAgain=false;} throw;}
+        await RecoverOneStageAsync(pair,settings,events,paths,local,dropbox,store,heldInput,populate,compareOldBinding,ct,null);
     }
 
     private async Task RecoverOneStageAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,ISide local,ISide dropbox,IStore store,Func<Scope,IEnumerable<Change>> heldInput,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,PrefixSet? footprint)
