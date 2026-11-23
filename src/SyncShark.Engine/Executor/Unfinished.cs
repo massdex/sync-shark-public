@@ -279,6 +279,17 @@ public sealed class Unfinished
             if(location is not {InScope:true}) await Unchecked(store,pair,proof.Expected,ct);
             await store.DisarmAsync(pair.PairId,victim,note.Stage,ct);return;
         }
+        if(!proof.Expected.IsFolder)
+        {
+            if(actual.Location.Entry.Size!=proof.Expected.Size) return;
+            if(!ContentHash.IsValid(actual.Location.Entry.ContentHash))
+            {
+                if(await local.RecoverAsync(actual.Location,proof.Expected with {ContentHash=proof.ContentHash??""},ct) is not Recovery.File file) return;
+                await using var bytes=file.Bytes;
+                if(file.Version.Id!=proof.Expected.Id || file.Version.ContentHash!=proof.ContentHash) return;
+            }
+            else if(actual.Location.Entry.ContentHash!=proof.ContentHash) return;
+        }
         if(note.Stage==null && proof.Expected.IsFolder)
         {
             var pc=local.BoundaryAsync(ct);var db=dropbox.BoundaryAsync(ct);await Task.WhenAll(pc,db);
