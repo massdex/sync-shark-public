@@ -316,7 +316,6 @@ public static class Repair
             {
                 if(row!=null && Touched(row,row.IsFolder()) || candidates.Any(c=>store.ScanTouched(id,scan,c.Side,c.Moved.Path,c.Moved.IsFolder)))
                 {
-                    if(Volatile.Read(ref scanCleared)) reobserve=true;
                     if(retained==null && !reobserve) return;
                     // Our own Failure touched this scan. Retry the retained input, not a notice that replaced it.
                     if(retained!=null && await CurrentRetryAsync(store,id,retained,token)==null) throw new WorkQueue.Unsettled();
