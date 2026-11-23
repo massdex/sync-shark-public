@@ -1,3 +1,4 @@
+using ScanMarks = global::Massdex.SyncShark.Engine.Storage.ScanTable;
 namespace Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 /// <summary>In-memory records and notices used for observable settlement assertions.</summary>
@@ -18,9 +19,51 @@ public sealed class InMemoryStateStore : IStore
     private readonly HashSet<string> firstRepairDone = [];
     private readonly Dictionary<string,string> summaries=[];
     private readonly Dictionary<string,string> historyCursor=[];
-    private readonly HashSet<(Guid Scan,string Key)> scratchDeleted=[];
-    private readonly Dictionary<(string Pair,Guid Scan),string> completedHistory=[];
+    private readonly HashSet<(string Pair,Guid Scan,string Key)> scratchDeleted=[];
+    private readonly Dictionary<(string Pair,Guid Scan),(string Cursor,string Origin)> completedHistory=[];
     private readonly Dictionary<(string Pair,string Key),bool> spentDeleted=[];
+    private readonly Dictionary<(string Pair,Guid Scan),ScanMarks> tracking=[];
+    public void BeginScan(string pairId,Guid scanId)
+    {
+        lock(pairs) if(!tracking.ContainsKey((pairId,scanId)))
+        {
+            var marks=new ScanMarks();marks.Begin(pairId,scanId);tracking.Add((pairId,scanId),marks);
+        }
+    }
+    public bool ScanTouched(string pairId,Guid scanId,Side side,string path,bool descendants)
+    {
+        lock(pairs) return !tracking.TryGetValue((pairId,scanId),out var marks) || marks.Touched(pairId,scanId,side,path,descendants);
+    }
+    private void Touch(string pairId,Side side,string key,bool subtree)
+    {
+        lock(pairs) foreach(var item in tracking) if(item.Key.Pair==pairId) item.Value.Touch(pairId,side,key,subtree);
+    }
+    private void TouchChange(string pairId, SyncedEntry? before, SyncedEntry? after, SyncedEntry? second = null)
+    {
+        bool sameFolder = before is {IsFolder:true, LocalId.Length:>0, DropboxId.Length:>0} && after is {IsFolder:true} &&
+            before.LocalId==after.LocalId && before.DropboxId==after.DropboxId;
+        bool localMoved=before?.LocalPath!=after?.LocalPath, remoteMoved=before?.DropboxPath!=after?.DropboxPath;
+        Mark(Side.Local, !(sameFolder && remoteMoved && !localMoved));
+        Mark(Side.Dropbox, !(sameFolder && localMoved && !remoteMoved));
+        void Mark(Side side, bool descendants)
+        {
+            var old = before?.KeyOn(side);
+            var first = after?.KeyOn(side);
+            var last = second?.KeyOn(side);
+            if (old != null && old != first && old != last) Touch(pairId, side, old, descendants && before!.IsFolder);
+            if (first != null && first != last) Touch(pairId, side, first, descendants && (after!.IsFolder || (first == old && before!.IsFolder)));
+            if (last != null) Touch(pairId, side, last, second!.IsFolder || (descendants && ((last == old && before!.IsFolder) || (last == first && after!.IsFolder))));
+        }
+    }
+
+    private void TouchNotice(string pairId, string path, IssueSubject subject)
+    {
+        foreach (var member in subject.Items) Touch(pairId, member.Side, PathNames.KeyFor(member.Side, member.Path), false);
+        if (subject.Items.Count != 0) return;
+        Touch(pairId, Side.Local, PathNames.Key(path), false);
+        Touch(pairId, Side.Dropbox, PathNames.DropboxKey(path), false);
+    }
+
     /// <summary>Pairs operation on the supplied facts.</summary>
     public IAsyncEnumerable<PairConfig> PairsAsync(CancellationToken ct)
     {
@@ -96,6 +139,7 @@ public sealed class InMemoryStateStore : IStore
         Requests.Count(nameof(CommitAsync));
         if (before != null && !Records.Remove((pairId, before.LocalKey))) throw new InvalidDataException("Missing previous binding");
         if (after != null) Records[(pairId, after.LocalKey)] = after with { LocalPublished = publication ?? (before?.LocalId == after.LocalId ? after.LocalPublished : null) };
+        TouchChange(pairId,before,after);
         if (spentDeletedKey!=null) spentDeleted[(pairId,spentDeletedKey)]=true;
         return Task.CompletedTask;
     }
@@ -110,6 +154,9 @@ public sealed class InMemoryStateStore : IStore
         lock (pairs)
         {
             var slot=notices.Where(x=>x.Key.Pair==pairId).Select(x=>x.Value).FirstOrDefault(n=>n.Path==notice.Path && n.Kind==notice.Kind);
+            if(slot?.Kind==NoticeKind.PutBack && slot.At>notice.At) return Task.CompletedTask;
+            if(slot!=null) TouchNotice(pairId,slot.Path,slot.Subject);
+            TouchNotice(pairId,notice.Path,notice.Subject);
             var id=slot?.Id ?? checked(++lastNoticeId);
             notices[(pairId,id)]=notice with { Id=id };
         }
@@ -122,7 +169,9 @@ public sealed class InMemoryStateStore : IStore
         lock (pairs)
         {
             var key = (pairId, expected.Id);
-            return Task.FromResult(notices.TryGetValue(key, out var current) && current.Matches(expected) && notices.Remove(key));
+            var closed=notices.TryGetValue(key, out var current) && current.Matches(expected) && notices.Remove(key);
+            if(closed) TouchNotice(pairId,expected.Path,expected.Subject);
+            return Task.FromResult(closed);
         }
     }
     /// <summary>Position operation on the supplied facts.</summary>
@@ -220,15 +269,18 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested();
         if(terminalHistoryCursor!=null && side!=Side.Dropbox) throw new ArgumentException(nameof(terminalHistoryCursor));
+        BeginScan(pairId,scanId);
+        var origin=HistoryOrigin(pairId);
+        if(terminalHistoryCursor!=null){completedHistory.Remove((pairId,scanId));scratchDeleted.RemoveWhere(k=>k.Pair==pairId && k.Scan==scanId);}
         await foreach(var row in rows.WithCancellation(ct))
         {
             if(row.Entry is { } entry) scan[(pairId,scanId,side,PathNames.KeyFor(side,row.Path))]=entry;
-            else if(terminalHistoryCursor!=null) scratchDeleted.Add((scanId,PathNames.DropboxKey(row.Path)));
+            if(terminalHistoryCursor!=null){var key=(pairId,scanId,PathNames.Key(row.Path));if(row.Entry==null) scratchDeleted.Add(key);else scratchDeleted.Remove(key); }
         }
         if(terminalHistoryCursor!=null)
         {
             var cursor=terminalHistoryCursor();ArgumentException.ThrowIfNullOrWhiteSpace(cursor);
-            completedHistory.Add((pairId,scanId),cursor);
+            completedHistory[(pairId,scanId)]=(cursor,origin);
         }
     }
     /// <summary>Compare operation on the supplied facts.</summary>
@@ -261,7 +313,8 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested();
         foreach(var key in scan.Keys.Where(k=>k.Pair==pairId && k.Scan==scanId).ToArray()) scan.Remove(key);
-        scratchDeleted.RemoveWhere(k=>k.Scan==scanId); completedHistory.Remove((pairId,scanId));return Task.CompletedTask;
+        lock(pairs) tracking.Remove((pairId,scanId));
+        scratchDeleted.RemoveWhere(k=>k.Pair==pairId && k.Scan==scanId); completedHistory.Remove((pairId,scanId));return Task.CompletedTask;
     }
     /// <summary>Dispose operation on the supplied facts.</summary>
     private static async IAsyncEnumerable<T> Enumerate<T>(IEnumerable<T> values, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
@@ -272,14 +325,39 @@ public sealed class InMemoryStateStore : IStore
     public void Dispose() { }
     public Task<(bool FirstRepairDone,string? LastRepairJson)> RepairStateAsync(string pairId,CancellationToken ct) => Task.FromResult((firstRepairDone.Contains(pairId),summaries.GetValueOrDefault(pairId)));
     public Task<(string? Cursor,bool Owed)> DeletedHistoryAsync(string pairId,CancellationToken ct) => Task.FromResult((historyCursor.GetValueOrDefault(pairId),!historyCursor.ContainsKey(pairId)));
+    private string HistoryOrigin(string pairId)
+    {
+        var pair=pairs.GetValueOrDefault(pairId);
+        return System.Text.Json.JsonSerializer.Serialize(new {LocalRoot=pair?.LocalRoot,DropboxRoot=pair?.DropboxRoot,ConnectionId=pair?.ConnectionId,Roots=pair?.Roots,Cursor=historyCursor.GetValueOrDefault(pairId)});
+    }
+    public Task<(string? Cursor,bool Owed)> DeletedHistoryAsync(string pairId,Guid scanId,CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if(!pairs.ContainsKey(pairId)) throw new InvalidOperationException(Text.Get(TextKey.PairUnknown,(TextArg.Pair,pairId)));
+        // Published names are stored directly; there are no encoded blocks to restore or verify.
+        return DeletedHistoryAsync(pairId,ct);
+    }
     public Task PublishDeletedHistoryAsync(string pairId,Guid scanId,CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        if(!completedHistory.Remove((pairId,scanId),out var cursor)) throw new InvalidOperationException("Not a completed discovery acquisition");
-        foreach(var row in scratchDeleted.Where(x=>x.Scan==scanId)) spentDeleted.TryAdd((pairId,row.Key),false);
-        historyCursor[pairId]=cursor;return Task.CompletedTask;
+        if(!completedHistory.TryGetValue((pairId,scanId),out var done) || done.Origin!=HistoryOrigin(pairId)) throw new InvalidOperationException("Not a current completed discovery acquisition");
+        foreach(var row in scratchDeleted.Where(x=>x.Pair==pairId && x.Scan==scanId)) spentDeleted.TryAdd((pairId,row.Key),false);
+        historyCursor[pairId]=done.Cursor;completedHistory.Remove((pairId,scanId));return Task.CompletedTask;
     }
-    public Task<bool> DeletedNameAsync(string pairId,Guid? scanId,string key,CancellationToken ct) => Task.FromResult(spentDeleted.TryGetValue((pairId,key),out var spent) ? !spent : scanId is {} id && scratchDeleted.Contains((id,key)));
+    public Task<bool> DeletedNameAsync(string pairId,Guid? scanId,string key,CancellationToken ct) => DeletedNameAsync(pairId,scanId,key,false,ct);
+    public Task<bool> DeletedNameAsync(string pairId,Guid? scanId,string key,bool isFolder,CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        bool completed=completedHistory.TryGetValue((pairId,scanId.GetValueOrDefault()),out var done) && scanId.HasValue;
+        if(completed ? done.Origin!=HistoryOrigin(pairId) : !historyCursor.ContainsKey(pairId)) return Task.FromResult(false);
+        for(var candidate=key;candidate.Length!=0;candidate=PathNames.Parent(candidate))
+        {
+            if(spentDeleted.TryGetValue((pairId,candidate),out var spent)){if(!spent || candidate==key) return Task.FromResult(!spent);}
+            else if(completed && scratchDeleted.Contains((pairId,scanId!.Value,candidate))) return Task.FromResult(true);
+            if(!isFolder) break;
+        }
+        return Task.FromResult(false);
+    }
     public IAsyncEnumerable<Notice> NoticesAtAsync(string pairId,string pathKey,CancellationToken ct) => Enumerate(notices.Where(n=>n.Key.Pair==pairId && PathNames.Same(n.Value.Path,pathKey)).Select(n=>n.Value),ct);
     public Task ProjectSubtreeAsync(string pairId,Scope from,Scope to,CancellationToken ct)
     {
@@ -291,6 +369,11 @@ public sealed class InMemoryStateStore : IStore
             if(l!=item.LocalPath || d!=item.DropboxPath) projected.Add((item,item with { LocalPath=l,LocalKey=PathNames.Key(l),DropboxPath=d,DropboxKey=PathNames.DropboxKey(d) }));
         }
         foreach(var x in projected) Records.Remove((pairId,x.Before.LocalKey));
+        foreach(var side in new[]{Side.Local,Side.Dropbox})
+        {
+            var old=side==Side.Local?from.LocalPath:from.DropboxPath;var next=side==Side.Local?to.LocalPath:to.DropboxPath;
+            if(old!=next){Touch(pairId,side,PathNames.KeyFor(side,old),true);Touch(pairId,side,PathNames.KeyFor(side,next),true);}
+        }
         foreach(var x in projected) Records.Add((pairId,x.After.LocalKey),x.After);
         return Task.CompletedTask;
     }
@@ -330,13 +413,23 @@ public sealed class InMemoryStateStore : IStore
                        select new RenameCandidate(row.Side,row.Entry,saved);
         return Enumerate(candidates.GroupBy(x=>x.Synced).OrderBy(group=>group.Min(x=>PathNames.Depth(x.Moved.Path))).ThenBy(group=>group.Key.LocalKey,StringComparer.Ordinal).SelectMany(group=>group.OrderBy(x=>x.Side)),ct);
     }
-    /// <summary>Replace the old link with both new links and their notice in one transaction.</summary>
-    public Task CommitKeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry second, Notice notice, CancellationToken ct)
+    /// <inheritdoc/>
+    public Task CommitKeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, Notice notice, CancellationToken ct) =>
+        KeepBothAsync(pairId, before, first, null, notice, ct);
+    /// <inheritdoc/>
+    public Task CommitKeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry second, Notice notice, CancellationToken ct) =>
+        KeepBothAsync(pairId, before, first, second, notice, ct);
+    private Task KeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry? second, Notice notice, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();lock(pairs)
         {
-            if(first.LocalKey==second.LocalKey || first.DropboxKey==second.DropboxKey || before!=null && Records.GetValueOrDefault((pairId,before.LocalKey))!=before || Records.Any(x=>x.Key.Pair==pairId && x.Value!=before && (x.Value.LocalKey==first.LocalKey || x.Value.LocalKey==second.LocalKey || x.Value.DropboxKey==first.DropboxKey || x.Value.DropboxKey==second.DropboxKey))) throw new InvalidDataException("Kept bindings no longer match");
-            SaveNoticeAsync(pairId,notice,ct).GetAwaiter().GetResult();if(before!=null) Records.Remove((pairId,before.LocalKey));Records.Add((pairId,first.LocalKey),first);Records.Add((pairId,second.LocalKey),second);return Task.CompletedTask;
+            if(first.LocalKey==second?.LocalKey || first.DropboxKey==second?.DropboxKey || before!=null && Records.GetValueOrDefault((pairId,before.LocalKey))!=before || Records.Any(x=>x.Key.Pair==pairId && x.Value!=before && (x.Value.LocalKey==first.LocalKey || x.Value.LocalKey==second?.LocalKey || x.Value.DropboxKey==first.DropboxKey || x.Value.DropboxKey==second?.DropboxKey))) throw new InvalidDataException("Kept bindings no longer match");
+            SaveNoticeAsync(pairId,notice,ct).GetAwaiter().GetResult();
+            if(before!=null) Records.Remove((pairId,before.LocalKey));
+            Records.Add((pairId,first.LocalKey),first);
+            if(second!=null) Records.Add((pairId,second.LocalKey),second);
+            TouchChange(pairId,before,first,second);
+            return Task.CompletedTask;
         }
     }
     /// <summary>In one transaction match the reviewed drive notice and publish the chosen pair; only FirstSync resets bindings and first Repair.</summary>

@@ -699,9 +699,38 @@ public static class RecoveryChecks
     public static Task A47QuietJobHostReadyAsync() => throw new NotImplementedException();
     public static Task A47FailedRecoveryHostReadyAsync() => throw new NotImplementedException();
     public static Task A47SecondStartDuringStopDrainAsync() => throw new NotImplementedException();
-    public static Task A51LegacyTieNewChangeStillHeldAsync() => throw new NotImplementedException();
-    public static Task A51LegacyTieIdenticalEditStillHeldAsync() => throw new NotImplementedException();
-    public static Task A51AllMembersAbsentAsync() => throw new NotImplementedException();
+    // A51: a stored legacy Tie survives until the owner picks a choice; identical content never releases it; Repair closes it only once every member is absent on both sides.
+    private static Notice LegacyTie() => new(1,NoticeKind.Tie,TextKey.TieEqualTimes,"item",
+        new IssueSubject([new(Side.Local,"item","pc-item"),new(Side.Dropbox,"item","db-item")],null),DateTimeOffset.UnixEpoch,false);
+    public static async Task A51LegacyTieNewChangeStillHeldAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();await x.LinkAsync("item",1);
+        var tie=LegacyTie();await x.Store.SaveNoticeAsync(x.Pair.PairId,tie,default);
+        var edit=ItemChecks.File(Side.Local,"item",2,"pc-item");x.Pc.Items["item"]=(edit,[2]);
+        await x.CompareAsync();
+        Check.Require(x.Store.OpenNotices.Any(n=>n.Matches(tie)),"A new change to a legacy tie's item released it");
+        Check.Require(x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{2}) && x.Cloud.Items["item"].Bytes.SequenceEqual(new byte[]{1}),"A held tie was resolved instead of staying held");
+        Check.Require(x.Store.Records.Count==1 && x.Store.OpenNotices.Count(n=>n.Matches(tie))==1,"A held tie lost its binding or gained a duplicate notice");
+    }
+    public static async Task A51LegacyTieIdenticalEditStillHeldAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();await x.LinkAsync("item",1);
+        var tie=LegacyTie();await x.Store.SaveNoticeAsync(x.Pair.PairId,tie,default);
+        x.Pc.Items["item"]=(ItemChecks.File(Side.Local,"item",2,"pc-item"),[2]);
+        x.Cloud.Items["item"]=(ItemChecks.File(Side.Dropbox,"item",2,"db-item"),[2]);
+        await x.CompareAsync();
+        Check.Require(x.Store.OpenNotices.Any(n=>n.Matches(tie)),"Identical edits on both sides silently released or closed a legacy tie");
+        Check.Require(x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{2}) && x.Cloud.Items["item"].Bytes.SequenceEqual(new byte[]{2}) && x.Store.Records.Count==1,"Identical edits changed data while the tie held");
+    }
+    public static async Task A51AllMembersAbsentAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();await x.LinkAsync("item",1);
+        var tie=LegacyTie();await x.Store.SaveNoticeAsync(x.Pair.PairId,tie,default);
+        x.Pc.Items.Clear();x.Cloud.Items.Clear();
+        await x.CompareAsync();
+        Check.Require(x.Store.OpenNotices.All(n=>!n.Matches(tie)) && x.Store.Records.Count==0,"A legacy tie whose members are all absent was not closed by Repair");
+        Check.Require(x.Pc.Items.Count==0 && x.Cloud.Items.Count==0,"Closing an absent tie resurrected data");
+    }
     public static Task A52UnreadFolderNoticeRetainedAsync() => throw new NotImplementedException();
     public static Task A52MultiMemberPartiallyCoveredAsync() => throw new NotImplementedException();
     public static Task A52InvalidJobPathsAbsentAsync() => throw new NotImplementedException();

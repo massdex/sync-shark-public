@@ -3,7 +3,10 @@ namespace Massdex.SyncShark.Engine.Tests;
 /// <summary>Registers the checks run by the CI executable.</summary>
 public static class CheckRegistry
 {
-    public static IReadOnlyList<Check> All(CheckArguments input) => Groups(input).Values.SelectMany(checks => checks).ToArray();
+    public static IReadOnlyList<Check> All(CheckArguments input) => Groups(input)
+        .SelectMany(group => group.Key is "acceptance" or "call-budget" or "fixtures"
+            ? group.Value.Select(check => check with { Run = () => Run.AutoSyncChecks.WithinDeadline(ct => Task.Run(check.Run, ct), check.Name) })
+            : group.Value).ToArray();
 
     private static Dictionary<string, Check[]> Groups(CheckArguments input) => new()
     {
@@ -14,6 +17,7 @@ public static class CheckRegistry
             new("Fixtures/ReleaseSchema", Scenarios.StoreMoveChecks.CreateFixtureAsync)
         ],
         ["contracts"] = [
+            new("Contracts/scan history and settlement parity", TestDoubles.StoreParityChecks.RunAsync),
             new("Contracts/job member origin", Contracts.PathScopeChecks.JobMemberOriginAsync),
             new("Contracts/atomic source resets",Contracts.PathScopeChecks.SourceResetAsync),
             new("Contracts/acquisition isolation and spent name", Contracts.PathScopeChecks.AcquisitionIsolationAsync),
