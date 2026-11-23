@@ -1,0 +1,21 @@
+{
+  "engine": [
+    "acceptance",
+    "call-budget",
+    "cli",
+    "contracts",
+    "dependencies",
+    "dropbox",
+    "edge",
+    "executor",
+    "fixtures",
+    "literals",
+    "local",
+    "planner",
+    "run",
+    "storage",
+    "strings"
+  ],
+  "core": [],
+  "ui": []
+}
