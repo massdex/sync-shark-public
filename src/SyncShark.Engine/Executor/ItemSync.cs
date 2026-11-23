@@ -177,9 +177,7 @@ public static class ItemSync
         {
             if(heldInput==null || paths.ExcludesBinding(folder) || await store.FindAsync(pair.PairId,deleted,folder.KeyOn(deleted),ct)!=folder || await source.ReadByIdAsync(folder.IdOn(deleted),ct) is {InScope:true}) Retain(row.Key,failed);
             var found=await target.ReadByIdAsync(folder.IdOn(target.Side),ct);
-            // Both bound identities are gone (R57, R95 B1): the selected removal already settled; retire the binding as ForgetOnly does.
-            if(found is not {InScope:true} at) { await store.CommitAsync(pair.PairId,folder,null,null,null,ct); return true; }
-            if(!at.Location.Entry.IsFolder || at.Location.Entry.Id!=folder.IdOn(target.Side) || !PathNames.Same(at.Location.Entry.Path,folder.PathOn(target.Side))) { Retain(row.Key,failed); return false; }
+            if(found is not {InScope:true} at || !at.Location.Entry.IsFolder || at.Location.Entry.Id!=folder.IdOn(target.Side) || !PathNames.Same(at.Location.Entry.Path,folder.PathOn(target.Side))) { Retain(row.Key,failed); return false; }
             var selected=at.Location.Entry; RequireReadable(target.Side,selected);
             await RequireRemovalAsync(new FolderDelete().ApplyAsync(pair,settings,events,paths,selected,folder,target.Side,SyncAction.DeleteOn(target.Side),local,dropbox,store,heldInput!,populate,compareOldBinding,ct,resolveConflict:(where,side,version,token)=>new Effects().RecoverConflictAsync(pair,settings,events,paths,where,side,version,local,dropbox,store,populate,compareOldBinding,token),coversThrough:coversThrough),()=>failed?.Invoke(row.Key,false));
             return true;
