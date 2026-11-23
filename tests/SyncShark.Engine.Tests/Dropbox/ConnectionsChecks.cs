@@ -124,12 +124,14 @@ public static class ConnectionsChecks
                 File.WriteAllText(ListFile(root), LegacyRecord(1, "set", NullAdditional(first), null));
                 Expect(Refuses(() => connections.Read(root)), "A winning set with a null additional entry was projected");
             });
-            Case(failures, "a set with a null retained entry decodes", () =>
+            Case(failures, "null retained entry rejects only the winner", () =>
             {
                 var root = Root(scratch, "nullRetainedEntry");
                 Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
                 File.WriteAllText(ListFile(root), LegacyRecord(1, "set", NullRetained(second), null));
-                Expect(connections.Read(root).SequenceEqual(new[] { second }), "A null retained entry stopped the typed read");
+                Expect(failures, Refuses(() => connections.Read(root)), "A winning null retained entry exposed membership");
+                File.AppendAllText(ListFile(root), LegacySet(first));
+                Expect(connections.Read(root).SequenceEqual(new[] { first }), "A superseded null retained entry stopped the scan");
             });
             Case(failures, "wrong-typed retained record", () =>
             {
@@ -297,7 +299,9 @@ public static class ConnectionsChecks
                 connections.Save(target, new[] { first });
                 var sourceBytes = File.ReadAllBytes(ListFile(source));
                 var targetBytes = File.ReadAllBytes(ListFile(target));
-                Expect(connections.Verify(source, target, new[] { first }) is null,
+                var differing = new List<string>();
+                Expect(connections.Verify(source, target, new[] { first }, differing.Add) is null &&
+                       differing.SequenceEqual(new[] { Path.GetFullPath(ListFile(source)) }),
                     "A same-set canonical target with different bytes was refused instead of kept under R47");
                 Expect(File.ReadAllBytes(ListFile(source)).AsSpan().SequenceEqual(sourceBytes) &&
                        File.ReadAllBytes(ListFile(target)).AsSpan().SequenceEqual(targetBytes),
@@ -435,6 +439,10 @@ public static class ConnectionsChecks
                 Expect(connections.Read(root).SequenceEqual(new[] { first }), "An explicit connection id was not trimmed");
                 File.WriteAllText(ListFile(root), LegacySet(first) + LegacyRecord(1.5, "set", BindingJson(null, "acct-other"), null));
                 Expect(connections.Read(root).SequenceEqual(new[] { first }), "A non-Int32 schema threw instead of keeping the prefix");
+                var damaged = Encoding.UTF8.GetBytes(LegacySet(second));
+                damaged[damaged.AsSpan().IndexOf(Encoding.UTF8.GetBytes(second))] = 0xff;
+                File.WriteAllBytes(ListFile(root), Encoding.UTF8.GetBytes(LegacySet(first)).Concat(damaged).ToArray());
+                Expect(connections.Read(root).SequenceEqual(new[] { first }), "Malformed UTF-8 lost the preceding valid membership");
                 File.WriteAllText(ListFile(root), LegacySet(first) + "\r\n" + LegacySet(second));
                 Expect(connections.Read(root).SequenceEqual(new[] { first }), "An empty-after-CR record was skipped instead of stopping");
                 File.WriteAllText(ListFile(root), "not-json\n" + LegacySet(second));
@@ -473,6 +481,19 @@ public static class ConnectionsChecks
                 connections.Save(root, Array.Empty<string>());
                 Expect(connections.Read(root).Count == 0, "An empty canonical list was not read back");
                 Expect(Refuses(() => connections.Save(root, new[] { "not-a-connection-id" })), "An invalid id was saved");
+            });
+            Case(failures, "membership updates share one publication boundary", () =>
+            {
+                var source = Root(scratch, "authority");
+                var target = Root(scratch, "published");
+                connections.Save(source, new[] { first, third });
+                connections.Save(target, new[] { first });
+                var readRoot = source;
+                Parallel.Invoke(() => connections.SetConnected(target, ref readRoot, second, true),
+                    () => connections.SetConnected(target, ref readRoot, first, false));
+                Expect(readRoot == target && connections.Read(target).SequenceEqual(Sorted(second, third)) &&
+                       connections.Read(source).SequenceEqual(Sorted(first, third)),
+                    "Concurrent membership updates lost an account or reopened the disconnected account");
             });
             Case(failures, "stable connection id", () =>
             {

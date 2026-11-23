@@ -4,7 +4,14 @@ namespace Massdex.SyncShark.Engine.Local;
 public static class DriveIdentity
 {
     /// <summary>Convert an absolute path for native Windows calls.</summary>
-    public static string ToExtendedWindowsPath(string path) => throw new NotImplementedException();
+    public static string ToExtendedWindowsPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        if (fullPath.StartsWith("\\\\?\\", StringComparison.Ordinal)) return fullPath;
+        return fullPath.StartsWith("\\\\", StringComparison.Ordinal)
+            ? "\\\\?\\UNC\\" + fullPath[2..]
+            : "\\\\?\\" + fullPath;
+    }
 
     /// <summary>Read operation on the supplied facts.</summary>
     public static (DirectoryIdentity Identity, DriveType Type) Read(string root) => throw new NotImplementedException();

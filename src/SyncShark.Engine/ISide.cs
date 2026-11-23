@@ -31,6 +31,8 @@ public interface ISide
     Task<RemovalResult> EnsureFolderAsync(string path, CancellationToken ct);
     /// <summary>Removes the selected file or folder. Dropbox addresses the selected identity through Dispatcher; Local rechecks the held victim. An accepted but Running request is not removal.</summary>
     Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, CancellationToken ct);
+    /// <summary>Resolve only the selected create collision without repeating the accepted write.</summary>
+    Task<JobReply.Terminal> ResolveCreateClashAsync(JobMember member, JobReply.Terminal selected, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Pass the originating action through deletion so an accepted job retains its removal policy.</summary>
     Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, ActionKind origin, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Moves expected to newPath (the destination must be free; case-only allowed).</summary>
@@ -55,6 +57,8 @@ public interface ISide
     Task<DeletionEvidence> DeletedAsync(string path, bool folder, CancellationToken ct);
     /// <summary>Recovers attributable file bytes or folder scope; a substitute is never the selected version.</summary>
     Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct);
+    /// <summary>Restore the entire selected bin item to its original path only if the name is vacant.</summary>
+    Task<RemovalResult> RestoreRecycledAsync(IdentityLocation actual, Entry version, string originalPath, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Reopens only the armed victim’s stage, verified by held volume/id, size and full digest. Its own stamped metadata supplies the source time. Ordinary redecision precedes create-only publication; no live source Entry is required.</summary>
     Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, CancellationToken ct);
     /// <summary>Observes a returned job without submitting its members again.</summary>

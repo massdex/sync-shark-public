@@ -297,7 +297,7 @@ public sealed class SignIn
                 throw;
             }
             catch (Exception error) when (error is OperationCanceledException or TimeoutException or
-                HttpRequestException or IOException or SocketException)
+                InvalidDataException or HttpRequestException or IOException or SocketException)
             {
                 // Offline or unproven ownership (including an HTTP timeout or an interrupted response body):
                 // the local disconnect completes and the fixed entry is left in place (R41).

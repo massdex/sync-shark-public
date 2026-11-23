@@ -12,6 +12,7 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// append log) and only its winner is projected to ids.</summary>
 public sealed class Connections
 {
+    private readonly object membership = new();
     private const string StateFolder = "state";
     private const string FileName = "dropbox-connection.jsonl";
     private const string SlotA = "dropbox-connection-a.json";
@@ -41,20 +42,55 @@ public sealed class Connections
     private sealed record RecoveryState(string? EvidenceFile, string? OriginalSha256, int ValidPrefixByteLength,
         int BadByteLength, string? BadSha256, string? Outcome);
 
-    private sealed record ProviderCapabilityFlags(bool ContentRead, bool ContentWrite, bool MetadataRead,
-        bool MetadataWrite, bool SharingRead, bool SharingWrite, bool StableObjectIds, bool DeltaCursor,
-        bool NativeMove, bool Revisions, bool DeletedItems, bool ProgrammaticRewind, bool FileRequestsRead,
-        bool FileRequestsWrite, bool NativeDocuments, bool Shortcuts, bool SharedDrives, bool ConditionalWrites);
+    private sealed record ProviderCapabilityFlags(
+        bool ContentRead,
+        bool ContentWrite,
+        bool MetadataRead,
+        bool MetadataWrite,
+        bool SharingRead,
+        bool SharingWrite,
+        bool StableObjectIds,
+        bool DeltaCursor,
+        bool NativeMove,
+        bool Revisions,
+        bool DeletedItems,
+        bool ProgrammaticRewind,
+        bool FileRequestsRead = false,
+        bool FileRequestsWrite = false,
+        bool NativeDocuments = false,
+        bool Shortcuts = false,
+        bool SharedDrives = false,
+        bool ConditionalWrites = true);
 
-    private sealed record ProviderConnectionRecord(string? ConnectionId, string? Provider, string? AccountId,
-        string? RootNamespaceId, string? HomeNamespaceId, string? DisplayName, string? Email, string? AccountType,
-        string? CredentialReference, bool IsActive, ProviderCapabilityFlags? Capabilities);
+    private sealed record ProviderConnectionRecord(
+        string ConnectionId,
+        string Provider,
+        string AccountId,
+        string RootNamespaceId,
+        string HomeNamespaceId,
+        string DisplayName,
+        string Email,
+        string AccountType,
+        string CredentialReference,
+        bool IsActive,
+        ProviderCapabilityFlags Capabilities);
 
-    private sealed record DropboxConnectionBinding(string? ClientId, string? AccountId, string? RootNamespaceId,
-        string? HomeNamespaceId, string? ContentAccess, string[]? Scopes, string? ConnectionId, string? DisplayName,
-        string? Email, string? AccountType, DateTimeOffset? ConnectedUtc, DateTimeOffset? LastVerifiedUtc,
-        string? CredentialReference, ProviderConnectionRecord[]? RetainedConnections,
-        DropboxConnectionBinding[]? AdditionalConnections);
+    private sealed record DropboxConnectionBinding(
+        string ClientId,
+        string AccountId,
+        string RootNamespaceId,
+        string HomeNamespaceId,
+        string ContentAccess,
+        IReadOnlyList<string> Scopes,
+        string ConnectionId = "",
+        string DisplayName = "",
+        string Email = "",
+        string AccountType = "",
+        DateTimeOffset? ConnectedUtc = null,
+        DateTimeOffset? LastVerifiedUtc = null,
+        string CredentialReference = "",
+        IReadOnlyList<ProviderConnectionRecord>? RetainedConnections = null,
+        IReadOnlyList<DropboxConnectionBinding>? AdditionalConnections = null);
 
     /// <summary>The stable connection id of a Dropbox account: <c>connection-</c> and 24 lowercase hex digits of its
     /// domain-separated account hash, as 0.3.95 created it.</summary>
@@ -79,7 +115,11 @@ public sealed class Connections
     /// with different bytes is accepted and neither side is overwritten (R47); the migration owner reports it once via
     /// the existing notice path. On refusal remove only this attempt's files and throw before database publication; on
     /// success return cleanup for a failed switch, or null when nothing was created.</summary>
-    public Action? Verify(string sourceRoot, string productRoot, IReadOnlyList<string> requiredConnectionIds)
+    public Action? Verify(string sourceRoot, string productRoot, IReadOnlyList<string> requiredConnectionIds) =>
+        Verify(sourceRoot, productRoot, requiredConnectionIds, null);
+
+    public Action? Verify(string sourceRoot, string productRoot, IReadOnlyList<string> requiredConnectionIds,
+        Action<string>? differingAppendLog)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceRoot, nameof(sourceRoot));
         ArgumentException.ThrowIfNullOrWhiteSpace(productRoot, nameof(productRoot));
@@ -92,6 +132,7 @@ public sealed class Connections
         var sourceSet = presented is { Form: not ListShape.Canonical } observed ? observed.Ids : SourceSet(sourceRoot);
         var slotsAuthoritative = SlotsExist(sourceRoot);
         var appendSuppliesBytes = !slotsAuthoritative && File.Exists(source);
+        var differing = false;
         var created = false;
         IReadOnlyList<string> actual;
         try
@@ -118,6 +159,7 @@ public sealed class Connections
                         throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
                     if (resolved.Form == ListShape.Append && appendSuppliesBytes && !SameBytesBounded(source, target))
                         throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
+                    differing = appendSuppliesBytes && resolved.Form == ListShape.Canonical && !SameBytesBounded(source, target);
                     actual = resolved.Ids;
                 }
                 else if (sourceSet.Count > 0 || slotsAuthoritative || File.Exists(source))
@@ -134,12 +176,25 @@ public sealed class Connections
             foreach (var required in requiredConnectionIds)
                 if (!actual.Contains(required, StringComparer.Ordinal))
                     throw new InvalidDataException(Text.Get(TextKey.AccountMissing, (TextArg.Account, required)));
+            if (differing) differingAppendLog?.Invoke(Path.GetFullPath(source));
             return created ? () => TryDelete(target) : null;
         }
         catch
         {
             if (created) TryDelete(target);
             throw;
+        }
+    }
+
+    /// <summary>Publish one membership change from the current authority; only a successful save switches reads to the fixed root.</summary>
+    public void SetConnected(string productRoot, ref string readRoot, string connectionId, bool connected)
+    {
+        _ = CredentialStore.AccountTarget(connectionId);
+        lock (membership)
+        {
+            var ids = Read(readRoot);
+            Save(productRoot, (connected ? ids.Append(connectionId) : ids.Where(id => id != connectionId)).ToArray());
+            Volatile.Write(ref readRoot, productRoot);
         }
     }
 
@@ -341,7 +396,6 @@ public sealed class Connections
         if (new FileInfo(path).Length > MaximumStateBytes) throw InvalidList();
         var bytes = File.ReadAllBytes(path);
         DropboxConnectionBinding? winner = null;
-        var hasWinner = false;
         var records = 0;
         foreach (var line in TerminatedLines(bytes))
         {
@@ -352,17 +406,17 @@ public sealed class Connections
             catch (JsonException) { break; }
             using (document)
             {
-                if (!TryApplyLegacy(document.RootElement, ref winner, ref hasWinner)) break;
+                if (!TryApplyLegacy(trimmed, document.RootElement, ref winner)) break;
             }
             if (++records > MaximumAppendRecords) throw InvalidList();
         }
-        return hasWinner && winner is not null ? ProjectBinding(winner) : Array.Empty<string>();
+        return winner is not null ? ProjectBinding(winner) : Array.Empty<string>();
     }
 
-    private static bool TryApplyLegacy(JsonElement record, ref DropboxConnectionBinding? winner, ref bool hasWinner)
+    private static bool TryApplyLegacy(ReadOnlySpan<byte> bytes, JsonElement record, ref DropboxConnectionBinding? winner)
     {
         AppendRecord<DropboxConnectionBinding>? decoded;
-        try { decoded = JsonSerializer.Deserialize<AppendRecord<DropboxConnectionBinding>>(record.GetRawText(), JsonOptions); }
+        try { decoded = JsonSerializer.Deserialize<AppendRecord<DropboxConnectionBinding>>(bytes, JsonOptions); }
         catch (JsonException) { return false; }
         if (decoded is null || decoded.SchemaVersion != AppendSchemaVersion || decoded.PayloadSha256 is null ||
             string.IsNullOrEmpty(decoded.Operation))
@@ -372,7 +426,6 @@ public sealed class Connections
         {
             if (!HashMatches(decoded.PayloadSha256, Encoding.UTF8.GetBytes(DeleteOperation))) return false;
             winner = null;
-            hasWinner = false;
             return true;
         }
         if (kind == RecoveryOperation)
@@ -388,7 +441,6 @@ public sealed class Connections
         if (!record.TryGetProperty("Value", out var rawValue) || rawValue.ValueKind == JsonValueKind.Null) return false;
         if (!HashMatches(decoded.PayloadSha256, Encoding.UTF8.GetBytes(rawValue.GetRawText()))) return false;
         winner = decoded.Value;
-        hasWinner = true;
         return true;
     }
 
@@ -434,6 +486,7 @@ public sealed class Connections
 
     private static void AddBindingId(DropboxConnectionBinding binding, List<string> ids)
     {
+        if (binding.RetainedConnections?.Any(item => item is null) == true) throw InvalidList();
         if (!string.IsNullOrWhiteSpace(binding.ConnectionId))
         {
             ids.Add(ValidatedConnectionId(binding.ConnectionId.Trim()));
