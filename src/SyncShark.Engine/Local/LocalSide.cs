@@ -204,7 +204,7 @@ public sealed class LocalSide : ISide
                     return new(RemovalOutcome.Unknown,null,TextKey.PublishFailed);
                 var published=Publication(final.Entry(local.Path,local.Proof.ContentHash),usn.Published(file.SafeFileHandle)) with
                     {Recycled=removal?.Recycled, RecycledVictim=removal?.RecycledVictim};
-                if(selection!=null) await store.DisarmAsync(pair.PairId,selection,local.Proof,ct);
+                
                 return published;
             }
             finally { file.Dispose(); }
