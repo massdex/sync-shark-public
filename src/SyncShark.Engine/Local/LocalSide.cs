@@ -219,7 +219,7 @@ public sealed class LocalSide : ISide
         var turn=Turns.GetOrAdd(pair.PairId,_=>new(1)); bool held=false;
         try
         {
-            var result=await RemovePinned(expected,selection!,null,driveType,ct,async()=>{await turn.WaitAsync(ct);held=true;});
+            var result=await RemovePinned(expected,selection!,null,driveType,ct,()=>Task.CompletedTask);
             if(result.Outcome==RemovalOutcome.Removed && !expected.IsFolder) await store.DisarmAsync(pair.PairId,selection!,null,ct);
             return result;
         }
