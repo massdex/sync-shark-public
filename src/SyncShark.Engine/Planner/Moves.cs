@@ -56,7 +56,7 @@ public static class Moves
         return null;
     }
 
-    internal static bool IsFileSplit(SyncAction action) => action is {Kind:ActionKind.ForgetOnly, Row.Synced.IsFolder:false, InfoAfter:TextKey.InfoMovedEdited or TextKey.InfoMovedDeleted or TextKey.InfoMovedTwice};
+    internal static bool IsFileSplit(SyncAction action) => action.Target!=null && action is {Kind:ActionKind.ForgetOnly, Row.Synced.IsFolder:false, InfoAfter:TextKey.InfoMovedEdited or TextKey.InfoMovedDeleted or TextKey.InfoMovedTwice};
 
     private static SyncAction Split(Row row, TextKey info) => new(ActionKind.ForgetOnly, row, InfoAfter: info);
     private static SyncAction Failure(Row row, TextKey cause) => new(ActionKind.Notice, row, NoticeKind: NoticeKind.Failure, Cause: cause);
