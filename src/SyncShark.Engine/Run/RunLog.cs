@@ -222,7 +222,7 @@ public sealed class RunLog : IDisposable
                 case '\n': escaped.Append(EscapeNewLine); break;
                 default:
                     escaped.Append(UnicodeEscape)
-                        .Append(((int)character + 1).ToString(UnicodeFormat, CultureInfo.InvariantCulture));
+                        .Append(((int)character).ToString(UnicodeFormat, CultureInfo.InvariantCulture));
                     break;
             }
         }
