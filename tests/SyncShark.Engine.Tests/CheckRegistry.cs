@@ -3,7 +3,10 @@ namespace Massdex.SyncShark.Engine.Tests;
 /// <summary>Registers the checks run by the CI executable.</summary>
 public static class CheckRegistry
 {
-    public static IReadOnlyList<Check> All(CheckArguments input) => Groups(input).Values.SelectMany(checks => checks).ToArray();
+    public static IReadOnlyList<Check> All(CheckArguments input) => Groups(input)
+        .SelectMany(group => group.Key is "acceptance" or "call-budget" or "fixtures"
+            ? group.Value.Select(check => check with { Run = () => Run.AutoSyncChecks.WithinDeadline(ct => Task.Run(check.Run, ct), check.Name) })
+            : group.Value).ToArray();
 
     private static Dictionary<string, Check[]> Groups(CheckArguments input) => new()
     {
@@ -14,6 +17,7 @@ public static class CheckRegistry
             new("Fixtures/ReleaseSchema", Scenarios.StoreMoveChecks.CreateFixtureAsync)
         ],
         ["contracts"] = [
+            new("Contracts/scan history and settlement parity", TestDoubles.StoreParityChecks.RunAsync),
             new("Contracts/job member origin", Contracts.PathScopeChecks.JobMemberOriginAsync),
             new("Contracts/atomic source resets",Contracts.PathScopeChecks.SourceResetAsync),
             new("Contracts/acquisition isolation and spent name", Contracts.PathScopeChecks.AcquisitionIsolationAsync),
@@ -432,6 +436,9 @@ public static class CheckRegistry
             new("A18 hard linked child in pair", Scenarios.FolderChecks.A18HardLinkedChildInPairAsync),
             new("A18 hard linked child outside pair", Scenarios.FolderChecks.A18HardLinkedChildOutsidePairAsync),
             new("A18 old name reused", Scenarios.FolderChecks.A18OldNameReusedAsync),
+            new("A13 dropbox move lands before delete request", Scenarios.FolderChecks.A13DropboxMoveLandsBeforeDeleteRequestAsync),
+            new("A18 crossed parent mappings", Scenarios.FolderChecks.A18CrossedParentMappingsAsync),
+            new("A18 relocation mapped parent concurrent repair", Scenarios.FolderChecks.A18RelocationMappedParentConcurrentRepairAsync),
             new("A23 nested clashing child folders", Scenarios.FolderChecks.A23NestedClashingChildFoldersAsync),
             new("A23 different child files keep both", Scenarios.FolderChecks.A23DifferentChildFilesKeepBothAsync),
             new("A23 move over relocation ceiling", Scenarios.FolderChecks.A23MoveOverRelocationCeilingAsync),

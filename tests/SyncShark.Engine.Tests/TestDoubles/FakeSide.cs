@@ -144,8 +144,19 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(DeleteAsync)); Mutations.Add(expected.Id);var old = Current(expected);
         if (RecycleRefusals.TryGetValue(expected.Path, out var failure)) throw failure;
-        foreach (var child in Items.Values.Where(v => expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray()) { History.Add(child); Items.Remove(child.Entry.Path); }
-        History.Add(old); Items.Remove(expected.Path); AfterDelete?.Invoke(expected); return Task.FromResult(new RemovalResult(RemovalOutcome.Removed, null, null));
+        var children = Items.Values.Where(v => expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray();
+        foreach (var child in children) { History.Add(child); Items.Remove(child.Entry.Path); }
+        History.Add(old); Items.Remove(expected.Path); AfterDelete?.Invoke(expected);
+        var removed = new RemovalResult(RemovalOutcome.Removed, null, null);
+        return Task.FromResult(Side == Side.Dropbox
+            ? removed with { Reply = new JobReply.Terminal([(old.Entry, null, null)]) }
+            : removed with { RecycledVictim = new(selection?.Proof.VolumeId ?? Side.ToString(), expected.Path, old.Entry), Recycled = expected.IsFolder && selection != null ? Contents() : null });
+
+        async IAsyncEnumerable<Listed> Contents()
+        {
+            await Task.CompletedTask;
+            foreach (var child in children) yield return new(child.Entry.Path, child.Entry);
+        }
     }
     // Immediate fake deletes mutate the selected entry directly; there is no accepted job to persist an origin on.
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, ActionKind origin, CancellationToken ct) =>
@@ -194,7 +205,10 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(RecoverAsync));
         if(Side==Side.Local && actual.Domain=="volume" && actual.Entry==version && History.LastOrDefault(v=>v.Entry==version) is { Entry:not null } retained && !version.IsFolder)
             return Task.FromResult<Recovery?>(new Recovery.File(version,new MemoryStream(retained.Bytes,false)));
-        return Task.FromResult(Recoverable.GetValueOrDefault((actual.Entry.Id,version.Revision,version.ContentHash)));
+        var scripted = Recoverable.GetValueOrDefault((actual.Entry.Id,version.Revision,version.ContentHash));
+        return Task.FromResult(scripted is Recovery.File file
+            ? file with { Bytes = new MemoryStream(((MemoryStream)file.Bytes).ToArray(), false) }
+            : scripted);
     }
     /// <summary>ReadJob operation on the supplied facts.</summary>
     public Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct)

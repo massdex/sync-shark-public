@@ -201,7 +201,9 @@ public static class FolderChecks
         await store.SavePairAsync(pair, default);
         if (extraPairs != null) foreach (var extra in extraPairs) await store.SavePairAsync(extra, default);
         if (baseline) await store.FinishRepairAsync(pair.PairId, (0, await store.OweRepairAsync(pair.PairId, Side.Dropbox, "requested", default)), "{}", default);
-        IReadOnlyList<PairConfig> pairList = allPairs ?? [pair, ..(extraPairs ?? [])];
+        IReadOnlyList<PairConfig> pairList;
+        if (allPairs != null) pairList = allPairs;
+        else { var list = new List<PairConfig> { pair }; if (extraPairs != null) list.AddRange(extraPairs); pairList = list; }
         var paths = new PathScope(pair, pairList, DriveType.Fixed);
         var queue = await ItemChecks.StartQueueAsync(pair, paths, pc, db, store);
         return new(pair, paths, pc, db, store, queue);
@@ -704,32 +706,310 @@ public static class FolderChecks
         Check.Require(run.Store.Records.Values.All(r => r.LocalPath != "New/Child"), "The deleted child's binding survived at the moved endpoint");
         Check.Require(run.Db.Items.TryGetValue("Old/Child", out var occupant) && occupant.Entry.Id == "new-occupant", "The new occupant at the old path was removed by the queued delete");
     }
-    public static Task A23NestedClashingChildFoldersAsync() => throw new NotImplementedException();
-    public static Task A23DifferentChildFilesKeepBothAsync() => throw new NotImplementedException();
+    private static Task<RemovalResult> MergeAsync(PairRun run, Entry source, Entry dest,
+        Func<Entry, Entry, Entry?, SyncedEntry?, CancellationToken, Task<EffectOutcome>>? collide = null) =>
+        new FolderMerge().ApplyAsync(run.Pair, ItemChecks.Settings, _ => { }, run.Paths, source, dest, Side.Local, run.Pc, run.Db, run.Store,
+            _ => [], (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, default, collide: collide,
+            coversThrough: global::Massdex.SyncShark.Engine.Tests.Executor.FolderDeleteChecks.Admitted(run.Pc, run.Db));
+
+    private static async Task<(Entry Source, Entry Dest)> MergeFolderAsync(PairRun run, string source = "old", string dest = "new")
+    {
+        var src = Seed(run.Pc, source, 0, folder: true);
+        var at = src with { Path = dest, Id = "dest" };
+        run.Pc.Items[dest] = (at, []);
+        return (src, at);
+    }
+
+    /// <summary>A nested clashing child folder merges into the existing destination child without a notice.</summary>
+    public static async Task A23NestedClashingChildFoldersAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        var source = Seed(run.Pc, "old", 0, folder: true);
+        var dest = source with { Path = "new", Id = "dest" };
+        run.Pc.Items["new"] = (dest, []);
+        foreach (var path in new[] { "old/sub", "new/sub" })
+        {
+            var v = source with { Path = path, Id = path };
+            run.Pc.Items[path] = (v, []);
+            await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(v, v with { Id = "remote-" + path }), null, null, default);
+        }
+        var child = Seed(run.Pc, "old/free", 1); var peer = Seed(run.Db, "old/free", 1);
+        await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(child, peer), null, null, default);
+        var result = await MergeAsync(run, source, dest);
+        Check.Require(result.Outcome == RemovalOutcome.Removed && !run.Pc.Items.ContainsKey("old") && !run.Pc.Items.ContainsKey("old/sub"), "The source was not removed after the nested merge");
+        Check.Require(run.Pc.Items.ContainsKey("new/sub") && run.Pc.Items.ContainsKey("new/free") && run.Pc.Items["new/free"].Entry.Id == child.Id, "The nested child folders did not merge or the free child did not move");
+        Check.Require(run.Store.OpenNotices.Count == 0, "A plain folder merge raised a notice");
+    }
+
+    /// <summary>A clashing child file of different content is kept both; neither copy is lost.</summary>
+    public static async Task A23DifferentChildFilesKeepBothAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        var (source, dest) = await MergeFolderAsync(run);
+        var selected = Seed(run.Pc, "old/f", 1); var incumbent = Seed(run.Pc, "new/f", 2);
+        int collisions = 0;
+        var result = await MergeAsync(run, source, dest, (sel, inc, peer, saved, ct) =>
+        {
+            collisions++;
+            Check.Require(sel.Id == selected.Id && inc.Id == incumbent.Id, "Wrong collision subjects for the clashing child file");
+            return Task.FromResult(EffectOutcome.Refused);
+        });
+        Check.Require(collisions == 1, "The different child files were not sent to the collision owner");
+        Check.Require(Is(run.Pc, "new/f", false, 2) && Is(run.Pc, "old/f", false, 1), "A clashing child file was lost instead of kept");
+        Check.Require(run.Pc.Items.ContainsKey("new"), "The existing destination folder was removed");
+    }
+
     public static Task A23MoveOverRelocationCeilingAsync() => throw new NotImplementedException();
-    public static Task A23NewChildBeforeLastListingAsync() => throw new NotImplementedException();
-    public static Task A23NewChildAfterLastListingAsync() => throw new NotImplementedException();
-    public static Task A23RemoveOnlyOriginalSourceAsync() => throw new NotImplementedException();
-    public static Task A30JunctionAsync() => throw new NotImplementedException();
-    public static Task A30SymbolicLinkAsync() => throw new NotImplementedException();
-    public static Task A30LastMemberDisappearsAsync() => throw new NotImplementedException();
-    public static Task A30MappedLinkProtectsRemoteMoveAsync() => throw new NotImplementedException();
-    public static Task A36IgnoredFileOnlyAsync() => throw new NotImplementedException();
-    public static Task A36IgnoredFolderWithContentAsync() => throw new NotImplementedException();
-    public static Task A36OrdinaryFileInFolderAsync() => throw new NotImplementedException();
-    public static Task A36ExcludedChildAsync() => throw new NotImplementedException();
-    public static Task A36NestedRootChildAsync() => throw new NotImplementedException();
-    public static Task A36LinkedChildAsync() => throw new NotImplementedException();
-    public static Task A36NestedEmptyFoldersAsync() => throw new NotImplementedException();
-    public static Task A36EmptyChildWithoutDeletionRecordAsync() => throw new NotImplementedException();
-    public static Task A36InterleavedOrdinalSubtreesAsync() => throw new NotImplementedException();
+
+    /// <summary>A child the last one-level listing finds keeps the source as merge work and lands at the destination.</summary>
+    public static async Task A23NewChildBeforeLastListingAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        var (source, dest) = await MergeFolderAsync(run);
+        var extra = Seed(run.Pc, "old/extra", 3);
+        var result = await MergeAsync(run, source, dest);
+        Check.Require(run.Pc.Items.ContainsKey("new/extra") && run.Pc.Items["new/extra"].Bytes.SequenceEqual(new byte[] { 3 }), "A newly found child was not carried into the destination");
+        Check.Require(!run.Pc.Items.ContainsKey("old") && !run.Pc.Items.ContainsKey("old/extra"), "The source survived after its last listing was empty of work");
+    }
+
+    /// <summary>A child landing after the listing is recovered rather than lost with the source cleanup.</summary>
+    public static async Task A23NewChildAfterLastListingAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        var (source, dest) = await MergeFolderAsync(run);
+        Seed(run.Pc, "old/late", 4);
+        var result = await MergeAsync(run, source, dest);
+        var recovered = run.Pc.Items.ContainsKey("new/late") || run.Pc.Items.ContainsKey("old/late");
+        Check.Require(recovered && run.Pc.Items.Values.Any(v => v.Bytes.SequenceEqual(new byte[] { 4 })), "A late child was lost with the source cleanup");
+    }
+
+    /// <summary>Only the original source folder is removed; other folders and the destination are kept.</summary>
+    public static async Task A23RemoveOnlyOriginalSourceAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        var (source, dest) = await MergeFolderAsync(run);
+        var other = Seed(run.Pc, "other", 0, folder: true);
+        await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(other, Seed(run.Db, "other", 0, folder: true)), null, null, default);
+        Seed(run.Pc, "old/a", 1); Seed(run.Pc, "old/b", 2);
+        var result = await MergeAsync(run, source, dest);
+        Check.Require(!run.Pc.Items.ContainsKey("old") && run.Pc.Items.ContainsKey("new") && run.Pc.Items.ContainsKey("other"), "The merge removed a folder other than the original source");
+        Check.Require(run.Pc.Items.ContainsKey("new/a") && run.Pc.Items.ContainsKey("new/b"), "The free children did not reach the destination");
+    }
+    private static async Task LinkNoticeAsync(string top)
+    {
+        var run = await StartAsync(baseline: true);
+        Seed(run.Pc, top + "/link", 0, skip: nameof(TextKey.SkipLink));
+        await RepairAsync(run);
+        var notice = run.Store.OpenNotices.Single();
+        Check.Require(notice.Kind == NoticeKind.Info && notice.Cause == TextKey.InfoLinks && notice.Subject.Items.Count == 1,
+            "A link was not summarised in the pair-level links notice");
+        Check.Require(run.Pc.Items.Count == 1 && run.Db.Items.Count == 0 && run.Store.Records.Count == 0, "A link was followed or copied to the other side");
+    }
+
+    public static Task A30JunctionAsync() => LinkNoticeAsync("top-a");
+    public static Task A30SymbolicLinkAsync() => LinkNoticeAsync("top-b");
+
+    /// <summary>The pair-level links notice counts the members and closes when the last one is gone.</summary>
+    public static async Task A30LastMemberDisappearsAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        Seed(run.Pc, "top-a/link", 0, skip: nameof(TextKey.SkipLink));
+        Seed(run.Pc, "top-b/link", 0, skip: nameof(TextKey.SkipLink));
+        await RepairAsync(run);
+        Check.Require(run.Store.OpenNotices.Single().Subject.Items.Count == 2, "The links notice did not count both members");
+        run.Pc.Items.Remove("top-a/link");
+        await RepairAsync(run);
+        Check.Require(run.Store.OpenNotices.Single().Subject.Items.Count == 1, "The links notice did not shrink to the remaining member");
+        run.Pc.Items.Remove("top-b/link");
+        await RepairAsync(run);
+        Check.Require(run.Store.OpenNotices.Count == 0, "The links notice did not close when the last link was gone");
+    }
+
+    /// <summary>A mapped link subtree is never carried into the destination by an enclosing move.</summary>
+    public static async Task A30MappedLinkProtectsRemoteMoveAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        var source = Seed(run.Pc, "old", 0, folder: true);
+        var dest = source with { Path = "new", Id = "dest" };
+        run.Pc.Items["new"] = (dest, []);
+        Seed(run.Pc, "old/link", 0, skip: nameof(TextKey.SkipLink));
+        var result = await MergeAsync(run, source, dest);
+        Check.Require(run.Pc.Items.ContainsKey("old/link") && !run.Pc.Items.ContainsKey("new/link"), "The enclosing move carried the mapped link subtree");
+        Check.Require(run.Db.Items.Count == 0, "The link subtree was copied to the other endpoint");
+        Check.Require(result.Outcome == RemovalOutcome.Retained, "The enclosing move removed its source despite the protected link");
+    }
+    private static async Task<PairRun> DeletedFolderRunAsync(PairConfig? pair = null, IReadOnlyList<PairConfig>? extra = null, params string[] deleted)
+    {
+        var run = await StartAsync(pair: pair, extraPairs: extra);
+        foreach (var path in deleted) run.Db.DeletedHistory[path] = new DeletionEvidence.DeletedPath(path, path);
+        return run;
+    }
+
+    private static void NoKeptFolderNotice(PairRun run) =>
+        Check.Require(run.Store.OpenNotices.All(n => n.Cause is not (TextKey.InfoIgnoredFolderKept or TextKey.InfoSharedFolderKept)),
+            "A kept-folder notice was raised for a recyclable first-run folder");
+
+    /// <summary>A first-run PC folder holding only an ignored file is recycled whole, never created on Dropbox.</summary>
+    public static async Task A36IgnoredFileOnlyAsync()
+    {
+        var run = await DeletedFolderRunAsync(ItemChecks.Pair() with { IgnoreRules = ["FileName:draft.tmp"] }, null, "item");
+        Seed(run.Pc, "item", 0, folder: true);
+        Seed(run.Pc, "item/draft.tmp", 1);
+        await RepairAsync(run);
+        Check.Require(!run.Pc.Items.ContainsKey("item") && run.Pc.History.Any(v => v.Entry.Path == "item/draft.tmp"), "The ignored-only folder was not recycled with its ignored content");
+        Check.Require(run.Db.Items.Count == 0 && run.Store.Records.Count == 0, "The ignored-only folder was created on Dropbox or bound");
+        NoKeptFolderNotice(run);
+    }
+
+    /// <summary>A first-run PC folder holding only an ignored folder and its files is recycled whole.</summary>
+    public static async Task A36IgnoredFolderWithContentAsync()
+    {
+        var run = await DeletedFolderRunAsync(ItemChecks.Pair() with { IgnoreRules = ["FolderName:cache"] }, null, "item");
+        Seed(run.Pc, "item", 0, folder: true);
+        Seed(run.Pc, "item/cache", 0, folder: true);
+        Seed(run.Pc, "item/cache/x.txt", 2);
+        await RepairAsync(run);
+        Check.Require(!run.Pc.Items.ContainsKey("item") && run.Pc.History.Any(v => v.Entry.Path == "item/cache/x.txt"), "The ignored folder and its content were not recycled together");
+        Check.Require(run.Db.Items.Count == 0 && run.Store.Records.Count == 0, "The ignored folder was created on Dropbox");
+        NoKeptFolderNotice(run);
+    }
+
+    /// <summary>A first-run PC folder holding an ordinary file is synced, not recycled.</summary>
+    public static async Task A36OrdinaryFileInFolderAsync()
+    {
+        var run = await DeletedFolderRunAsync(ItemChecks.Pair(), null, "item");
+        Seed(run.Pc, "item", 0, folder: true);
+        Seed(run.Pc, "item/keep.txt", 3);
+        await RepairAsync(run);
+        Check.Require(run.Db.Items.ContainsKey("item") && run.Db.Items.ContainsKey("item/keep.txt"), "The folder with an ordinary file was not synced to Dropbox");
+        Check.Require(run.Pc.Items.ContainsKey("item") && run.Pc.History.Count == 0, "The synced PC folder was recycled");
+    }
+
+    /// <summary>A first-run PC folder holding an excluded child is synced (the child is not copied).</summary>
+    public static async Task A36ExcludedChildAsync()
+    {
+        var run = await DeletedFolderRunAsync(ItemChecks.Pair() with { Exclusions = [new(Side.Local, "item/held", true)] }, null, "item");
+        Seed(run.Pc, "item", 0, folder: true);
+        Seed(run.Pc, "item/held", 3);
+        await RepairAsync(run);
+        Check.Require(run.Db.Items.ContainsKey("item") && !run.Db.Items.ContainsKey("item/held"), "The folder with an excluded child was not synced or the excluded child was copied");
+        Check.Require(run.Pc.Items.ContainsKey("item") && run.Pc.History.Count == 0, "The folder with an excluded child was recycled");
+    }
+
+    /// <summary>A first-run PC folder holding a nested pair's root is synced, the root held back.</summary>
+    public static async Task A36NestedRootChildAsync()
+    {
+        var pair = ItemChecks.Pair();
+        var inner = pair with { PairId = "inner", LocalRoot = Path.Combine(pair.LocalRoot, "item", "inner"), DropboxRoot = pair.DropboxRoot + "/item/inner" };
+        var run = await DeletedFolderRunAsync(pair, [inner], "item");
+        Seed(run.Pc, "item", 0, folder: true);
+        Seed(run.Pc, "item/inner", 0, folder: true);
+        await RepairAsync(run);
+        Check.Require(run.Db.Items.ContainsKey("item") && !run.Db.Items.ContainsKey("item/inner"), "The nested root was copied or its folder was not synced");
+        Check.Require(run.Pc.Items.ContainsKey("item") && run.Pc.History.Count == 0, "The folder holding a nested root was recycled");
+    }
+
+    /// <summary>A first-run PC folder holding a link is synced, the link held back.</summary>
+    public static async Task A36LinkedChildAsync()
+    {
+        var run = await DeletedFolderRunAsync(ItemChecks.Pair(), null, "item");
+        Seed(run.Pc, "item", 0, folder: true);
+        Seed(run.Pc, "item/link", 0, skip: nameof(TextKey.SkipLink));
+        await RepairAsync(run);
+        Check.Require(run.Db.Items.ContainsKey("item") && !run.Db.Items.ContainsKey("item/link"), "The folder with a link was not synced or the link was copied");
+        Check.Require(run.Pc.Items.ContainsKey("item") && run.Pc.History.Count == 0, "The folder holding a link was recycled");
+    }
+
+    /// <summary>Nested empty folders are recycled with their parent, never created on Dropbox first.</summary>
+    public static async Task A36NestedEmptyFoldersAsync()
+    {
+        var run = await DeletedFolderRunAsync(ItemChecks.Pair(), null, "item");
+        Seed(run.Pc, "item", 0, folder: true);
+        Seed(run.Pc, "item/sub", 0, folder: true);
+        await RepairAsync(run);
+        Check.Require(!run.Pc.Items.ContainsKey("item") && run.Pc.History.Any(v => v.Entry.Path == "item/sub"), "The nested empty folders were not recycled together");
+        Check.Require(run.Db.Items.Count == 0, "The empty folder was created on Dropbox first");
+    }
+
+    /// <summary>An empty subfolder with no deletion record of its own is still recycled with its parent.</summary>
+    public static async Task A36EmptyChildWithoutDeletionRecordAsync()
+    {
+        var run = await DeletedFolderRunAsync(ItemChecks.Pair(), null, "item");
+        Seed(run.Pc, "item", 0, folder: true);
+        Seed(run.Pc, "item/sub", 0, folder: true);
+        await RepairAsync(run);
+        Check.Require(!run.Pc.Items.ContainsKey("item") && !run.Pc.Items.ContainsKey("item/sub") && run.Db.Items.Count == 0, "An empty child without its own deletion record defeated the parent recycle");
+    }
+
+    /// <summary>Ordinal interval handling keeps `A` recycle from swallowing `A!`'s synced contents.</summary>
+    public static async Task A36InterleavedOrdinalSubtreesAsync()
+    {
+        var run = await DeletedFolderRunAsync(ItemChecks.Pair() with { IgnoreRules = ["FileNamePrefix:~"] }, null, "A");
+        Seed(run.Pc, "A", 0, folder: true);
+        Seed(run.Pc, "A/~draft", 1);
+        Seed(run.Pc, "A!", 0, folder: true);
+        Seed(run.Pc, "A!/z", 2);
+        await RepairAsync(run);
+        Check.Require(!run.Pc.Items.ContainsKey("A") && run.Pc.History.Any(v => v.Entry.Path == "A/~draft"), "The empty-ish A folder was not recycled");
+        Check.Require(run.Db.Items.ContainsKey("A!") && run.Db.Items.ContainsKey("A!/z") && run.Pc.Items.ContainsKey("A!"), "A!'s contents were swallowed by A's ordinal interval");
+    }
     public static Task A46CrashStageWrittenAsync() => throw new NotImplementedException();
     public static Task A46CrashV16PutAsideAsync() => throw new NotImplementedException();
     public static Task A46CrashAfterSwitchAsync() => throw new NotImplementedException();
     public static Task A46SwitchFailedAsync() => throw new NotImplementedException();
-    public static Task A46PointerRemovalFailedAsync() => throw new NotImplementedException();
-    public static Task A46PreviousAttemptStageUntouchedAsync() => throw new NotImplementedException();
-    public static Task A46PointerToFixedRootAsync() => throw new NotImplementedException();
+    private static string StoreFileAt(string root) => Path.Combine(root, ResourceNames.EngineFolder, ResourceNames.DatabaseFile);
+
+    /// <summary>A pointer-cleanup failure after publication is a warning; pairs keep running and the next start retries.</summary>
+    public static async Task A46PointerRemovalFailedAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var move = new global::Massdex.SyncShark.Engine.Storage.StoreMove();
+            await move.CreateAsync(root, default);
+            var path = StoreFileAt(root); var pointer = Path.Combine(root, "product-root.txt");
+            await File.WriteAllTextAsync(pointer, root);
+            string? warning;
+            using (new FileStream(pointer, FileMode.Open, FileAccess.Read, FileShare.Read))
+                warning = await move.MoveWithOutcomeAsync(root, root, (_, _, ids) => { Check.Require(ids.Count == 0, "Empty store reported required connections"); return null; }, default);
+            Check.Require(!string.IsNullOrEmpty(warning) && File.Exists(path) && File.Exists(pointer), "A pointer-cleanup failure hid the usable store");
+            var retry = await move.MoveWithOutcomeAsync(root, root, (_, _, _) => null, default);
+            Check.Require(retry == null && !File.Exists(pointer) && File.Exists(path), "The next start did not retry the pointer removal");
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+
+    /// <summary>A stage left by an earlier attempt is never adopted or disturbed by the next start.</summary>
+    public static async Task A46PreviousAttemptStageUntouchedAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var move = new global::Massdex.SyncShark.Engine.Storage.StoreMove();
+            await move.CreateAsync(root, default);
+            var path = StoreFileAt(root); var stage = path + ".previous.new";
+            await File.WriteAllTextAsync(stage, "abandoned stage");
+            var warning = await move.MoveWithOutcomeAsync(root, root, (_, _, _) => null, default);
+            Check.Require(warning == null && File.Exists(path) && await File.ReadAllTextAsync(stage) == "abandoned stage", "The next start consumed or disturbed another attempt's stage");
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+
+    /// <summary>A pointer to the fixed folder is one source, not an external lineage claim.</summary>
+    public static async Task A46PointerToFixedRootAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var move = new global::Massdex.SyncShark.Engine.Storage.StoreMove();
+            await move.CreateAsync(root, default);
+            var pointer = Path.Combine(root, "product-root.txt");
+            await File.WriteAllTextAsync(pointer, root);
+            var warning = await move.MoveWithOutcomeAsync(root, root, (_, _, _) => null, default);
+            Check.Require(warning == null && !File.Exists(pointer) && File.Exists(StoreFileAt(root)), "A pointer to the fixed folder was not treated as one source");
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
     public static Task A46FixedPointerWithOnlyV16BackupAsync() => throw new NotImplementedException();
     public static Task A46TwoLinkNoticesFoldedAsync() => throw new NotImplementedException();
     public static Task A46MixedLinkAndNonlinkMembersAsync() => throw new NotImplementedException();
@@ -738,11 +1018,92 @@ public static class FolderChecks
     /// <summary>Restart after the first add stops before publication; neither restart nor retry may adopt its stage.</summary>
     public static Task A46CrashDuringFirstPairAddAsync() => FirstAddAsync(true);
     public static Task A46FreshReadCreatesNoStoreAsync() => FreshStartAsync();
-    public static Task A46ClosedImageNoWalAsync() => throw new NotImplementedException();
-    public static Task A46AmbiguousIndependentStoresAsync() => throw new NotImplementedException();
-    public static Task A46InvalidSourceAsync() => throw new NotImplementedException();
-    public static Task A46ExternalDanglingPointerAsync() => throw new NotImplementedException();
-    public static Task A46BothListsAbsentNoRequiredAccountAsync() => throw new NotImplementedException();
+    /// <summary>A freshly published image is closed: no WAL, shared-memory or rollback-journal side file remains.</summary>
+    public static async Task A46ClosedImageNoWalAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            await new global::Massdex.SyncShark.Engine.Storage.StoreMove().CreateAsync(root, default);
+            var path = StoreFileAt(root);
+            Check.Require(File.Exists(path), "No store was created");
+            Check.Require(!File.Exists(path + "-wal") && !File.Exists(path + "-shm") && !File.Exists(path + "-journal"), "The published image depends on a WAL side file");
+            using var db = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = path, Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+            await db.OpenAsync();
+            using var cmd = db.CreateCommand(); cmd.CommandText = "PRAGMA user_version";
+            Check.Require(Convert.ToInt32(await cmd.ExecuteScalarAsync()) == global::Massdex.SyncShark.Engine.Storage.Schema.Version, "The published image has the wrong version");
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+
+    /// <summary>Two independently occupied stores never prove provenance: the move refuses without overwriting either.</summary>
+    public static async Task A46AmbiguousIndependentStoresAsync()
+    {
+        var first = Directory.CreateTempSubdirectory().FullName; var second = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var move = new global::Massdex.SyncShark.Engine.Storage.StoreMove();
+            await move.CreateAsync(first, default); await move.CreateAsync(second, default);
+            var pointer = Path.Combine(second, "product-root.txt"); await File.WriteAllTextAsync(pointer, first);
+            var firstBefore = await File.ReadAllBytesAsync(StoreFileAt(first)); var secondBefore = await File.ReadAllBytesAsync(StoreFileAt(second));
+            bool refused = false;
+            try { await move.MoveWithOutcomeAsync(second, second, (_, _, _) => null, default); }
+            catch (InvalidDataException) { refused = true; }
+            Check.Require(refused && File.ReadAllText(pointer) == first && (await File.ReadAllBytesAsync(StoreFileAt(first))).SequenceEqual(firstBefore) &&
+                (await File.ReadAllBytesAsync(StoreFileAt(second))).SequenceEqual(secondBefore), "An ambiguous independent store was overwritten or consumed");
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(first, true); Directory.Delete(second, true); }
+    }
+
+    /// <summary>A pointer to a directory that holds no release image is refused, leaving source and pointer intact.</summary>
+    public static async Task A46InvalidSourceAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var move = new global::Massdex.SyncShark.Engine.Storage.StoreMove();
+            await move.CreateAsync(root, default);
+            var other = Directory.CreateDirectory(Path.Combine(root, "elsewhere")).FullName;
+            var pointer = Path.Combine(root, "product-root.txt"); await File.WriteAllTextAsync(pointer, other);
+            var before = await File.ReadAllBytesAsync(StoreFileAt(root));
+            bool refused = false;
+            try { await move.MoveWithOutcomeAsync(root, root, (_, _, _) => null, default); }
+            catch (InvalidDataException) { refused = true; }
+            Check.Require(refused && File.Exists(pointer) && File.ReadAllText(pointer) == other && (await File.ReadAllBytesAsync(StoreFileAt(root))).SequenceEqual(before), "An invalid source was accepted or the store changed");
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+
+    /// <summary>A dangling pointer to a missing predecessor is refused without creating or changing a store.</summary>
+    public static async Task A46ExternalDanglingPointerAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var move = new global::Massdex.SyncShark.Engine.Storage.StoreMove();
+            await move.CreateAsync(root, default);
+            var missing = Path.Combine(root, "missing-predecessor");
+            var pointer = Path.Combine(root, "product-root.txt"); await File.WriteAllTextAsync(pointer, missing);
+            var before = await File.ReadAllBytesAsync(StoreFileAt(root));
+            bool refused = false;
+            try { await move.MoveWithOutcomeAsync(root, root, (_, _, _) => null, default); }
+            catch (InvalidDataException) { refused = true; }
+            Check.Require(refused && File.ReadAllText(pointer) == missing && (await File.ReadAllBytesAsync(StoreFileAt(root))).SequenceEqual(before), "A dangling external pointer was followed or changed the store");
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
+
+    /// <summary>Both lists absent with no required connections is valid empty input: no store is created.</summary>
+    public static async Task A46BothListsAbsentNoRequiredAccountAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var warning = await new global::Massdex.SyncShark.Engine.Storage.StoreMove().MoveWithOutcomeAsync(root, root, (_, _, _) => null, default);
+            Check.Require(warning == null && !File.Exists(StoreFileAt(root)), "Empty input created a store instead of leaving the first add to publish");
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+    }
     public static Task A46MissingRequiredConnectionAsync() => throw new NotImplementedException();
     public static Task A46DistinctConnectionListsAsync() => throw new NotImplementedException();
     public static Task A48SameNameRemovedTwiceAsync() => throw new NotImplementedException();
@@ -760,12 +1121,170 @@ public static class FolderChecks
     public static Task A48UnavailableHistoryAsync() => throw new NotImplementedException();
     public static Task A48UnknownDriveUsesShellOrAbortAsync() => throw new NotImplementedException();
     public static Task A48StampBeforeNonreplacingMoveAsync() => throw new NotImplementedException();
-    public static Task A50NewInnerRootEffectiveBeforeNextEntryAsync() => throw new NotImplementedException();
-    public static Task A50ExclusionEffectiveBeforeNextEntryAsync() => throw new NotImplementedException();
-    public static Task A50InnerPairRemovedQuietRangeAsync() => throw new NotImplementedException();
-    public static Task A50SideAccountSpecificRootsAsync() => throw new NotImplementedException();
-    public static Task A50MappedOtherEndpointProtectedAsync() => throw new NotImplementedException();
-    public static Task A50WholeMoveProtectedAsync() => throw new NotImplementedException();
-    public static Task A50PartialMoveProtectedAsync() => throw new NotImplementedException();
-    public static Task A50ReplacementRetainsFolderAsync() => throw new NotImplementedException();
+    private static PairConfig NestedPair(PairConfig outer, string innerRoot) =>
+        outer with { PairId = "inner", LocalRoot = Path.Combine(outer.LocalRoot, innerRoot), DropboxRoot = outer.DropboxRoot + "/" + innerRoot };
+
+    /// <summary>A new inner pair's root is skipped by the outer pair before its next entry and its records are kept.</summary>
+    public static async Task A50NewInnerRootEffectiveBeforeNextEntryAsync()
+    {
+        var pair = ItemChecks.Pair(); var inner = NestedPair(pair, "nested");
+        var run = await StartAsync(pair, baseline: true, extraPairs: [inner]);
+        Seed(run.Pc, "nested/x", 1);
+        await RepairAsync(run);
+        Check.Require(run.Db.Items.Count == 0 && run.Store.Records.Count == 0, "The outer pair synced the new inner pair's subtree");
+    }
+
+    /// <summary>An added exclusion applies to the outer pair before its next entry.</summary>
+    public static async Task A50ExclusionEffectiveBeforeNextEntryAsync()
+    {
+        var pair = ItemChecks.Pair() with { Exclusions = [new(Side.Local, "held", true)] };
+        var run = await StartAsync(pair, baseline: true);
+        Seed(run.Pc, "held/x", 1);
+        await RepairAsync(run);
+        Check.Require(run.Db.Items.Count == 0 && run.Store.Records.Count == 0, "The outer pair ignored the newly added exclusion");
+    }
+
+    /// <summary>Once the inner pair is removed, the outer pair compares the formerly quiet subtree at once.</summary>
+    public static async Task A50InnerPairRemovedQuietRangeAsync()
+    {
+        var pair = ItemChecks.Pair();
+        var run = await StartAsync(pair, baseline: true);
+        Seed(run.Pc, "nested/x", 1);
+        await RepairAsync(run);
+        Check.Require(run.Db.Items.ContainsKey("nested/x") && run.Store.Records.Values.Any(r => r.LocalPath == "nested/x"), "The outer pair did not compare the removed inner pair's subtree");
+    }
+
+    /// <summary>Nested roots are derived for each side's own actual roots.</summary>
+    public static Task A50SideAccountSpecificRootsAsync()
+    {
+        var pair = ItemChecks.Pair(); var inner = NestedPair(pair, "nested");
+        var paths = new PathScope(pair, [pair, inner], DriveType.Fixed);
+        Check.Require(paths.NestedRoots(Side.Local).SequenceEqual(new[] { "nested" }) && paths.NestedRoots(Side.Dropbox).SequenceEqual(new[] { "nested" }),
+            "Nested roots were not derived separately for each side's actual roots");
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Both mapped endpoints of a nested root are protected from a whole or partial move.</summary>
+    public static Task A50MappedOtherEndpointProtectedAsync()
+    {
+        var pair = ItemChecks.Pair(); var inner = NestedPair(pair, "nested");
+        var paths = new PathScope(pair, [pair, inner], DriveType.Fixed);
+        Check.Require(paths.HoldsNestedRoot(Side.Local, "nested/child") && paths.HoldsNestedRoot(Side.Dropbox, "nested/child"),
+            "A mapped nested endpoint was not protected before a move");
+        return Task.CompletedTask;
+    }
+
+    /// <summary>A whole-folder move that carries another pair's root fails without being propagated.</summary>
+    public static async Task A50WholeMoveProtectedAsync()
+    {
+        var pair = ItemChecks.Pair(); var inner = NestedPair(pair, "top/nested");
+        var run = await StartAsync(pair, baseline: true, extraPairs: [inner]);
+        var top = Seed(run.Pc, "top", 0, folder: true); var dbTop = Seed(run.Db, "top", 0, folder: true);
+        await run.Store.CommitAsync(pair.PairId, null, SyncedEntries.From(top, dbTop), null, null, default);
+        await run.Pc.MoveAsync(top, "moved", default);
+        await RepairAsync(run);
+        Check.Require(run.Store.OpenNotices.Any(n => n.Cause == TextKey.FailCarriesOtherPair), "The move carrying another pair's root raised no failure");
+        Check.Require(!run.Db.Items.ContainsKey("moved") && run.Db.Items.ContainsKey("top"), "The carrying move was propagated to the other side");
+    }
+
+    /// <summary>A partial move that carries another pair's root is likewise refused.</summary>
+    public static async Task A50PartialMoveProtectedAsync()
+    {
+        var pair = ItemChecks.Pair(); var inner = NestedPair(pair, "top/sub/nested");
+        var run = await StartAsync(pair, baseline: true, extraPairs: [inner]);
+        var top = Seed(run.Pc, "top", 0, folder: true); var sub = Seed(run.Pc, "top/sub", 0, folder: true);
+        var dbTop = Seed(run.Db, "top", 0, folder: true); var dbSub = Seed(run.Db, "top/sub", 0, folder: true);
+        await run.Store.CommitAsync(pair.PairId, null, SyncedEntries.From(top, dbTop), null, null, default);
+        await run.Store.CommitAsync(pair.PairId, null, SyncedEntries.From(sub, dbSub), null, null, default);
+        await run.Pc.MoveAsync(sub, "moved", default);
+        await RepairAsync(run);
+        Check.Require(run.Store.OpenNotices.Any(n => n.Cause == TextKey.FailCarriesOtherPair), "The partial move carrying another pair's root raised no failure");
+        Check.Require(!run.Db.Items.ContainsKey("moved") && run.Db.Items.ContainsKey("top/sub"), "The partial carrying move was propagated");
+    }
+
+    /// <summary>A folder holding another pair's root is not replaced by a file; a retained-replacement failure is raised.</summary>
+    public static async Task A50ReplacementRetainsFolderAsync()
+    {
+        var pair = ItemChecks.Pair(); var inner = NestedPair(pair, "top/nested");
+        var run = await StartAsync(pair, baseline: true, extraPairs: [inner]);
+        var top = Seed(run.Pc, "top", 0, folder: true); var dbTop = Seed(run.Db, "top", 0, folder: true);
+        await run.Store.CommitAsync(pair.PairId, null, SyncedEntries.From(top, dbTop), null, null, default);
+        run.Db.Items["top"] = (ItemChecks.File(Side.Dropbox, "top", 9, "incoming-file"), [9]);
+        await RepairAsync(run);
+        Check.Require(run.Pc.Items.ContainsKey("top") && run.Pc.Items["top"].Entry.IsFolder, "The folder holding another pair's root was replaced");
+        Check.Require(run.Store.OpenNotices.Any(n => n.Cause == TextKey.FailReplacementRetained), "The retained replacement raised no failure notice");
+    }
+
+    // B-218 (open-bug audit 20261123): a Dropbox folder moves after the delete's identity check and
+    // before the delete request. The queued tombstone still names the old path, but the selected
+    // identity now lives at the new one, so no delete may land there and no version may be lost.
+    public static async Task A13DropboxMoveLandsBeforeDeleteRequestAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        var pcFolder = Seed(run.Pc, "old", 0, folder: true);
+        var dbFolder = Seed(run.Db, "old", 0, folder: true);
+        await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(pcFolder, dbFolder), null, null, default);
+        var pcChild = Seed(run.Pc, "old/child", 1);
+        var dbChild = Seed(run.Db, "old/child", 1);
+        await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(pcChild, dbChild), null, null, default);
+        // The move lands after the read that queued the tombstone; the queued delete still names the old path.
+        await run.Db.MoveAsync(dbFolder, "new", default);
+        var tombstone = new Change(Side.Dropbox, ChangeKind.Deleted, "old", null, dbFolder.Id, null, false, false);
+        await ItemSync.ApplyAsync(run.Pair, ItemChecks.Settings, _ => { }, run.Paths, tombstone, run.Pc, run.Db, run.Store,
+            ItemChecks.Population(run.Pair, run.Paths, run.Pc, run.Db, run.Store),
+            ItemChecks.Hop(run.Pair, run.Paths, run.Queue, run.Pc, run.Db, run.Store), default,
+            heldInput: _ => [], coversThrough: _ => true);
+        Check.Require(Is(run.Db, "new", true) && Is(run.Db, "new/child", false, 1), "The queued delete removed the moved Dropbox folder or its child");
+        Check.Require(Is(run.Pc, "new", true) && Is(run.Pc, "new/child", false, 1), "The move did not sync to the PC");
+        Check.Require(run.Db.Requests[nameof(ISide.DeleteAsync)] == 0, "The queued tombstone issued a Dropbox delete for the moved identity");
+        Check.Require(run.Db.History.Count == 0 && run.Pc.History.Count == 0, "A version was lost to the mistaken delete");
+        Check.Require(run.Store.OpenNotices.All(n => n.Cause != TextKey.InfoMovedDeleted), "The surviving move was reported as moved and deleted");
+    }
+
+    // L111 (open-bug audit 20261123): crossed parent mappings must not turn a PC relocation into a
+    // false moved-and-deleted decision. The saved parent mapping owns the destination, identity is kept.
+    public static async Task A18CrossedParentMappingsAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        var pcOne = Seed(run.Pc, "one", 0, folder: true); var dbTwo = Seed(run.Db, "two", 0, folder: true);
+        var pcTwo = Seed(run.Pc, "two", 0, folder: true); var dbOne = Seed(run.Db, "one", 0, folder: true);
+        await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(pcOne, dbTwo), null, null, default);
+        await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(pcTwo, dbOne), null, null, default);
+        var file = Seed(run.Pc, "one/x", 1); var peer = Seed(run.Db, "two/x", 1);
+        await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(file, peer), null, null, default);
+        await run.Pc.MoveAsync(file, "two/x", default);
+        await RepairAsync(run);
+        Check.Require(Is(run.Pc, "two/x", false, 1), "The relocated PC file disappeared");
+        Check.Require(Is(run.Db, "one/x", false, 1), "The move did not sync to the parent the crossed mapping names");
+        Check.Require(!run.Pc.Items.ContainsKey("one/x") && !run.Db.Items.ContainsKey("two/x"), "A stale copy survived beside the mapped destination");
+        Check.Require(run.Pc.History.Count == 0 && run.Db.History.Count == 0, "The crossed mapping lost a version");
+        Check.Require(run.Store.Records.Values.Any(r => r.LocalPath == "two/x" && r.DropboxPath == "one/x"), "The saved binding did not follow the mapped destination");
+        Check.Require(run.Store.OpenNotices.All(n => n.Cause is not (TextKey.InfoMovedDeleted or TextKey.InfoMovedTwice)),
+            "The relocation took a moved-and-deleted or moved-twice decision");
+    }
+
+    // L121 (open-bug audit 20261123): a relocation under a mapped parent spelling while a Repair runs.
+    // Both inputs reach one item; the final paths, contents and the single surviving version must agree.
+    public static async Task A18RelocationMappedParentConcurrentRepairAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        var pcFolder = Seed(run.Pc, "Folder", 0, folder: true); var dbFolder = Seed(run.Db, "folder", 0, folder: true);
+        await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(pcFolder, dbFolder), null, null, default);
+        var file = Seed(run.Pc, "Folder/x", 1); var peer = Seed(run.Db, "folder/x", 1);
+        await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(file, peer), null, null, default);
+        await run.Pc.MoveAsync(file, "Folder/relocated", default);
+        var moved = run.Pc.Items["Folder/relocated"].Entry;
+        var rename = new Change(Side.Local, ChangeKind.Renamed, "Folder/relocated", "Folder/x", moved.Id, moved, true, false, 5, JournalId: 1);
+        await Task.WhenAll(
+            RepairAsync(run),
+            AutoSync.ApplyPageAsync(run.Pair, ItemChecks.Settings, _ => { }, run.Paths, run.Queue, Side.Local,
+                ItemChecks.Journal([rename], 6), run.Pc, run.Db, run.Store, default));
+        Check.Require(Is(run.Pc, "Folder/relocated", false, 1), "The relocated PC file disappeared");
+        Check.Require(Is(run.Db, "folder/relocated", false, 1), "The move did not reach the mapped Dropbox spelling");
+        Check.Require(!run.Pc.Items.ContainsKey("Folder/x") && !run.Db.Items.ContainsKey("folder/x"), "A duplicate or stale copy survived the concurrent run");
+        Check.Require(run.Pc.History.Count == 0 && run.Db.History.Count == 0, "The relocation lost a version");
+        Check.Require(run.Store.Records.Values.Count(r => r.LocalPath == "Folder/relocated" && r.DropboxPath == "folder/relocated") == 1,
+            "The relocation did not settle exactly one binding at the mapped destination");
+        Check.Require(run.Store.OpenNotices.Count == 0, "The concurrent Repair or page raised a notice");
+    }
 }
