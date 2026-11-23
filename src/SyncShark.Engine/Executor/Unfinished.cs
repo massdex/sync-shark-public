@@ -276,6 +276,7 @@ public sealed class Unfinished
         var location=await local.ReadByIdAsync(proof.Expected.Id,ct);
         if(location is not {InScope:false} actual || actual.Location.Domain!=proof.VolumeId || actual.Location.Entry.Id!=proof.Expected.Id)
         {
+            if(location is {InScope:true}) return;
             if(location is not {InScope:true}) await Unchecked(store,pair,proof.Expected,ct);
             await store.DisarmAsync(pair.PairId,victim,note.Stage,ct);return;
         }
