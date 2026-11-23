@@ -174,6 +174,7 @@ public sealed class Effects
                         result = await Remove(expected);
                         if (result.Outcome != RemovalOutcome.Removed) return Incomplete(result,target);
                         if (await ReadOneAsync(from,source.Path,ct) != source) throw new ChangedUnderneathException(source.Path){FailedSide=from.Side};
+                        if (await ReadOneAsync(to,target,ct) != null) throw new ChangedUnderneathException(target){FailedSide=to.Side};
                         expected = null;
                     }
                     if (to.Side==Side.Local && expected!=null && !userSelected && (coversThrough==null || heldInput==null)) return EffectOutcome.Pending;
