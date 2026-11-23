@@ -51,7 +51,7 @@ public static class ItemSync
             if(change.Side==Side.Local && saved!=null && !selectedRemoval && (pc==null || change.Id==saved.LocalId && pc.Id!=saved.LocalId))
             {
                 var currentIdentity=change.Id==saved.LocalId && (change.Kind==ChangeKind.Deleted || heldInput!=null) ? await local.ReadByIdAsync(saved.LocalId,ct) : null;
-                if(change.Kind==ChangeKind.Deleted && change.Id is {Length:>0} selected && selected==saved.LocalId && currentIdentity is null or {InScope:false})
+                if(change.Kind==ChangeKind.Deleted && change.Id is {Length:>0} selected && selected==saved.LocalId && currentIdentity==null)
                 {
                     selectedRemoval=true;
                     if(saved.IsFolder) return await RemoveBoundAsync(pair,settings,events,paths,saved,Side.Local,local,dropbox,store,heldInput,populate,compareOldBinding,failed,ct,coversThrough);
