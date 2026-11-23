@@ -680,13 +680,6 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
                 (s,side,f,token)=>Populate(m,s,side,f,token),(b,before,after,token)=>Compare(m,b,before,after,token),ct,m.Queue.CoversHop);
             if(n.Kind==NoticeKind.PutBack && await store.NoticeAsync(pairId,id,ct) is {} remaining)
                 throw new EngineRequestException(remaining.Matches(n)?TextKey.WaitItemRetry:TextKey.ResolveStale,(TextArg.Id,id.ToString()));
-            // A closed put-back ends its ancestor removal's custody; re-attempt only held inputs overlapping this notice's footprint.
-            if(n.Kind==NoticeKind.PutBack)
-            {
-                var owners=m.Queue.RetryHeldAsync(new Scope(n.Path,n.Path),ct);
-                if(!owners.IsCompleted) await OutsideCommands(()=>owners);
-                await owners;
-            }
             return;
         }
         if (choice==ResolutionChoice.BindRoots) { await Membership(m,false,ct); Start(m); return; }
