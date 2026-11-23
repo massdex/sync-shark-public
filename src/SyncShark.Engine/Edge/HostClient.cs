@@ -46,7 +46,6 @@ public sealed class HostClient
             handles = Marshal.AllocHGlobal(IntPtr.Size);
             var output = stdout.DangerousGetHandle();
             Marshal.WriteIntPtr(handles, output);
-            if (!UpdateProcThreadAttribute(list, 0, HandleList, handles, IntPtr.Size, 0, 0)) throw new Win32Exception();
             var info = new StartupInfoEx { cb = Marshal.SizeOf<StartupInfoEx>(), dwFlags = UseStdHandles,
                 hStdOutput = output, lpAttributeList = list };
             if (!CreateProcessW(exe, new StringBuilder($"\"{exe}\" {arguments}"), 0, 0, true,
