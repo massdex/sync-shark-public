@@ -300,7 +300,7 @@ public sealed class Unfinished
                     if(saved!=null) await compareOldBinding(saved,range,range,ct);
                     if(occupied) await Unchecked(store,pair,proof.Expected,ct);
                 }
-                else if(saved!=null)
+                else if(saved!=null && currentBinding!=saved)
                 {
                     var dead=new List<SyncedEntry>();
                     await foreach(var b in store.ByIdAsync(pair.PairId,Side.Local,saved.LocalId,ct)) if(b.DropboxId==saved.DropboxId && !b.IsFolder) dead.Add(b);
