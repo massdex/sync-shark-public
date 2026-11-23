@@ -291,6 +291,7 @@ public sealed class Unfinished
         if(note.Stage==null)
         {
             var peer=saved==null?null:await dropbox.ReadByIdAsync(saved.DropboxId,ct);
+            if(peer!=null)return;
             if(peer==null)
             {
                 if(proof.Expected.IsFolder)
