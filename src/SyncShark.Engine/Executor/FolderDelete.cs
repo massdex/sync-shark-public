@@ -1,0 +1,559 @@
+namespace Massdex.SyncShark.Engine.Executor;
+
+/// <summary>Remove the selected identity without giving away held child evidence.</summary>
+public sealed class FolderDelete
+{
+    /// <summary>The binding overload receives the side where deletion was observed.</summary>
+    public async Task<RemovalResult> ApplyAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, SyncedEntry folder, Side deleting, ISide local, ISide dropbox, IStore store, Func<Scope,IEnumerable<Change>> heldInput, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding, CancellationToken ct,Row? covered=null,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough=null)
+    {
+        if(await store.FindAsync(pair.PairId,deleting,folder.KeyOn(deleting),ct)!=folder) return new(RemovalOutcome.Retained,null,TextKey.FailChanged);
+        var change=new Change(deleting,ChangeKind.Deleted,folder.PathOn(deleting),null,folder.IdOn(deleting),null,false,deleting==Side.Local);
+        bool retained=false;
+        try
+        {
+            var settled=await ItemSync.ChangeAsync(pair,settings,events,paths,change,local,dropbox,store,populate,compareOldBinding,ct,heldInput,(_,reproducible)=>retained=!reproducible,coversThrough:coversThrough);
+            return new(settled?RemovalOutcome.Removed:RemovalOutcome.Retained,null,null);
+        }
+        catch(InventoryIncompleteException e) when(retained && e.Message==nameof(RemovalOutcome))
+        {
+            // RequireRemovalAsync signals a non-removal to queue callers; this overload returns that disposition.
+            return new(RemovalOutcome.Retained,null,null);
+        }
+    }
+
+    /// <summary>Choose the missing ancestor before the caller acquires its exact footprint.</summary>
+    public static async Task<SyncedEntry?> HighestMissingAsync(PairConfig pair,PathScope paths,SyncedEntry folder,ISide source,IStore store,CancellationToken ct)
+    {
+        var deleting=source.Side;
+        if(await source.ReadByIdAsync(folder.IdOn(deleting),ct) is {InScope:true}) return null;
+        foreach(var ancestor in PathNames.Ancestors(folder.PathOn(deleting)))
+        {
+            var parent=await store.FindAsync(pair.PairId,deleting,PathNames.KeyFor(deleting,ancestor),ct);
+            if(parent is not {IsFolder:true} || paths.ExcludesBinding(parent)) break;
+            if(await source.ReadByIdAsync(parent.IdOn(deleting),ct) is {InScope:true}) break;
+            folder=parent;
+        }
+        return folder;
+    }
+
+    /// <summary>Returns the actual removal result. Dispatcher saves Pending; no binding is retired on acceptance.</summary>
+    public async Task<RemovalResult> ApplyAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Entry folder, SyncedEntry? binding, Side deleting, ActionKind origin, ISide local, ISide dropbox, IStore store, Func<Scope,IEnumerable<Change>> heldInput, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding, CancellationToken ct,bool splitSelected=false,Row? covered=null,Func<Scope,Side,Entry,CancellationToken,Task<EffectOutcome>>? resolveConflict=null,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough=null,bool userSelected=false)
+    {
+        var target=deleting==Side.Local?local:dropbox; var peer=deleting==Side.Local?dropbox:local;
+        var scope=new Scope(binding?.LocalPath??PathNames.LocalSpelling(folder.Path),binding?.DropboxPath??folder.Path);
+        if(splitSelected && (deleting!=Side.Dropbox || origin!=ActionKind.DeleteDropbox || coversThrough==null)) return new(RemovalOutcome.Retained,folder,TextKey.FailChanged);
+        var protectedPaths=new PrefixSet();
+        if(!folder.IsFolder || folder.Path.Length==0 || binding!=null && (binding.IdOn(deleting)!=folder.Id || !PathNames.Same(binding.PathOn(deleting),folder.Path))) return new(RemovalOutcome.Unknown,folder,TextKey.FailChanged);
+        async Task Protect(Side side,string path)
+        {
+            var projected=side==deleting ? path : await MapAsync(pair,store,side,path,ct);
+            protectedPaths.Add(PathNames.KeyFor(deleting,projected));
+            if(side!=deleting)
+                await foreach(var row in store.DescendantsAsync(pair.PairId,side,PathNames.KeyFor(side,path),ct))
+                    if(PathNames.IsSelfOrUnder(row.PathOn(deleting),folder.Path)) protectedPaths.Add(row.KeyOn(deleting));
+        }
+        foreach(var ex in pair.Exclusions) if(paths.CoversKey(ex.Side,PathNames.KeyFor(ex.Side,ex.Path))) await Protect(ex.Side,ex.Path);
+        foreach(var side in new[]{Side.Local,Side.Dropbox}) foreach(var root in paths.NestedRoots(side)) await Protect(side,root);
+        await foreach(var n in store.NoticesUnderAsync(pair.PairId,scope,ct))
+        {
+            if(n.Cause is TextKey.ReadLocalFailed or TextKey.SkipUnreadable) return new(RemovalOutcome.Retained,folder,n.Cause);
+            if(n.Cause==TextKey.InfoLinks || n.Subject.Move!=null || n.Kind==NoticeKind.PutBack)
+                foreach(var item in n.Subject.Items) await Protect(item.Side,item.Path);
+        }
+        if(!userSelected && binding!=null && !pair.Exclusions.Any(ex=>!ex.Keep && ex.Side==deleting && PathNames.Same(ex.Path,folder.Path)) && await peer.ReadOneAsync(binding.PathOn(peer.Side),ct) is {IsFolder:true} reused && origin is ActionKind.DeleteLocal or ActionKind.DeleteDropbox)
+        {
+            if(reused.Id==binding.IdOn(peer.Side)) return new(RemovalOutcome.Retained,folder,null);
+            await foreach(var row in peer.ReadAllAsync(reused.Path,new(true,true),ct))
+            {
+                if(row.Entry is not {} entry) continue;
+                if(entry.Skip==nameof(TextKey.SkipUnreadable)) return new(RemovalOutcome.Retained,folder,TextKey.ReadLocalFailed);
+                var child=await store.FindAsync(pair.PairId,peer.Side,PathNames.KeyFor(peer.Side,row.Path),ct);
+                if(child!=null && child.IdOn(peer.Side)==entry.Id) protectedPaths.Add(child.KeyOn(deleting));
+            }
+        }
+        // Acquire once before mutation: an unreadable late sibling vetoes the entire removal.
+        Dictionary<string,Entry>? frozen=userSelected?new(PathNames.Comparer):null;
+        Dictionary<string,int>? frozenChildren=userSelected?new(PathNames.Comparer):null;
+        bool cleanCoverage=!userSelected && covered is {Context:{CompleteInventory:true,ProtectedContents:false,UnreadableCause:null}} && covered.Synced==binding && covered.EntryOn(deleting)==folder && covered.EntryOn(peer.Side)==null && !protectedPaths.Overlaps(PathNames.Key(folder.Path));
+        if(!cleanCoverage && (userSelected || deleting==Side.Local || protectedPaths.Overlaps(PathNames.Key(folder.Path))))
+        {
+            await foreach(var row in target.ReadAllAsync(folder.Path,new(true,true),ct))
+            {
+                if(row.Entry is not {} child || child.Skip==nameof(TextKey.SkipUnreadable))
+                {
+                    await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,TextKey.ReadLocalFailed,row.Path,new([new(deleting,row.Path,row.Entry?.Id??string.Empty)],deleting),DateTimeOffset.UtcNow,false),ct);
+                    return new(RemovalOutcome.Retained,folder,TextKey.ReadLocalFailed);
+                }
+                if(frozen!=null)
+                {
+                    frozen.Add(PathNames.KeyFor(deleting,row.Path),child);
+                    var parent=PathNames.KeyFor(deleting,PathNames.Parent(row.Path));frozenChildren![parent]=frozenChildren!.GetValueOrDefault(parent)+1;
+                }
+                if(child.Skip==nameof(TextKey.SkipLink)) await Protect(deleting,row.Path);
+            }
+        }
+        if(!userSelected && origin==ActionKind.ReplaceKind)
+        {
+            var capturedAt=DateTimeOffset.UtcNow;
+            var before=heldInput(scope);
+            if(before.Any(c=>c.Kind!=ChangeKind.Deleted && c.Side==deleting && c.Path!=null && PathNames.IsSelfOrUnder(c.Path,folder.Path)))
+            {
+                // The conflict owner may move either version. Never continue the stale parent replacement after handing it off.
+                var applied=await RecoverHeldAsync(pair,scope,deleting,local,dropbox,store,_=>before,populate,ct,preRemoval:true,capturedAt:capturedAt,origin:origin,resolveConflict:resolveConflict);
+                return new(RemovalOutcome.Retained,folder,applied?null:TextKey.FailReplacementRetained);
+            }
+        }
+        return await Remove(folder,binding);
+
+        async Task<bool> Admitted()
+        {
+            if(coversThrough==null) return false;
+            var pc=local.BoundaryAsync(ct);var db=dropbox.BoundaryAsync(ct);await Task.WhenAll(pc,db);
+            return (await pc).Position is {} position && (await db).Cursor is {Length:>0} cursor && coversThrough((position,cursor));
+        }
+
+        async Task<RemovalResult> Remove(Entry entry,SyncedEntry? saved)
+        {
+            var key=PathNames.KeyFor(deleting,entry.Path);
+            bool partial=false;
+            if(protectedPaths.Keys.Any() || entry.Skip!=null)
+            {
+                var verdict=Planner.FolderDeletes.Classify(protectedPaths.Covers(key),false,entry.Skip==nameof(TextKey.SkipLink),entry.Skip==nameof(TextKey.SkipUnreadable),false);
+                partial=!Planner.FolderDeletes.SelectBranch(verdict,protectedPaths.Overlaps(key),false);
+                if(verdict==Planner.FolderDeletes.FolderVerdict.Survives || partial && origin==ActionKind.ReplaceKind) return new(RemovalOutcome.Retained,entry,TextKey.FailReplacementRetained);
+            }
+            RemovalSelection? selection=null;
+            if(deleting==Side.Local)
+            {
+                var location=await local.ReadByIdAsync(entry.Id,ct);
+                if(location is not {InScope:true} match || match.Location.Entry!=entry || string.IsNullOrEmpty(match.Location.Domain)) return new(RemovalOutcome.Unknown,entry,TextKey.FailChanged);
+                var volume=match.Location.Domain;
+                if(pair.Roots!=null && pair.Roots.LocalVolumeKey()!=volume) return new(RemovalOutcome.Unknown,entry,TextKey.RootLocalIdentityChanged);
+                selection=new(new(entry,volume,entry.IsFolder || entry.Skip==nameof(TextKey.SkipOnlineOnly)?null:await local.ContentHashAsync(entry,ct)),saved);
+            }
+            if(!userSelected && coversThrough==null) return new(RemovalOutcome.Retained,entry,TextKey.RetryRecoveryRequired);
+            var splitRoot=splitSelected && entry==folder;
+            string? cursor=null;
+            RemovalResult removal;
+            try {removal=partial || splitRoot?new(RemovalOutcome.Retained,entry,null):await DeleteSelected();}
+            catch(ItemFailedException e) when(entry.IsFolder && e.Cause==TextKey.FailDropboxTooManyFiles && e.Disposition==FailureDisposition.Permanent) {removal=new(RemovalOutcome.NoEffect,entry,e.Cause);}
+            if(partial || splitRoot || removal is {Outcome:RemovalOutcome.NoEffect,Cause:TextKey.FailDropboxTooManyFiles} && entry.IsFolder && origin is (ActionKind.DeleteLocal or ActionKind.DeleteDropbox))
+            {
+                RemovalResult? unsettled=null;ItemFailedException? deferred=null;
+                await foreach(var row in target.ReadAllAsync(entry.Path,new(false,true),ct))
+                {
+                    if(row.Entry is not {} child || child.Skip==nameof(TextKey.SkipUnreadable)) return new(RemovalOutcome.Retained,entry,TextKey.ReadLocalFailed);
+                    try
+                    {
+                        if(frozen!=null && frozen.GetValueOrDefault(PathNames.KeyFor(deleting,child.Path))!=child) return new(RemovalOutcome.Retained,entry,TextKey.FailChanged);
+                        var part=await Remove(child,await store.FindAsync(pair.PairId,deleting,PathNames.KeyFor(deleting,child.Path),ct));
+                        if(part.Outcome!=RemovalOutcome.Removed && !(partial && part.Outcome==RemovalOutcome.Retained && protectedPaths.Overlaps(PathNames.KeyFor(deleting,child.Path)))) unsettled??=part;
+                    }
+                    catch(ItemFailedException wait) when(wait.Disposition==FailureDisposition.TemporaryNoEffect) {deferred??=wait;}
+                    catch(ItemFailedException error)
+                    {
+                        await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,error.Cause,child.Path,new([new(deleting,child.Path,child.Id)],deleting),DateTimeOffset.UtcNow,false),ct);
+                        unsettled??=new(RemovalOutcome.Retained,entry,error.Cause);
+                    }
+                }
+                if(deferred!=null) throw deferred;
+                if(unsettled!=null) return new(RemovalOutcome.Retained,entry,unsettled.Cause);
+                if(partial) return removal;
+                removal=await DeleteSelected();
+            }
+            async Task<RemovalResult> DeleteSelected()
+            {
+                if(frozen!=null)
+                {
+                    if(deleting==Side.Dropbox && (cursor=(await dropbox.BoundaryAsync(ct)).Cursor) is not {Length:>0}) return new(RemovalOutcome.Retained,entry,TextKey.FailChanged);
+                    if(await target.ReadOneAsync(entry.Path,ct)!=entry) return new(RemovalOutcome.Retained,entry,TextKey.FailChanged);
+                    if(entry.IsFolder)
+                    {
+                        var counts=new Dictionary<string,int>(PathNames.Comparer){[key]=0};
+                        await foreach(var row in target.ReadAllAsync(entry.Path,new(true,true),ct))
+                        {
+                            var childKey=PathNames.KeyFor(deleting,row.Path);
+                            if(row.Entry==null || frozen.GetValueOrDefault(childKey)!=row.Entry) return new(RemovalOutcome.Retained,entry,TextKey.FailChanged);
+                            var parent=PathNames.KeyFor(deleting,PathNames.Parent(row.Path)); counts[parent]=counts.GetValueOrDefault(parent)+1;
+                            if(row.Entry.IsFolder) counts.TryAdd(childKey,0);
+                        }
+                        if(counts.Any(x=>frozenChildren!.GetValueOrDefault(x.Key)!=x.Value)) return new(RemovalOutcome.Retained,entry,TextKey.FailChanged);
+                    }
+                }
+                else if(!await Admitted()) return new(RemovalOutcome.Retained,entry,TextKey.RetryRecoveryRequired);
+                return deleting==Side.Dropbox?await target.DeleteAsync(entry,null,origin,ct):await target.DeleteAsync(entry,selection,ct);
+            }
+            if(removal.RecycledVictim is {} victim && selection!=null && victim.Domain==selection.Proof.VolumeId && (victim.Entry.Id!=entry.Id || removal.Outcome==RemovalOutcome.Retained && ContentHash.IsValid(victim.Entry.ContentHash) && victim.Entry.ContentHash!=selection.Proof.ContentHash))
+            {
+                var subject=new Scope(entry.Path,saved?.DropboxPath??entry.Path);
+                var restored=await PutBackSubstituteAsync(pair,subject,victim,local,dropbox,store,populate,ct);
+                if(restored) await store.DisarmAsync(pair.PairId,selection,null,ct);
+                return removal with {Outcome=restored?RemovalOutcome.WrongRestored:RemovalOutcome.Unknown};
+            }
+            if(removal.Outcome!=RemovalOutcome.Removed)
+            {
+                if(removal.Outcome==RemovalOutcome.NoEffect && selection!=null) await store.DisarmAsync(pair.PairId,selection,null,ct);
+                return removal;
+            }
+            var suffix=entry.Path[folder.Path.Length..]; var footprint=new Scope(saved?.LocalPath??scope.LocalPath+suffix,saved?.DropboxPath??scope.DropboxPath+suffix);
+            // The launch checker recovers the whole split only after its post-effect capture.
+            if(splitSelected && deleting==Side.Dropbox && origin==ActionKind.DeleteDropbox) return removal;
+            if(!userSelected && !await Admitted()) return new(RemovalOutcome.Retained,null,TextKey.RetryRecoveryRequired);
+            var receiptEntry=removal.Reply is JobReply.Terminal {Members:[({Skip:null} hit,null,null)],AbsentOrdinals.Count:0} && hit.Id==entry.Id && hit.IsFolder==entry.IsFolder?hit:null;
+            bool uncertain=deleting==Side.Dropbox && (receiptEntry==null || !PathNames.Same(receiptEntry.Path,entry.Path));
+            var capturedAt=DateTimeOffset.UtcNow;
+            IEnumerable<Change> reports=userSelected?[]:heldInput(footprint);
+            if(frozen!=null)
+            {
+                if(deleting==Side.Local && entry.IsFolder)
+                {
+                    if(removal.RecycledVictim is not {} receipt || receipt.Domain!=selection?.Proof.VolumeId || receipt.Entry.Id!=entry.Id || !receipt.Entry.IsFolder || removal.Recycled==null) return new(RemovalOutcome.Unknown,null,TextKey.RecycleUnchecked);
+                    await foreach(var row in removal.Recycled.WithCancellation(ct))
+                    {
+                        if(row.Entry is not {} item || item.Skip==nameof(TextKey.SkipUnreadable)) return new(RemovalOutcome.Unknown,null,TextKey.RecycleUnchecked);
+                        if(frozen.GetValueOrDefault(PathNames.Key(row.Path))!=item)
+                            await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,TextKey.FailRecycledLate,row.Path,new([new(deleting,row.Path,item.Id)],deleting),DateTimeOffset.UtcNow,false),ct);
+                    }
+                }
+                if(deleting==Side.Dropbox)
+                {
+                    capturedAt=DateTimeOffset.UtcNow;
+                    var end=await dropbox.BoundaryAsync(ct);if(end.Cursor is not {Length:>0} || cursor==null) return new(RemovalOutcome.Unknown,null,TextKey.FailChanged);
+                    var actualRoot=receiptEntry?.Path;
+                    var edits=new Dictionary<string,Change>(PathNames.Comparer);
+                    while(cursor!=end.Cursor)
+                    {
+                        var page=await dropbox.ReadChangesAsync(cursor,null,end,ct);
+                        if(page.ContinuityLost || !page.CaughtUp && (page.Cursor==null || page.Cursor==cursor)) return new(RemovalOutcome.Unknown,null,TextKey.FailChanged);
+                        foreach(var change in page.Changes)
+                        {
+                            if(change.Path is not {} path || !(PathNames.IsSelfOrUnder(path,entry.Path) || actualRoot!=null && !Path.IsPathRooted(actualRoot) && !paths.Excludes(null,path,false) && PathNames.IsSelfOrUnder(path,actualRoot)) || change.Kind==ChangeKind.Deleted) continue;
+                            edits[PathNames.DropboxKey(path)]=change;
+                        }
+                        if(page.CaughtUp) break;
+                        cursor=page.Cursor;
+                    }
+                    reports=edits.Values.Where(change=>change.Observed is not {} observed ||
+                        (PathNames.Same(observed.Path,entry.Path)?entry:frozen.GetValueOrDefault(PathNames.DropboxKey(observed.Path)))!=observed);
+                    foreach(var change in reports)
+                    {
+                        if(change.Observed is not {IsFolder:false,Skip:null} v || change.Id!=v.Id || !PathNames.Same(change.Path,v.Path) || string.IsNullOrEmpty(v.Revision) || !ContentHash.IsValid(v.ContentHash) || pair.Roots?.Dropbox.RootNamespaceId is not {Length:>0} ns) continue;
+                        Notice? prior=null;
+                        await foreach(var n in store.NoticesAtAsync(pair.PairId,PathNames.DropboxKey(v.Path),ct)) if(n.Kind==NoticeKind.PutBack){prior=n;break;}
+                        var subject=new IssueSubject([new(Side.Dropbox,v.Path,v.Id)],Side.Dropbox){DropboxVersion=new(ns,PathNames.RootedDropboxPath(pair.DropboxRoot,v.Path),v)};
+                        if(prior?.Subject.DropboxVersion!=subject.DropboxVersion) await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.PutBack,TextKey.RetryRecoveryRequired,v.Path,subject,capturedAt,false),ct);
+                    }
+                }
+            }
+            if(!userSelected && removal.Recycled!=null && !cleanCoverage && origin is (ActionKind.MoveLocal or ActionKind.MoveDropbox))
+            {
+                var arrivals=new List<Change>();
+                await foreach(var row in removal.Recycled.WithCancellation(ct))
+                {
+                    if(row.Entry is not {Skip:null} child) continue;
+                    var record=await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(row.Path),ct);
+                    if(record==null || record.LocalId==child.Id && !child.IsFolder && (record.LocalSize!=child.Size || record.LocalModifiedTicks!=child.Modified.UtcTicks || ContentHash.IsValid(child.ContentHash) && child.ContentHash!=record.DropboxContentHash))
+                        arrivals.Add(new(Side.Local,ChangeKind.Changed,row.Path,null,child.Id,child,true,false));
+                }
+                // A later held delete must supersede a receipt, not be overwritten by it.
+                reports=arrivals.Concat(reports);
+            }
+            if(uncertain) return removal with {Outcome=RemovalOutcome.Unknown,Cause=TextKey.FailDropboxOutcomeUnknown};
+            if(!await RecoverHeldAsync(pair,footprint,deleting,local,dropbox,store,_=>reports,populate,ct,capturedAt:capturedAt,origin:origin,resolveConflict:resolveConflict,selectedCloudWindow:frozen!=null && deleting==Side.Dropbox)) return new(RemovalOutcome.Retained,null,TextKey.RetryRecoveryRequired);
+            if(frozen?.Remove(key)==true) frozenChildren![PathNames.KeyFor(deleting,PathNames.Parent(entry.Path))]--;
+            if(saved!=null) await compareOldBinding(saved,footprint,footprint,ct);
+            if(selection!=null) await store.DisarmAsync(pair.PairId,selection,null,ct);
+            return removal;
+        }
+    }
+
+    /// <summary>Recover the positively observed bin occupant without ever granting the planned replacement.</summary>
+    public static Task<bool> PutBackSubstituteAsync(PairConfig pair,Scope scope,IdentityLocation receipt,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,CancellationToken ct)
+    {
+        var version=receipt.Entry with {Path=scope.LocalPath};
+        var observed=new Change(Side.Local,ChangeKind.Changed,scope.LocalPath,null,version.Id,version,true,false);
+        return RecoverHeldAsync(pair,scope,Side.Local,local,dropbox,store,_=>[observed],populate,ct,actualVictim:receipt);
+    }
+
+    internal static async Task<string> MapAsync(PairConfig pair,IStore store,Side side,string path,CancellationToken ct)
+    {
+        var other=PathNames.Other(side);
+        if(await store.FindAsync(pair.PairId,side,PathNames.KeyFor(side,path),ct) is {} exact) return exact.PathOn(other);
+        return PathNames.Parent(path).Length==0?PathNames.SpellingOn(other,path):await ItemSync.CounterpartAsync(pair,side,path,store,ct);
+    }
+
+    private static bool ClassifiedFailure(Exception ex)=>ex is ItemFailedException or ChangedUnderneathException or PathOccupiedException or IOException;
+
+    private static bool MatchesHistory(DeletionEvidence evidence,string? domain,Entry version)=>evidence is DeletionEvidence.DeletedFile h && PathNames.Same(h.Path,version.Path) && h.Domain==domain && h.RemoteId==version.Id && h.Revision==version.Revision && h.ContentHash==version.ContentHash;
+
+    /// <summary>Retry only the exact held subject; an empty replay is not settlement.</summary>
+    public static async Task<bool> RetryHeldAsync(PairConfig pair,Scope scope,Notice notice,ISide local,ISide dropbox,IStore store,Func<Scope,IEnumerable<Change>> heldInput,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,CancellationToken ct,Func<Scope,Side,Entry,CancellationToken,Task<EffectOutcome>>? resolveConflict=null)
+    {
+        if(notice.Kind!=NoticeKind.PutBack || notice.Subject.Incoming is not {} side) return false;
+        var subject=notice.Subject.Items.FirstOrDefault(m=>m.Side==side && PathNames.Same(m.Path,notice.Path));
+        if(subject==null || !PathNames.IsSelfOrUnder(subject.Path,side==Side.Local?scope.LocalPath:scope.DropboxPath)) return false;
+        var endpoint=side==Side.Local?local:dropbox;
+        var entry=notice.Subject.DropboxVersion?.Entry ?? (await endpoint.ReadByIdAsync(subject.Id,ct))?.Location.Entry;
+        var mapped=await MapAsync(pair,store,side,subject.Path,ct);
+        var range=side==Side.Local?new Scope(subject.Path,mapped):new Scope(mapped,subject.Path);
+        var saved=await store.FindAsync(pair.PairId,side,PathNames.KeyFor(side,subject.Path),ct);
+        var observed=entry;
+        if(entry==null) entry=heldInput(range).LastOrDefault(c=>c.Side==side && c.Id==subject.Id && PathNames.Same(c.Path,subject.Path) && c.Observed?.Id==subject.Id)?.Observed;
+        var locks=new ItemLocks();
+        if(entry?.IsFolder==true)
+            return await locks.RunAsync([(Side.Local,ItemLocks.Physical(pair,Side.Local,range.LocalPath),true),(Side.Dropbox,ItemLocks.Physical(pair,Side.Dropbox,range.DropboxPath),true)],Recover,ct);
+        var row=Row.ForOneSide(side,subject.Path,entry==null?null:entry with {Path=subject.Path},saved,[],null,RowContext.Neutral with {Destination=mapped});
+        return await locks.RunAsync(pair,new(side==Side.Local?ActionKind.DeleteLocal:ActionKind.DeleteDropbox,row,Target:subject.Path),[],Recover,ct);
+        async Task<bool> Recover()
+        {
+            if(await store.NoticeAsync(pair.PairId,notice.Id,ct) is not {} current || !current.Matches(notice) || await store.FindAsync(pair.PairId,side,PathNames.KeyFor(side,subject.Path),ct)!=saved || await MapAsync(pair,store,side,subject.Path,ct)!=mapped) return false;
+            if(notice.Subject.DropboxVersion==null && (await endpoint.ReadByIdAsync(subject.Id,ct))?.Location.Entry!=observed) return false;
+            return await RecoverHeldAsync(pair,range,side,local,dropbox,store,heldInput,populate,ct,notice,resolveConflict:resolveConflict);
+        }
+    }
+
+    /// <summary>Keep failed reports in the queue so Retry can reconstruct the latest required version.</summary>
+    internal static async Task<bool> RecoverHeldAsync(PairConfig pair,Scope scope,Side side,ISide local,ISide dropbox,IStore store,Func<Scope,IEnumerable<Change>> heldInput,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,CancellationToken ct,Notice? retry=null,ActionKind origin=ActionKind.None,Func<Scope,Side,Entry,CancellationToken,Task<EffectOutcome>>? resolveConflict=null,IdentityLocation? actualVictim=null,bool selectedCloudWindow=false,DateTimeOffset? capturedAt=null,bool preRemoval=false)
+    {
+        var source=side==Side.Local?local:dropbox; bool complete=true;
+        var root=side==Side.Local?scope.LocalPath:scope.DropboxPath;
+        var subject=retry?.Subject.Items.FirstOrDefault(i=>i.Side==side && PathNames.Same(i.Path,retry.Path));
+        var latest=new Dictionary<(string Path,string Id), (long Order,Change Report)>();
+        var pathDeletes=new Dictionary<string,long>(PathNames.Comparer);
+        var acks=new List<((string Path,string Id) Key,Action Ack)>();long order=0;
+        var pinned=retry?.Subject.DropboxVersion;
+        if(pinned!=null && (side!=Side.Dropbox || subject==null || pinned.Domain!=pair.Roots?.Dropbox.RootNamespaceId || pinned.Entry.Id!=subject.Id || pinned.Entry.Path!=subject.Path || pinned.NativePath!=PathNames.RootedDropboxPath(pair.DropboxRoot,subject.Path))) return false;
+        Entry? distinct=null,echoed=null;
+        var identifiedAt=capturedAt??DateTimeOffset.UtcNow;
+        IEnumerable<Change> inputs=heldInput(scope);
+
+        foreach(var c in inputs)
+        {
+            if(c.Side!=side) continue;
+            if(c.Path==null || !PathNames.IsSelfOrUnder(c.Path,root))
+            {
+                if((c.OldPath!=null && PathNames.IsSelfOrUnder(c.OldPath,root) || c.AffectedPath!=null && PathNames.IsSelfOrUnder(c.AffectedPath,root)) && (subject==null || subject.Id==c.Id)) complete=false;
+                continue;
+            }
+            var key=(PathNames.Key(c.Path),c.Id??c.Observed?.Id??string.Empty);
+            if(pinned!=null && PathNames.Same(c.Path,pinned.Entry.Path) && c.Kind==ChangeKind.Deleted)
+            {
+                // A path-only echo has no identity. Leave a corroborated independent removal to ordinary settlement.
+                if(c.Id==pinned.Entry.Id) return false;
+                if(c.Id==null && distinct!=null) echoed=distinct;
+                continue;
+            }
+            if(subject!=null && (!PathNames.Same(subject.Path,c.Path) || key.Item2!=subject.Id && !(side==Side.Dropbox && c.Kind==ChangeKind.Deleted && key.Item2.Length==0 && latest.ContainsKey((key.Item1,subject.Id))))) continue;
+            if(pinned!=null)
+            {
+                // Borrow only the pinned observation. An unrelated queue entry keeps its own acknowledgement.
+                distinct=c.Observed is {} observed && observed.Id==pinned.Entry.Id && observed.Revision!=pinned.Entry.Revision?observed:null;
+                if(c.Observed!=pinned.Entry || c.Kind==ChangeKind.Deleted) continue;
+            }
+            latest[key]=(++order,c);
+            if(side==Side.Dropbox && key.Item2.Length==0 && c.Kind==ChangeKind.Deleted) pathDeletes[key.Item1]=order;
+            if(c.ConsumeHeld!=null) acks.Add((key,c.ConsumeHeld));
+        }
+        if(pinned!=null)
+        {
+            if(echoed!=null && MatchesHistory(await source.DeletedAsync(pinned.Entry.Path,ct),pinned.Domain,echoed)) return false;
+            var key=(PathNames.Key(pinned.Entry.Path),pinned.Entry.Id);
+            latest.TryAdd(key,(0,new(side,ChangeKind.Changed,pinned.Entry.Path,null,pinned.Entry.Id,pinned.Entry,true,false)));
+        }
+        if(retry!=null && latest.Count==0)
+        {
+            if(subject==null || side!=Side.Local || await source.ReadByIdAsync(subject.Id,ct) is not {InScope:false} bin || bin.Location.Entry.Id!=subject.Id) return false;
+            var baseline=await store.FindAsync(pair.PairId,side,PathNames.Key(subject.Path),ct);
+            var selected=await store.ArmedAsync(pair.PairId,ct);
+            if(!(baseline!=null && baseline.LocalId!=subject.Id) && !(selected is {} note && note.Victim.Saved==baseline && PathNames.Same(note.Victim.Proof.Expected.Path,subject.Path) && note.Victim.Proof.VolumeId==bin.Location.Domain)) return false;
+            actualVictim=bin.Location;var recovered=bin.Location.Entry with {Path=subject.Path};
+            latest[(PathNames.Key(subject.Path),subject.Id)]=(++order,new(side,ChangeKind.Changed,subject.Path,null,subject.Id,recovered,true,false));
+        }
+        var settled=new HashSet<(string Path,string Id)>();
+        foreach(var (key,candidate) in latest)
+        {
+            var last=candidate.Report;
+            if(pathDeletes.GetValueOrDefault(key.Path)>candidate.Order) {settled.Add(key);continue;}
+            if(last.Kind!=ChangeKind.Deleted)
+            {
+                if(last.Observed is not {} version) {complete=false;continue;}
+                if(!PathNames.Same(last.Path,version.Path) || !PathNames.IsSelfOrUnder(version.Path,root)) {complete=false;continue;}
+                var saved=await store.FindAsync(pair.PairId,side,PathNames.KeyFor(side,version.Path),ct);
+                bool foreign=saved!=null && saved.IdOn(side)!=version.Id;
+                bool substitute=actualVictim?.Entry.Id==version.Id || foreign && retry?.Subject.Items.Any(i=>i.Side==side && i.Id==version.Id && PathNames.Same(i.Path,version.Path))==true;
+
+                Notice? owner=retry;
+                if(owner==null) await foreach(var open in store.NoticesAtAsync(pair.PairId,PathNames.Key(version.Path),ct))
+                    if(open.Kind==NoticeKind.PutBack && open.Subject.Incoming==side && open.Subject.Items.FirstOrDefault() is {} original && original.Id==version.Id && PathNames.Same(original.Path,version.Path)) owner=open;
+                var exact=owner?.Subject.DropboxVersion;
+                if(exact!=null && (exact.Entry!=version || exact.Domain!=pair.Roots?.Dropbox.RootNamespaceId)) {complete=false;continue;}
+                var items=owner?.Subject.Items.ToList()??[new(side,version.Path,version.Id)];
+                var tail=version.Path[root.Length..]; var endpoints=new Scope(saved?.LocalPath??PathNames.LocalSpelling(scope.LocalPath+tail),saved?.DropboxPath??scope.DropboxPath+tail);
+                try
+                {
+                    if(!preRemoval && side==Side.Dropbox && !version.IsFolder && version.Skip==null && !string.IsNullOrEmpty(version.Revision) && ContentHash.IsValid(version.ContentHash) && pair.Roots?.Dropbox.RootNamespaceId is {Length:>0} nsId)
+                        exact??=new(nsId,PathNames.RootedDropboxPath(pair.DropboxRoot,version.Path),version);
+                    if(exact!=null && owner?.Subject.DropboxVersion!=exact) {if(selectedCloudWindow){complete=false;continue;} await Checkpoint();}
+                    bool freeDropbox=false;
+                    if(side==Side.Dropbox && (!foreign || substitute) && (origin==ActionKind.ReplaceKind && !selectedCloudWindow || await Competing()))
+                    {
+                        if(await Resolve()) settled.Add(key);else complete=false;continue;
+                    }
+                    var located=actualVictim==null && exact==null?await source.ReadByIdAsync(version.Id,ct):null;
+                    if(actualVictim==null && located==null && side==Side.Local && items.All(i=>i.Side!=Side.Local || i.Id==version.Id)) throw new ChangedUnderneathException(version.Path);
+                    var location=exact??actualVictim??located?.Location;
+                    var armed=side==Side.Local && (substitute || owner!=null)?await store.ArmedAsync(pair.PairId,ct):null;
+                    bool sameSelection=armed is {} n && n.Victim.Saved==saved && n.Victim.Proof.VolumeId==location?.Domain && PathNames.Same(n.Victim.Proof.Expected.Path,version.Path);
+                    bool sameId=sameSelection && armed!.Value.Victim.Proof.Expected.Id==version.Id;
+                    if(owner!=null && sameSelection && !sameId && (actualVictim!=null || located is {InScope:false})) substitute=true;
+                    if(foreign && !substitute) {complete=false;continue;}
+                    Recovery.File? provenFile=null;
+                    if(side==Side.Local && located is {InScope:false} bin && bin.Location.Entry.Id==version.Id && !bin.Location.Entry.IsFolder)
+                    {
+                        var candidateVersion=bin.Location.Entry with {Path=version.Path};
+                        provenFile=await source.RecoverAsync(bin.Location,candidateVersion,ct) as Recovery.File;
+                        if(provenFile==null) throw new ChangedUnderneathException(version.Path);
+                    }
+                    if(sameId && owner!=null && provenFile!=null && ContentHash.IsValid(provenFile.Version.ContentHash) && !string.Equals(armed!.Value.Victim.Proof.ContentHash,provenFile.Version.ContentHash,StringComparison.OrdinalIgnoreCase)) substitute=true;
+                    // Copy recovery needs the stream; whole-item restore needs only the version before it opens a DELETE handle.
+                    await using var verifiedBytes=substitute?null:provenFile?.Bytes;
+                    if(provenFile!=null)
+                    {
+                        await using var proofOnly=substitute?provenFile.Bytes:null;
+                        var candidateVersion=location!.Entry with {Path=version.Path};
+                        if(!ContentHash.IsValid(provenFile.Version.ContentHash) || (provenFile.Version with {ContentHash=candidateVersion.ContentHash})!=candidateVersion || ContentHash.IsValid(candidateVersion.ContentHash) && provenFile.Version.ContentHash!=candidateVersion.ContentHash) throw new ChangedUnderneathException(version.Path);
+                        version=provenFile.Version;
+                    }
+                    if(location==null && side==Side.Dropbox && !version.IsFolder && !string.IsNullOrEmpty(version.Revision) && pair.Roots?.Dropbox.RootNamespaceId is {Length:>0} ns) location=new(ns,PathNames.RootedDropboxPath(pair.DropboxRoot,version.Path),version);
+
+                    bool Keep(Side leg,string path)=>!pair.Exclusions.Any(ex=>!ex.Keep && ex.Side==leg && PathNames.IsSelfOrUnder(path,ex.Path));
+                    if(substitute)
+                    {
+                        if(side!=Side.Local || location==null || !Keep(Side.Local,endpoints.LocalPath)) throw new ChangedUnderneathException(version.Path);
+                        if(await local.ReadOneAsync(endpoints.LocalPath,ct)!=null) throw new PathOccupiedException(endpoints.LocalPath);
+                        if(!version.IsFolder && !ContentHash.IsValid(version.ContentHash))
+                        {
+                            if(await local.RecoverAsync(location,version,ct) is not Recovery.File known) throw new ChangedUnderneathException(version.Path);
+                            await using(known.Bytes){if(!ContentHash.IsValid(known.Version.ContentHash) || (known.Version with {ContentHash=version.ContentHash})!=version) throw new ChangedUnderneathException(version.Path);version=known.Version;}
+                        }
+                        if(sameId && (version.IsFolder || !ContentHash.IsValid(version.ContentHash) || string.Equals(armed!.Value.Victim.Proof.ContentHash,version.ContentHash,StringComparison.OrdinalIgnoreCase))) throw new ChangedUnderneathException(version.Path);
+                        // The exact PutBack subject survives the native rename until its matching note is discharged.
+                        if(sameSelection && owner==null) await Checkpoint();
+                        var restored=await local.RestoreRecycledAsync(location,version,endpoints.LocalPath,ct);
+                        if(restored is not {Outcome:RemovalOutcome.Published,Final:{} final} || final.Id!=version.Id || final.IsFolder!=version.IsFolder || !PathNames.Same(final.Path,endpoints.LocalPath) ||
+                            !final.IsFolder && (final.Size!=version.Size || !ContentHash.IsValid(final.ContentHash) || ContentHash.IsValid(version.ContentHash) && !string.Equals(final.ContentHash,version.ContentHash,StringComparison.OrdinalIgnoreCase))) throw new ChangedUnderneathException(version.Path);
+                        if(armed is {Stage:not null}) {complete=false;continue;}
+                        if(sameSelection) await store.DisarmAsync(pair.PairId,armed!.Value.Victim,null,ct);
+                        if(!await ReleaseOwner()) {complete=false;continue;}
+                        settled.Add(key);continue;
+                    }
+                    async Task<bool> Resolve()
+                    {
+                        if(resolveConflict==null || await resolveConflict(endpoints,side,version,ct)!=EffectOutcome.Applied) throw new ItemFailedException(version.Path,TextKey.RetryRecoveryRequired,null);
+                        return await ReleaseOwner();
+                    }
+                    async Task<bool> Competing()
+                    {
+                        if(retry==null || resolveConflict==null && exact==null) return false;
+                        var db=await dropbox.ReadOneAsync(endpoints.DropboxPath,ct);
+                        freeDropbox=exact!=null && db==null && Keep(Side.Dropbox,endpoints.DropboxPath);
+                        if(freeDropbox) return false; // The old-ID fence and create-only Restore govern this leg.
+                        var pc=await local.ReadOneAsync(endpoints.LocalPath,ct);
+                        return pc!=null && (pc.IsFolder!=version.IsFolder || !pc.IsFolder && await local.ContentHashAsync(pc,ct)!=version.ContentHash) || db!=null && (db.IsFolder!=version.IsFolder || !db.IsFolder && db.ContentHash!=version.ContentHash);
+                    }
+                    if(side==Side.Local && (origin==ActionKind.ReplaceKind && !selectedCloudWindow || await Competing()))
+                    {
+                        if(await Resolve()) settled.Add(key);else complete=false;continue;
+                    }
+                    if((selectedCloudWindow || exact!=null) && (version.IsFolder || version.Skip!=null || await source.ReadByIdAsync(version.Id,ct) is not null)) throw new ChangedUnderneathException(version.Path);
+                    if(version.IsFolder)
+                    {
+                        if(location==null || await source.RecoverAsync(location,version,ct) is not Recovery.Folder folder || folder.Root.Id!=version.Id) throw new ChangedUnderneathException(version.Path);
+                        var keepPc=Keep(Side.Local,endpoints.LocalPath);var keepDb=Keep(Side.Dropbox,endpoints.DropboxPath);
+                        if(!(side==Side.Local?keepDb:keepPc)) throw new ItemFailedException(version.Path,TextKey.RetryRecoveryRequired,null);
+                        await populate(endpoints,side,folder,ct);
+                    }
+                    else
+                    {
+                        Entry? a=null,b=null;Exception? localFailure=null;
+                        try {if(Keep(Side.Local,endpoints.LocalPath)) a=await Restore(local,endpoints.LocalPath,null);}
+                        catch(Exception ex) when(Keep(Side.Dropbox,endpoints.DropboxPath) && (ex is PathOccupiedException || freeDropbox && ClassifiedFailure(ex))) {localFailure=ex;}
+                        if(localFailure!=null && freeDropbox && (owner==null || await store.NoticeAsync(pair.PairId,owner.Id,ct) is not {} current || !current.Matches(owner))) {complete=false;continue;}
+                        // An eligible empty Dropbox name gets the pinned revision, never a stream from mutable Local.
+                        try {if(Keep(Side.Dropbox,endpoints.DropboxPath)) b=await Restore(dropbox,endpoints.DropboxPath,freeDropbox?null:a);}
+                        catch(PathOccupiedException) when(resolveConflict!=null && (a!=null || localFailure is PathOccupiedException)) { }
+                        if(localFailure!=null && localFailure is not PathOccupiedException) throw localFailure;
+                        if(localFailure!=null || b==null && Keep(Side.Dropbox,endpoints.DropboxPath))
+                        {
+                            if(await Resolve()) settled.Add(key);else complete=false;continue;
+                        }
+                        if(a==null && b==null) {complete=false;continue;}
+                        if(a!=null && b!=null) await store.CommitAsync(pair.PairId,saved,SyncedEntries.From(a,b),null,null,ct);
+
+                        await Notice(NoticeKind.Info,TextKey.InfoEditBeatsDelete);
+                        if(retry==null && !await ReleaseOwner()) {complete=false;continue;}
+                    }
+                    async Task<Entry> Restore(ISide leg,string path,Entry? verifiedLocal)
+                    {
+                        var present=await leg.ReadOneAsync(path,ct);
+                        if(present!=null)
+                        {
+                            bool known=items.Any(m=>m.Side==leg.Side && m.Id==present.Id && PathNames.Same(m.Path,path)) || saved?.IdOn(leg.Side)==present.Id;
+                            // A lost remote create reply cannot prove our authorship. It can prove ordinary equality against the exact checkpointed local file.
+                            bool equalCandidate=leg.Side==Side.Dropbox && verifiedLocal!=null && owner!=null && items.Any(i=>i.Side==Side.Local && i.Id==verifiedLocal.Id && PathNames.Same(i.Path,verifiedLocal.Path)) && await local.ContentHashAsync(verifiedLocal,ct)==version.ContentHash;
+                            if(present.IsFolder || !(known || equalCandidate) || present.Size!=version.Size || !ContentHash.IsValid(version.ContentHash)) throw new PathOccupiedException(path);
+                            if(!StringComparer.OrdinalIgnoreCase.Equals(await leg.ContentHashAsync(present,ct),version.ContentHash)) throw new PathOccupiedException(path);
+                            return present;
+                        }
+                        await using var bytes=verifiedLocal!=null?await local.OpenReadAsync(verifiedLocal,ct):verifiedBytes??(location!=null && await source.RecoverAsync(location,version,ct) is Recovery.File file && file.Version==version?file.Bytes:throw new ChangedUnderneathException(path));
+                        foreach(var parent in PathNames.Ancestors(path).Reverse().Where(p=>p.Length>0)) if((await leg.EnsureFolderAsync(parent,ct)).Outcome!=RemovalOutcome.Published) throw new ChangedUnderneathException(parent);
+                        await using var stage=await leg.StageAsync(path,bytes,version,null,ct);
+                        if(stage.Proof is {} proof && leg.Side==Side.Local)
+                        {
+                            if(exact!=null && (proof.Size!=version.Size || !StringComparer.OrdinalIgnoreCase.Equals(proof.ContentHash,version.ContentHash))) throw new ChangedUnderneathException(path);
+                            // Persist the exact staged file identity before create-only publication: restart cannot infer ownership from equal bytes.
+                            items.Add(new(leg.Side,path,proof.FileId));
+                            await Checkpoint();
+                        }
+                        var published=await leg.PublishAsync(stage,null,null,ct);
+                        if(published is {Outcome:RemovalOutcome.Published,Final:{} confirmed} && !items.Any(i=>i.Side==leg.Side && i.Id==confirmed.Id && PathNames.Same(i.Path,path)))
+                        {
+                            items.Add(new(leg.Side,path,confirmed.Id)); await Checkpoint();
+                        }
+                        if(published.Outcome!=RemovalOutcome.Published || published.Final is not {} entry || entry.Size!=version.Size || !ContentHash.IsValid(version.ContentHash)) throw new ChangedUnderneathException(path);
+                        return StringComparer.OrdinalIgnoreCase.Equals(await leg.ContentHashAsync(entry,ct),version.ContentHash)?entry:throw new ChangedUnderneathException(path);
+                    }
+                }
+                catch(Exception ex) when(ClassifiedFailure(ex))
+                {
+                    if(owner==null || await store.NoticeAsync(pair.PairId,owner.Id,ct) is {} activeFailure && activeFailure.Matches(owner)) await Notice(NoticeKind.PutBack,ex is ItemFailedException failure?failure.Cause:ex is PathOccupiedException?TextKey.ClashNameTaken:TextKey.FailChanged);
+                    complete=false;continue;
+                }
+                async Task<bool> ReleaseOwner()
+                {
+                    if(owner==null) return true;
+                    if(!await store.CloseNoticeAsync(pair.PairId,owner,ct)) return false;
+                    if(owner==retry) retry=null;
+                    return true;
+                }
+                async Task Checkpoint()
+                {
+                    if(owner!=null && (await store.NoticeAsync(pair.PairId,owner.Id,ct) is not {} active || !active.Matches(owner))) throw new ChangedUnderneathException(version.Path);
+                    await Notice(NoticeKind.PutBack,owner?.Cause??TextKey.RetryRecoveryRequired);
+                    await foreach(var n in store.NoticesAtAsync(pair.PairId,PathNames.Key(version.Path),ct))
+                        if(n.Kind==NoticeKind.PutBack && n.Subject.Incoming==side && n.Subject.DropboxVersion==exact && n.Subject.HasSameItems(IssueSubject.FromDistinct(items,side))) {owner=n;if(retry!=null) retry=n;return;}
+                    throw new ChangedUnderneathException(version.Path);
+                }
+                Task Notice(NoticeKind kind,TextKey cause)=>store.SaveNoticeAsync(pair.PairId,new(0,kind,cause,version.Path,IssueSubject.FromDistinct(items,side) with {DropboxVersion=kind==NoticeKind.PutBack?exact:null},owner?.At??identifiedAt,false),ct);
+            }
+            settled.Add(key);
+        }
+        if(retry!=null)
+        {
+            if(!complete) return false;
+            if(retry!=null && !await store.CloseNoticeAsync(pair.PairId,retry,ct)) return false;
+        }
+        foreach(var entry in acks) if(settled.Contains(entry.Key)) entry.Ack();
+        return complete;
+    }
+}
