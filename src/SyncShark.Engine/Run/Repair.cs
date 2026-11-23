@@ -276,9 +276,7 @@ public static class Repair
         {
             var (left,right)=Row.Paths(raw); var items=notice.Subject.Items;
             if(Retirable(notice) && !notice.Ignored && !notice.Dismissed && !raw.CounterpartElsewhere && !raw.Ambiguous && raw.Context.CompleteInventory &&
-                (member==null ? items.Count==0 : items.Count==1 && items[0]==member ||
-                    // Every member of a multi-member notice sits on this bilaterally absent row (A51/A52).
-                    items.Count>1 && raw.Local==null && raw.Dropbox==null && items.Contains(member) && items.All(i=>PathNames.Same(i.Path,i.Side==Side.Local?left:right))))
+                (member==null ? items.Count==0 : items.Count==1 && items[0]==member))
             {
                 var footprint=await Footprint(member?.Side??notice.Subject.Incoming??Side.Local,member?.Path??notice.Path,token);
                 if(PathNames.Same(left,footprint.LocalPath) && PathNames.Same(right,footprint.DropboxPath) && CanClose(footprint) &&
