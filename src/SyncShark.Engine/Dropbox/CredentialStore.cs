@@ -21,6 +21,7 @@ public sealed class CredentialStore
 {
     /// <summary>The fixed target 0.3.95 used for the first connection's refresh token.</summary>
     public const string RegisteredTarget = "massdex/account-access/v1/dropbox/sync-shark/production/refresh-token";
+    private static readonly object MutationGate = new();
     private const string AccountPrefix = "massdex/account-access/v1/dropbox/sync-shark-";
     private const string AccountSuffix = "/production/refresh-token";
     private const string ConnectionPrefix = "connection-";
@@ -63,7 +64,8 @@ public sealed class CredentialStore
                     Persist = PersistLocalMachine,
                     UserName = "Dropbox refresh token"
                 };
-                if (!CredWrite(ref credential, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                lock (MutationGate)
+                    if (!CredWrite(ref credential, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
             }
             finally
             {
@@ -93,12 +95,23 @@ public sealed class CredentialStore
     /// <summary>Removes the fixed legacy target; only after its owner has been proven.</summary>
     public void RemoveLegacy() => DeleteTarget(RegisteredTarget);
 
+    internal static (string Value, long Stamp)? ObserveOwn(string connectionId) => ReadEntry(AccountTarget(connectionId));
+
+    // All host store instances share this boundary with Save; no lock is held during account verification.
+    internal void RemoveObserved(string connectionId, (string Value, long Stamp) observed)
+    {
+        lock (MutationGate)
+            if (ObserveOwn(connectionId) == observed) Remove(connectionId);
+    }
+
     private static void RequireWindows()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
     }
 
-    private static string? ReadTarget(string target)
+    private static string? ReadTarget(string target) => ReadEntry(target)?.Value;
+
+    private static (string Value, long Stamp)? ReadEntry(string target)
     {
         RequireWindows();
         if (!CredRead(target, GenericCredential, 0, out var pointer))
@@ -112,7 +125,8 @@ public sealed class CredentialStore
             var credential = Marshal.PtrToStructure<NativeCredential>(pointer);
             var bytes = new byte[credential.CredentialBlobSize];
             if (bytes.Length > 0) Marshal.Copy(credential.CredentialBlob, bytes, 0, bytes.Length);
-            try { return Encoding.UTF8.GetString(bytes); }
+            var written = credential.LastWritten;
+            try { return (Encoding.UTF8.GetString(bytes), ((long)written.dwHighDateTime << 32) | (uint)written.dwLowDateTime); }
             finally { CryptographicOperations.ZeroMemory(bytes); }
         }
         finally { CredFree(pointer); }

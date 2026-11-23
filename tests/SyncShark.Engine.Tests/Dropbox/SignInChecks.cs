@@ -193,6 +193,15 @@ public static class SignInChecks
                     failures.Add(cause + " aborted the local disconnect or removed the unproven fixed entry");
             }
 
+            store.Save(connectionOwner, "before-reconnect");
+            var held = new TaskCompletionSource<(string, string, string)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var disconnect = SignIn.DisconnectAsync((_, _) => held.Task, store, connectionOwner, default);
+            new CredentialStore().Save(connectionOwner, "after-reconnect");
+            held.SetResult((accountOther, "root-b", "home-b"));
+            await disconnect;
+            Check.Require(store.ReadOwn(connectionOwner) == "after-reconnect",
+                "Delayed disconnect removed the credential of a successfully reconnected account");
+
             // Caller cancellation is not swallowed: nothing is removed.
             store.Save(connectionOwner, "own-c");
             using var cancelled = new CancellationTokenSource();

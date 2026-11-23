@@ -277,7 +277,7 @@ public sealed class SignIn
         ArgumentNullException.ThrowIfNull(verify, nameof(verify));
         ArgumentNullException.ThrowIfNull(credentials, nameof(credentials));
         _ = CredentialStore.AccountTarget(connectionId);
-        var ownsCredential = credentials.ReadOwn(connectionId) is not null;
+        var observed = CredentialStore.ObserveOwn(connectionId);
         var legacy = credentials.ReadLegacy();
         if (legacy is not null)
         {
@@ -303,7 +303,7 @@ public sealed class SignIn
                 // the local disconnect completes and the fixed entry is left in place (R41).
             }
         }
-        if (ownsCredential) credentials.Remove(connectionId);
+        if (observed is { } entry) credentials.RemoveObserved(connectionId, entry);
     }
 
     /// <summary>Posts a token form through the supplied sender and returns the parsed token facts and granted scopes.</summary>
