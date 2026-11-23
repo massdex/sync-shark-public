@@ -346,14 +346,9 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
         e is ItemFailedException {ProviderWait:{} wait} provider && wait>TimeSpan.Zero
             ? wait-(provider.ProviderWaitStarted is {} start ? clock.GetElapsedTime(start) : TimeSpan.Zero)
             : settings.Backoff.RetryDelay(failures),clock,ct);
-    private async Task Failed(Member m,Exception e,CancellationToken ct)
-    {
-        try { await store!.SaveNoticeAsync(m.Pair.PairId,
+    private Task Failed(Member m,Exception e,CancellationToken ct) => store!.SaveNoticeAsync(m.Pair.PairId,
         new(0,NoticeKind.Failure,e switch {ItemFailedException i=>i.Cause,EngineRequestException request=>request.Key,_=>TextKey.RootUnavailable},e is ItemFailedException f ? f.Path : string.Empty,
-            new([],null),clock.GetUtcNow(),false),ct); }
-        catch(OperationCanceledException) when(ct.IsCancellationRequested) { throw; }
-        catch(Exception error) { m.Event(new(RunEventKind.Failed,nameof(IStore.SaveNoticeAsync),string.Empty,error.Message,string.Empty){Error=error}); }
-    }
+            new([],null),clock.GetUtcNow(),false),ct);
     private Task Membership(Member m,bool removed,CancellationToken ct) => m.Local==null || m.Pair.Roots==null ? Task.CompletedTask : m.Local.SetMembershipAsync(m.Pair,!m.Pair.Enabled || !m.Admitted || IsPaused(m.Pair.PairId),removed,ct);
     private static async Task Drain(Member m)
     {
