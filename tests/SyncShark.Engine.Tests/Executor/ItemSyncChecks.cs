@@ -25,7 +25,7 @@ public static class ItemSyncChecks
         var old=ItemChecks.File(Side.Local,"parent",0,"local",true); var peer=ItemChecks.File(Side.Dropbox,"parent",0,"peer",true);
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(old,peer),null,null,default);
         var deleted=new Change(Side.Local,ChangeKind.Deleted,old.Path,null,old.Id,null,false,true);
-        Check.Require(await ItemSync.ChangeAsync(pair,ItemChecks.Settings,_=>{},paths,deleted,pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[])==true && store.Records.Count==0 && db.Requests[nameof(ISide.DeleteAsync)]==0,"An already-removed peer folder kept its binding or was deleted again");
+        Check.Require(await (Task<bool>)ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,deleted,pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[])==true && store.Records.Count==0 && db.Requests[nameof(ISide.DeleteAsync)]==0,"An already-removed peer folder kept its binding or was deleted again");
     }
 
     public static async Task DeliberateRefusalIsNotRetained()
