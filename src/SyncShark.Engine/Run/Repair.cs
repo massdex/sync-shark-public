@@ -117,7 +117,7 @@ public static class Repair
             await foreach(var (raw,notices) in store.CompareAsync(id,scan,physicalHop!=null?logical:scope,Evidence,ct))
             {
                 // Descendant listings omit the hop's own root; its caller owns that binding (Record, Relink or meeting).
-                if(physicalHop is {} owner && raw.Local==null && raw.Dropbox==null && raw.Synced==owner.Binding) continue;
+                if(meetingRoot!=null && raw.Local==null && raw.Dropbox==null && raw.Synced==meetingRoot) continue;
                 await FinishFolders(raw.Key);
                 if(notices.Count==0 && !raw.Ambiguous && raw.Local is {Skip:null} pc && raw.Dropbox is {Skip:null} db && pc.IsFolder==db.IsFolder && raw.Synced is {} old && SyncedEntries.From(pc,db)==(old with {LocalPublished=null})) continue;
                 if(mapped)
