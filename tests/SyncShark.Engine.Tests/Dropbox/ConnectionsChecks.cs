@@ -299,7 +299,9 @@ public static class ConnectionsChecks
                 connections.Save(target, new[] { first });
                 var sourceBytes = File.ReadAllBytes(ListFile(source));
                 var targetBytes = File.ReadAllBytes(ListFile(target));
-                Expect(connections.Verify(source, target, new[] { first }) is null,
+                var differing = new List<string>();
+                Expect(connections.Verify(source, target, new[] { first }, differing.Add) is null &&
+                       differing.SequenceEqual(new[] { Path.GetFullPath(ListFile(source)) }),
                     "A same-set canonical target with different bytes was refused instead of kept under R47");
                 Expect(File.ReadAllBytes(ListFile(source)).AsSpan().SequenceEqual(sourceBytes) &&
                        File.ReadAllBytes(ListFile(target)).AsSpan().SequenceEqual(targetBytes),
@@ -479,6 +481,19 @@ public static class ConnectionsChecks
                 connections.Save(root, Array.Empty<string>());
                 Expect(connections.Read(root).Count == 0, "An empty canonical list was not read back");
                 Expect(Refuses(() => connections.Save(root, new[] { "not-a-connection-id" })), "An invalid id was saved");
+            });
+            Case(failures, "membership updates share one publication boundary", () =>
+            {
+                var source = Root(scratch, "authority");
+                var target = Root(scratch, "published");
+                connections.Save(source, new[] { first, third });
+                connections.Save(target, new[] { first });
+                var readRoot = source;
+                Parallel.Invoke(() => connections.SetConnected(target, ref readRoot, second, true),
+                    () => connections.SetConnected(target, ref readRoot, first, false));
+                Expect(readRoot == target && connections.Read(target).SequenceEqual(Sorted(second, third)) &&
+                       connections.Read(source).SequenceEqual(Sorted(first, third)),
+                    "Concurrent membership updates lost an account or reopened the disconnected account");
             });
             Case(failures, "stable connection id", () =>
             {

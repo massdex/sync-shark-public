@@ -97,7 +97,7 @@ public sealed class SignIn
         try
         {
             using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            // Negative control: no authorization deadline.
+            bounded.CancelAfter(bound);
             try { return await attempt(bounded.Token); }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
@@ -297,7 +297,7 @@ public sealed class SignIn
                 throw;
             }
             catch (Exception error) when (error is OperationCanceledException or TimeoutException or
-                SocketException)
+                InvalidDataException or HttpRequestException or IOException or SocketException)
             {
                 // Offline or unproven ownership (including an HTTP timeout or an interrupted response body):
                 // the local disconnect completes and the fixed entry is left in place (R41).
