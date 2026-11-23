@@ -1,3 +1,4 @@
+using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Run;
 using Massdex.SyncShark.Engine.Tests.Scenarios;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
@@ -517,7 +518,7 @@ public static class RepairChecks
         var priorBinding=SyncedEntries.From(child,prior); await store.CommitAsync(pair.PairId,null,priorBinding,null,null,token);
         pc.Seed(child,[1]); db.Seed(prior,[1]);
         await pc.MoveAsync(pc.Items["old"].Entry,"new",token); await db.MoveAsync(db.Items["old"].Entry,"new",token);
-        var edited=ItemChecks.File(Side.Local,"new/item",2,child.Id); pc.Seed(edited,[2]);
+        var edited=ItemChecks.File(Side.Local,"new/item",2,child.Id); pc.Items["new/item"]=(edited,new byte[]{2});
         var occupant=ItemChecks.File(Side.Local,"old/item",9,"new-occupant"); pc.Seed(occupant,[9]);
         var oldDestination=ItemChecks.File(Side.Dropbox,"old/item",8,"replacement-at-destination"); db.Seed(oldDestination,[8]);
         var parentRow=new Row(binding.LocalKey,pc.Items["new"].Entry,db.Items["new"].Entry,binding,[],null,RowContext.Neutral with {CompleteInventory=true,Destination="new"});
