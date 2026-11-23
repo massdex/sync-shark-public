@@ -25,12 +25,12 @@ public sealed class FolderDelete
     public static async Task<SyncedEntry?> HighestMissingAsync(PairConfig pair,PathScope paths,SyncedEntry folder,ISide source,IStore store,CancellationToken ct)
     {
         var deleting=source.Side;
-        if(await source.ReadByIdAsync(folder.IdOn(deleting),ct) is {InScope:true}) return null;
+        if(await source.ReadByIdAsync(folder.IdOn(deleting),ct) is not null) return null;
         foreach(var ancestor in PathNames.Ancestors(folder.PathOn(deleting)))
         {
             var parent=await store.FindAsync(pair.PairId,deleting,PathNames.KeyFor(deleting,ancestor),ct);
             if(parent is not {IsFolder:true} || paths.ExcludesBinding(parent)) break;
-            if(await source.ReadByIdAsync(parent.IdOn(deleting),ct) is {InScope:true}) break;
+            if(await source.ReadByIdAsync(parent.IdOn(deleting),ct) is not null) break;
             folder=parent;
         }
         return folder;
