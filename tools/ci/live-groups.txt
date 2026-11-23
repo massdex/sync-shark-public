@@ -1,0 +1,2 @@
+# No registered Engine DLL group accesses a live pair. All acceptance scenarios and call-budget arms are hosted synthetic checks.
+# The separate tests/live/ route is never invoked by hosted lane CI.
