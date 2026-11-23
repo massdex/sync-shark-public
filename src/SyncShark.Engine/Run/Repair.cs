@@ -363,7 +363,6 @@ public static class Repair
                 {
                     retained=own;
                     // After discovery the durable notice is the retry. A second failure releases the row so its followers and the run finish.
-                    if(endAttempted) return;
                     await discoveryEnded.Task.WaitAsync(token); endAttempted=true;
                     throw;
                 }
