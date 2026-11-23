@@ -414,4 +414,5 @@ public enum TextKey
     SignInReturnRetry,
     HostNotRunning,
     DifferingConnections,
+    ProductName,
 }
