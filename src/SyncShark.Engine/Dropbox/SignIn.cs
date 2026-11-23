@@ -228,10 +228,10 @@ public sealed class SignIn
     {
         ArgumentNullException.ThrowIfNull(credentials, nameof(credentials));
         _ = CredentialStore.AccountTarget(connectionId);
-        var refresh = credentials.Read(connectionId);
+        var refresh = credentials.Read(connectionId, out var fromLegacy);
         if (string.IsNullOrWhiteSpace(refresh)) throw new ItemFailedException(string.Empty, TextKey.SignInReturnRetry, null);
         var account = await OpenIdentityAsync(send, connectionId, refresh, ct);
-        RequireOwnedConnection(connectionId, account.AccountId);
+        RequireOwnedConnection(connectionId, account.AccountId, fromLegacy);
         return account;
     }
 
@@ -353,29 +353,36 @@ public sealed class SignIn
         {
             Content = new StringContent("null", Encoding.UTF8, "application/json")
         };
-        request.Headers.Authorization = new AuthenticationHeaderValue(BearerScheme, accessToken);
+        try { request.Headers.Authorization = new AuthenticationHeaderValue(BearerScheme, accessToken); }
+        catch (FormatException) { throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid)); }
         using var response = await send(request, ct);
         if (!response.IsSuccessStatusCode) throw new HttpRequestException(Text.Get(TextKey.SignInReturnRetry), null, response.StatusCode);
         using var document = await ReadJsonAsync(response, ct);
         var root = document.RootElement;
         if (!root.TryGetProperty("root_info", out var rootInfo) || rootInfo.ValueKind != JsonValueKind.Object)
             throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-        return (RequiredIdentity(root, "account_id"), RequiredIdentity(rootInfo, "root_namespace_id"),
-            RequiredIdentity(rootInfo, "home_namespace_id"));
+        return (RequiredString(root, "account_id"), RequiredString(rootInfo, "root_namespace_id"),
+            RequiredString(rootInfo, "home_namespace_id"));
     }
 
     /// <summary>The one acceptance rule for an opened account: its identity must derive the requested connection id.</summary>
-    internal static void RequireOwnedConnection(string connectionId, string accountId)
+    internal static void RequireOwnedConnection(string connectionId, string accountId, bool fromLegacy)
     {
-        if (Connections.CreateConnectionId(accountId) != connectionId)
-            throw new InvalidOperationException(Text.Get(TextKey.RootDropboxScopeChanged));
+        if (Connections.CreateConnectionId(accountId) == connectionId) return;
+        if (fromLegacy) throw new ItemFailedException(string.Empty, TextKey.SignInReturnRetry, null);
+        throw new InvalidOperationException(Text.Get(TextKey.RootDropboxScopeChanged));
     }
 
-    private static string RequiredIdentity(JsonElement element, string name) =>
-        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String &&
-        !string.IsNullOrWhiteSpace(value.GetString())
-            ? value.GetString()!
-            : throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
+    private static string RequiredString(JsonElement element, string name)
+    {
+        try
+        {
+            if (element.TryGetProperty(name, out var value) && value.GetString() is { } text && !string.IsNullOrWhiteSpace(text))
+                return text;
+        }
+        catch (InvalidOperationException) { /* A non-string or invalid Unicode is not an identity. */ }
+        throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
+    }
 
     internal static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response, CancellationToken ct)
     {
@@ -408,8 +415,7 @@ public sealed class SignIn
         try
         {
             using var document = await ReadJsonAsync(response, ct);
-            return document.RootElement.TryGetProperty("error", out var error) &&
-                   error.ValueKind == JsonValueKind.String && error.GetString() is "invalid_grant";
+            return RequiredString(document.RootElement, "error") == "invalid_grant";
         }
         catch (InvalidDataException) { return false; }
     }
@@ -535,10 +541,10 @@ public sealed class RefreshingAccessTokenSource
         try
         {
             if (_accessToken is not null && DateTime.UtcNow < _refreshAtUtc) return _accessToken;
-            var refresh = _credentials.Read(_connectionId);
+            var refresh = _credentials.Read(_connectionId, out var fromLegacy);
             if (string.IsNullOrWhiteSpace(refresh)) throw new ItemFailedException(string.Empty, TextKey.SignInReturnRetry, null);
             var account = await SignIn.OpenVerifiedAsync(_send, _connectionId, refresh, ct);
-            SignIn.RequireOwnedConnection(_connectionId, account.AccountId);
+            SignIn.RequireOwnedConnection(_connectionId, account.AccountId, fromLegacy);
             if (!string.Equals(account.AccountId, _expected.AccountId, StringComparison.Ordinal) ||
                 !string.Equals(account.RootNamespaceId, _expected.RootNamespaceId, StringComparison.Ordinal) ||
                 !string.Equals(account.HomeNamespaceId, _expected.HomeNamespaceId, StringComparison.Ordinal))

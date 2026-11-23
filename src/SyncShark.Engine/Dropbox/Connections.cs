@@ -104,7 +104,7 @@ public sealed class Connections
     /// <summary>The product's present connection ids: the canonical array line when present, otherwise the 0.3.95
     /// authoritative value of this root (slots first, then the typed append log). A missing list is empty; a malformed
     /// one refuses.</summary>
-    public IReadOnlyList<string> Read(string productRoot) { lock (membership) return Resolve(productRoot).Ids; }
+    public IReadOnlyList<string> Read(string productRoot) { lock (membership) return Resolve(productRoot, out _).Ids; }
 
     /// <summary>Verify the source's authoritative 0.3.95 value and the target before the store switch. In place, the
     /// root's own JSONL is evidence and is never overwritten, and the value Read will expose must equal the authoritative
@@ -127,14 +127,6 @@ public sealed class Connections
         var source = FilePath(sourceRoot);
         var target = FilePath(productRoot);
         var sameRoot = SameRoot(sourceRoot, productRoot);
-        // One observation of this root when it is both source and product (no canonical candidate) is reused.
-        (ListShape Form, IReadOnlyList<string> Ids)? presented = sameRoot ? Resolve(productRoot) : null;
-        var sourceView = presented ?? Resolve(sourceRoot);
-        var sourceSet = sameRoot && sourceView.Form == ListShape.Canonical
-            ? SlotsExist(sourceRoot) ? SlotSet(sourceRoot) : Array.Empty<string>()
-            : sourceView.Ids;
-        var slotsAuthoritative = SlotsExist(sourceRoot);
-        var appendSuppliesBytes = !slotsAuthoritative && sourceView.Form == ListShape.Append;
         var differing = false;
         var created = false;
         IReadOnlyList<string> actual;
@@ -142,37 +134,40 @@ public sealed class Connections
         {
             if (sameRoot)
             {
-                var resolved = presented!.Value;
-                if (File.Exists(target) || slotsAuthoritative)
+                var resolved = Resolve(productRoot, out _);
+                if (resolved.Form == ListShape.Canonical)
                 {
-                    // The value Read will expose must be the authoritative one; a divergence refuses before publication.
-                    if (!resolved.Ids.SequenceEqual(sourceSet, StringComparer.Ordinal))
-                        throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-                    actual = resolved.Ids;
+                    var authoritative = SlotsExist(sourceRoot) ? SlotSet(sourceRoot) : Array.Empty<string>();
+                    if (!resolved.Ids.SequenceEqual(authoritative, StringComparer.Ordinal)) throw InvalidList();
                 }
-                else actual = sourceSet;
+                actual = resolved.Ids;
             }
             else
             {
-                var resolved = Resolve(productRoot);
+                // A slot supersedes the old log, even if that log is unreadable or looks canonical.
+                var slotsAuthoritative = SlotsExist(sourceRoot);
+                var append = slotsAuthoritative ? null : ReadBounded(new FileInfo(source));
+                var sourceSet = slotsAuthoritative ? SlotSet(sourceRoot) : append is null ? Array.Empty<string>() : AppendSet(append);
+                var resolved = Resolve(productRoot, out var targetBytes);
                 var targetPresent = resolved.Form != ListShape.Absent || SlotsExist(productRoot);
                 if (targetPresent)
                 {
                     if (!resolved.Ids.SequenceEqual(sourceSet, StringComparer.Ordinal))
                         throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-                    if (resolved.Form == ListShape.Append && appendSuppliesBytes && !SameBytesBounded(source, target))
+                    if (resolved.Form == ListShape.Append && append is not null &&
+                        (targetBytes is null || !append.AsSpan().SequenceEqual(targetBytes)))
                         throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-                    differing = appendSuppliesBytes && resolved.Form == ListShape.Canonical;
+                    differing = append is not null && resolved.Form == ListShape.Canonical && !append.AsSpan().SequenceEqual(targetBytes);
                     actual = resolved.Ids;
                 }
-                else if (sourceSet.Count > 0 || slotsAuthoritative || File.Exists(source))
+                else if (slotsAuthoritative || append is not null)
                 {
-                    var published = appendSuppliesBytes
-                        ? Publish(target, output => CopyBounded(source, output))
+                    var published = append is not null
+                        ? Publish(target, output => output.Write(append))
                         : Publish(target, output => WriteIds(output, sourceSet));
                     if (!published) throw new IOException();
                     created = true;
-                    actual = Resolve(productRoot).Ids;
+                    actual = Resolve(productRoot, out _).Ids;
                 }
                 else actual = sourceSet;
             }
@@ -260,28 +255,18 @@ public sealed class Connections
         output.WriteByte((byte)'\n');
     }
 
-    private static void CopyBounded(string source, FileStream output)
-    {
-        if (new FileInfo(source).Length > MaximumStateBytes) throw InvalidList();
-        output.Write(File.ReadAllBytes(source));
-    }
-
-    private static bool SameBytesBounded(string left, string right)
-    {
-        if (new FileInfo(left).Length > MaximumStateBytes || new FileInfo(right).Length > MaximumStateBytes)
-            throw InvalidList();
-        return File.ReadAllBytes(left).AsSpan().SequenceEqual(File.ReadAllBytes(right));
-    }
+    private static byte[]? ReadBounded(FileInfo file) => !file.Exists ? null :
+        file.Length <= MaximumStateBytes ? File.ReadAllBytes(file.FullName) : throw InvalidList();
 
     // --- The product's list or a not-yet-upgraded root's 0.3.95 value, resolved once -----------------------------
 
     private enum ListShape { Absent, Canonical, Append }
 
-    private static (ListShape Form, IReadOnlyList<string> Ids) Resolve(string productRoot)
+    private static (ListShape Form, IReadOnlyList<string> Ids) Resolve(string productRoot, out byte[]? bytes)
     {
         var path = FilePath(productRoot);
         var file = new FileInfo(path);
-        var bytes = !file.Exists ? null : file.Length <= MaximumStateBytes ? File.ReadAllBytes(path) : null;
+        bytes = !file.Exists || file.Length > MaximumStateBytes ? null : File.ReadAllBytes(path);
         var form = bytes is not null ? ListForm(bytes) : file.Exists ? ListShape.Append : ListShape.Absent;
         if (form == ListShape.Canonical) return (form, CanonicalIds(bytes!));
         if (SlotsExist(productRoot)) return (form, SlotSet(productRoot));

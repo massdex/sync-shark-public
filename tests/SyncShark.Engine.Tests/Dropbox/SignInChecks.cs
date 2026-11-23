@@ -171,25 +171,6 @@ public static class SignInChecks
                     "Missing first-bind credential lost the typed sign-in cause");
             }
             CredentialStoreChecks.LegacyFixture.Write("legacy-fixture");
-            const string validToken = """{"access_token":"fixture"}""";
-            const string otherIdentity = """{"account_id":"acct-owner-a","root_info":{"root_namespace_id":"root-a","home_namespace_id":"home-a"}}""";
-            foreach (var refresh in new[] { false, true })
-            {
-                var calls = 0;
-                Task<HttpResponseMessage> Reply(HttpRequestMessage _, CancellationToken __) => Task.FromResult(
-                    new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(++calls == 1 ? validToken : otherIdentity) });
-                var classified = false;
-                try
-                {
-                    if (refresh) await SignIn.AccessTokenSource(Reply, store, connectionOther, accountOther, "root-b", "home-b")(default);
-                    else await SignIn.VerifyAccountAsync(Reply, store, connectionOther, default);
-                }
-                catch (ItemFailedException error) { classified = error.Cause == TextKey.SignInReturnRetry; }
-                catch (InvalidOperationException) { }
-                if (!classified || calls != 2 || store.ReadLegacy() != "legacy-fixture")
-                    failures.Add(refresh ? "Unrelated legacy credential masked missing refresh credential" :
-                        "Unrelated legacy credential masked missing first-bind credential");
-            }
             store.Save(connectionOther, "own-b");
             await SignIn.DisconnectAsync(verify, store, connectionOther, default);
             Check.Require(store.ReadOwn(connectionOther) is null && store.ReadLegacy() == "legacy-fixture",
@@ -227,30 +208,13 @@ public static class SignInChecks
                     failures.Add(cause + " aborted the local disconnect or removed the unproven fixed entry");
             }
 
-            foreach (var (status, tokenBody, accountBody) in new (HttpStatusCode, string, string?)[]
-            {
+            await MalformedDisconnectAsync(store, connectionOwner, failures,
+            [
                 (HttpStatusCode.OK, "[]", null),
                 (HttpStatusCode.OK, """{"access_token":1}""", null),
                 (HttpStatusCode.OK, """{"access_token":"fixture","expires_in":999999999999}""", null),
-                (HttpStatusCode.OK, """{"access_token":"bad\r\nheader"}""", null),
-                (HttpStatusCode.OK, validToken, """{"account_id":"\uD800","root_info":{"root_namespace_id":"r","home_namespace_id":"h"}}"""),
                 (HttpStatusCode.BadRequest, """{"error":"\uD800"}""", null)
-            })
-            {
-                store.Save(connectionOwner, "own-a");
-                var completed = false;
-                var calls = 0;
-                try
-                {
-                    await SignIn.DisconnectAsync((legacy, token) => SignIn.OpenIdentityAsync((_, _) =>
-                        Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(++calls == 1 ? tokenBody : accountBody!) }),
-                        connectionOwner, legacy, token), store, connectionOwner, default);
-                    completed = true;
-                }
-                catch (Exception e) when (e is InvalidOperationException or FormatException) { }
-                if (!completed || calls != (accountBody is null ? 1 : 2) || store.ReadOwn(connectionOwner) is not null || store.ReadLegacy() != "legacy-fixture")
-                    failures.Add("Malformed provider reply aborted disconnect or changed unproven ownership");
-            }
+            ]);
 
             store.Save(connectionOwner, "before-reconnect");
             var held = new TaskCompletionSource<(string, string, string)>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -280,6 +244,82 @@ public static class SignInChecks
             CredentialStoreChecks.LegacyFixture.Delete();
             store.Remove(connectionOwner);
             store.Remove(connectionOther);
+        }
+    }
+
+    private const string ValidTokenReply = """{"access_token":"fixture"}""";
+
+    /// <summary>Verify both credential consumers with an unrelated fixed credential and the real account route.</summary>
+    public static async Task UnrelatedCredentialAsync()
+    {
+        CredentialStoreChecks.LegacyFixture.RequireAbsent();
+        var store = new CredentialStore();
+        const string accountOther = "acct-owner-b";
+        var connectionOther = Connections.CreateConnectionId(accountOther);
+        Check.Require(store.ReadOwn(connectionOther) is null, "The synthetic account fixture is occupied");
+        try
+        {
+            CredentialStoreChecks.LegacyFixture.Write("legacy-fixture");
+            const string otherIdentity = """{"account_id":"acct-owner-a","root_info":{"root_namespace_id":"root-a","home_namespace_id":"home-a"}}""";
+            foreach (var refresh in new[] { false, true })
+            {
+                var calls = 0;
+                Task<HttpResponseMessage> Reply(HttpRequestMessage _, CancellationToken __) => Task.FromResult(
+                    new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(++calls == 1 ? ValidTokenReply : otherIdentity) });
+                var classified = false;
+                try
+                {
+                    if (refresh) await SignIn.AccessTokenSource(Reply, store, connectionOther, accountOther, "root-b", "home-b")(default);
+                    else await SignIn.VerifyAccountAsync(Reply, store, connectionOther, default);
+                }
+                catch (ItemFailedException error) { classified = error.Cause == TextKey.SignInReturnRetry; }
+                catch (InvalidOperationException) { }
+                Check.Require(classified && calls == 2 && store.ReadLegacy() == "legacy-fixture",
+                    "Unrelated legacy credential masked missing own credential: " + (refresh ? "refresh" : "first bind"));
+            }
+        }
+        finally { CredentialStoreChecks.LegacyFixture.Delete(); }
+    }
+
+    /// <summary>Verify local removal when a malformed response reaches the account route.</summary>
+    public static async Task MalformedAccountDisconnectAsync()
+    {
+        CredentialStoreChecks.LegacyFixture.RequireAbsent();
+        var store = new CredentialStore();
+        var connection = Connections.CreateConnectionId("acct-owner-a");
+        Check.Require(store.ReadOwn(connection) is null, "The synthetic account fixture is occupied");
+        var failures = new List<string>();
+        try
+        {
+            CredentialStoreChecks.LegacyFixture.Write("legacy-fixture");
+            await MalformedDisconnectAsync(store, connection, failures,
+            [
+                (HttpStatusCode.OK, """{"access_token":"bad\r\nheader"}""", null),
+                (HttpStatusCode.OK, ValidTokenReply, """{"account_id":"\uD800","root_info":{"root_namespace_id":"r","home_namespace_id":"h"}}"""),
+            ]);
+            Check.Require(failures.Count == 0, string.Join("; ", failures));
+        }
+        finally { CredentialStoreChecks.LegacyFixture.Delete(); store.Remove(connection); }
+    }
+
+    private static async Task MalformedDisconnectAsync(CredentialStore store, string connectionOwner, List<string> failures,
+        (HttpStatusCode Status, string Token, string? Account)[] replies)
+    {
+        foreach (var (status, tokenBody, accountBody) in replies)
+        {
+            store.Save(connectionOwner, "own-a");
+            var completed = false;
+            var calls = 0;
+            try
+            {
+                await SignIn.DisconnectAsync((legacy, token) => SignIn.OpenIdentityAsync((_, _) =>
+                    Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(++calls == 1 ? tokenBody : accountBody!) }),
+                    connectionOwner, legacy, token), store, connectionOwner, default);
+                completed = true;
+            }
+            catch (Exception e) when (e is InvalidOperationException or FormatException) { }
+            if (!completed || calls != (accountBody is null ? 1 : 2) || store.ReadOwn(connectionOwner) is not null || store.ReadLegacy() != "legacy-fixture")
+                failures.Add("Malformed provider reply aborted disconnect or changed unproven ownership");
         }
     }
 

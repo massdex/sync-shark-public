@@ -77,10 +77,13 @@ public sealed class CredentialStore
     }
 
     /// <summary>Reads the connection's own protected target, or the fixed legacy target when only that exists.</summary>
-    public string? Read(string connectionId)
+    public string? Read(string connectionId) => Read(connectionId, out _);
+
+    internal string? Read(string connectionId, out bool fromLegacy)
     {
-        var target = AccountTarget(connectionId);
-        return ReadTarget(target) ?? ReadTarget(RegisteredTarget);
+        var own = ReadOwn(connectionId);
+        fromLegacy = own is null;
+        return own ?? ReadLegacy();
     }
 
     /// <summary>Reads only the connection's own protected target; never the fixed legacy target.</summary>
