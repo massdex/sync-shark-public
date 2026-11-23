@@ -176,6 +176,7 @@ public static class CheckRegistry
             new("Run/ChangedItemReplay", Run.AutoSyncChecks.ChangedItemReplayAsync),
             new("Run/UnprovedFolderStays", Run.AutoSyncChecks.UnprovedFolderStaysAsync),
             new("Run/AutoSyncChecks", Run.AutoSyncChecks.RunAsync),
+            new("Run/AutoSyncChecks.SourceRetryAsync", Run.AutoSyncChecks.SourceRetryAsync),
             new("Run/host retry", Run.HostChecks.RetryAtHostAsync),
             new("Run/host trim", Run.HostChecks.TrimAtHostAsync),
             new("Run/PublicationRetry", Run.HostChecks.PublicationRetryAsync),

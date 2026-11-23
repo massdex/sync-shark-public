@@ -9,6 +9,8 @@ public static class AutoSyncChecks
 
     /// <summary>Check reset behind held page at integration.</summary>
     public static Task ResetBehindHeldPageAsync() => throw new NotImplementedException();
+    /// <summary>A failed read waits the attempt schedule, then only the remaining positive provider wait.</summary>
+    public static Task SourceRetryAsync() => throw new NotImplementedException();
     /// <summary>Verifies the AutoSync contract through the module surface.</summary>
     public static Task RunAsync() => throw new NotImplementedException();
 }

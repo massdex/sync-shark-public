@@ -34,6 +34,24 @@ public sealed record EngineSettings(string ConflictLabelFormat, string ConflictL
             var offset = (2 * sample() - 1) * BackoffJitter * nominal;
             return TimeSpan.FromSeconds(nominal + offset);
         }
+
+        // Task.Delay on .NET 8 accepts at most 0xfffffffe milliseconds per timer.
+        private const uint MaximumTimerMilliseconds = uint.MaxValue - 1;
+        private static readonly TimeSpan MaximumTimerDelay = TimeSpan.FromMilliseconds(MaximumTimerMilliseconds);
+
+        /// <summary>Wait a positive provider-requested time on the supplied clock in supported Task.Delay chunks, never shortening it.</summary>
+        public async Task WaitAsync(TimeSpan delay, TimeProvider clock, CancellationToken ct)
+        {
+            ArgumentNullException.ThrowIfNull(clock);
+            // A zero or missing time is no time given: the attempt owner waits its adopted retry schedule instead.
+            if (delay <= TimeSpan.Zero) return;
+            while (delay > MaximumTimerDelay)
+            {
+                await Task.Delay(MaximumTimerDelay, clock, ct).ConfigureAwait(false);
+                delay -= MaximumTimerDelay;
+            }
+            await Task.Delay(delay, clock, ct).ConfigureAwait(false);
+        }
     }
     /// <summary>Chunk size for log readers.</summary>
     public int LogReadBufferBytes { get; init; }
