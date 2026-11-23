@@ -297,7 +297,7 @@ public sealed class Unfinished
                 {
                     var range=new Scope(proof.Expected.Path,cloudPath); bool occupied=current!=null || other!=null;
                     if(!occupied && !await FolderDelete.RecoverHeldAsync(pair,range,Side.Local,local,dropbox,store,heldInput,populate,ct)) return;
-                    if(saved!=null) await compareOldBinding(saved,range,range,ct);
+                    
                     if(occupied) await Unchecked(store,pair,proof.Expected,ct);
                 }
                 else if(saved!=null)
