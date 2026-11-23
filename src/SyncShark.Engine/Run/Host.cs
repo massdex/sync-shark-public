@@ -323,7 +323,7 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
                 return m.Manual;
             }
             m.ManualStop?.Dispose(); m.ManualStop=CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var token=m.ManualStop.Token; var run=Task.Run(async ()=>
+            var token=m.ManualStop.Token; return m.Manual=Task.Run(async ()=>
             {
                 try { await work(token); }
                 catch(ChangedUnderneathException error) when(!token.IsCancellationRequested && PathNames.Same(error.Path,m.Pair.LocalRoot))
@@ -333,8 +333,6 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
                 }
                 catch(Exception error) when(!explicitRequest && !token.IsCancellationRequested) { await Failed(m,error,token); }
             },token);
-            m.Manual=run.ContinueWith(static _=>{},CancellationToken.None,TaskContinuationOptions.ExecuteSynchronously,TaskScheduler.Default);
-            return run;
         }
     }
     private RunLog NewLog(string id)
