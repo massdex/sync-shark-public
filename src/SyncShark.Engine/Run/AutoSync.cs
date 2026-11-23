@@ -176,7 +176,7 @@ public static class AutoSync
                     if(consecutiveFailures<int.MaxValue) ++consecutiveFailures;
                 }
                 events(new(RunEventKind.Wait,nameof(ISide.ReadChangesAsync),"",Text.Get(TextKey.WaitSourceRetry,(TextArg.Seconds,wait.TotalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture))),""){Side=source,Cause=TextKey.WaitSourceRetry,Error=error});
-                await settings.Backoff.WaitAsync(wait,TimeProvider.System,ct);
+                if(wait<TimeSpan.FromMilliseconds(uint.MaxValue)) await settings.Backoff.WaitAsync(wait,TimeProvider.System,ct);
             }
         }
     }

@@ -50,7 +50,10 @@ public static class AutoSyncChecks
         using var cancel=CancellationTokenSource.CreateLinkedTokenSource(ct);
         try
         {
-            await AutoSync.ReadPageAsync(_=>throw Failure(TimeSpan.FromMilliseconds(uint.MaxValue)),Side.Dropbox,settings,_=>cancel.Cancel(),cancel.Token);
+            int reads=0, announced=0;
+            var oversized=AutoSync.ReadPageAsync(_=>++reads==1 ? throw Failure(TimeSpan.FromMilliseconds(uint.MaxValue)) : Task.FromResult(next),Side.Dropbox,settings,_=>++announced,cancel.Token);
+            Check.Require(announced==1 && reads==1 && !oversized.IsCompleted,"Oversized retry re-entered acquisition before cancellation");
+            cancel.Cancel();await oversized;
             throw new InvalidDataException("Oversized provider wait was shortened instead of cancelled");
         }
         catch(OperationCanceledException) when(cancel.IsCancellationRequested && !ct.IsCancellationRequested) { }
@@ -224,12 +227,27 @@ public static class AutoSyncChecks
         var waiting=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var fault=new ChangedUnderneathException(pair.LocalRoot);
         async Task<ChangePage> Fail(CancellationToken token){await waiting.Task.WaitAsync(token);throw fault;}
-        async Task Hold(CancellationToken token){waiting.TrySetResult();await Task.Delay(Timeout.Infinite,token);}
+        var exiting=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int exited=0;
+        async Task Hold(CancellationToken token)
+        {
+            waiting.TrySetResult();
+            try {await Task.Delay(Timeout.Infinite,token);}
+            finally {exiting.TrySetResult();await release.Task.WaitAsync(ct);Volatile.Write(ref exited,1);}
+        }
         var local=Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.ReadChangesAsync)?Fail((CancellationToken)args[^1]!):Observation.Forward(pc,m,args));
         var observed=Observation.Wrap<IStore>((m,args)=>m.Name==nameof(IStore.SaveCursorAsync)?Hold((CancellationToken)args[^1]!):Observation.Forward(store,m,args));
         db.Pages.Enqueue(new([],"held",null));
-        try {await AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),local,db,observed,(new(1,1),"held"),static()=>{},ct).WaitAsync(ct);}
-        catch(ChangedUnderneathException e) when(ReferenceEquals(e,fault)) {Check.Require(await store.CursorAsync(pair.PairId,ct)==null,"Failed reader published the held cursor");return;}
+        var intake=AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),local,db,observed,(new(1,1),"held"),static()=>{},ct);
+        try
+        {
+            await Task.WhenAny(exiting.Task,intake).WaitAsync(ct);
+            Check.Require(exiting.Task.IsCompleted && !intake.IsCompleted,"Source failure returned before held publication exited");
+        }
+        finally {release.TrySetResult();}
+        try {await intake.WaitAsync(ct);}
+        catch(ChangedUnderneathException e) when(ReferenceEquals(e,fault)) {Check.Require(Volatile.Read(ref exited)==1,"Source failure returned before held publication exited");Check.Require(await store.CursorAsync(pair.PairId,ct)==null,"Failed reader published the held cursor");return;}
         catch(OperationCanceledException) {throw new InvalidDataException("Held page blocked or replaced the typed source failure");}
         throw new InvalidDataException("Held page swallowed the typed source failure");
     }
