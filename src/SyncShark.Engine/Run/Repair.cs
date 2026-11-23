@@ -125,7 +125,7 @@ public static class Repair
                     // The scan joins on the old names. A confirmed identity at its final names takes the ordinary file decision;
                     // any row this hop cannot settle keeps its old binding for the caller's ProjectSubtreeAsync and later ordinary input.
                     var left=raw.Local; var right=raw.Dropbox;
-                    if(notices.Count!=0 || raw.Ambiguous || !raw.Context.CompleteInventory || raw.Synced is not {IsFolder:false} link || left==null && right==null ||
+                    if(notices.Count!=0 || raw.Ambiguous || !raw.Context.CompleteInventory || raw.Synced is not {IsFolder:false} link || left==null || right==null ||
                         left is not (null or {IsFolder:false,Skip:null}) || left!=null && left.Id!=link.LocalId ||
                         right is not (null or {IsFolder:false,Skip:null}) || right!=null && right.Id!=link.DropboxId ||
                         PathNames.RelativeUnderDropboxRoot(logical.LocalPath,left?.Path??link.LocalPath) is not {} l ||
