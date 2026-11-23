@@ -127,7 +127,7 @@ public sealed class PairTable
     /// <summary>Arm one exact victim before removal without replacing another armed operation.</summary>
     public async Task<bool> ArmAsync(SqliteConnection db,string pairId,RemovalSelection victim,StageProof? stage,CancellationToken ct)
     {
-        return await Write(db,null,"UPDATE pair SET pending_json=$note WHERE pair_id=$p AND (pending_json IS NULL OR pending_json=$note)",ct,("$p",pairId),("$note",Note(victim,stage)))==1;
+        return await Write(db,null,"UPDATE pair SET pending_json=$note WHERE pair_id=$p AND (pending_json IS NULL OR pending_json=$note)",ct,("$p",pairId),("$note",Note(victim,stage)))==1 ? true : throw new InvalidOperationException();
     }
     /// <summary>Read the exact victim and optional replacement stage.</summary>
     public async Task<(RemovalSelection Victim,StageProof? Stage)?> ArmedAsync(SqliteConnection db,string pairId,CancellationToken ct)
