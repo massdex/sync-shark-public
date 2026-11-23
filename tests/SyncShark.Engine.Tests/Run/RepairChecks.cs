@@ -224,7 +224,8 @@ public static class RepairChecks
         await new PairRunner().CatchUpAsync(pair,(null,null),ItemChecks.Settings,_=>{},paths,queue,local,remote,store,static()=>{},ct);
         await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,remote,store,null,null,ct);
         Check.Require(localListings==1 && remoteListings==1,"Covered child population listed its range again");
-        Check.Require(db.Items.ContainsKey("a/empty")==keep && pc.Items.ContainsKey("a")==keep,"Suppressed child created under recycled parent or lost under kept parent");
+        Check.Require(db.Items.ContainsKey("a/empty")==keep,$"keep={keep}: db has a/empty={db.Items.ContainsKey("a/empty")} expected {keep}; db=[{string.Join(",",db.Items.Keys)}] pc=[{string.Join(",",pc.Items.Keys)}]");
+        Check.Require(pc.Items.ContainsKey("a")==keep,$"keep={keep}: pc has a={pc.Items.ContainsKey("a")} expected {keep}; db=[{string.Join(",",db.Items.Keys)}] pc=[{string.Join(",",pc.Items.Keys)}]");
         if(keep) Check.Require(db.Items["a/content"].Bytes.SequenceEqual(new byte[]{3}),"Kept parent did not consume its acquired content");
         else Check.Require(db.Requests[nameof(ISide.EnsureFolderAsync)]==0,"Created a child before recycling the whole parent");
     });
