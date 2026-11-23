@@ -28,7 +28,30 @@ public static class LogTextChecks
         Check.Require(provider.Length == 0, "a completed provider diagnostic is not a user outcome");
         CheckRecordedFacts();
         OneMoveCard();
+        SuppressedRecordsAllocateNothing();
         return Task.CompletedTask;
+    }
+
+    private static void SuppressedRecordsAllocateNothing()
+    {
+        var at = DateTimeOffset.UnixEpoch;
+        var completed = new RunEvent(RunEventKind.ProviderRequest, "", "", "", "done");
+        var incomplete = new RunEvent(RunEventKind.Effect, "", "old", "", nameof(RemovalOutcome.Published))
+            { Action = ActionKind.MoveLocal, Side = Side.Local };
+        // Warm the two paths before counting. Returning the shared empty string needs no display-clock string.
+        long CountBytes(RunEvent item)
+        {
+            _ = LogText.Format(item, at);
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            var block = LogText.Format(item, at);
+            var bytes = GC.GetAllocatedBytesForCurrentThread() - before;
+            Check.Require(block.Length == 0, "the suppressed record must stay invisible");
+            return bytes;
+        }
+        var providerBytes = CountBytes(completed);
+        var moveBytes = CountBytes(incomplete);
+        Check.Require(providerBytes == 0 && moveBytes == 0,
+            $"suppressed records must not allocate a display clock: provider bytes={providerBytes}; move bytes={moveBytes}");
     }
 
     private static void OneMoveCard()

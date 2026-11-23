@@ -23,6 +23,8 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Dictionary<string,Exception> ReadFailures { get; } = new(PathNames.Comparer);
     /// <summary>Content-only faults leave listing and metadata reads intact.</summary>
     public Dictionary<string,Exception> PublishFailures { get; } = new(PathNames.Comparer);
+    /// <summary>Run after destination staging succeeds, before control returns to the caller.</summary>
+    public Action? AfterStage { get; set; }
     public Dictionary<string,Exception> ContentFailures { get; } = new(PathNames.Comparer);
     /// <summary>Script an uncertain or refused move without changing the selected entry.</summary>
     public Queue<RemovalResult> MoveOutcomes { get; } = new();
@@ -101,12 +103,18 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
         async Task<IStaged> Copy()
         {
             using var stream=new MemoryStream(); await content.CopyToAsync(stream,ct); var bytes=stream.ToArray();
-            if (Side!=Side.Local) return new Stage(path,bytes,source);
-            var id=$"stage-{++nextId}";var at=path+"."+id;using var hash=new ContentHash();hash.Append(bytes);
-            var proof=new StageProof(at,"volume",id,bytes.LongLength,hash.Finish());
-            var stamped=source with {Path=at,Id=id,Size=bytes.LongLength,ContentHash=proof.ContentHash,Revision=string.Empty};
-            var staged=new Stage(path,bytes,stamped,DiscardUnarmedAsync){Proof=proof};
-            stages.Add(at,staged);return staged;
+            Stage staged;
+            if (Side!=Side.Local) staged=new Stage(path,bytes,source);
+            else
+            {
+                var id=$"stage-{++nextId}";var at=path+"."+id;using var hash=new ContentHash();hash.Append(bytes);
+                var proof=new StageProof(at,"volume",id,bytes.LongLength,hash.Finish());
+                var stamped=source with {Path=at,Id=id,Size=bytes.LongLength,ContentHash=proof.ContentHash,Revision=string.Empty};
+                staged=new Stage(path,bytes,stamped,DiscardUnarmedAsync){Proof=proof};
+                stages.Add(at,staged);
+            }
+            AfterStage?.Invoke();
+            return staged;
         }
     }
     /// <summary>Publish operation on the supplied facts.</summary>
@@ -136,6 +144,9 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
         foreach (var child in Items.Values.Where(v => expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray()) { History.Add(child); Items.Remove(child.Entry.Path); }
         History.Add(old); Items.Remove(expected.Path); return Task.FromResult(new RemovalResult(RemovalOutcome.Removed, null, null));
     }
+    // Immediate fake deletes mutate the selected entry directly; there is no accepted job to persist an origin on.
+    public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, ActionKind origin, CancellationToken ct) =>
+        DeleteAsync(expected,selection,ct);
     /// <summary>Move operation on the supplied facts.</summary>
     public Task<RemovalResult> MoveAsync(Entry expected, string newPath, CancellationToken ct)
     {

@@ -23,6 +23,8 @@ public sealed class WorkQueue
     public bool CoversHop((JournalPosition? Local, string? Dropbox) throughHop) => throw new NotImplementedException();
     /// <summary>Invalidate one source's coverage on reset before draining earlier work.</summary>
     public void LoseCoverage(Side source) => throw new NotImplementedException();
+    /// <summary>Order a verified reset against pending publications for the same source.</summary>
+    public Task LoseCoverage(PairConfig pair, Side source, ChangePage reset, IStore store, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Retry the original retained input or prepared operation within the selected scope.</summary>
     public Task<bool> RetryHeldAsync(Scope? scope, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Read the published scope when a queued callback executes.</summary>

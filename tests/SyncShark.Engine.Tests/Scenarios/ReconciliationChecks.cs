@@ -28,7 +28,9 @@ public static class ReconciliationChecks
         if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(
             ItemChecks.File(Side.Local, Original, 1, Side.Local.ToString()), ItemChecks.File(Side.Dropbox, Original, 1, Side.Dropbox.ToString())),null,null,default);
         var before=new[]{local,remote}.SelectMany(side=>side.Items.Values.Select(v=>(Side:side,v.Entry,v.Bytes))).ToArray();
-        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(), local, remote, store, null,null, default);
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,local,remote,store);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue, local, remote, store, null,null, default);
         foreach(var item in before.Where(x=>!x.Side.Items.Values.Any(v=>v.Entry.Id==x.Entry.Id && v.Bytes.SequenceEqual(x.Bytes))))
             Check.Require(item.Side.History.Any(v=>v.Entry==item.Entry && v.Bytes.SequenceEqual(item.Bytes)),"Displaced version is not recoverable");
         if(expectMove) Check.Require(remote.Items["renamed"].Entry.Id==before.Single(x=>x.Side==remote).Entry.Id && remote.Requests[nameof(ISide.MoveAsync)]==1 && remote.Requests[nameof(ISide.DeleteAsync)]==0 && remote.Requests[nameof(ISide.PublishAsync)]==0,"Counterpart recreated instead of moved");
@@ -89,7 +91,8 @@ public static class ReconciliationChecks
     public static Task A03FourEndpointNoticeAsync() => throw new NotImplementedException();
     public static async Task A05SameIdSizeMtimeWriteAfterPublicationAsync()
     {
-        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);var queue=new WorkQueue();using var store=new InMemoryStateStore();var local=new FakeSide(Side.Local);var remote=new FakeSide(Side.Dropbox);
+        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);using var store=new InMemoryStateStore();var local=new FakeSide(Side.Local);var remote=new FakeSide(Side.Dropbox);
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,local,remote,store);
         var before=ItemChecks.File(Side.Local,"file",1,"pc");var db=ItemChecks.File(Side.Dropbox,"file",1,"db");
         var after=ItemChecks.File(Side.Local,"file",2,before.Id) with { Modified=before.Modified };
         local.Seed(after,[2]);remote.Seed(db,[1]);await store.CommitAsync(pair.PairId,null,SyncedEntries.From(before,db),new(1,10),null,default);
@@ -130,8 +133,19 @@ public static class ReconciliationChecks
     {
         var pair=ItemChecks.Pair();using var store=new InMemoryStateStore();await store.SavePairAsync(pair,default);var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);
         db.Seed(ItemChecks.File(Side.Dropbox,"victim",1,"db"),[1]);var host=new Host((_,_)=>Task.FromResult<IStore?>(store),(_,_,_,_)=>(pc,db),ItemChecks.Settings,null!,TimeProvider.System,_=>throw new InvalidOperationException(),(_,_)=>throw new InvalidOperationException());
-        using var output=new StringWriter();await new global::Massdex.SyncShark.Engine.Edge.Commands().ExecuteAsync(["pairs","exclude","--pair",pair.PairId,"--side","dropbox","--rel","victim"],host,output,default);
-        var warning=output.ToString();Check.Require(warning.Contains(Text.Get(TextKey.RecoveryDropboxHistory),StringComparison.OrdinalIgnoreCase) && warning.Contains("retention",StringComparison.OrdinalIgnoreCase) && db.Items.ContainsKey("victim") && db.Requests[nameof(ISide.DeleteAsync)]==0,"Destructive preview did not explain recovery or removed the target");
+        var savedRules=(await store.PairAsync(pair.PairId,default))!.Exclusions.ToArray();
+        var original=db.Items["victim"];var originalBytes=original.Bytes.ToArray();
+        using var output=new StringWriter();using var error=new StringWriter();
+        var code=await new global::Massdex.SyncShark.Engine.Edge.Commands().ExecuteAsync(["pairs","exclude","--pair",pair.PairId,"--side","dropbox","--rel","victim"],host,output,error,default);
+        var expected=Text.Get(TextKey.ResultExcludePreview,(TextArg.Path,"victim"),(TextArg.Side,"Dropbox"),
+            (TextArg.CopyFiles,"1"),(TextArg.CopyBytes,"1"),(TextArg.RemoveFiles,"1"),(TextArg.RemoveBytes,"1"),
+            (TextArg.Place,Text.Get(TextKey.RecoveryDropboxHistory)));
+        var saved=await store.PairAsync(pair.PairId,default);
+        Check.Require(code==0 && error.ToString().Length==0 && output.ToString().TrimEnd()==expected &&
+            saved!=null && saved.Exclusions.SequenceEqual(savedRules) && pc.Items.Count==0 && db.Items.Count==1 &&
+            db.Items.TryGetValue("victim",out var after) && after.Entry==original.Entry && after.Bytes.SequenceEqual(originalBytes) &&
+            pc.Requests[nameof(ISide.DeleteAsync)]==0 && db.Requests[nameof(ISide.DeleteAsync)]==0,
+            "Destructive preview did not explain recovery or removed the target");
     }
     public static Task A28ConfirmedRemovalPcAsync() => throw new NotImplementedException();
     public static Task A28ConfirmedRemovalCloudAsync() => throw new NotImplementedException();

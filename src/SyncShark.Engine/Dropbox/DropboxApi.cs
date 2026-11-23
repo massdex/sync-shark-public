@@ -3,6 +3,9 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// <summary>The HTTP and response-consumption boundary;</summary>
 public sealed class DropboxApi
 {
+    /// <summary>Create the shared Dropbox transport using the supplied clock for activity timeouts.</summary>
+    public static HttpClient CreateHttpClient(TimeProvider clock) => throw new NotImplementedException();
+
     /// <summary>Send a prepared request through the shared transport. Return HTTP status and body unchanged, including provider refusals; the caller owns the response.</summary>
     public Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Uses the transport and clock supplied by the composition root for requests and response timing. Construct the transport limiter from settings.InitialLimiterLevel, settings.Backoff and the run’s event sink.</summary>

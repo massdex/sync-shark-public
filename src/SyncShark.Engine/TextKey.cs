@@ -413,4 +413,5 @@ public enum TextKey
     SignInReturnReceived,
     SignInReturnRetry,
     HostNotRunning,
+    DifferingConnections,
 }

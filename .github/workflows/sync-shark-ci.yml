@@ -32,6 +32,7 @@ jobs:
         shell: pwsh
         run: ./tools/ci/check-personal-literals.ps1
       - name: Build all four projects from their locks
+        id: build_projects
         shell: pwsh
         run: ./tools/ci/build-projects.ps1 -SourceRevision $env:GITHUB_SHA
       - name: Run every check with the exported capability inventory
@@ -108,3 +109,8 @@ jobs:
           Clear-SetupPreparation $root
           if ([IO.File]::ReadAllText($marker) -cne 'incomplete extraction') { throw 'F007: unproven preparation was changed.' }
           if ($ownershipFailures.Count) { throw ($ownershipFailures -join "; ") }
+      - name: Check finished-work deployment fixture 49
+        if: ${{ always() && steps.build_projects.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $env:SYNC_SHARK_RELEASE_TEST_MODE='1'; & ./tools/Test-SyncSharkDeploy.ps1 -Fixture 49

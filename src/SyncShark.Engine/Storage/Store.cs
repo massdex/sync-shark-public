@@ -102,6 +102,8 @@ public sealed class Store : IStore
 
     /// <summary>Read deleted-name publication state independently of the change-feed cursor.</summary>
     public Task<(string? Cursor, bool Owed)> DeletedHistoryAsync(string pairId, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read history state for the active scan after verifying the saved history.</summary>
+    public Task<(string? Cursor, bool Owed)> DeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct) => throw new NotImplementedException();
 
     /// <summary>Fold only this completed history acquisition and publish its own terminal cursor with it. An ordinary or incomplete scan cannot publish history.</summary>
     public Task PublishDeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct) => throw new NotImplementedException();

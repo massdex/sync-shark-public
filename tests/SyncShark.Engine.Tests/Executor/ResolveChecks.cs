@@ -3,6 +3,7 @@ namespace Massdex.SyncShark.Engine.Tests.Executor;
 /// <summary>Contract checks for Resolve.</summary>
 public static class ResolveChecks
 {
+    public static Task RemovalProofAsync() => throw new NotImplementedException();
     /// <summary>Check dismiss choice matrix at integration.</summary>
     public static Task DismissAsync() => throw new NotImplementedException();
     /// <summary>Check reviewed resolution endpoints at integration.</summary>

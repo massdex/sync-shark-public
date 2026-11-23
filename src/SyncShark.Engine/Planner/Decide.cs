@@ -17,7 +17,7 @@ public static class Decide
     /// <summary>DropboxChanged for the selected Decide operation.</summary>
     internal static bool DropboxChanged(Entry entry, SyncedEntry synced) => throw new NotImplementedException();
     /// <summary>Changed for the selected Decide operation.</summary>
-    internal static bool? Changed(Side side, Entry entry, SyncedEntry synced, string? localHash, bool localContentDirty) => throw new NotImplementedException();
+    public static bool? Changed(Side side, Entry entry, SyncedEntry synced, string? localHash, bool localContentDirty) => throw new NotImplementedException();
     /// <summary>IsFreeIncoming for the selected Decide operation.</summary>
     public static bool IsFreeIncoming(Entry? local, Entry? dropbox, SyncedEntry? localBinding, SyncedEntry? dropboxBinding) => throw new NotImplementedException();
     /// <summary>CrossedFar for the selected Decide operation.</summary>

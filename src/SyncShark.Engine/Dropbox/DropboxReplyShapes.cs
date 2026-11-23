@@ -12,6 +12,8 @@ public static class DropboxReplyShapes
     public static DropboxReply<Listed> Listed(PairConfig pair) => throw new NotImplementedException();
     /// <summary>Metadata for the selected DropboxReplyShapes operation.</summary>
     public static DropboxReply<Entry> Metadata(PairConfig pair, string? untaggedKind = null, bool nested = false) => throw new NotImplementedException();
+    /// <summary>Read a single delete receipt against the selected identity before mapping its location.</summary>
+    public static DropboxReply<Entry?> SelectedDelete(PairConfig pair, string selectedId) => throw new NotImplementedException();
     /// <summary>SessionId for the selected DropboxReplyShapes operation.</summary>
     public static DropboxReply<string> SessionId() => throw new NotImplementedException();
     /// <summary>Void for the selected DropboxReplyShapes operation.</summary>

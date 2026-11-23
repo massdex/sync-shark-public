@@ -3,6 +3,7 @@ namespace Massdex.SyncShark.Engine.Tests.Executor;
 /// <summary>Contract checks for Exclusions.</summary>
 public static class ExclusionsChecks
 {
+    public static Task RemovalProofAsync() => throw new NotImplementedException();
     /// <summary>Check mapped exclusion protection at integration.</summary>
     public static Task MappedProtectionAsync() => throw new NotImplementedException();
     /// <summary>Check exclusion copy estimate at integration.</summary>

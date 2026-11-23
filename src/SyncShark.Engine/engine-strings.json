@@ -407,5 +407,6 @@
   "FileHolderKnown": "{Message} Program holding the file: {Holder}.",
   "SignInReturnReceived": "Browser response received. Return to the command line to see whether the account connected.",
   "SignInReturnRetry": "Sign-in did not finish. Run accounts connect again.",
-  "HostNotRunning": "The Sync Shark host is not running."
+  "HostNotRunning": "The Sync Shark host is not running.",
+  "DifferingConnections": "The connection lists differ. The original append log is at {Path}. On the next start the fixed list is used; reconnect any missing account."
 }

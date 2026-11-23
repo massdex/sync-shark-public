@@ -3,6 +3,15 @@ namespace Massdex.SyncShark.Engine.Tests.Local;
 /// <summary>Contract checks for LocalSide.</summary>
 public static class LocalSideChecks
 {
+    public static Task ArmedOfflineStageAsync() => throw new NotImplementedException();
+    public static Task WriterPreconditionsAsync() => throw new NotImplementedException();
+
+    public static Task LongPathRecoveryAsync() => throw new NotImplementedException();
+    public static Task ReceiptWalkAsync() => throw new NotImplementedException();
+    public static Task SelectedReceiptAsync() => throw new NotImplementedException();
+    public static Task ReplacedInventoryRootAsync() => throw new NotImplementedException();
+    public static Task SettledPrefixAsync() => throw new NotImplementedException();
+
     /// <summary>Check late read failure through the module interface.</summary>
     public static Task LateReadFailureAsync() => throw new NotImplementedException();
     /// <summary>Check excluded first alias through the module interface.</summary>

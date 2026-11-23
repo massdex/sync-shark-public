@@ -7,6 +7,25 @@ namespace Massdex.SyncShark.Engine.Tests.Scenarios;
 /// <summary>Models a deletion on one side with an independent surviving, changed, hidden or unreadable child on the other.</summary>
 public static class FolderChecks
 {
+    internal static Func<(JournalPosition? Local,string? Dropbox),bool> RemovalCoverage(FakeSide pc,FakeSide cloud,Side victimSide,Entry victim,CancellationToken ct)
+    {
+        var echo=new Change(victimSide,ChangeKind.Deleted,victim.Path,null,victim.Id,null,false,victimSide==Side.Local);
+        var journal=new ChangePage(victimSide==Side.Local?[echo with {Usn=2,JournalId=1}]:[],null,new(1,3));
+        var feed=new ChangePage(victimSide==Side.Dropbox?[echo]:[],"after-removal",null);
+        pc.Pages.Enqueue(journal);cloud.Pages.Enqueue(feed);
+        return fence=>
+        {
+            if(fence.Local!=journal.Position || fence.Dropbox!=feed.Cursor ||
+               !(victimSide==Side.Local?pc:cloud).History.Any(v=>v.Entry==victim)) return false;
+            var stop=(fence.Dropbox,fence.Local);
+            var localRead=pc.ReadChangesAsync(null,null,stop,ct).GetAwaiter().GetResult();
+            var cloudRead=cloud.ReadChangesAsync(null,null,stop,ct).GetAwaiter().GetResult();
+            return !localRead.ContinuityLost && !cloudRead.ContinuityLost && localRead.CaughtUp && cloudRead.CaughtUp &&
+                localRead.Position==fence.Local && cloudRead.Cursor==fence.Dropbox &&
+                localRead.Changes.SequenceEqual(journal.Changes) && cloudRead.Changes.SequenceEqual(feed.Changes);
+        };
+    }
+
     public static async Task DeleteAsync(bool excluded=false, bool ignored=false, bool unreadable=false, bool edited=false, bool nested=false)
     {
         const string root="folder"; const string child="folder/child";
@@ -15,7 +34,7 @@ public static class FolderChecks
         await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
         var inner=pair with { PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"folder","child"),DropboxRoot=pair.DropboxRoot+"/folder/child" };
         if(nested) await store.SavePairAsync(inner,default);
-        var queue=new WorkQueue();var paths=new PathScope(pair,nested?[pair,inner]:[pair],DriveType.Fixed);
+        var paths=new PathScope(pair,nested?[pair,inner]:[pair],DriveType.Fixed);var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,cloud,store);
         var a=ItemChecks.File(Side.Local,root,0,"parent-a",true);var b=ItemChecks.File(Side.Dropbox,root,0,"parent-b",true);
         var parent=SyncedEntries.From(a,b);await store.CommitAsync(pair.PairId,null,parent,null,null,default); pc.Seed(a,[]);
         var childA=ItemChecks.File(Side.Local,child,1,"child-a",nested);var childB=ItemChecks.File(Side.Dropbox,child,1,"child-b",nested);
@@ -27,7 +46,44 @@ public static class FolderChecks
             await store.CommitAsync(pair.PairId,null,SyncedEntries.From(sibling,ItemChecks.File(Side.Dropbox,"folder/free",2,"free-b")),null,null,default);
         }
         if(unreadable) pc.ReadFailures[child]=new ItemFailedException(child,TextKey.ReadLocalFailed,null);
-        await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,parent,Side.Dropbox,pc,cloud,store,queue.Held,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),default);
+        if(edited)
+        {
+            // The parent owns the footprint before the local edit is read; recovery must consume the held child.
+            var edit = new Change(Side.Local,ChangeKind.Changed,child,null,live.Id,live,true,false,10,JournalId:1);
+            var gone = new Change(Side.Dropbox,ChangeKind.Deleted,root,null,b.Id,null,false,false);
+            cloud.Pages.Enqueue(new([gone],"removed",null));
+            pc.Pages.Enqueue(new([edit],null,new(1,11)));
+            var deletion = await cloud.ReadChangesAsync(null,null,default);
+            Task? held = null;
+            await queue.AdmitAsync(pair,deletion,async (_,ct)=>
+            {
+                var editedPage = await pc.ReadChangesAsync(null,null,ct);
+                held = queue.AdmitAsync(pair,editedPage,(_,_)=>throw new InvalidOperationException("Recovered edit ran independently"),pc.SettleJournalAsync,ct);
+                // The next local record is the folder recycle; the feed has no newer change.
+                var echo = new Change(Side.Local,ChangeKind.Deleted,root,null,a.Id,null,false,true,11,JournalId:1);
+                pc.Pages.Enqueue(new([echo],null,new(1,12)));
+                cloud.Pages.Enqueue(new([],deletion.Cursor,null));
+                bool Covered((JournalPosition? Local,string? Dropbox) fence)
+                {
+                    // FakeSide reads complete synchronously. Do not certify the fence until the actual victim and child are in its bin.
+                    var victim = pc.ReadByIdAsync(a.Id,ct).GetAwaiter().GetResult();
+                    var retained = pc.ReadByIdAsync(live.Id,ct).GetAwaiter().GetResult();
+                    if(victim is not {InScope:false} parentReceipt || parentReceipt.Location.Entry!=a ||
+                       retained is not {InScope:false} childReceipt || childReceipt.Location.Entry!=live) return false;
+                    var localEnd = pc.ReadChangesAsync(null,editedPage.Position,ct).GetAwaiter().GetResult();
+                    var cloudEnd = cloud.ReadChangesAsync(deletion.Cursor,null,ct).GetAwaiter().GetResult();
+                    return localEnd.Changes.SequenceEqual(new[]{echo}) && localEnd.Position==fence.Local && cloudEnd.Cursor==fence.Dropbox;
+                }
+                await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,parent,Side.Dropbox,pc,cloud,store,queue.Held,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),ct,coversThrough:Covered);
+            },null,default);
+            if(held!=null) await held;
+        }
+        else
+        {
+            var result=await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,parent,Side.Dropbox,pc,cloud,store,queue.Held,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),default,
+                coversThrough:ignored?RemovalCoverage(pc,cloud,Side.Local,a,default):null);
+            if(ignored) Check.Require(result.Outcome==RemovalOutcome.Removed,"Ignored folder removal was not settled");
+        }
         if(ignored)
         {
             Check.Require(pc.Items.Count==0 && cloud.Items.Count==0 && pc.History.Any(x=>x.Entry.Path==child && x.Bytes.SequenceEqual(new byte[]{1})),"Ignored child did not accompany recycled parent");
@@ -50,7 +106,7 @@ public static class FolderChecks
     {
         var pair=ItemChecks.Pair();var pc=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox);using var store=new InMemoryStateStore();
         await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
-        var queue=new WorkQueue();var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,cloud,store);
         foreach(var path in new[]{"top-a/link","top-b/link"}) pc.Seed(ItemChecks.File(Side.Local,path,0,path,true) with { Skip=nameof(TextKey.SkipLink) },[]);
         await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,null,null,default);
         var notice=store.OpenNotices.Single();Check.Require(notice.Kind==NoticeKind.Info && notice.Cause==TextKey.InfoLinks && notice.Subject.Items.Count==2,"Link summary must contain both members");
@@ -124,8 +180,9 @@ public static class FolderChecks
     public static Task A08StageFailureBeforeRemovalAsync() => throw new NotImplementedException();
     public static async Task A08SoleSmallUploadSourceUnreadableAsync()
     {
-        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);var queue=new WorkQueue();using var store=new InMemoryStateStore();
+        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);using var store=new InMemoryStateStore();
         var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);var file=ItemChecks.File(Side.Local,"item",2,"pc");var folder=ItemChecks.File(Side.Dropbox,"item",0,"db",true);
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,db,store);
         pc.Seed(file,[2]);db.Seed(folder,[]);pc.ContentFailures[file.Path]=new ItemFailedException(file.Path,TextKey.ReadLocalFailed,null);
         await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Local,ChangeKind.Changed,file.Path,null,file.Id,file,true,false),pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),default);
         Check.Require(pc.Requests[nameof(ISide.OpenReadAsync)]+pc.Requests[nameof(ISide.ContentHashAsync)]>0 && db.Items[folder.Path].Entry==folder && db.Requests[nameof(ISide.DeleteAsync)]==0 && store.OpenNotices.Any(n=>n.Kind==NoticeKind.Failure),"Failed content read removed the target or went unreported");
