@@ -712,12 +712,12 @@ public static class FolderChecks
             _ => [], (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, default, collide: collide,
             coversThrough: global::Massdex.SyncShark.Engine.Tests.Executor.FolderDeleteChecks.Admitted(run.Pc, run.Db));
 
-    private static async Task<(Entry Source, Entry Dest)> MergeFolderAsync(PairRun run, string source = "old", string dest = "new")
+    private static Task<(Entry Source, Entry Dest)> MergeFolderAsync(PairRun run, string source = "old", string dest = "new")
     {
         var src = Seed(run.Pc, source, 0, folder: true);
         var at = src with { Path = dest, Id = "dest" };
         run.Pc.Items[dest] = (at, []);
-        return (src, at);
+        return Task.FromResult((src, at));
     }
 
     /// <summary>A nested clashing child folder merges into the existing destination child without a notice.</summary>
