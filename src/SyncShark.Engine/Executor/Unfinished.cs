@@ -64,11 +64,7 @@ public sealed class Unfinished
         if(received==null)
         {
             await RecoverStageAsync(pair,settings,events,paths,local,dropbox,store,heldInput,populate,compareOldBinding,ct,footprint);
-            if(await store.ArmedAsync(pair.PairId,ct) is {} left && (footprint==null || footprint.Overlaps(PathNames.DropboxKey(left.Victim.Saved?.DropboxPath ?? await FolderDelete.MapAsync(pair,store,Side.Local,left.Victim.Proof.Expected.Path,ct)))))
-            {
-                if(reviewed==null) await Unchecked(store,pair,left.Victim.Proof.Expected,ct);
-                await store.DisarmAsync(pair.PairId,left.Victim,left.Stage,ct);
-            }
+
         }
 
         async Task Check(AcceptedJob job)
