@@ -330,7 +330,7 @@ public static class Repair
             }
             async Task Attempt(CancellationToken token)
             {
-                if(row!=null && !(removal && row is {Local:null,Dropbox:null,Synced:not null}) && Touched(row,row.IsFolder()) || candidates.Any(c=>store.ScanTouched(id,scan,c.Side,c.Moved.Path,c.Moved.IsFolder)))
+                if(row!=null && Touched(row,row.IsFolder()) || candidates.Any(c=>store.ScanTouched(id,scan,c.Side,c.Moved.Path,c.Moved.IsFolder)))
                 {
                     if(Volatile.Read(ref scanCleared)) reobserve=true;
                     if(retained==null && !reobserve) return;
