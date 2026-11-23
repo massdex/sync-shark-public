@@ -630,7 +630,16 @@ public static class RecoveryChecks
     }
     public static Task A45InvalidReappearsAfterHigherClosesAsync() => throw new NotImplementedException();
     public static Task A45RestartInconclusiveAfterMaskedInvalidAsync() => throw new NotImplementedException();
-    public static Task A45QuietJobNextRepairOpportunityAsync() => throw new NotImplementedException();
+    public static async Task A45QuietJobNextRepairOpportunityAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();
+        var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","tok",[new("tok","gone",null)]);
+        await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies["tok"]=new([new JobReply.Running(),new JobReply.Running()]);
+        await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,new Change(Side.Dropbox,ChangeKind.Deleted,"gone",null,null,null,false,false),x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        var pending=new List<AcceptedJob>();await foreach(var p in x.Store.JobsAsync(x.Pair.PairId,default)) pending.Add(p);
+        Check.Require(x.Cloud.Requests[nameof(ISide.ReadJobAsync)]==2 && pending.Single()==job && x.Store.OpenNotices.Count==0,"A quiet running job did not get its next opportunity");
+    }
     public static Task A47SecondStartAttachesAsync() => throw new NotImplementedException();
     public static Task A47LogsWhileHostDownAsync() => throw new NotImplementedException();
     public static async Task A47OtherReadWhileHostDownAsync()
@@ -675,7 +684,17 @@ public static class RecoveryChecks
     public static Task A47PerPairPauseSharedVolumeAsync() => throw new NotImplementedException();
     public static Task A47ResumeFromHeldPositionAsync() => throw new NotImplementedException();
     public static Task A47ResumeAfterHistoryGapAsync() => throw new NotImplementedException();
-    public static Task A47RestartClearsPauseAsync() => throw new NotImplementedException();
+    public static async Task A47RestartClearsPauseAsync()
+    {
+        using var store=new InMemoryStateStore();
+        var settings=SettingsParser.Load();
+        Host NewHost()=>new((_,_)=>Task.FromResult<IStore?>(store),(_,opened,_,_)=>ReferenceEquals(opened,store)?(new FakeSide(Side.Local),new FakeSide(Side.Dropbox)):throw new InvalidOperationException("Wrong adapter store"),settings,null!,TimeProvider.System,_=>throw new InvalidOperationException(),(_,_)=>throw new InvalidOperationException());
+        var first=NewHost();await first.PauseAsync("pair-a",default);
+        Check.Require(first.IsPaused("pair-a"),"A pair pause was not applied");
+        var restarted=NewHost();
+        Check.Require(!restarted.IsPaused("pair-a"),"A pause survived the host restart");
+        await first.StopAsync(default);await restarted.StopAsync(default);
+    }
     public static Task A47FailedPairDoesNotStopOtherPairsAsync() => throw new NotImplementedException();
     public static Task A47QuietJobHostReadyAsync() => throw new NotImplementedException();
     public static Task A47FailedRecoveryHostReadyAsync() => throw new NotImplementedException();
