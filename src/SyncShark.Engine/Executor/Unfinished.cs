@@ -287,8 +287,6 @@ public sealed class Unfinished
         if(saved!=null)
         {
             var peer=await dropbox.ReadByIdAsync(saved.DropboxId,ct);
-            if(note.Stage==null && peer==null && currentBinding?.LocalId!=proof.Expected.Id && (currentBinding!=null || current!=null || other!=null))
-            {await store.DisarmAsync(pair.PairId,victim,null,ct);return;}
             if(peer is {} live && (!live.InScope || live.Location.Entry!=other)) return;
             // A stage at the arrival name is not proof that the original pair moved there.
             if(note.Stage!=null && localKey!=saved.LocalKey) return;
