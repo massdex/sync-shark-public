@@ -267,6 +267,13 @@ public static class ConnectionsChecks
                 File.Copy(ListFile(source), ListFile(target));
                 Expect(Refuses(() => connections.Verify(source, target, new[] { first })),
                     "A distinct target that dropped an authoritative connection was accepted (required id was present)");
+                connections.Save(source, new[] { first }); // stale canonical beside the same authoritative slot
+                Expect(Refuses(() => connections.Verify(source, target, new[] { first })),
+                    "Stale canonical source membership overrode the authoritative slot");
+                connections.Save(target, new[] { first, second });
+                using var obsolete = File.Open(ListFile(source), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                Expect(connections.Verify(source, target, new[] { first }) is null,
+                    "Verifying a slot-bearing source needed its obsolete log");
             });
             Case(failures, "byte-identical distinct append target accepted", () =>
             {
