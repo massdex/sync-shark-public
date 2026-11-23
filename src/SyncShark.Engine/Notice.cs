@@ -27,7 +27,9 @@ public sealed record Notice(long Id, NoticeKind Kind, TextKey Cause, string Path
         this with { Subject = expected.Subject, Ignored = expected.Ignored, Reviewed = expected.Reviewed, Choices = expected.Choices,
             LinkCount = expected.LinkCount, LinkFolders = expected.LinkFolders } == expected &&
         Subject.Incoming == expected.Subject.Incoming && Subject.HasSameItems(expected.Subject) &&
-        Subject.FirstRunDeletion == expected.Subject.FirstRunDeletion;
+        Subject.FirstRunDeletion == expected.Subject.FirstRunDeletion &&
+        Subject.DropboxVersion == expected.Subject.DropboxVersion &&
+        Subject.DropboxVersionAttributed == expected.Subject.DropboxVersionAttributed;
 
     /// <summary>Whether any subject key is self-or-under this scope; item-less operational notices use their path.
     /// Empty scope includes every issue, including dismissed ones, independently of holding policy.</summary>
@@ -74,6 +76,17 @@ public sealed record IssueSubject(
     /// <summary>The unknown move this Failure retains; null for every other subject.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public UnknownMove? Move { get; init; }
+
+    /// <summary>The Dropbox version this issue pins for a retry from the pre-dispatch observation: namespace, rooted
+    /// original path and the original entry with its id, revision, size/hash and metadata. Null for every other
+    /// subject; omitted from stored JSON.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IdentityLocation? DropboxVersion { get; init; }
+
+    /// <summary>True when the pinned Dropbox version came from an attributed deletion rather than an observed-only
+    /// check; false is the ordinary case and omitted from stored JSON.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool DropboxVersionAttributed { get; init; }
 
     /// <summary>The side of the endpoint a turn at path retains: the incoming side, else the item at that path.</summary>
     internal Side? EndpointSide(string path) => Incoming ?? Items.FirstOrDefault(item => item.Path == path)?.Side;
