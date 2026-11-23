@@ -368,7 +368,7 @@ public static class Repair
                     throw;
                 }
                 if(own==null && !reobserve && retiring!=null && outcome==EffectOutcome.Applied) await CloseSelected(retiring,token);
-                if(own!=null && !endAttempted && physicalHop==null && outcome!=EffectOutcome.Refused)
+                if(own!=null && !endAttempted && physicalHop==null)
                 {
                     await discoveryEnded.Task.WaitAsync(token); endAttempted=true;
                     await RetryOwn(own,token);
