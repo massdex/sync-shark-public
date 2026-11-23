@@ -57,7 +57,7 @@ public static class Moves
     }
 
     /// <summary>Identify a file move whose surviving endpoints need separate bindings.</summary>
-    public static bool IsFileSplit(SyncAction action) => action is {Kind:ActionKind.ForgetOnly, Row.Synced.IsFolder:false, InfoAfter:TextKey.InfoMovedEdited or TextKey.InfoMovedDeleted or TextKey.InfoMovedTwice};
+    public static bool IsFileSplit(SyncAction action) => action.Target!=null && action is {Kind:ActionKind.ForgetOnly, Row.Synced.IsFolder:false, InfoAfter:TextKey.InfoMovedEdited or TextKey.InfoMovedDeleted or TextKey.InfoMovedTwice};
 
     private static SyncAction Split(Row row, TextKey info) => new(ActionKind.ForgetOnly, row, InfoAfter: info);
     private static SyncAction Failure(Row row, TextKey cause) => new(ActionKind.Notice, row, NoticeKind: NoticeKind.Failure, Cause: cause);
