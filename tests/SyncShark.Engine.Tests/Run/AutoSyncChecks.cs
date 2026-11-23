@@ -242,7 +242,8 @@ public static class AutoSyncChecks
         var intake=AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),local,db,observed,(new(1,1),"held"),static()=>{},ct);
         try
         {
-            await Task.WhenAny(exiting.Task,intake).WaitAsync(ct);
+            if(await Task.WhenAny(exiting.Task,intake).WaitAsync(ct)==intake && !waiting.Task.IsCompleted) await intake;
+            // A missing queue implementation never entered the publication and is not a join failure.
             Check.Require(exiting.Task.IsCompleted && !intake.IsCompleted,"Source failure returned before held publication exited");
         }
         finally {release.TrySetResult();}
