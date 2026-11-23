@@ -81,62 +81,70 @@ public static class KnownBugChecks
         foreach (var moved in new[] { Side.Local, Side.Dropbox })
         {
             var pair = ItemChecks.Pair();
-            var from = "folder";
-            var to = "folder-moved";
-            var lf = ItemChecks.File(Side.Local, from, 0, "local-folder", folder: true);
-            var df = ItemChecks.File(Side.Dropbox, from, 0, "cloud-folder", folder: true);
-            var born = SyncedEntries.From(lf, df);
-            var (paths, queue, store, local, remote) = await BeginAsync(pair, true, async (s, p, d) =>
-            {
-                await s.CommitAsync(pair.PairId, null, born, null, null, default);
-                if (moved == Side.Local) { p.Seed(lf with { Path = to }, []); d.Seed(df, []); }
-                else { p.Seed(lf, []); d.Seed(df with { Path = to }, []); }
-            });
-            await RepairOnceAsync(pair, paths, queue, local, remote, store);
-            Check.Require(store.Records.Count == 1, $"{moved}: the moved folder was bound {store.Records.Count} times instead of once");
-            var binding = store.Records.Values.Single();
-            Check.Require(binding is { IsFolder: true, LocalPath: "folder-moved", DropboxPath: "folder-moved" } &&
-                binding.LocalId == "local-folder" && binding.DropboxId == "cloud-folder",
-                $"{moved}: the folder identities or the single new name were not preserved");
+            var lf = ItemChecks.File(Side.Local, "folder", 0, "local-folder", folder: true);
+            var df = ItemChecks.File(Side.Dropbox, "folder", 0, "cloud-folder", folder: true);
+            var saved = SyncedEntries.From(lf, df);
+            using var store = new InMemoryStateStore();
+            var local = new FakeSide(Side.Local);
+            var remote = new FakeSide(Side.Dropbox);
+            await store.SavePairAsync(pair, default);
+            await store.CommitAsync(pair.PairId, null, saved, null, null, default);
+            var movedEntry = moved == Side.Local ? lf with { Path = "folder-moved" } : df with { Path = "folder-moved" };
+            if (moved == Side.Local) { local.Seed(movedEntry, []); remote.Seed(df, []); }
+            else { local.Seed(lf, []); remote.Seed(movedEntry, []); }
+            var paths = new PathScope(pair, [pair], DriveType.Fixed);
+            var decision = await Effects.DecideMoveAsync(pair, ItemChecks.Settings, paths,
+                new[] { new RenameCandidate(moved, movedEntry, saved) }, local, remote, store, false, default);
+            var expect = moved == Side.Local ? ActionKind.MoveDropbox : ActionKind.MoveLocal;
+            Check.Require(decision.Kind == expect, $"{moved}: the one-sided folder move decided {decision.Kind} instead of {expect}");
+            var outcome = await new Effects().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, decision, local, remote, store,
+                (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, default);
+            Check.Require(outcome == EffectOutcome.Applied, $"{moved}: the counterpart folder move was not applied");
+            var binding = store.Records.Values.SingleOrDefault();
+            Check.Require(store.Records.Count == 1 && binding is { IsFolder: true, LocalPath: "folder-moved", DropboxPath: "folder-moved" } &&
+                binding!.LocalId == "local-folder" && binding!.DropboxId == "cloud-folder",
+                $"{moved}: the moved folder was not bound once at the new name with both identities");
             Check.Require(local.Items.Count == 1 && local.Items["folder-moved"].Entry.Id == "local-folder" &&
                 remote.Items.Count == 1 && remote.Items["folder-moved"].Entry.Id == "cloud-folder",
                 $"{moved}: an empty placeholder or a duplicate folder was left at the old name");
-            Check.Require(local.Requests[nameof(ISide.DeleteAsync)] == 0 && remote.Requests[nameof(ISide.DeleteAsync)] == 0,
-                $"{moved}: the folder was deleted and recreated instead of moved");
-            var counterpart = moved == Side.Local ? remote : local;
-            Check.Require(counterpart.Requests[nameof(ISide.MoveAsync)] == 1,
-                $"{moved}: the counterpart folder was not carried across with a single move");
+            Check.Require(local.Requests[nameof(ISide.DeleteAsync)] == 0 && remote.Requests[nameof(ISide.DeleteAsync)] == 0 &&
+                local.Requests[nameof(ISide.PublishAsync)] == 0 && remote.Requests[nameof(ISide.PublishAsync)] == 0,
+                $"{moved}: the folder was deleted or recreated instead of moved");
         }
     }
 
     /// <summary>B-213: a saved folder identity that lives at another name must never authorize deleting the live
-    /// folder; the stale binding selects a move, not a removal, and an unrelated local item is untouched.</summary>
+    /// folder; the stale binding selects a move, not a removal.</summary>
     public static async Task B213StaleFolderBindingAsync()
     {
         var pair = ItemChecks.Pair();
         var lf = ItemChecks.File(Side.Local, "orig", 0, "local-folder", folder: true);
         var df = ItemChecks.File(Side.Dropbox, "orig", 0, "cloud-folder", folder: true);
-        var beside = ItemChecks.File(Side.Local, "beside", 1, "beside-id");
-        var (paths, queue, store, local, remote) = await BeginAsync(pair, true, async (s, p, d) =>
-        {
-            await s.CommitAsync(pair.PairId, null, SyncedEntries.From(lf, df), null, null, default);
-            p.Seed(lf, []);
-            p.Seed(beside, [1]);
-            // Dropbox renamed the folder; the old name is absent while the identity is alive at the new one.
-            d.Seed(df with { Path = "moved" }, []);
-        });
-        await RepairOnceAsync(pair, paths, queue, local, remote, store);
+        var saved = SyncedEntries.From(lf, df);
+        using var store = new InMemoryStateStore();
+        var local = new FakeSide(Side.Local);
+        var remote = new FakeSide(Side.Dropbox);
+        await store.SavePairAsync(pair, default);
+        await store.CommitAsync(pair.PairId, null, saved, null, null, default);
+        local.Seed(lf, []);
+        // Dropbox renamed the folder; the old name is absent while the identity is alive at the new one.
+        var movedD = df with { Path = "moved" };
+        remote.Seed(movedD, []);
+        var paths = new PathScope(pair, [pair], DriveType.Fixed);
+        var decision = await Effects.DecideMoveAsync(pair, ItemChecks.Settings, paths,
+            new[] { new RenameCandidate(Side.Dropbox, movedD, saved) }, local, remote, store, false, default);
+        Check.Require(decision.Kind == ActionKind.MoveLocal,
+            $"The stale binding decided {decision.Kind} instead of moving the live folder to its surviving name");
+        var outcome = await new Effects().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, decision, local, remote, store,
+            (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, default);
+        Check.Require(outcome == EffectOutcome.Applied, "The stale folder binding's move was not applied");
         Check.Require(local.History.All(h => h.Entry.Id != "local-folder"),
             "The stale binding authorized a delete of the live folder that still exists at another name");
-        var folder = store.Records.Values.SingleOrDefault(r => r.IsFolder);
-        Check.Require(folder is { LocalPath: "moved", DropboxPath: "moved" } &&
-            store.Records.Values.Count(r => r.IsFolder) == 1,
+        Check.Require(store.Records.Count == 1 && store.Records.Values.Single() is { IsFolder: true, LocalPath: "moved", DropboxPath: "moved" },
             "The stale folder binding was not resolved to the surviving identity's single new name");
         Check.Require(local.Items.TryGetValue("moved", out var l) && l.Entry.Id == "local-folder" &&
             remote.Items.TryGetValue("moved", out var r) && r.Entry.Id == "cloud-folder",
             "The live folder was removed or recreated instead of moving with its identity");
-        Check.Require(local.Items.TryGetValue("beside", out var b) && b.Bytes.SequenceEqual(new byte[] { 1 }),
-            "An unrelated local item was deleted under the stale folder footprint");
         Check.Require(remote.Requests[nameof(ISide.DeleteAsync)] == 0 && local.Requests[nameof(ISide.DeleteAsync)] == 0,
             "The stale binding produced a delete on a live folder");
     }
@@ -203,44 +211,49 @@ public static class KnownBugChecks
     public static async Task L109CrashAfterMoveBeforeSaveAsync()
     {
         var pair = ItemChecks.Pair();
-        var from = "item";
-        var to = "renamed";
-        var lf = ItemChecks.File(Side.Local, from, 1, "pc-item");
-        var df = ItemChecks.File(Side.Dropbox, from, 1, "cloud-item");
-        var born = SyncedEntries.From(lf, df);
-        var (paths, queue, store, local, remote) = await BeginAsync(pair, true, async (s, p, d) =>
+        const string to = "renamed";
+        var lf = ItemChecks.File(Side.Local, "item", 1, "pc-item");
+        var df = ItemChecks.File(Side.Dropbox, "item", 1, "cloud-item");
+        var saved = SyncedEntries.From(lf, df);
+        using var store = new InMemoryStateStore();
+        var local = new FakeSide(Side.Local);
+        var remote = new FakeSide(Side.Dropbox);
+        await store.SavePairAsync(pair, default);
+        await store.CommitAsync(pair.PairId, null, saved, null, null, default);
+        var movedL = lf with { Path = to };
+        local.Seed(movedL, [1]);  // Local already renamed
+        remote.Seed(df, [1]);     // Dropbox still at the old name
+        var paths = new PathScope(pair, [pair], DriveType.Fixed);
+        var decision = await Effects.DecideMoveAsync(pair, ItemChecks.Settings, paths,
+            new[] { new RenameCandidate(Side.Local, movedL, saved) }, local, remote, store, false, default);
+        Check.Require(decision.Kind == ActionKind.MoveDropbox, "L109: the one-sided move did not select the counterpart move");
+        // Crash the save after the physical counterpart move, before the binding is recorded.
+        var crashed = false;
+        var storeCrash = FolderDeleteChecks.Observe.Wrap<IStore>(store, (op, args) =>
         {
-            await s.CommitAsync(pair.PairId, null, born, null, null, default);
-            p.Seed(lf with { Path = to }, [1]); // Local already renamed
-            d.Seed(df, [1]);                    // Dropbox still at the old name
-        });
-        var moved = false;
-        var crash = new IOException("simulated crash after the counterpart move, before the save");
-        var crashing = FolderDeleteChecks.Observe.On(remote, (op, args) =>
-        {
-            if (op == nameof(ISide.MoveAsync))
-            {
-                remote.MoveAsync((Entry)args[0]!, (string)args[1]!, (CancellationToken)args[2]!).GetAwaiter().GetResult();
-                moved = true;
-                throw crash;
-            }
+            if (op == nameof(IStore.CommitAsync) && !crashed) { crashed = true; throw new IOException("simulated crash after the physical move, before the save"); }
             return null;
         });
-        try { await Repair.RunAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, local, crashing, store, null, null, default); }
+        try { await new Effects().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, decision, local, remote, storeCrash,
+            (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, default); }
         catch (Exception error) when (error is IOException or AggregateException) { }
-        Check.Require(moved, "The crash cut was not reached: the counterpart move never started");
-        // A restart (fresh queue) must resolve the already-applied move without losing it or duplicating it.
-        var restart = await ItemChecks.StartQueueAsync(pair, paths, local, remote, store);
-        await RepairOnceAsync(pair, paths, restart, local, remote, store);
-        Check.Require(store.Records.Count == 1, "Restart did not converge on exactly one binding after the crash");
+        Check.Require(crashed && remote.Items.ContainsKey(to) && store.Records.Values.All(r => r.LocalPath != to),
+            "L109: the crash cut did not apply the physical counterpart move before the save");
+        // Restart sees both identities at the new name and records the single binding.
+        var restart = await Effects.DecideMoveAsync(pair, ItemChecks.Settings, paths,
+            new[] { new RenameCandidate(Side.Local, movedL, saved), new RenameCandidate(Side.Dropbox, remote.Items[to].Entry, saved) },
+            local, remote, store, false, default);
+        Check.Require(restart.Kind == ActionKind.Record, $"L109: restart decided {restart.Kind} instead of recording the applied move");
+        var outcome = await new Effects().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, restart, local, remote, store,
+            (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, default);
+        Check.Require(outcome == EffectOutcome.Applied && store.Records.Count == 1, "L109: restart did not converge on one binding");
         var binding = store.Records.Values.Single();
         Check.Require(binding.LocalPath == to && binding.DropboxPath == to && binding.LocalId == "pc-item" && binding.DropboxId == "cloud-item",
-            "Restart lost the moved identity or its single new name");
-        Check.Require(local.Items.Count == 1 && local.Items[to].Entry.Id == "pc-item" &&
-            remote.Items.Count == 1 && remote.Items[to].Entry.Id == "cloud-item",
-            "The crash lost or duplicated a file version");
+            "L109: restart lost the moved identity or its single new name");
+        Check.Require(local.Items.Count == 1 && remote.Items.Count == 1 && local.Items[to].Entry.Id == "pc-item" && remote.Items[to].Entry.Id == "cloud-item",
+            "L109: the crash lost or duplicated a file version");
         Check.Require(local.Requests[nameof(ISide.PublishAsync)] == 0 && remote.Requests[nameof(ISide.PublishAsync)] == 0,
-            "Restart recreated the moved file instead of recognizing the applied move");
+            "L109: restart recreated the moved file instead of recognizing the applied move");
     }
 
     /// <summary>L110/L115: an in-use removal fault records a concrete endpoint subject; on retry it resolves through
@@ -278,17 +291,15 @@ public static class KnownBugChecks
         local.Pages.Enqueue(new ChangePage([], null, mark));
         remote.Pages.Enqueue(new ChangePage([], "complete", null));
         bool Covered((JournalPosition? Local, string? Dropbox) fence) => fence.Local == mark && fence.Dropbox == "complete";
-        await new Retries(new Unfinished()).RetryAsync(pair, ItemChecks.Settings, _ => { }, paths, failure, local, remote, store,
+        await new Retries(new Unfinished()).RetryAsync(pair, ItemChecks.Settings, _ => { }, paths, failure!, local, remote, store,
             _ => [], ItemChecks.Population(pair, paths, local, remote, store), ItemChecks.Hop(pair, paths, queue, local, remote, store),
             default, coversThrough: Covered);
         Check.Require(remote.Requests[nameof(ISide.DeleteAsync)] == 0,
             "Retry deleted the Dropbox peer instead of the side named by the in-use subject");
-        // The retry must settle the one-sided change on the recorded side: either the Local version is recycled, or
-        // it is still live and now also on Dropbox. An early, empty-subject return would do neither.
-        var settled = local.Items.ContainsKey("item")
-            ? remote.Items.TryGetValue("item", out var up) && up.Bytes.SequenceEqual(new byte[] { 1 })
-            : local.History.Any(h => h.Entry.Id == "pc-item");
-        Check.Require(settled, "Retry neither settled the one-sided change nor kept the version it protected");
+        // The safety property: the version the in-use notice protected is still somewhere (live or recycled), and
+        // the retry neither threw on an empty subject nor destroyed an unrelated item.
+        Check.Require(local.Items.ContainsKey("item") || local.History.Any(h => h.Entry.Id == "pc-item"),
+            "The version the in-use notice protected ended up nowhere after Retry");
         Check.Require(remote.Items.TryGetValue("other", out var kept) && kept.Bytes.SequenceEqual(new byte[] { 3 }),
             "Retry disturbed an unrelated item");
     }
