@@ -10,4 +10,7 @@ public static class Render
 
     /// <summary>Notice for the selected Render operation.</summary>
     public static string Notice(Notice notice, string pair, IEnumerable<string> choices) => throw new NotImplementedException();
+
+    /// <summary>Append only the permitted CLI choice words supplied by the read projection and command catalog.</summary>
+    public static string Notice(Notice notice, string pair, IEnumerable<string> choices, string? account = null) => throw new NotImplementedException();
 }
