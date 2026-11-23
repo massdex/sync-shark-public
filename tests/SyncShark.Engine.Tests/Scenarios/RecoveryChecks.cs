@@ -616,9 +616,48 @@ public static class RecoveryChecks
         await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,new Change(Side.Dropbox,ChangeKind.Deleted,"gone",null,null,null,false,false),x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         Check.Require(x.Cloud.Requests[nameof(ISide.DeleteAsync)]==0 && x.Store.OpenNotices.Any(n=>n.Cause==TextKey.FailDropboxDeleteJobInvalid),"An invalid token was resent or went unreported");
     }
-    public static Task A45InvalidVersusInconclusiveAsync() => throw new NotImplementedException();
-    public static Task A45TwoInvalidTokensOnePathAsync() => throw new NotImplementedException();
-    public static Task A45OneTokenClearsOtherRemainsAsync() => throw new NotImplementedException();
+    private static Task JobCheck(PairState x,Change received) => x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,received,
+        x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+    private static async Task<List<AcceptedJob>> PendingJobs(PairState x)
+    {
+        var jobs=new List<AcceptedJob>();await foreach(var job in x.Store.JobsAsync(x.Pair.PairId,default)) jobs.Add(job);return jobs;
+    }
+    private static Change NewsAt(string path)=>new(Side.Dropbox,ChangeKind.Deleted,path,null,null,null,false,false);
+    // A45: only an Invalid reply raises the invalid-job notice; an inconclusive reply never does.
+    public static async Task A45InvalidVersusInconclusiveAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();
+        var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","tok",[new("id:tok","gone",null)]);
+        await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies["tok"]=new([new JobReply.Running()]);
+        await JobCheck(x,NewsAt("gone"));
+        Check.Require(x.Store.OpenNotices.All(n=>n.Cause!=TextKey.FailDropboxDeleteJobInvalid),"An inconclusive reply raised an invalid-job notice");
+        Check.Require((await PendingJobs(x)).Single()==job,"An inconclusive reply settled the job");
+    }
+    public static async Task A45TwoInvalidTokensOnePathAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();
+        var a=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","t1",[new("id:a","gone",null)]);
+        var b=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","t2",[new("id:b","gone",null)]);
+        await x.Store.SaveJobAsync(a,default);await x.Store.SaveJobAsync(b,default);
+        x.Cloud.JobReplies["t1"]=new([new JobReply.Invalid()]);x.Cloud.JobReplies["t2"]=new([new JobReply.Invalid()]);
+        await JobCheck(x,NewsAt("gone"));
+        Check.Require(x.Store.OpenNotices.Count(n=>n.Cause==TextKey.FailDropboxDeleteJobInvalid)==1,"Two invalid tokens at one path did not coalesce to one notice");
+        Check.Require((await PendingJobs(x)).Count==2,"An invalid token was settled or dropped");
+    }
+    public static async Task A45OneTokenClearsOtherRemainsAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();
+        var a=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","ja",[new("id:a","a",null)]);
+        var b=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","jb",[new("id:b","b",null)]);
+        await x.Store.SaveJobAsync(a,default);await x.Store.SaveJobAsync(b,default);
+        x.Cloud.JobReplies["ja"]=new([new JobReply.Invalid(),new JobReply.Running()]);x.Cloud.JobReplies["jb"]=new([new JobReply.Invalid()]);
+        await JobCheck(x,NewsAt("a"));await JobCheck(x,NewsAt("b"));
+        Check.Require(x.Store.OpenNotices.Count(n=>n.Cause==TextKey.FailDropboxDeleteJobInvalid)==2,"Each invalid token did not raise its own contribution");
+        await JobCheck(x,NewsAt("a"));
+        Check.Require(!x.Store.OpenNotices.Any(n=>n.Cause==TextKey.FailDropboxDeleteJobInvalid && n.Path=="a"),"A cleared token left its own invalid notice open");
+        Check.Require(x.Store.OpenNotices.Any(n=>n.Cause==TextKey.FailDropboxDeleteJobInvalid && n.Path=="b"),"Clearing one token closed another token's invalid notice");
+        Check.Require((await PendingJobs(x)).Select(j=>j.JobId).Order().SequenceEqual(new[]{"ja","jb"}),"A cleared-token check settled or dropped a job");
+    }
     public static async Task A45HigherFailureMasksInvalidAsync()
     {
         using var x=new PairState();await x.InitializeAsync();
@@ -628,7 +667,20 @@ public static class RecoveryChecks
         await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,new Change(Side.Dropbox,ChangeKind.Deleted,"gone",null,null,null,false,false),x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         Check.Require(x.Store.OpenNotices.Any(n=>n.Cause==TextKey.FailChanged) && x.Store.OpenNotices.All(n=>n.Cause!=TextKey.FailDropboxDeleteJobInvalid),"An invalid contribution was not masked by a higher failure");
     }
-    public static Task A45InvalidReappearsAfterHigherClosesAsync() => throw new NotImplementedException();
+    public static async Task A45InvalidReappearsAfterHigherClosesAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();
+        var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","tok",[new("id:tok","gone",null)]);
+        await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies["tok"]=new([new JobReply.Invalid(),new JobReply.Invalid()]);
+        await x.Store.SaveNoticeAsync(x.Pair.PairId,new Notice(1,NoticeKind.Failure,TextKey.FailChanged,"gone",new([new(Side.Dropbox,"gone","id:tok")],Side.Dropbox),DateTimeOffset.UnixEpoch,false),default);
+        await JobCheck(x,NewsAt("gone"));
+        Check.Require(x.Store.OpenNotices.All(n=>n.Cause!=TextKey.FailDropboxDeleteJobInvalid),"A higher failure did not mask the invalid contribution");
+        var higher=x.Store.OpenNotices.Single(n=>n.Cause==TextKey.FailChanged);
+        await x.Store.CloseNoticeAsync(x.Pair.PairId,higher,default);
+        await JobCheck(x,NewsAt("gone"));
+        Check.Require(x.Store.OpenNotices.Any(n=>n.Cause==TextKey.FailDropboxDeleteJobInvalid && n.Path=="gone"),"An invalid contribution did not reappear after the higher failure closed");
+        Check.Require((await PendingJobs(x)).Single()==job,"Reappearance settled or dropped the job");
+    }
     public static Task A45RestartInconclusiveAfterMaskedInvalidAsync() => throw new NotImplementedException();
     public static async Task A45QuietJobNextRepairOpportunityAsync()
     {
