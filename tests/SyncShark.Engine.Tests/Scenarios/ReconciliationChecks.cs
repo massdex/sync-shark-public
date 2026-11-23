@@ -43,7 +43,7 @@ public static class ReconciliationChecks
         finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); directory.Delete(true); }
     }
     internal static Task CompareAsync(bool baseline, FileAt[] pc, FileAt[] cloud, FileAt[] finalPc, FileAt[] finalCloud,
-        int links, TextKey[] notices, FirstRunPolicy policy = FirstRunPolicy.NewestWins, string[]? ignores = null, Exclusion[]? exclusions = null, bool expectMove=false, bool baselineFolder=false, bool noDeletes=false, bool pastFirstSync=false)
+        int links, TextKey[] notices, FirstRunPolicy policy = FirstRunPolicy.NewestWins, string[]? ignores = null, Exclusion[]? exclusions = null, bool expectMove=false, bool baselineFolder=false, bool noDeletes=false, bool pastFirstSync=false, bool admit=false)
     {
         var pair = ItemChecks.Pair() with { FirstRun = policy, IgnoreRules = ignores ?? [], Exclusions = exclusions ?? [] };
         return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
@@ -56,6 +56,7 @@ public static class ReconciliationChecks
             var before=new[]{local,remote}.SelectMany(side=>side.Items.Values.Select(v=>(Side:side,v.Entry,v.Bytes))).ToArray();
             var paths=new PathScope(pair,[pair],DriveType.Fixed);
             var queue=await ItemChecks.StartQueueAsync(pair,paths,local,remote,store);
+            if(admit) FolderChecks.AdmitFullRepair(queue,local,remote);
             await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue, local, remote, store, null,null, deadline);
             // A displaced edition is proved by identity, revision and bytes; a counterpart move relocates it, so its path may differ.
             foreach(var item in before.Where(x=>!x.Side.Items.Values.Any(v=>v.Entry.Id==x.Entry.Id && v.Bytes.SequenceEqual(x.Bytes))))
@@ -98,7 +99,7 @@ public static class ReconciliationChecks
     public static Task CapitalsAsync() => CompareAsync(true, [new("ITEM",1)], [new(Original,1)], [new("ITEM",1)], [new("ITEM",1)], 1, []);
     public static Task DifferentCapitalsAsync() => CompareAsync(true, [new("ITEM",1)], [new("Item",1)], [new("ITEM",1)], [new("Item",1)], 1, [TextKey.InfoCapitalsDiffer]);
     public static Task FolderCapitalsAsync() => CompareAsync(false, [new("Folder",0,true)], [new("folder",0,true)], [new("Folder",0,true)], [new("folder",0,true)], 1, []);
-    public static Task FirstRunAsync(FirstRunPolicy policy, byte winner) => CompareAsync(false, [new(Original,policy==FirstRunPolicy.DropboxWins?(byte)5:(byte)2)], [new(Original,4)], [new(Original,winner)], [new(Original,winner)], 1, [], policy);
+    public static Task FirstRunAsync(FirstRunPolicy policy, byte winner, bool admit = false) => CompareAsync(false, [new(Original,policy==FirstRunPolicy.DropboxWins?(byte)5:(byte)2)], [new(Original,4)], [new(Original,winner)], [new(Original,winner)], 1, [], policy, admit: admit);
     public static Task IgnoreAsync() => CompareAsync(false, [new("~$draft",1)], [], [new("~$draft",1)], [], 0, [], ignores:["FileNamePrefix:~$"]);
     public static Task ExcludeKeepAsync() => CompareAsync(false, [new("outside",1)], [], [new("outside",1)], [], 0, [], exclusions:[new(Side.Local,"outside",true)]);
     // A32: the Dropbox adapter classifies an untransferable name with SkipReservedName. Keep no Local copy and
@@ -326,9 +327,9 @@ public static class ReconciliationChecks
         [new(Original,0,true), new(Label(Original,Side.Local,At(2)),2)],
         2, [TextKey.InfoKeptBoth]);
     public static Task A34FileFolderPcWinsAsync() => CompareAsync(false,
-        [new(Original,2)],[new(Original,0,true)],[new(Original,2)],[new(Original,2)],1,[],FirstRunPolicy.LocalWins);
+        [new(Original,2)],[new(Original,0,true)],[new(Original,2)],[new(Original,2)],1,[],FirstRunPolicy.LocalWins, admit: true);
     public static Task A34FileFolderDropboxWinsAsync() => CompareAsync(false,
-        [new(Original,2)],[new(Original,0,true)],[new(Original,0,true)],[new(Original,0,true)],1,[],FirstRunPolicy.DropboxWins);
+        [new(Original,2)],[new(Original,0,true)],[new(Original,0,true)],[new(Original,0,true)],1,[],FirstRunPolicy.DropboxWins, admit: true);
     private static string Hash(byte v){using var h=new ContentHash();h.Append([v]);return h.Finish();}
     // A PC-only file on first run with a Dropbox deleted entry that cannot confirm equal-content-later-delete:
     // it is uploaded with one edit-beats-delete notice, never recycled.

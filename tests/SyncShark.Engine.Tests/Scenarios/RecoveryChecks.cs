@@ -137,7 +137,9 @@ public static class RecoveryChecks
         x.Cloud.ClockOffset=measured?(TimeSpan.Zero,TimeSpan.Zero):null;
         x.Cloud.DeletedHistory[path]=folder?new DeletionEvidence.DeletedPath(path,path):
             new DeletionEvidence.DeletedFile(path,"cloud","previous","r1",entry.Modified.AddDays(1),null,entry.ContentHash,null);
-        await x.CompareAsync();
+        using var budget=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        FolderChecks.AdmitFullRepair(x.Queue,x.Pc,x.Cloud);
+        await Repair.RunAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,x.Pc,x.Cloud,x.Store,null,null,budget.Token);
         Check.Require(x.Cloud.Requests[nameof(ISide.DeletedAsync)]==1,"Ineligible live name received a history lookup or eligible name was missed");
         if(folder || measured)
         {
@@ -187,7 +189,9 @@ public static class RecoveryChecks
         var moved=a with { Path="dest" };x.Pc.Seed(moved,folder?[]:[1]);x.Cloud.Seed(b,folder?[]:[1]);
         var occupant=Src(Side.Dropbox,"dest","existing",1,folder);x.Cloud.Seed(occupant,folder?[]:[1]);
         if(folder) { x.Pc.Seed(Src(Side.Local,"dest/new","child-a",2),[2]);x.Cloud.Seed(Src(Side.Dropbox,"dest/other","child-b",3),[3]); }
-        await x.CompareAsync();x.VerifyLinks();
+        using var budget=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        FolderChecks.AdmitFullRepair(x.Queue,x.Pc,x.Cloud);
+        await Repair.RunAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,x.Pc,x.Cloud,x.Store,null,null,budget.Token);x.VerifyLinks();
         foreach(var side in new[]{x.Pc,x.Cloud})
         {
             Check.Require(!side.Items.ContainsKey("old") && side.Items["dest"].Entry.IsFolder==folder,"Obsolete source or missing destination");

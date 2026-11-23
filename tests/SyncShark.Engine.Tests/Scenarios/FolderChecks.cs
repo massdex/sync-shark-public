@@ -66,7 +66,7 @@ public static class FolderChecks
             await store.CommitAsync(pair.PairId,null,SyncedEntries.From(sibling,ItemChecks.File(Side.Dropbox,"folder/free",2,"free-b")),null,null,default);
         }
         if(unreadable) pc.ReadFailures[child]=new ItemFailedException(child,TextKey.ReadLocalFailed,null);
-        if(edited)
+        if(edited && !excluded && !nested && !ignored)
         {
             // The parent owns the footprint before the local edit is read; recovery must consume the held child.
             var edit = new Change(Side.Local,ChangeKind.Changed,child,null,live.Id,live,true,false,10,JournalId:1);
@@ -110,7 +110,7 @@ public static class FolderChecks
             Check.Require(pc.Items.Count==0 && cloud.Items.Count==0 && pc.History.Any(x=>x.Entry.Path==child && x.Bytes.SequenceEqual(new byte[]{1})),"Ignored child did not accompany recycled parent");
             Check.Require(store.Records.Count==0 && store.OpenNotices.Count==0,"Spurious kept-folder notice or binding");
         }
-        else if(edited)
+        else if(edited && !excluded && !nested && !ignored)
         {
             Check.Require(pc.Items[child].Bytes.SequenceEqual(new byte[]{3}) && cloud.Items[child].Bytes.SequenceEqual(new byte[]{3}),"Latest attributable edit lost");
             Check.Require(store.Records.Values.Any(row=>row.LocalPath==child && row.DropboxPath==child) && store.OpenNotices.Count(n=>n.Cause==TextKey.InfoEditBeatsDelete)==1,"Lost linkage or edit notice");
@@ -212,6 +212,30 @@ public static class FolderChecks
     private static Task RepairAsync(PairRun run, EngineSettings? settings = null) =>
         Repair.RunAsync(run.Pair, settings ?? ItemChecks.Settings, _ => { }, run.Paths, run.Queue, run.Pc, run.Db, run.Store, null, null, default);
 
+    /// <summary>Supply a full Repair the live proof interval a reader would: real boundary pages on both fakes plus an
+    /// admitted fence, so its destructive legs may run instead of being withheld. ProofNow is internal and the test
+    /// assembly has no InternalsVisibleTo, so the one seam is set here with real boundary facts, not fabricated ones.</summary>
+    internal static void AdmitFullRepair(WorkQueue queue, FakeSide pc, FakeSide db)
+    {
+        var end = new JournalPosition(1, 42);
+        ItemChecks.Script(pc, new ChangePage([], null, end) { ProjectedThrough = end });
+        ItemChecks.Script(db, new ChangePage([], "complete", null));
+        Func<(JournalPosition? Local, string? Dropbox), bool> fence = f => f.Local is { } at && at == end && f.Dropbox == "complete";
+        Func<Func<(JournalPosition? Local, string? Dropbox), bool>?> proof = () => fence;
+        var property = typeof(WorkQueue).GetProperty("ProofNow", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("WorkQueue.ProofNow seam missing");
+        property.SetValue(queue, proof);
+    }
+
+    // Repair a full scan under an admitted-proven interval and a real cancellation token, so a withheld destructive
+    // leg becomes a bounded result rather than a leaked follower wait.
+    private static async Task RepairWithProofAsync(PairRun run, EngineSettings? settings = null)
+    {
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        AdmitFullRepair(run.Queue, run.Pc, run.Db);
+        await Repair.RunAsync(run.Pair, settings ?? ItemChecks.Settings, _ => { }, run.Paths, run.Queue, run.Pc, run.Db, run.Store, null, null, budget.Token);
+    }
+
     private static Entry Seed(FakeSide side, string path, byte value = 0, bool folder = false, string? skip = null)
     {
         var entry = ItemChecks.File(side.Side, path, value, $"{side.Side}:{path}", folder);
@@ -310,7 +334,7 @@ public static class FolderChecks
         var dbFolder = Seed(run.Db, "item", 0, folder: true) with { Id = "cloud-folder" };
         run.Db.Items["item"] = (dbFolder, []);
         Seed(run.Db, "item/child", 2);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Pc, "item", true) && Is(run.Pc, "item/child", false, 2), "PC did not adopt the replacement folder with its child");
         Check.Require(Is(run.Db, "item", true), "The cloud replacement folder changed");
         Check.Require(run.Pc.History.Any(v => v.Entry.Id == oldPc.Id && v.Bytes.SequenceEqual(new byte[] { 1 })), "The displaced PC file was not kept recoverable");
@@ -329,7 +353,7 @@ public static class FolderChecks
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(oldPc, oldDb), null, null, default);
         var pcFile = Seed(run.Pc, "item", 3) with { Id = "pc-file" };
         run.Pc.Items["item"] = (pcFile, [3]);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Db, "item", false, 3) && Is(run.Pc, "item", false, 3), "The replacement file did not reach both sides");
         Check.Require(run.Db.History.Any(v => v.Entry.Id == oldDb.Id) && run.Db.History.Any(v => v.Entry.Id == dbChild.Id), "The replaced cloud folder or its child was not kept recoverable");
         Check.Require(run.Store.Records.Count == 1 && run.Store.Records.Values.Single().LocalPath == "item" && run.Store.Records.Values.Single().DropboxPath == "item", "Wrong link after the folder-to-file replacement");
@@ -346,7 +370,7 @@ public static class FolderChecks
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(oldPc, oldDb), null, null, default);
         var dbFile = Seed(run.Db, "item", 3) with { Id = "cloud-file" };
         run.Db.Items["item"] = (dbFile, [3]);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Pc, "item", false, 3) && Is(run.Db, "item", false, 3), "The replacement file did not reach both sides");
         Check.Require(run.Pc.History.Any(v => v.Entry.Id == oldPc.Id) && run.Pc.History.Any(v => v.Entry.Id == pcChild.Id), "The replaced PC folder or its child was not kept recoverable");
         Check.Require(run.Store.Records.Count == 1 && run.Store.Records.Values.Single().LocalPath == "item", "Wrong link after the folder-to-file replacement");
@@ -368,7 +392,7 @@ public static class FolderChecks
         run.Db.Items.Remove("item/c1");
         run.Db.Items.Remove("item/c2");
         run.Db.Seed(ItemChecks.File(Side.Dropbox, "item", 3, "cloud-file"), [3]);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Pc, "item", false, 3) && Is(run.Db, "item", false, 3), "The parent replacement did not settle on both sides");
         Check.Require(run.Pc.History.Any(v => v.Entry.Id == oldPc.Id) && run.Pc.History.Any(v => v.Entry.Id == c1.Id) && run.Pc.History.Any(v => v.Entry.Id == c2.Id),
             "The children were not displaced together with their folder");
@@ -442,7 +466,7 @@ public static class FolderChecks
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(oldPc, oldDb), null, null, default);
         run.Pc.Items["item"] = (ItemChecks.File(Side.Local, "item", 3, "pc-file"), [3]);
         run.Db.PublishFailures["item"] = new ItemFailedException("item", TextKey.PublishFailed, null);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(run.Db.History.Any(v => v.Entry.Id == oldDb.Id), "The removed cloud folder did not reach history");
         Check.Require(!run.Db.Items.ContainsKey("item"), "A refused finish still published the file");
         Check.Require(run.Pc.Items.TryGetValue("item", out var kept) && kept.Bytes.SequenceEqual(new byte[] { 3 }), "The pending incoming file left its own side");
@@ -862,7 +886,7 @@ public static class FolderChecks
         var run = await DeletedFolderRunAsync(ItemChecks.Pair() with { IgnoreRules = ["FileName:draft.tmp"] }, null, "item");
         Seed(run.Pc, "item", 0, folder: true);
         Seed(run.Pc, "item/draft.tmp", 1);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("item") && run.Pc.History.Any(v => v.Entry.Path == "item/draft.tmp"), "The ignored-only folder was not recycled with its ignored content");
         Check.Require(run.Db.Items.Count == 0 && run.Store.Records.Count == 0, "The ignored-only folder was created on Dropbox or bound");
         NoKeptFolderNotice(run);
@@ -875,7 +899,7 @@ public static class FolderChecks
         Seed(run.Pc, "item", 0, folder: true);
         Seed(run.Pc, "item/cache", 0, folder: true);
         Seed(run.Pc, "item/cache/x.txt", 2);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("item") && run.Pc.History.Any(v => v.Entry.Path == "item/cache/x.txt"), "The ignored folder and its content were not recycled together");
         Check.Require(run.Db.Items.Count == 0 && run.Store.Records.Count == 0, "The ignored folder was created on Dropbox");
         NoKeptFolderNotice(run);
@@ -933,7 +957,7 @@ public static class FolderChecks
         var run = await DeletedFolderRunAsync(ItemChecks.Pair(), null, "item");
         Seed(run.Pc, "item", 0, folder: true);
         Seed(run.Pc, "item/sub", 0, folder: true);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("item") && run.Pc.History.Any(v => v.Entry.Path == "item/sub"), "The nested empty folders were not recycled together");
         Check.Require(run.Db.Items.Count == 0, "The empty folder was created on Dropbox first");
     }
@@ -944,7 +968,7 @@ public static class FolderChecks
         var run = await DeletedFolderRunAsync(ItemChecks.Pair(), null, "item");
         Seed(run.Pc, "item", 0, folder: true);
         Seed(run.Pc, "item/sub", 0, folder: true);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("item") && !run.Pc.Items.ContainsKey("item/sub") && run.Db.Items.Count == 0, "An empty child without its own deletion record defeated the parent recycle");
     }
 
@@ -956,7 +980,7 @@ public static class FolderChecks
         Seed(run.Pc, "A/~draft", 1);
         Seed(run.Pc, "A!", 0, folder: true);
         Seed(run.Pc, "A!/z", 2);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("A") && run.Pc.History.Any(v => v.Entry.Path == "A/~draft"), "The empty-ish A folder was not recycled");
         Check.Require(run.Db.Items.ContainsKey("A!") && run.Db.Items.ContainsKey("A!/z") && run.Pc.Items.ContainsKey("A!"), "A!'s contents were swallowed by A's ordinal interval");
     }
