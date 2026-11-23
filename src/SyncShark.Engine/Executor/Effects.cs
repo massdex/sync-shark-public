@@ -213,7 +213,7 @@ public sealed class Effects
         var spent = row.Deletion is DeletionEvidence.DeletedFile or DeletionEvidence.DeletedPath ? PathNames.DropboxKey(row.Deletion.Path) : null;
         await store.CommitAsync(pair.PairId,saved,after,boundary,spent,ct);
         // A merged destination holds both sides' children; compare it once at its final names. Merge settlement owns the root.
-        if (mergedSource!=null) await compareOldBinding(after!,new(after!.LocalPath,after.DropboxPath),null,ct);
+
         if (action.InfoAfter is {} info) await Raise(NoticeKind.Info,info);
         if (armed != null && await store.ArmedAsync(pair.PairId,ct) is {} note && note.Victim == armed && note.Stage == proof) await store.DisarmAsync(pair.PairId,note.Victim,note.Stage,ct);
         if (mergedSource!=null) events(new(RunEventKind.Effect,nameof(ISide.MoveAsync),target,mergedSource.Path,nameof(RemovalOutcome.Published)){Action=action.Kind,Side=written});
