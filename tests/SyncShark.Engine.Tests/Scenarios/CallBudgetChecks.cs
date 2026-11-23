@@ -262,16 +262,65 @@ public static class CallBudgetChecks
         AtMost(pc.Requests[nameof(ISide.OpenReadAsync)], 1, "unproved content read");
     }
 
-    // STOPPED: first-run context (Row.Context.FirstRun) is set only by the Repair acquisition; a direct executor
-    // call always sees the ordinary path. Reaching first run therefore needs Repair.RunAsync, which throws the
-    // product default IStore.BeginScan (IStore.cs:87) because InMemoryStateStore does not implement it.
-    public static Task FirstSyncStampMatchAsync(int size) => throw new NotImplementedException();
+    // First run: a file whose size and modification second match on both sides costs one record write per item and
+    // zero content transfers (PLAN 7 "First run" row). First-run context comes from the Repair acquisition, which
+    // harness-f1 now implements on the double (BeginScan/ScanTouched), so no store workaround is needed.
+    public static async Task FirstSyncStampMatchAsync(int size)
+    {
+        var pair = ItemChecks.Pair(); var paths = Paths(pair);
+        var pc = new FakeSide(Side.Local); var cloud = new FakeSide(Side.Dropbox);
+        using var store = new InMemoryStateStore();
+        await store.SavePairAsync(pair, default); // no completed Repair: first run
+        for (int i = 0; i < size; i++)
+        {
+            string p = $"file-{i}";
+            var a = ItemChecks.File(Side.Local, p, 1, $"local-{i}");
+            var b = ItemChecks.File(Side.Dropbox, p, 1, $"cloud-{i}");
+            pc.Seed(a, [1]); cloud.Seed(b, [1]);
+        }
+        var queue = await ItemChecks.StartQueueAsync(pair, paths, pc, cloud, store);
+        long before = store.Requests[nameof(IStore.CommitAsync)];
+        await Repair.RunAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, pc, cloud, store, null, null, default);
+        Exact(store.Requests[nameof(IStore.CommitAsync)] - before, size, "first-run matched record writes");
+        foreach (var side in new[] { pc, cloud })
+        {
+            Check.Require(side.Requests[nameof(ISide.ReadAllAsync)] > 0, "First run skipped a side");
+            foreach (var op in new[] { nameof(ISide.OpenReadAsync), nameof(ISide.StageAsync), nameof(ISide.PublishAsync) })
+                Exact(side.Requests[op], 0, $"{side.Side} {op} per matched first-run item");
+            Check.Require(side.Items.Count == size, "First run altered a matched item");
+        }
+        Check.Require(store.Records.Count == size, "First run did not bind every matched item");
+    }
+
+    // STOPPED: the first-run PC-only probe needs a name that is eligible in the Dropbox deleted-name history and the
+    // exact get_metadata -> list_revisions -> get_metadata-by-id chain. The double models the spent mask and the
+    // deleted-name enumeration but not the three per-path provider reads of the real deletion-evidence adapter
+    // (Dropbox/DeletedHistory.cs), whose contract is already proven by Dropbox/DeletedHistoryChecks. Needs a
+    // history-backed first-run fixture.
     public static Task FirstSyncDeletedNameProbeAsync(int size) => throw new NotImplementedException();
 
-    // STOPPED: Repair.RunAsync / AutoSync.PopulateAsync call IStore.BeginScan and IStore.ScanTouched, whose product
-    // default implementations throw NotImplementedException (src/SyncShark.Engine/IStore.cs:87,89) and which
-    // InMemoryStateStore does not implement. Every gap-repair case is NI until the double gains those two members.
-    public static Task RepairAfterGapAsync(int size) => throw new NotImplementedException();
+    // A full Repair after a gap must not read or transfer unchanged files, in any operation. The provider-call budget
+    // is a per-item ISide count, so the parity-proven in-memory double is used (R93); SQL-statement counts, which must
+    // use the real Store, are the separate PerPhaseSqlAndRowCounts COUNTER case.
+    public static async Task RepairAfterGapAsync(int size)
+    {
+        var pair = ItemChecks.Pair(); var paths = Paths(pair);
+        var (store, pc, cloud, _) = await SteadyAsync(pair, size);
+        // A gap the reader did not cover forces a full two-sided comparison rather than a replay.
+        await store.OweRepairAsync(pair.PairId, Side.Local, "requested", default);
+        long before = store.Requests[nameof(IStore.CommitAsync)];
+        var queue = await ItemChecks.StartQueueAsync(pair, paths, pc, cloud, store);
+        await Repair.RunAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, pc, cloud, store, null, null, default);
+        Check.Require((await store.ReadRepairAsync(pair.PairId, Side.Local, default)).Reason == null, "Repair did not settle the requested comparison");
+        foreach (var side in new[] { pc, cloud })
+        {
+            Check.Require(side.Requests[nameof(ISide.ReadAllAsync)] > 0, "Repair skipped a side’s acquisition");
+            foreach (var op in new[] { nameof(ISide.OpenReadAsync), nameof(ISide.ContentHashAsync), nameof(ISide.PublishAsync), nameof(ISide.DeleteAsync), nameof(ISide.MoveAsync) })
+                Exact(side.Requests[op], 0, $"{side.Side} {op} per unchanged item");
+        }
+        Exact(store.Requests[nameof(IStore.CommitAsync)] - before, 0, "gap Repair record writes for unchanged items");
+        Check.Require(store.Records.Count == size, "Gap Repair lost or added a record");
+    }
 
     public static async Task WholeFolderDeleteAsync(int size)
     {
@@ -330,17 +379,18 @@ public static class CallBudgetChecks
         Check.Require(!pc.Items.ContainsKey(root) && pc.History.Any(v => v.Entry.Path == root), "PC folder not recycled into history");
     }
 
-    // STOPPED: folder move/merge destination creation and child fan-out need the physical-hop Repair callback,
-    // which throws the same IStore.BeginScan default (IStore.cs:87).
+    // R94-PENDING: BeginScan now works on the double, so these folder move/merge cases reach the physical-hop Repair.
+    // But the merge's source cleanup runs FolderDelete, which under a standalone Repair retains the removal before
+    // DeleteAsync (coversThrough is hard-coded null until R94(b) adds WorkQueue.ProofNow), so the queue waits for a
+    // settlement with no live reader and the 30s scenario deadline expires (harness-f1: A23/A24/A36 hang). They wait
+    // on R94(b). The destination-create and child-move counts are readable only once the enclosing Repair settles.
     public static Task MoveOrMergeDestinationAsync(int size) => throw new NotImplementedException();
-    // STOPPED: a refused move is scripted through FakeSide.MoveOutcomes, but the follow-up child fan-out reaches
-    // FolderMerge + the hop callback and thus IStore.BeginScan (IStore.cs:87).
+    // R94-PENDING: the refused-move child fan-out reaches the same FolderMerge source cleanup as above (R94(b)).
     public static Task MoveRefusalSubdivideAsync(int size) => throw new NotImplementedException();
-    // STOPPED: mapped-range compare happens inside a physical-hop Repair.RunAsync, which calls IStore.BeginScan
-    // (IStore.cs:87) that InMemoryStateStore does not implement.
+    // R94-PENDING: the mapped-range compare precedes a folder repath whose source cleanup is the same held removal
+    // under standalone Repair (R94(b)); the compare itself is read-only but the enclosing Repair cannot settle.
     public static Task MappedRangeBeforeRepathAsync(int size) => throw new NotImplementedException();
-    // STOPPED: source cleanup is FolderDelete's post-merge step, reachable only through the hop Repair callback
-    // (IStore.BeginScan, IStore.cs:87).
+    // R94-PENDING: source cleanup is FolderDelete's post-merge step, the same held removal that R94(b) lets complete.
     public static Task SourceCleanupAsync(int size) => throw new NotImplementedException();
 
     // ---- Folder-job checks --------------------------------------------------------------------------------
@@ -402,11 +452,14 @@ public static class CallBudgetChecks
     // has no way to hold a check open. Needs a double change.
     public static Task FolderJobCoalescedWakeAsync(int size) => throw new NotImplementedException();
 
-    // STOPPED: the block-and-delta split is the real Dropbox deleted-history adapter (Dropbox/DeletedHistory.cs);
-    // the acquisition that binds its cursor is a Repair scan (IStore.BeginScan, IStore.cs:87).
+    // DOUBLE: the block-and-delta split lives in the real Dropbox deleted-history adapter (Dropbox/DeletedHistory.cs);
+    // the in-memory acquisition history models the cursor, spent mask and deleted-name enumeration but carries no
+    // encoded compressed blocks, so the block/delta request split cannot be driven through the scenario. That adapter
+    // contract is already proven by Dropbox/DeletedHistoryChecks.
     public static Task DeletedNameBlockAndDeltaAsync(int size) => throw new NotImplementedException();
-    // STOPPED: scratch scan rows are written by AddScan inside a Repair/AutoSync scan (IStore.BeginScan,
-    // IStore.cs:87); InMemoryStateStore also exposes no scratch-row count.
+    // COUNTER: scratch scan rows are now written by AddScan inside a Repair acquisition (BeginScan works), but neither
+    // InMemoryStateStore nor the real Store exposes a scratch-row counter to assert "1 row per listed entry, cleared
+    // after". Needs a scratch-row counter/reader on the store; the real Store is required for SQL counts and has none.
     public static Task ScratchScanWritesAndClearAsync(int size) => throw new NotImplementedException();
 
     // ---- Scoped compare -----------------------------------------------------------------------------------
@@ -423,9 +476,26 @@ public static class CallBudgetChecks
         Exact(Transfer(pc) + Transfer(cloud), 0, "configuration scope provider work");
     }
 
-    // STOPPED: a scoped compare runs inside Repair acquisition (IStore.BeginScan, IStore.cs:87); an interrupted
-    // repeat needs the same scan.
-    public static Task ScopeCompareAsync(int size) => throw new NotImplementedException();
+    // A scoped Repair compares one mapped range and reads/transfers nothing per unchanged item. Provider-call budget on
+    // the parity-proven in-memory double (R93); the scoped-compare path itself is the same BeginScan/ScanTouched route.
+    public static async Task ScopeCompareAsync(int size)
+    {
+        var pair = ItemChecks.Pair(); var paths = Paths(pair);
+        var (store, pc, cloud, _) = await SteadyAsync(pair, size);
+        var scope = new Scope("unchanged-0", "unchanged-0");
+        var queue = await ItemChecks.StartQueueAsync(pair, paths, pc, cloud, store);
+        await Repair.RunAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, pc, cloud, store, scope, null, default);
+        foreach (var side in new[] { pc, cloud })
+        {
+            Check.Require(side.Requests[nameof(ISide.ReadAllAsync)] > 0, "Scoped Repair skipped a side");
+            foreach (var op in new[] { nameof(ISide.OpenReadAsync), nameof(ISide.ContentHashAsync), nameof(ISide.PublishAsync), nameof(ISide.DeleteAsync), nameof(ISide.MoveAsync) })
+                Exact(side.Requests[op], 0, $"{side.Side} {op} per unchanged scoped item");
+        }
+    }
+
+    // DOUBLE (unworkable interruption seam): an interrupted-and-repeated scoped compare needs the acquisition to abort
+    // midway at a chosen entry; the FakeSide enumerates atomically so the interruption point cannot be fixed, and no
+    // double holds a scan open. The scoped budget itself is proven by ScopeCompareAsync.
     public static Task ScopePartialRepeatAsync(int size) => throw new NotImplementedException();
 
     // ---- Failure and notices ------------------------------------------------------------------------------
@@ -479,11 +549,12 @@ public static class CallBudgetChecks
         Exact(Transfer(pc) + Transfer(cloud), 0, "startup per-item provider work");
     }
 
-    // STOPPED: replay of held reports needs a journal replay fixture (PairRunner.JournalReplay / Local journal);
-    // the doubles do not provide a replay source, and the resumed Repair reaches IStore.BeginScan (IStore.cs:87).
+    // DOUBLE: replay of held reports needs a journal replay source (PairRunner.JournalReplay / the Local journal).
+    // The doubles still expose no replay source (harness-f1 added BeginScan/ScanTouched, not a journal); the resumed
+    // Repair that consumes the replay has no fixture to seed it.
     public static Task ResumeReplayAsync(int size) => throw new NotImplementedException();
-    // STOPPED: paused-volume history is a journal-replay path over the real store; the doubles have no paused-volume
-    // or history fixture, and resuming reaches IStore.BeginScan (IStore.cs:87).
+    // DOUBLE: paused-volume history is a journal-replay path whose history fixture the doubles do not provide; the
+    // resumed pair likewise has no replay source to drive the counts.
     public static Task PausedVolumeHistoryAsync(int size) => throw new NotImplementedException();
 
     public static async Task CleanBootNoBindingWalkAsync(int size)
@@ -499,17 +570,19 @@ public static class CallBudgetChecks
         Exact(Transfer(pc) + Transfer(cloud), 0, "clean boot per-item provider work");
     }
 
-    // STOPPED: per-statement row/VM counts need a SQL-level counting store and a full Repair acquisition; the
-    // in-memory double counts only method calls, and Repair reaches IStore.BeginScan (IStore.cs:87).
+    // COUNTER: per-SQL-statement and rows-changed counts. Per the rule these must use the real SQLite Store, and Repair
+    // now acquires (BeginScan works), but neither the real Store nor the double exposes a statement/rows counter. Needs
+    // a counting IStore wrapper (or a per-statement hook on Store); no such seam exists and this helper may not build
+    // new ones.
     public static Task PerPhaseSqlAndRowCountsAsync(int size) => throw new NotImplementedException();
-    // STOPPED: durable bytes per item need a byte/page counter, which InMemoryStateStore does not expose; measuring
-    // it requires the real SQLite store (state.db), which the rules forbid the check to open.
+    // COUNTER: durable bytes per item need a byte/page counter. Neither InMemoryStateStore nor the real Store exposes
+    // one, and opening state.db for a file-size measure is forbidden by the brief.
     public static Task DurableBytesPerItemAsync(int size) => throw new NotImplementedException();
-    // STOPPED: scratch bytes per item need a scratch-byte counter; InMemoryStateStore has none and the scratch store
-    // is written only inside a scan that reaches IStore.BeginScan (IStore.cs:87).
+    // COUNTER: scratch bytes per item need a scratch-byte counter; the scan now runs (BeginScan works) but no store
+    // exposes a scratch-byte/page counter.
     public static Task ScratchBytesPerItemAsync(int size) => throw new NotImplementedException();
-    // STOPPED: window/waiter memory has no counter and section 7 states no certified memory bound; measuring live
-    // memory is not a reproducible check and the doubles expose no measurement seam.
+    // COUNTER: window/waiter memory has no counter and section 7 certifies no memory bound; measuring live memory is
+    // not a reproducible check and the doubles expose no measurement seam.
     public static Task WindowAndWaiterMemoryAsync(int size) => throw new NotImplementedException();
 
     private static string Hash(byte value)
