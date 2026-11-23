@@ -281,15 +281,6 @@ public static class ItemSync
             if(await CounterpartAsync(pair,Side.Local,left.Path,store,ct)!=right.Path) Retain(row.Key,failed);
             row=row with {Synced=SyncedEntries.Relink(original,left,right)};mappedChild=true;
         }
-        else if(candidates.Count==0 && row?.Synced is {IsFolder:false} single && (row.Local==null)!=(row.Dropbox==null) && row.Context.Destination is {} far &&
-            (row.Local??row.Dropbox) is {IsFolder:false} present && present.Id==single.IdOn(row.Local!=null?Side.Local:Side.Dropbox) &&
-            present.Path!=single.PathOn(row.Local!=null?Side.Local:Side.Dropbox) && far!=single.PathOn(row.Local!=null?Side.Dropbox:Side.Local))
-        {
-            // A one-sided child at a confirmed hop: decide at both final names, commit against the old binding.
-            var (pcPath,dbPath)=row.Local!=null?(present.Path,far):(far,present.Path);
-            if(await CounterpartAsync(pair,Side.Local,pcPath,store,ct)!=dbPath) Retain(row.Key,failed);
-            row=row with {Synced=single with {LocalPath=pcPath,LocalKey=PathNames.Key(pcPath),DropboxPath=dbPath,DropboxKey=PathNames.DropboxKey(dbPath)}};mappedChild=true;
-        }
         var action=candidates.Count==0 ? Decide.For(row!,pair.FirstRun,now,dirty) :
             await Effects.DecideMoveAsync(pair,settings,paths,candidates,local,dropbox,store,dirty,ct);
         row=action.Row;
