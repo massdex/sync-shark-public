@@ -382,13 +382,7 @@ public static class Repair
                     await RetryOwn(own,token);
                 }
             }
-            async Task Settle()
-            {
-                // A live identity or a changed binding belongs to its own input. Leave it and finish this removal.
-                try { await Apply(ct); }
-                catch(ChangedUnderneathException race) when(!PathNames.Same(race.Path,pair.LocalRoot) && !PathNames.Same(race.Path,pair.DropboxRoot)) {}
-            }
-            if(physicalHop!=null) return removal && row is {Local:null,Dropbox:null,Synced:not null} ? Settle() : Apply(ct);
+            if(physicalHop!=null) return Apply(ct);
             Schedule(queue.AdmitAsync(pair,row,candidates,Apply,ct));
             return Task.CompletedTask;
         }
