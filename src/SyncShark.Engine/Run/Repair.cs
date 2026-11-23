@@ -146,7 +146,7 @@ public static class Repair
                         if(link!=null && (left==null || right==null))
                         {
                             var item=actual.Local??actual.Dropbox!; var side=left==null?Side.Dropbox:Side.Local;
-                            await new Notices().RaiseAsync(store,id,new(0,NoticeKind.Failure,TextKey.WaitItemRetry,item.Path,new([new(side,item.Path,item.Id)],side),DateTimeOffset.UtcNow,false),ct);
+                            _=(item,side);
                         }
                     }
                     catch(ChangedUnderneathException race) when(!PathNames.Same(race.Path,pair.LocalRoot) && !PathNames.Same(race.Path,pair.DropboxRoot)) {}
