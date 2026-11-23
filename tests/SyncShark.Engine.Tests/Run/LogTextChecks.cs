@@ -28,11 +28,11 @@ public static class LogTextChecks
         Check.Require(provider.Length == 0, "a completed provider diagnostic is not a user outcome");
         CheckRecordedFacts();
         OneMoveCard();
-        SuppressedRecordsAllocateNothing();
+        AllocationChecks();
         return Task.CompletedTask;
     }
 
-    private static void SuppressedRecordsAllocateNothing()
+    private static void AllocationChecks()
     {
         var at = DateTimeOffset.UnixEpoch;
         var completed = new RunEvent(RunEventKind.ProviderRequest, "", "", "", "done");
@@ -52,6 +52,20 @@ public static class LogTextChecks
         var moveBytes = CountBytes(incomplete);
         Check.Require(providerBytes == 0 && moveBytes == 0,
             $"suppressed records must not allocate a display clock: provider bytes={providerBytes}; move bytes={moveBytes}");
+
+        // An uncommon control must escape by appending the prefix and the formatted digits in place; the old
+        // encoder built a concatenated prefix-plus-digits string first, one extra allocation per character. The
+        // shared escape loop serves both the stored and readable encoders, so measuring one proves the other.
+        const int controls = 4096;
+        const int bytesPerEscapedControl = 90;
+        var unusual = new string('\u001b', controls);
+        _ = RunLog.EscapeDisplay(unusual);
+        var beforeEscape = GC.GetAllocatedBytesForCurrentThread();
+        var escapedLength = RunLog.EscapeDisplay(unusual).Length;
+        var escapeBytes = GC.GetAllocatedBytesForCurrentThread() - beforeEscape;
+        Check.Require(escapedLength == controls * 6 && escapeBytes < controls * bytesPerEscapedControl,
+            $"a control run escapes in place without an intermediate string: length={escapedLength}; " +
+            $"bytes={escapeBytes}; budget={controls * bytesPerEscapedControl}");
     }
 
     private static void OneMoveCard()
