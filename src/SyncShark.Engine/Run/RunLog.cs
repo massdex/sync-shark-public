@@ -207,8 +207,24 @@ public sealed class RunLog : IDisposable
         for (var index = first; index < value.Length; index++)
         {
             var character = value[index];
-            if (NeedsEscape(character, escapeBackslash)) escaped.Append(EscapeChar(character));
-            else escaped.Append(character);
+            if (!NeedsEscape(character, escapeBackslash))
+            {
+                escaped.Append(character);
+                continue;
+            }
+            // Append the escape prefix and the formatted digits straight to the builder, never a concatenated
+            // string, so an uncommon control costs only the digits it must format, for identical bytes.
+            switch (character)
+            {
+                case '\\': escaped.Append(EscapeBackslash); break;
+                case '\t': escaped.Append(EscapeTab); break;
+                case '\r': escaped.Append(EscapeReturn); break;
+                case '\n': escaped.Append(EscapeNewLine); break;
+                default:
+                    escaped.Append(UnicodeEscape)
+                        .Append(((int)character).ToString(UnicodeFormat, CultureInfo.InvariantCulture));
+                    break;
+            }
         }
         return escaped.ToString();
     }
@@ -250,13 +266,4 @@ public sealed class RunLog : IDisposable
 
     private static bool NeedsEscape(char value, bool escapeBackslash) =>
         char.IsControl(value) || (escapeBackslash && value == '\\');
-
-    private static string EscapeChar(char value) => value switch
-    {
-        '\\' => EscapeBackslash,
-        '\t' => EscapeTab,
-        '\r' => EscapeReturn,
-        '\n' => EscapeNewLine,
-        _ => UnicodeEscape + ((int)value).ToString(UnicodeFormat, CultureInfo.InvariantCulture),
-    };
 }
