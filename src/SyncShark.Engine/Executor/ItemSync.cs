@@ -416,7 +416,7 @@ public static class ItemSync
             if(outcome==EffectOutcome.Pending) Retain(row.Key,failed);
             // Vacating another binding only clears the destination; the arriving move still owns its input.
             if(outcome==EffectOutcome.Applied && action.Kind==ActionKind.ForgetOnly && candidates.Count!=0 && row.Synced!=candidates[0].Synced) Retain(row.Key,failed);
-            if(outcome==EffectOutcome.Refused) return (false,outcome); // The notice is the decision, not a race.
+            if(outcome==EffectOutcome.Refused) { failed?.Invoke(row.Key,false); throw new ChangedUnderneathException(Row.Path(row)); }
             return (true,outcome);
         }
 
