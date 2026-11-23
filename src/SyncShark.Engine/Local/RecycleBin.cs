@@ -296,7 +296,7 @@ public sealed class RecycleBin
             if(!StringComparer.OrdinalIgnoreCase.Equals(hash,selection.Proof.ContentHash))
                 return RemovalResult.Refused(new ChangedUnderneathException(expected.Path){ObservedLocal=expected with {ContentHash=hash}});
         }
-        ct.ThrowIfCancellationRequested(); if(!await arm()) return new(RemovalOutcome.Pending,null,null);
+        ct.ThrowIfCancellationRequested(); await arm();
         string? receipt;
         if(managed)
         {
