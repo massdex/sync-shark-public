@@ -289,10 +289,6 @@ public sealed class Unfinished
                 if(note.Stage==null && saved!=null && currentBinding==null && current==null && other==null && await FolderDelete.RecoverHeldAsync(pair,new(proof.Expected.Path,cloudPath),Side.Local,local,dropbox,store,heldInput,populate,ct))
                 {
                     // A folder hop re-pathed the armed file binding after its recycle. Retire that exact identity pair at its projected names.
-                    SyncedEntry? moved=null;
-                    if(!saved.IsFolder) await foreach(var b in store.ByIdAsync(pair.PairId,Side.Local,saved.LocalId,ct)) if(b.DropboxId==saved.DropboxId && !b.IsFolder) moved=b;
-                    if(moved!=null && await local.ReadOneAsync(moved.LocalPath,ct)==null && await dropbox.ReadOneAsync(moved.DropboxPath,ct)==null)
-                        await store.CommitAsync(pair.PairId,moved,null,null,null,ct);
                     await store.DisarmAsync(pair.PairId,victim,null,ct);
                 }
                 return;
