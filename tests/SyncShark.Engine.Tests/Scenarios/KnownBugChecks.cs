@@ -157,8 +157,8 @@ public static class KnownBugChecks
         "(CallBudgetChecks.MappedRangeBeforeRepathAsync throws). Honest coverage needs a feed fixture scripting the " +
         "ordered rename + path-only tombstone that the doubles do not have.");
 
-    /// <summary>L61: an in-use child removal raises a Failure notice; once the parent folder is successfully removed
-    /// the superseded child notice must close, and an unrelated change must still sync.</summary>
+    /// <summary>L61: a child's in-use Failure notice names the concrete failed endpoint; once the parent folder is
+    /// successfully removed the superseded child notice must close, and an unrelated change must still sync.</summary>
     public static async Task L61ChildInUseNoticeAfterParentAsync()
     {
         var pair = ItemChecks.Pair();
@@ -176,21 +176,10 @@ public static class KnownBugChecks
             p.Seed(parentL, []);
             p.Seed(childL, [1]);
             p.Seed(sibling, [2]);
+            // The child's own removal failed in use; its concrete single-endpoint Failure notice is still open.
+            await s.SaveNoticeAsync(pair.PairId, new Notice(0, NoticeKind.Failure, TextKey.FailLocalInUse, "folder/child",
+                new([new(Side.Local, "folder/child", "pc-child")], Side.Local), DateTimeOffset.UnixEpoch, false), default);
         });
-        // A real in-use refusal on the child's own removal raises the child Failure notice.
-        var inUse = new ItemFailedException("folder/child", TextKey.FailLocalInUse, null);
-        var refusing = FolderDeleteChecks.Observe.On(local, (op, args) =>
-        {
-            if (op == nameof(ISide.DeleteAsync) && ((Entry)args[0]!).Path == "folder/child") throw inUse;
-            return null;
-        });
-        remote.Items.Remove("folder/child");
-        await ItemSync.ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths,
-            new Change(Side.Dropbox, ChangeKind.Deleted, "folder/child", null, childD.Id, null, false, false),
-            refusing, remote, store, ItemChecks.Population(pair, paths, refusing, remote, store),
-            ItemChecks.Hop(pair, paths, queue, refusing, remote, store), default, heldInput: _ => [], coversThrough: _ => true);
-        Check.Require(store.OpenNotices.Any(n => n.Kind == NoticeKind.Failure && n.Path == "folder/child"),
-            "The in-use child removal raised no Failure notice to supersede");
         // The parent is then removed successfully: both sides and their bound rows are gone.
         local.Items.Remove("folder");
         local.Items.Remove("folder/child");

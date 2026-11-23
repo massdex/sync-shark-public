@@ -364,7 +364,10 @@ public sealed class InMemoryStateStore : IStore
         ct.ThrowIfCancellationRequested();var projected=new List<(SyncedEntry Before,SyncedEntry After)>();
         foreach(var item in Records.Where(k=>k.Key.Pair==pairId).Select(k=>k.Value))
         {
-            string Rewrite(string path,string before,string after)=>PathNames.IsSelfOrUnder(path,before)?after+path[before.Length..]:path;
+            // Strict descendants only: the real store's RebaseDescendantsBoth excludes the moved binding itself,
+            // which the caller then settles with its own Commit.
+            bool Under(string path,string before)=>path.Length>before.Length && PathNames.IsSelfOrUnder(path,before);
+            string Rewrite(string path,string before,string after)=>Under(path,before)?after+path[before.Length..]:path;
             var l=Rewrite(item.LocalPath,from.LocalPath,to.LocalPath);var d=Rewrite(item.DropboxPath,from.DropboxPath,to.DropboxPath);
             if(l!=item.LocalPath || d!=item.DropboxPath) projected.Add((item,item with { LocalPath=l,LocalKey=PathNames.Key(l),DropboxPath=d,DropboxKey=PathNames.DropboxKey(d) }));
         }
