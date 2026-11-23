@@ -257,7 +257,7 @@ public sealed class Unfinished
             while(true)
             {
                 await RecoverStageAsync(pair,settings,events,paths,local,dropbox,store,heldInput,populate,compareOldBinding,ct,null);
-                lock(jobs) { if(recoverAgain) {recoverAgain=false;continue;} recoveringLive=false;return; }
+                lock(jobs) { if(recoverAgain) recoverAgain=false; recoveringLive=false;return; }
             }
         }
         catch {lock(jobs) {recoveringLive=false;recoverAgain=false;} throw;}
