@@ -512,6 +512,9 @@ public static class FolderChecks
         var run = await StartAsync(pair: pair, baseline: true);
         var pcRoot = Seed(run.Pc, "p", 0, folder: true); var dbRoot = Seed(run.Db, "p", 0, folder: true);
         var saved = SyncedEntries.From(pcRoot, dbRoot);
+        // A selected delete of the cloud folder is one-sided: the peer copy is already gone, so the
+        // same-identity peer guard (FolderDelete.cs:92) does not retain before the split.
+        run.Pc.Items.Remove("p");
         Seed(run.Db, "p/a", 1); Seed(run.Db, "p/b", 2);
         run.Pc.Pages.Enqueue(new ChangePage([], null, new JournalPosition(1, 1)));
         run.Db.Pages.Enqueue(new ChangePage([], "c", null));
