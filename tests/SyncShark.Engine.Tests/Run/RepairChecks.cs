@@ -222,6 +222,13 @@ public static class RepairChecks
         });
         var local=CountStarts(pc,()=>Interlocked.Increment(ref localListings)); var remote=CountStarts(db,()=>Interlocked.Increment(ref remoteListings));
         await new PairRunner().CatchUpAsync(pair,(null,null),ItemChecks.Settings,_=>{},paths,queue,local,remote,store,static()=>{},ct);
+        if(!keep)
+        {
+            // The delete leg is admitted only under journal coverage (FolderDelete.cs:134,183); a real repair follows a journal pass.
+            bool covered=true;Func<Func<(JournalPosition? Local,string? Dropbox),bool>> proof=()=>_=>covered;
+            queue.GetType().GetProperty("ProofNow",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.SetValue(queue,proof);
+            pc.IdleBoundary=new ChangePage([],null,new JournalPosition(1,1)); db.IdleBoundary=new ChangePage([],"cursor",null);
+        }
         await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,remote,store,null,null,ct);
         Check.Require(localListings==1 && remoteListings==1,"Covered child population listed its range again");
         Check.Require(db.Items.ContainsKey("a/empty")==keep,$"keep={keep}: db has a/empty={db.Items.ContainsKey("a/empty")} expected {keep}; db=[{string.Join(",",db.Items.Keys)}] pc=[{string.Join(",",pc.Items.Keys)}]");
