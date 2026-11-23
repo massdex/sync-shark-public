@@ -441,7 +441,18 @@ public static class FolderChecks
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(localEntry, dropboxEntry), null, null, default);
         // The other side becomes a file, flipping the kind against the folder record.
         otherAdapter.Items["item"] = (ItemChecks.File(otherAdapter.Side, "item", 9, "incoming-file"), [9]);
-        await RepairAsync(run);
+        if (childSkip == nameof(TextKey.SkipUnreadable))
+        {
+            // An unreadable inventory must surface the existing incomplete-inventory error, never finish as complete (Repair.cs:182).
+            bool threw = false;
+            using (var budget = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+            {
+                try { await Repair.RunAsync(run.Pair, ItemChecks.Settings, _ => { }, run.Paths, run.Queue, run.Pc, run.Db, run.Store, null, null, budget.Token); }
+                catch (InventoryIncompleteException) { threw = true; }
+            }
+            Check.Require(threw, "An unreadable inventory finished as complete");
+        }
+        else await RepairAsync(run);
         Check.Require(folderAdapter.Items["item"].Entry.IsFolder && folderAdapter.Items.ContainsKey("item/child"), "The protected target folder or its child was replaced");
         Check.Require(folderAdapter.History.Count == 0, "Protected descendants were removed");
         Check.Require(run.Store.Records.Values.Single().IsFolder, "The folder binding was replaced");
@@ -496,8 +507,10 @@ public static class FolderChecks
         var oldDb = Seed(run.Db, "item", 0, folder: true);
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(oldPc, oldDb), null, null, default);
         run.Pc.Items["item"] = (ItemChecks.File(Side.Local, "item", 3, "pc-file"), [3]);
-        run.Db.AfterDelete = entry => { if (entry.Path == "item") run.Db.Seed(ItemChecks.File(Side.Dropbox, "item", 0, "recovered-folder", folder: true), []); };
-        await RepairAsync(run);
+        int recovered = 0;
+        run.Db.AfterDelete = entry => { if (entry.Path == "item") { recovered++; run.Db.Seed(ItemChecks.File(Side.Dropbox, "item", 0, "recovered-folder", folder: true), []); } };
+        await RepairWithProofAsync(run);
+        Check.Require(recovered == 1, "The recovered-folder window was never reached");
         Check.Require(run.Db.Items.TryGetValue("item", out var dbAt) && dbAt.Entry.IsFolder, "The stale staged finish displaced the recovered folder");
         Check.Require(run.Pc.Items.TryGetValue("item", out var pcAt) && !pcAt.Entry.IsFolder && pcAt.Bytes.SequenceEqual(new byte[] { 3 }), "The PC file was overwritten instead of kept");
         Check.Require(run.Store.OpenNotices.Any(n => n.Kind == NoticeKind.Info && n.Cause == TextKey.InfoKeptBoth), "The competing folder did not take keep-both");
@@ -620,7 +633,7 @@ public static class FolderChecks
         var (folder, _) = await FolderWithChildAsync(run);
         await run.Pc.MoveAsync(folder, "New", default);
         run.Db.Items.Remove("Old/Child");
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Pc, "New", true) && Is(run.Db, "New", true), "The folder move did not settle at the new spelling");
         Check.Require(!run.Pc.Items.ContainsKey("New/Child") && run.Store.Records.Values.All(r => r.LocalPath != "New/Child"), "The queued tombstone did not follow the child to its real endpoint");
     }
@@ -643,7 +656,7 @@ public static class FolderChecks
         var (folder, _) = await FolderWithChildAsync(run);
         await run.Pc.MoveAsync(folder, "OLD", default);
         run.Db.Items.Remove("Old/Child");
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Pc, "OLD", true) && Is(run.Db, "OLD", true), "The capitals rename did not settle the exact spelling on both sides");
         Check.Require(!run.Pc.Items.ContainsKey("OLD/Child") && run.Store.Records.Values.All(r => r.LocalPath != "OLD/Child"), "The queued tombstone did not follow the child through the capitals hop");
     }
@@ -682,7 +695,7 @@ public static class FolderChecks
         await RepairAsync(run);
         Check.Require(run.Store.Records.Values.Any(r => r.LocalPath == "New" && r.DropboxPath == "New"), "The parent move was not recorded before the restart");
         run.Db.Items.Remove("New/Child");
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("New/Child") && run.Store.Records.Values.All(r => r.LocalPath != "New/Child"), "The resumed Repair did not settle the held child delete");
     }
 
@@ -732,7 +745,7 @@ public static class FolderChecks
         await run.Pc.MoveAsync(folder, "New", default);
         run.Db.Items.Remove("Old/Child");
         run.Db.Seed(ItemChecks.File(Side.Dropbox, "Old/Child", 9, "new-occupant"), [9]);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("New/Child"), "The tombstone did not follow the real child to the moved endpoint");
         Check.Require(run.Store.Records.Values.All(r => r.LocalPath != "New/Child"), "The deleted child's binding survived at the moved endpoint");
         Check.Require(run.Db.Items.TryGetValue("Old/Child", out var occupant) && occupant.Entry.Id == "new-occupant", "The new occupant at the old path was removed by the queued delete");
