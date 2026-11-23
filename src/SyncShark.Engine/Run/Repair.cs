@@ -134,7 +134,7 @@ public static class Repair
                         await MissingPath(Side.Dropbox,selected.LocalPath)!=selected.DropboxPath) continue;
                     var l=PathNames.RelativeUnderDropboxRoot(logical.LocalPath,left?.Path??link?.LocalPath??string.Empty);
                     var d=PathNames.RelativeUnderDropboxRoot(logical.DropboxPath,right?.Path??link?.DropboxPath??string.Empty);
-                    if(link==null){l??=d;d??=l;}
+                    if(link==null) continue;
                     if(l==null || d==null) continue;
                     var pcPath=PathNames.Child(selected.LocalPath,l); var dbPath=PathNames.Child(selected.DropboxPath,d); var current=queue.CurrentScope(paths);
                     if(current.Excludes(pcPath,dbPath,raw.IsFolder()) || link!=null && current.ExcludesBinding(link) || Touched(raw,false)) continue;
