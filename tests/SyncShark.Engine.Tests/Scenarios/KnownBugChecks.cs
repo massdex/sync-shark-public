@@ -338,7 +338,7 @@ public static class KnownBugChecks
     /// <summary>L119: a crash after a no-keep exclusion removal before commit must not recycle the copy meant to stay
     /// on the PC. Still unmodelled on the doubles, see the DOUBLE note.</summary>
     public static Task L119CrashAfterExclusionRemovalAsync() => throw new NotImplementedException(
-        "DOUBLE: the exclusion path has no crash-cut injection at F1 and the cross-case receipt (crash after the "
+        "DOUBLE: the exclusion path has no crash-cut injection at F1 and the cross-case receipt (crash after the " +
         "no-keep removal, before commit, then un-exclude) is not a state the F1 Exclusions double can hold; the " +
         "bug list itself records L119 as UNCLEAR. Honest coverage needs a durable store plus a fault point between " +
         "removal and commit that the doubles do not have.");
