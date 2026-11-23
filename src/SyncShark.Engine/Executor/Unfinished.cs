@@ -257,6 +257,7 @@ public sealed class Unfinished
             while(true)
             {
                 await RecoverStageAsync(pair,settings,events,paths,local,dropbox,store,heldInput,populate,compareOldBinding,ct,null);
+                if(await store.ArmedAsync(pair.PairId,ct) is {} left){await Unchecked(store,pair,left.Victim.Proof.Expected,ct);await store.DisarmAsync(pair.PairId,left.Victim,left.Stage,ct);}
                 lock(jobs) { if(recoverAgain) {recoverAgain=false;continue;} recoveringLive=false;return; }
             }
         }
