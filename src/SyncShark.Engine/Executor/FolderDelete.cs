@@ -355,7 +355,7 @@ public sealed class FolderDelete
             {
                 // Borrow only the pinned observation. An unrelated queue entry keeps its own acknowledgement.
                 distinct=c.Observed is {} observed && observed.Id==pinned.Entry.Id && observed.Revision!=pinned.Entry.Revision?observed:null;
-                if(distinct!=null && c.Kind!=ChangeKind.Deleted && !latest.ContainsKey(key) && c.ConsumeHeld!=null) superseded.Add(c.ConsumeHeld);
+                if(distinct!=null && c.Kind!=ChangeKind.Deleted && !latest.ContainsKey(key) && c.ConsumeHeld!=null) { }
                 if(c.Observed!=pinned.Entry || c.Kind==ChangeKind.Deleted) continue;
                 foreach(var ack in superseded) acks.Add((key,ack));
                 superseded.Clear();
