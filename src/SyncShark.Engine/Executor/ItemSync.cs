@@ -362,7 +362,7 @@ public static class ItemSync
             }
             return await Locks.RunAsync(keys,ApplyLocked,ct);
         }
-        if(applied.Item1 && candidates.Count!=0 && candidates[0] is {Moved.IsFolder:false} move)
+        if(applied.Item1 && candidates.Count>2 && candidates[0] is {Moved.IsFolder:false} move)
         {
             var settled=await store.FindAsync(pair.PairId,move.Side,PathNames.KeyFor(move.Side,move.Moved.Path),ct);
             if(settled!=null && settled.LocalId==move.Synced.LocalId && settled.DropboxId==move.Synced.DropboxId && settled.PathOn(move.Side)==move.Moved.Path)
