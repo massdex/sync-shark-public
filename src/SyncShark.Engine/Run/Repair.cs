@@ -34,7 +34,6 @@ public static class Repair
         var mapped=logical!=selected;
         var unreadLocal=new PrefixSet(); var unreadRemote=new PrefixSet();
         var folders=new List<FolderMark>();
-        var linkWrites=new List<(NoticeItem Member,bool Present)>();
         var discoveryEnded=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         bool scanCleared=false;
         var admitted=new HashSet<Task>();
@@ -159,7 +158,7 @@ public static class Repair
                         else (retiring??=[]).Add((footprint,notice));
                     }
                     if(notice.Cause==TextKey.InfoLinks && member!=null && !(row.EntryOn(member.Side) is {} current && current.Skip==nameof(TextKey.SkipLink) && current.Id==member.Id))
-                        linkWrites.Add((member,false));
+                        await store.UpdateLinkMemberAsync(id,member,false,ct);
                 }
                 if(row.Local==null && row.Dropbox==null && row.Synced==null) continue;
                 var lp=row.Local?.Path??row.Synced?.LocalPath??row.Context.Destination;
@@ -169,7 +168,7 @@ public static class Repair
                 if((row.Local==null && !coveredLocal) || (row.Dropbox==null && !coveredRemote)) continue;
                 foreach(var side in new[]{Side.Local,Side.Dropbox})
                     if(row.EntryOn(side) is {Skip:nameof(TextKey.SkipLink)} link && !store.ScanTouched(id,scan,side,link.Path,false) && !notices.Any(n=>n.Notice.Cause==TextKey.InfoLinks && n.Member==new NoticeItem(side,link.Path,link.Id)))
-                        linkWrites.Add((new(side,link.Path,link.Id),true));
+                        await store.UpdateLinkMemberAsync(id,new(side,link.Path,link.Id),true,ct);
                 if(row.Local?.Skip==nameof(TextKey.SkipLink) || row.Dropbox?.Skip==nameof(TextKey.SkipLink)) continue;
                 var historical=notices.Where(n=>n.Notice.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && n.Notice.Subject.Items.Any(m=>row.EntryOn(m.Side)?.Id==m.Id)).Select(n=>n.Notice.Subject.FirstRunDeletion).FirstOrDefault();
                 var eligible=first && row.Local is {} pcItem && row.Dropbox==null && row.Synced==null && coveredRemote && pcItem.Skip==null && !paths.Excludes(lp,dp,pcItem.IsFolder) && await store.DeletedNameAsync(id,scan,PathNames.DropboxKey(dp),pcItem.IsFolder,ct);
@@ -185,8 +184,6 @@ public static class Repair
             await FinishFolders(null);
             discoveryEnded.TrySetResult();
             await Drain();
-            // Apply scan bookkeeping after attempts so it cannot mask an outside change.
-            foreach(var (member,present) in linkWrites) await store.UpdateLinkMemberAsync(id,member,present,ct);
             if(unreadLocal.Keys.Concat(unreadRemote.Keys).FirstOrDefault() is {} unreadPath) throw new InventoryIncompleteException(Text.Get(TextKey.SkipUnreadable,(TextArg.Path,unreadPath)),null);
             if(physicalHop!=null) return;
             await Finish();
