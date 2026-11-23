@@ -237,7 +237,7 @@ public static class AutoSync
         if(!settlement.IsFaulted && !settlement.IsCanceled) Registered(); // Empty and prerequisite-blocked pages have no immediate callback.
         if(gained)
         {
-            if(await store.ArmedAsync(pair.PairId,ct)!=null) await queue.Unfinished.RecoverStageAsync(pair,settings,events,queue.CurrentScope(paths),local,dropbox,store,queue.Held,Populate,Hop,ct,null);
+
             await Task.WhenAll(settlement,queue.RetryHeldAsync(null,ct));
         }
         else await settlement;
