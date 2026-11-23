@@ -220,7 +220,7 @@ public sealed class LocalSide : ISide
         try
         {
             var result=await RemovePinned(expected,selection!,null,driveType,ct,async()=>{await turn.WaitAsync(ct);held=true;});
-            if(result.Outcome==RemovalOutcome.Removed && !expected.IsFolder) await store.DisarmAsync(pair.PairId,selection!,null,ct);
+            if(result.Outcome==RemovalOutcome.Removed) await store.DisarmAsync(pair.PairId,selection!,null,ct);
             return result;
         }
         finally { if(held) turn.Release(); }
