@@ -119,7 +119,8 @@ public static class CheckRegistry
             new("Executor/RetriesChecks", Executor.RetriesChecks.RunAsync),
             new("Executor/stale recovery stage", Executor.UnfinishedChecks.StaleStageAsync),
             new("Executor/DeferredEnsure", Executor.UnfinishedChecks.DeferredEnsureAsync),
-            new("Executor/UnfinishedChecks", Executor.UnfinishedChecks.RunAsync)
+            new("Executor/UnfinishedChecks", Executor.UnfinishedChecks.RunAsync),
+            new("Executor/live third-path counterpart", Executor.UnfinishedChecks.LiveThirdPathAsync)
         ],
         ["cli"] = [
             new("Layout/CliParityChecks", () => Layout.CliParityChecks.RunAsync(input))
