@@ -396,7 +396,7 @@ public static class ItemSync
                 if(row.Synced is {} owned && (expected==null || successor!=null && missing==side))
                 {
                     var leg=side==Side.Local?local:dropbox;
-                    if(await leg.ReadByIdAsync(owned.IdOn(side),ct) is {InScope:true} live && !paths.Excludes(side==Side.Local?live.Location.Entry.Path:null,side==Side.Dropbox?live.Location.Entry.Path:null,live.Location.Entry.IsFolder)) throw new ChangedUnderneathException(owned.PathOn(side));
+                    if(await leg.ReadByIdAsync(owned.IdOn(side),ct) is {InScope:true}) throw new ChangedUnderneathException(owned.PathOn(side));
                     // An unrelated occupant is not the missing bound leg. A state-only or peer-only operation never writes it.
                     if(expected==null && seen!=null && (observedMissing is not {} observation || observation.Side!=side || observation.Occupant==seen) && seen.Id!=owned.IdOn(side) && (action.Kind==ActionKind.ForgetOnly || action.Kind is (ActionKind.DeleteLocal or ActionKind.DeleteDropbox) && action.WrittenSide()!=side)) continue;
                 }
