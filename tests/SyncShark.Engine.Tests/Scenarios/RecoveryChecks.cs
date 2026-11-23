@@ -363,7 +363,23 @@ public static class RecoveryChecks
     public static Task A40OnlyOneBackoffWithoutProviderDelayAsync() => throw new NotImplementedException();
     public static Task A40UnrelatedWorkContinuesAsync() => throw new NotImplementedException();
     public static Task A40SignedOutAsync() => throw new NotImplementedException();
-    public static Task A40DisconnectedAsync() => throw new NotImplementedException();
+    public static async Task A40DisconnectedAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();
+        Check.Require(x.Pair.ConnectionId.Length>0,"Disconnected pair has no seeded connection id");
+        await x.Store.SaveNoticeAsync(x.Pair.PairId,new Notice(1,NoticeKind.Failure,TextKey.AccountMissing,string.Empty,new([],Side.Local),DateTimeOffset.UnixEpoch,false),default);
+        Check.Require(x.Store.OpenNotices.SingleOrDefault(n=>n.Cause==TextKey.AccountMissing) is not null,"Disconnected pair has no stored AccountMissing notice");
+        var adapters=0;var tokens=0;
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(x.Store),(_,_,_,_)=>{adapters++;return(x.Pc,x.Cloud);},
+            ItemChecks.Settings,null!,TimeProvider.System,_=>{tokens++;return Task.FromResult(x.Pair.ConnectionId);},(_,_)=>{tokens++;return Task.CompletedTask;});
+        using var output=new StringWriter();using var errors=new StringWriter();
+        var code=await new global::Massdex.SyncShark.Engine.Edge.Commands().ExecuteAsync(["notices","--pair",x.Pair.PairId],host,output,errors,default);
+        Check.Require(code==0,"Disconnected notices command failed");
+        Check.Require(output.ToString().Contains(Text.Get(TextKey.AccountMissing,(TextArg.Account,x.Pair.ConnectionId)),StringComparison.Ordinal),"Disconnected CLI notice did not name the pair's account");
+        Check.Require(x.Store.OpenNotices.SingleOrDefault(n=>n.Cause==TextKey.AccountMissing) is not null,"Disconnected CLI notice lost its stored cause");
+        Check.Require(adapters==0,"Disconnected notices read opened an adapter");
+        Check.Require(tokens==0,"Disconnected notices read acquired a token");
+    }
     public static Task A41MissingRootAsync() => throw new NotImplementedException();
     public static Task A41WrongAccountAsync() => throw new NotImplementedException();
     public static Task A41PcRootRemovedWhileQueuedAsync() => throw new NotImplementedException();
