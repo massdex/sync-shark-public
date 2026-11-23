@@ -350,7 +350,7 @@ public static class Repair
                 }
                 Notice? own=null; EffectOutcome? outcome;
                 try { outcome=await ItemSync.ApplyAsync(pair,settings,Log,current,prepared,moves,local,dropbox,store,coveredFolder && !reobserve?PopulateCovered:Populate,Hop,token,queue.Held,
-                    (_,reproducible)=>{if(!reproducible) throw new WorkQueue.Unsettled();},failedNotice:n=>own=n,coversThrough:queue.ProofNow?.Invoke()); }
+                    (_,reproducible)=>{if(!reproducible) throw new WorkQueue.Unsettled();},failedNotice:n=>own=n,coversThrough:null); }
                 catch(WorkQueue.Unsettled) when(own!=null && physicalHop==null)
                 {
                     // The queue re-attempts this exact callback after it catches Unsettled. Wait for discovery, not release.
