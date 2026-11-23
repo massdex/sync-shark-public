@@ -329,7 +329,7 @@ public sealed class Unfinished
         var stage=note.Stage!;
         // Another object holds the final name: create-only publication can never land.
         if(current!=null && (current.Id!=stage.FileId || current.Size!=stage.Size || await local.ContentHashAsync(current,ct)!=stage.ContentHash))
-        {await store.DisarmAsync(pair.PairId,victim,stage,ct);return;}
+        return;
         try
         {
             if(other==null || other.IsFolder || other.Skip!=null || saved!=null && other.Id!=saved.DropboxId || other.Size!=stage.Size || other.ContentHash!=stage.ContentHash)
