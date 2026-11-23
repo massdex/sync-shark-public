@@ -16,12 +16,25 @@ public static class ItemChecks
         using var digest = new ContentHash(); digest.Append(bytes); var hash = digest.Finish();
         var a = new Entry("file", false, bytes.Length, DateTimeOffset.UnixEpoch, "local", "", hash, null);
         var b = a with { Id = "remote", Revision = "rev" }; local.Seed(a, bytes); remote.Seed(b, bytes);
-        var queue=new WorkQueue();var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);
         using var store = new InMemoryStateStore();
+        var queue=await StartQueueAsync(pair,paths,local,remote,store);
         await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths, new Change(Side.Dropbox, ChangeKind.Changed, b.Path, null, b.Id, b, false, false), local, remote, store,Population(pair,paths,local,remote,store),Hop(pair,paths,queue,local,remote,store),CancellationToken.None);
         Check.Require(local.Items.Count == 1 && remote.Items.Count == 1 && local.Items[a.Path].Bytes.SequenceEqual(bytes) && remote.Items[b.Path].Bytes.SequenceEqual(bytes), "Final paths and bytes");
         Check.Require(store.Records.Values.Single() == SyncedEntries.From(a, b) && store.OpenNotices.Count == 0, "Binding and notices");
         Check.Require(local.Requests[nameof(ISide.OpenReadAsync)] == 0 && remote.Requests[nameof(ISide.OpenReadAsync)] == 0, "Unexpected transfer");
+    }
+
+    internal static async Task<WorkQueue> StartQueueAsync(PairConfig pair, PathScope paths, ISide local, ISide cloud, IStore store, PairRunner? runner = null)
+    {
+        var queue = new WorkQueue();
+        runner ??= new PairRunner();
+        var localEnd = await local.BoundaryAsync(default);
+        var cloudEnd = await cloud.BoundaryAsync(default);
+        await runner.CatchUpAsync(pair, (localEnd.Position, cloudEnd.Cursor), Settings, _ => { }, paths, queue,
+            local, cloud, store, static () => { }, default);
+        Check.Require(ReferenceEquals(queue.Unfinished,runner.Unfinished) && queue.Unfinished != null,"Finite admission did not bind the pair's job owner");
+        return queue;
     }
 
     internal static PairConfig Pair() => new("pair", "Pair A", @"T:\Pair A", "/Pair A", "test", [], [], FirstRunPolicy.NewestWins, true, null);
@@ -35,8 +48,9 @@ public static class ItemChecks
     public static async Task ChangeAsync(bool baseline, byte? pc, byte? cloud, Side source, byte? expected, TextKey? notice = null, bool folder = false)
     {
         var pair = Pair(); var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
-        var queue=new WorkQueue();var paths=new PathScope(pair,[pair],DriveType.Fixed);
-        using var store = new InMemoryStateStore(); const string path = "item";
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        using var store = new InMemoryStateStore();
+        var queue=await StartQueueAsync(pair,paths,local,remote,store); const string path = "item";
         var oldA = File(Side.Local, path, 1, "local", folder); var oldB = File(Side.Dropbox, path, 1, "cloud", folder);
         if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(oldA,oldB),null,null,default);
         if (pc is { } a) local.Seed(File(Side.Local,path,a,oldA.Id,folder),folder ? [] : [a]);

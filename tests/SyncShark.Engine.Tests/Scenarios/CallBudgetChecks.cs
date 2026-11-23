@@ -18,7 +18,9 @@ public static class CallBudgetChecks
         }
         await store.OweRepairAsync(pair.PairId,Side.Local,"requested",default);
         long before = store.Requests[nameof(IStore.CommitAsync)];
-        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(),pc,cloud,store,null,null,default);
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,cloud,store);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,null,null,default);
         Check.Require((await store.ReadRepairAsync(pair.PairId,Side.Local,default)).Reason==null,"Repair did not settle the requested full comparison");
         foreach (var side in new[]{pc,cloud})
         {

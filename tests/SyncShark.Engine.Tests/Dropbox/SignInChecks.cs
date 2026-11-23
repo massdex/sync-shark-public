@@ -57,13 +57,15 @@ public static class SignInChecks
         Check.Require(!SignIn.GrantAccepted(SignIn.RequiredScopes.Append("extra.scope")), "An extra grant was accepted");
         Check.Require(!SignIn.GrantAccepted(Array.Empty<string>()), "An empty grant was accepted");
 
-        await BoundedAttemptAsync();
+        var failures = new List<string>();
+        await BoundedAttemptAsync(failures);
+        await DisconnectOwnershipAsync(failures);
+        Check.Require(failures.Count == 0, string.Join("; ", failures));
         var port = await AbandonedReturnAsync();
         await MalformedRequestsAsync(port);
-        await DisconnectOwnershipAsync();
     }
 
-    private static async Task BoundedAttemptAsync()
+    private static async Task BoundedAttemptAsync(List<string> failures)
     {
         var timedOut = false;
         using (var watch = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
@@ -77,8 +79,9 @@ public static class SignInChecks
                 });
             }
             catch (TimeoutException) { timedOut = true; }
+            catch (OperationCanceledException) when (watch.IsCancellationRequested) { }
         }
-        Check.Require(timedOut, "The authorization bound did not end a stalled attempt");
+        if (!timedOut) failures.Add("The authorization bound did not end a stalled attempt");
         Check.Require(await SignIn.RunAuthorizationAttemptAsync(CancellationToken.None, TimeSpan.FromSeconds(10),
                 _ => Task.FromResult("ok")) == "ok", "The gate was not released after a timed-out attempt");
     }
@@ -135,7 +138,7 @@ public static class SignInChecks
             "A malformed return did not serve the retry copy or reflected a callback value");
     }
 
-    private static async Task DisconnectOwnershipAsync()
+    private static async Task DisconnectOwnershipAsync(List<string> failures)
     {
         if (!OperatingSystem.IsWindows()) return;
         CredentialStoreChecks.LegacyFixture.RequireAbsent();
@@ -170,37 +173,25 @@ public static class SignInChecks
             // Offline/unproven legacy ownership completes the local disconnect and leaves the fixed entry (R41).
             // An HTTP timeout surfaces as a non-caller OperationCanceledException with an inner TimeoutException.
             CredentialStoreChecks.LegacyFixture.Write("legacy-fixture");
-            store.Save(connectionOwner, "own-a");
-            var timeoutDetail = string.Empty;
-            try
+            foreach (var (error, cause) in new (Exception, string)[]
             {
-                await SignIn.DisconnectAsync(
-                    (_, _) => throw new OperationCanceledException("timeout", new TimeoutException()),
-                    store, connectionOwner, default);
-            }
-            catch (Exception error) { timeoutDetail = " (" + error.Message + ")"; }
-            Check.Require(store.ReadOwn(connectionOwner) is null && store.ReadLegacy() == "legacy-fixture",
-                "An HTTP timeout aborted the local disconnect or removed the unproven fixed entry" + timeoutDetail);
-
-            // An interrupted response body (IOException) is the same offline outcome, with its own own-target fixture.
-            store.Save(connectionOwner, "own-io");
-            var ioDetail = string.Empty;
-            try { await SignIn.DisconnectAsync((_, _) => throw new IOException(), store, connectionOwner, default); }
-            catch (Exception error) { ioDetail = " (" + error.Message + ")"; }
-            Check.Require(store.ReadOwn(connectionOwner) is null && store.ReadLegacy() == "legacy-fixture",
-                "An interrupted response body aborted the local disconnect or removed the unproven fixed entry" + ioDetail);
-
-            // An offline send is the same offline outcome, again with its own own-target fixture.
-            store.Save(connectionOwner, "own-http");
-            var offlineDetail = string.Empty;
-            try
+                (new OperationCanceledException("timeout", new TimeoutException()), "An HTTP timeout"),
+                (new IOException(), "An interrupted response body"),
+                (new HttpRequestException(), "An offline legacy owner"),
+                (new InvalidDataException(), "An incomplete identity response")
+            })
             {
-                await SignIn.DisconnectAsync((_, _) => throw new HttpRequestException(Text.Get(TextKey.SignInReturnRetry)),
-                    store, connectionOwner, default);
+                store.Save(connectionOwner, "own-a");
+                var completed = false;
+                try
+                {
+                    await SignIn.DisconnectAsync((_, _) => throw error, store, connectionOwner, default);
+                    completed = true;
+                }
+                catch (Exception observed) when (ReferenceEquals(observed, error)) { }
+                if (!completed || store.ReadOwn(connectionOwner) is not null || store.ReadLegacy() != "legacy-fixture")
+                    failures.Add(cause + " aborted the local disconnect or removed the unproven fixed entry");
             }
-            catch (Exception error) { offlineDetail = " (" + error.Message + ")"; }
-            Check.Require(store.ReadOwn(connectionOwner) is null && store.ReadLegacy() == "legacy-fixture",
-                "An offline legacy owner aborted the local disconnect or removed the unproven fixed entry" + offlineDetail);
 
             // Caller cancellation is not swallowed: nothing is removed.
             store.Save(connectionOwner, "own-c");

@@ -7,6 +7,9 @@ public class ChangedUnderneathException(string path, Exception? inner = null)
     /// <summary>The item's relative path that no longer matches the expected version.</summary>
     public string Path { get; } = path;
 
+    /// <summary>The endpoint that observed the failure, if known.</summary>
+    public Side? FailedSide { get; set; }
+
     /// <summary>The complete selected Local content observed before any effect, when available.</summary>
     public Entry? ObservedLocal { get; init; }
 

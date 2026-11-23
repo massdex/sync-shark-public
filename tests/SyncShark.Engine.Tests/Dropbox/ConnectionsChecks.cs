@@ -124,12 +124,14 @@ public static class ConnectionsChecks
                 File.WriteAllText(ListFile(root), LegacyRecord(1, "set", NullAdditional(first), null));
                 Expect(Refuses(() => connections.Read(root)), "A winning set with a null additional entry was projected");
             });
-            Case(failures, "a set with a null retained entry decodes", () =>
+            Case(failures, "null retained entry rejects only the winner", () =>
             {
                 var root = Root(scratch, "nullRetainedEntry");
                 Directory.CreateDirectory(Path.GetDirectoryName(ListFile(root))!);
                 File.WriteAllText(ListFile(root), LegacyRecord(1, "set", NullRetained(second), null));
-                Expect(connections.Read(root).SequenceEqual(new[] { second }), "A null retained entry stopped the typed read");
+                Expect(failures, Refuses(() => connections.Read(root)), "A winning null retained entry exposed membership");
+                File.AppendAllText(ListFile(root), LegacySet(first));
+                Expect(connections.Read(root).SequenceEqual(new[] { first }), "A superseded null retained entry stopped the scan");
             });
             Case(failures, "wrong-typed retained record", () =>
             {
@@ -435,6 +437,10 @@ public static class ConnectionsChecks
                 Expect(connections.Read(root).SequenceEqual(new[] { first }), "An explicit connection id was not trimmed");
                 File.WriteAllText(ListFile(root), LegacySet(first) + LegacyRecord(1.5, "set", BindingJson(null, "acct-other"), null));
                 Expect(connections.Read(root).SequenceEqual(new[] { first }), "A non-Int32 schema threw instead of keeping the prefix");
+                var damaged = Encoding.UTF8.GetBytes(LegacySet(second));
+                damaged[damaged.AsSpan().IndexOf(Encoding.UTF8.GetBytes(second))] = 0xff;
+                File.WriteAllBytes(ListFile(root), Encoding.UTF8.GetBytes(LegacySet(first)).Concat(damaged).ToArray());
+                Expect(connections.Read(root).SequenceEqual(new[] { first }), "Malformed UTF-8 lost the preceding valid membership");
                 File.WriteAllText(ListFile(root), LegacySet(first) + "\r\n" + LegacySet(second));
                 Expect(connections.Read(root).SequenceEqual(new[] { first }), "An empty-after-CR record was skipped instead of stopping");
                 File.WriteAllText(ListFile(root), "not-json\n" + LegacySet(second));

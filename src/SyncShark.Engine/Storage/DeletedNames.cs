@@ -7,6 +7,8 @@ public sealed class DeletedNames
     public Task<bool> ContainsAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Guid? scanId, string key, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Read the separate deleted-history cursor and debt.</summary>
     public Task<(string? Cursor, bool Owed)> ReadStateAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId,CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Read history state for the active scan after verifying the saved history.</summary>
+    public Task<(string? Cursor, bool Owed)> ReadStateAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId, Guid scanId, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Publish the completed named acquisition and its terminal history cursor together.</summary>
     public Task PublishAsync(Microsoft.Data.Sqlite.SqliteConnection db, string pairId,Guid scanId,string terminalCursor,CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Check retained history for the specified candidate kind.</summary>

@@ -8,8 +8,8 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 /// It holds only connection ids; the account's saved root identity lives with each pair, so no credential reference
 /// is stored or returned here. One canonical representation covers the whole list: one JSON array line of ids,
 /// including <c>[]</c> for the empty list; a zero-byte, blank-line or append-record JSONL is a 0.3.95 legacy log.
-/// Migration resolves 0.3.95's authoritative value (slots first, otherwise the typed append log) and, in place,
-/// treats the root's own JSONL as source evidence.</summary>
+/// The legacy value is decoded by the framework into the ported 0.3.95 record shapes (slots first, otherwise the
+/// append log) and only its winner is projected to ids.</summary>
 public sealed class Connections
 {
     private const string StateFolder = "state";
@@ -25,6 +25,36 @@ public sealed class Connections
     private const string SetOperation = "set";
     private const string DeleteOperation = "delete";
     private const string RecoveryOperation = "recovery";
+
+    // The predecessor's default typed-read options.
+    private static readonly JsonSerializerOptions JsonOptions = new();
+
+    // --- 0.3.95 record shapes, ported so the framework decodes exactly as the predecessor did --------------------
+
+    private sealed record MutableJsonValue<TValue>(bool Present, TValue? Value);
+
+    private sealed record SlotRecord<TValue>(int SchemaVersion, long Generation, TValue? Value, string? PayloadSha256);
+
+    private sealed record AppendRecord<TValue>(int SchemaVersion, string? Operation, TValue? Value,
+        string? PayloadSha256, RecoveryState? Recovery);
+
+    private sealed record RecoveryState(string? EvidenceFile, string? OriginalSha256, int ValidPrefixByteLength,
+        int BadByteLength, string? BadSha256, string? Outcome);
+
+    private sealed record ProviderCapabilityFlags(bool ContentRead, bool ContentWrite, bool MetadataRead,
+        bool MetadataWrite, bool SharingRead, bool SharingWrite, bool StableObjectIds, bool DeltaCursor,
+        bool NativeMove, bool Revisions, bool DeletedItems, bool ProgrammaticRewind, bool FileRequestsRead,
+        bool FileRequestsWrite, bool NativeDocuments, bool Shortcuts, bool SharedDrives, bool ConditionalWrites);
+
+    private sealed record ProviderConnectionRecord(string? ConnectionId, string? Provider, string? AccountId,
+        string? RootNamespaceId, string? HomeNamespaceId, string? DisplayName, string? Email, string? AccountType,
+        string? CredentialReference, bool IsActive, ProviderCapabilityFlags? Capabilities);
+
+    private sealed record DropboxConnectionBinding(string? ClientId, string? AccountId, string? RootNamespaceId,
+        string? HomeNamespaceId, string? ContentAccess, string[]? Scopes, string? ConnectionId, string? DisplayName,
+        string? Email, string? AccountType, DateTimeOffset? ConnectedUtc, DateTimeOffset? LastVerifiedUtc,
+        string? CredentialReference, ProviderConnectionRecord[]? RetainedConnections,
+        DropboxConnectionBinding[]? AdditionalConnections);
 
     /// <summary>The stable connection id of a Dropbox account: <c>connection-</c> and 24 lowercase hex digits of its
     /// domain-separated account hash, as 0.3.95 created it.</summary>
@@ -85,11 +115,8 @@ public sealed class Connections
                 if (targetPresent)
                 {
                     if (!resolved.Ids.SequenceEqual(sourceSet, StringComparer.Ordinal))
-                    {
-                        File.WriteAllText(target, JsonSerializer.Serialize(sourceSet.ToArray()) + "\n");
                         throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-                    }
-                    if (resolved.Form == ListShape.Append && !SameBytesBounded(source, target))
+                    if (resolved.Form == ListShape.Append && appendSuppliesBytes && !SameBytesBounded(source, target))
                         throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
                     actual = resolved.Ids;
                 }
@@ -139,15 +166,13 @@ public sealed class Connections
         Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
     private static string StagePath(string target) =>
-        target + "." + System.DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'", System.Globalization.CultureInfo.InvariantCulture) + ".new";
+        // A fresh stage id (the established 32-hex id form) keeps an abandoned same-second stage from blocking a retry.
+        target + "." + ResourceNames.NewId() + ".new";
 
     /// <summary>The one attempt-publication path: write this attempt's own stage, then move it create-only (or replace).</summary>
     private static bool Publish(string target, Action<FileStream> write, bool overwrite = false)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-        foreach (var stale in Directory.EnumerateFiles(Path.GetDirectoryName(target)!,
-                     Path.GetFileName(target) + ".*.new"))
-            File.WriteAllText(stale, "tampered");
         var stage = StagePath(target);
         FileStream output;
         try { output = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None); }
@@ -219,16 +244,14 @@ public sealed class Connections
         var b = ReadSlot(Path.Combine(state, SlotB));
         // A successor exists, so the legacy log is never consulted; both invalid refuses rather than roll back.
         var selected = SelectSlot(a, b) ?? throw new InvalidDataException(Text.Get(TextKey.RootDropboxIdentityInvalid));
-        var ids = new List<string>();
-        if (selected.Present) ProjectBinding(selected.Value, ids);
-        return SortedDistinct(ids);
+        return selected.Present && selected.Value is not null ? ProjectBinding(selected.Value) : Array.Empty<string>();
     }
 
-    private sealed record Slot(bool Valid, long Generation, bool Present, JsonElement Value);
+    private sealed record Slot(bool Valid, long Generation, bool Present, DropboxConnectionBinding? Value);
 
     private static Slot ReadSlot(string path)
     {
-        var invalid = new Slot(false, 0, false, default);
+        var invalid = new Slot(false, 0, false, null);
         if (!File.Exists(path)) return invalid;
         if (new FileInfo(path).Length is 0 or > MaximumStateBytes) return invalid;
         var bytes = File.ReadAllBytes(path);
@@ -236,31 +259,15 @@ public sealed class Connections
         {
             using var document = JsonDocument.Parse(bytes);
             var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object ||
-                !root.TryGetProperty("SchemaVersion", out var schema) || schema.ValueKind != JsonValueKind.Number ||
-                schema.GetInt32() != SlotSchemaVersion ||
-                !root.TryGetProperty("Generation", out var generationElement) ||
-                generationElement.ValueKind != JsonValueKind.Number ||
-                !generationElement.TryGetInt64(out var generation) || generation <= 0 ||
-                !root.TryGetProperty("Value", out var value) || value.ValueKind != JsonValueKind.Object ||
-                !root.TryGetProperty("PayloadSha256", out var hash) || hash.ValueKind != JsonValueKind.String ||
-                !CryptographicOperations.FixedTimeEquals(Convert.FromHexString(hash.GetString()!),
-                    SHA256.HashData(Encoding.UTF8.GetBytes(value.GetRawText()))) ||
-                !value.TryGetProperty("Present", out var present) ||
-                present.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            if (!root.TryGetProperty("Value", out var rawValue) || rawValue.ValueKind == JsonValueKind.Null)
                 return invalid;
-            if (!present.GetBoolean())
-            {
-                // The predecessor's typed read still decodes a supplied value; a wrong-typed one invalidates this slot.
-                return value.TryGetProperty("Value", out var tombstone) && tombstone.ValueKind != JsonValueKind.Null &&
-                       !ValidBinding(tombstone)
-                    ? invalid
-                    : new Slot(true, generation, false, default);
-            }
-            // The predecessor's typed payload must be structurally valid before this generation is considered.
-            return value.TryGetProperty("Value", out var binding) && ValidBinding(binding)
-                ? new Slot(true, generation, true, binding.Clone())
-                : invalid;
+            var record = JsonSerializer.Deserialize<SlotRecord<MutableJsonValue<DropboxConnectionBinding>>>(bytes, JsonOptions);
+            if (record is null || record.SchemaVersion != SlotSchemaVersion || record.Generation <= 0 ||
+                record.Value is null || record.PayloadSha256 is null)
+                return invalid;
+            if (!HashMatches(record.PayloadSha256, Encoding.UTF8.GetBytes(rawValue.GetRawText()))) return invalid;
+            // An omitted Present defaults to false; Present:true with a null Value is valid and yields no membership.
+            return new Slot(true, record.Generation, record.Value.Present, record.Value.Value);
         }
         catch (Exception error) when (error is JsonException or FormatException or InvalidOperationException or ArgumentException)
         {
@@ -325,14 +332,16 @@ public sealed class Connections
         return SortedDistinct(ids);
     }
 
-    /// <summary>The 0.3.95 append log, in the predecessor's order: only a wholly empty record is skipped; every other
-    /// record is structurally validated and the scan stops at the first invalid one, counting only applied records.</summary>
+    /// <summary>The 0.3.95 append log: only a wholly empty record is skipped; the framework decodes each record into the
+    /// ported shape and the scan stops at the first undecodable/invalid one, counting only applied records. The valid
+    /// prefix selects a winner, which is projected once; a superseded set never projects its own ids.</summary>
     private static IReadOnlyList<string> AppendSet(string path)
     {
         if (!File.Exists(path)) return Array.Empty<string>();
         if (new FileInfo(path).Length > MaximumStateBytes) throw InvalidList();
         var bytes = File.ReadAllBytes(path);
-        var ids = new List<string>();
+        DropboxConnectionBinding? winner = null;
+        var hasWinner = false;
         var records = 0;
         foreach (var line in TerminatedLines(bytes))
         {
@@ -343,11 +352,53 @@ public sealed class Connections
             catch (JsonException) { break; }
             using (document)
             {
-                if (!TryAddLegacyRecord(document.RootElement, ids)) break;
+                if (!TryApplyLegacy(document.RootElement, ref winner, ref hasWinner)) break;
             }
             if (++records > MaximumAppendRecords) throw InvalidList();
         }
-        return SortedDistinct(ids);
+        return hasWinner && winner is not null ? ProjectBinding(winner) : Array.Empty<string>();
+    }
+
+    private static bool TryApplyLegacy(JsonElement record, ref DropboxConnectionBinding? winner, ref bool hasWinner)
+    {
+        AppendRecord<DropboxConnectionBinding>? decoded;
+        try { decoded = JsonSerializer.Deserialize<AppendRecord<DropboxConnectionBinding>>(record.GetRawText(), JsonOptions); }
+        catch (JsonException) { return false; }
+        if (decoded is null || decoded.SchemaVersion != AppendSchemaVersion || decoded.PayloadSha256 is null ||
+            string.IsNullOrEmpty(decoded.Operation))
+            return false;
+        var kind = decoded.Operation;
+        if (kind == DeleteOperation)
+        {
+            if (!HashMatches(decoded.PayloadSha256, Encoding.UTF8.GetBytes(DeleteOperation))) return false;
+            winner = null;
+            hasWinner = false;
+            return true;
+        }
+        if (kind == RecoveryOperation)
+        {
+            // The predecessor's recovery operation requires its named evidence file; its typed shape is already decoded.
+            if (decoded.Recovery is null || string.IsNullOrWhiteSpace(decoded.Recovery.EvidenceFile)) return false;
+            if (!record.TryGetProperty("Recovery", out var rawRecovery) || rawRecovery.ValueKind == JsonValueKind.Null)
+                return false;
+            return HashMatches(decoded.PayloadSha256, Encoding.UTF8.GetBytes(rawRecovery.GetRawText()));
+        }
+        if (kind != SetOperation) return false;
+        if (decoded.Value is null) return false;
+        if (!record.TryGetProperty("Value", out var rawValue) || rawValue.ValueKind == JsonValueKind.Null) return false;
+        if (!HashMatches(decoded.PayloadSha256, Encoding.UTF8.GetBytes(rawValue.GetRawText()))) return false;
+        winner = decoded.Value;
+        hasWinner = true;
+        return true;
+    }
+
+    private static bool HashMatches(string claimed, byte[] payload)
+    {
+        try
+        {
+            return CryptographicOperations.FixedTimeEquals(Convert.FromHexString(claimed), SHA256.HashData(payload));
+        }
+        catch (FormatException) { return false; }
     }
 
     private static byte[] TrimRecord(byte[] line) =>
@@ -366,193 +417,33 @@ public sealed class Connections
         return lines;
     }
 
-    private static bool TryAddLegacyRecord(JsonElement record, List<string> ids)
+    /// <summary>Projects the selected winner to ids once: its explicit trimmed id or the predecessor's derived account
+    /// id, then the same for each additional connection.</summary>
+    private static IReadOnlyList<string> ProjectBinding(DropboxConnectionBinding binding)
     {
-        try
-        {
-            if (record.ValueKind != JsonValueKind.Object ||
-                !record.TryGetProperty("SchemaVersion", out var schema) || schema.ValueKind != JsonValueKind.Number ||
-                schema.GetInt32() != AppendSchemaVersion ||
-                !record.TryGetProperty("Operation", out var operation) || operation.ValueKind != JsonValueKind.String ||
-                !record.TryGetProperty("PayloadSha256", out var hash) || hash.ValueKind != JsonValueKind.String)
-                return false;
-            var kind = operation.GetString();
-            // The predecessor typed-decodes the whole envelope once: a supplied Value/Recovery must match its typed shape.
-            if (record.TryGetProperty("Value", out var supplied) && supplied.ValueKind != JsonValueKind.Null &&
-                !ValidBinding(supplied))
-                return false;
-            var hasRecovery = record.TryGetProperty("Recovery", out var suppliedRecovery);
-            if (hasRecovery && suppliedRecovery.ValueKind != JsonValueKind.Null && !TypedRecovery(suppliedRecovery))
-                return false;
-            byte[] claimed;
-            try { claimed = Convert.FromHexString(hash.GetString()!); }
-            catch (FormatException) { return false; }
-            if (kind == DeleteOperation)
+        var ids = new List<string>();
+        AddBindingId(binding, ids);
+        if (binding.AdditionalConnections is { } additional)
+            foreach (var connection in additional)
             {
-                if (!CryptographicOperations.FixedTimeEquals(claimed, SHA256.HashData(Encoding.UTF8.GetBytes(DeleteOperation))))
-                    return false;
-                ids.Clear();
-                return true;
+                if (connection is null) throw InvalidList();
+                AddBindingId(connection, ids);
             }
-            JsonElement payload;
-            if (kind == SetOperation)
-            {
-                if (!record.TryGetProperty("Value", out var value) || value.ValueKind != JsonValueKind.Object) return false;
-                payload = value;
-            }
-            else if (kind == RecoveryOperation)
-            {
-                // Only the recovery operation itself requires a named evidence file (the predecessor's predicate).
-                if (!hasRecovery || suppliedRecovery.ValueKind == JsonValueKind.Null || !RecoveryEvidence(suppliedRecovery))
-                    return false;
-                payload = suppliedRecovery;
-            }
-            else return false;
-            if (!CryptographicOperations.FixedTimeEquals(claimed, SHA256.HashData(Encoding.UTF8.GetBytes(payload.GetRawText()))))
-                return false;
-            if (kind == RecoveryOperation) return true;
-            ids.Clear();
-            ProjectBinding(payload, ids);
-            return true;
-        }
-        catch (Exception error) when (error is InvalidOperationException or FormatException or ArgumentException)
+        return SortedDistinct(ids);
+    }
+
+    private static void AddBindingId(DropboxConnectionBinding binding, List<string> ids)
+    {
+        if (!string.IsNullOrWhiteSpace(binding.ConnectionId))
         {
-            return false;
+            ids.Add(ValidatedConnectionId(binding.ConnectionId.Trim()));
+            return;
         }
-    }
-
-    /// <summary>The predecessor's typed payload shape: field types must permit its typed read before acceptance.</summary>
-    private static bool ValidBinding(JsonElement binding)
-    {
-        if (binding.ValueKind != JsonValueKind.Object) return false;
-        foreach (var name in TypedStringFields)
-            if (!StringOrNull(binding, name)) return false;
-        foreach (var name in TypedTimeFields)
-            if (!TimeOrNull(binding, name)) return false;
-        if (!StringArrayOrNull(binding, "Scopes")) return false;
-        if (!BindingsOrNull(binding, "AdditionalConnections")) return false;
-        return RetainedOrNull(binding, "RetainedConnections");
-    }
-
-    private static readonly string[] TypedStringFields =
-    [
-        "ClientId", "AccountId", "RootNamespaceId", "HomeNamespaceId", "ContentAccess",
-        "ConnectionId", "DisplayName", "Email", "AccountType", "CredentialReference"
-    ];
-
-    private static readonly string[] TypedTimeFields = ["ConnectedUtc", "LastVerifiedUtc"];
-
-    private static bool StringOrNull(JsonElement element, string name) =>
-        !element.TryGetProperty(name, out var value) ||
-        value.ValueKind is JsonValueKind.String or JsonValueKind.Null;
-
-    private static bool TimeOrNull(JsonElement element, string name)
-    {
-        if (!element.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null) return true;
-        // The framework reader the predecessor used; prose spellings it rejects are rejected here too.
-        return value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out _);
-    }
-
-    /// <summary>The predecessor's typed recovery record: string members accept null/absent; the integer byte counts must
-    /// be integral; only a recovery operation needs its evidence file named. Unknown members are ignored.</summary>
-    private static bool TypedRecovery(JsonElement recovery)
-    {
-        if (recovery.ValueKind != JsonValueKind.Object) return false;
-        foreach (var name in RecoveryStringFields)
-            if (!StringOrNull(recovery, name)) return false;
-        foreach (var name in RecoveryIntFields)
+        if (!string.IsNullOrWhiteSpace(binding.AccountId))
         {
-            if (!recovery.TryGetProperty(name, out var value)) continue;
-            if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out _)) return false;
+            ids.Add(CreateConnectionId(binding.AccountId));
+            return;
         }
-        return true;
-    }
-
-    private static readonly string[] RecoveryStringFields = ["EvidenceFile", "OriginalSha256", "BadSha256", "Outcome"];
-    private static readonly string[] RecoveryIntFields = ["ValidPrefixByteLength", "BadByteLength"];
-
-    private static bool RecoveryEvidence(JsonElement recovery) =>
-        recovery.TryGetProperty("EvidenceFile", out var evidence) && evidence.ValueKind == JsonValueKind.String &&
-        !string.IsNullOrWhiteSpace(evidence.GetString());
-
-    private static bool StringArrayOrNull(JsonElement element, string name)
-    {
-        if (!element.TryGetProperty(name, out var value)) return true;
-        if (value.ValueKind == JsonValueKind.Null) return true;
-        if (value.ValueKind != JsonValueKind.Array) return false;
-        foreach (var item in value.EnumerateArray())
-            if (item.ValueKind != JsonValueKind.String) return false;
-        return true;
-    }
-
-    private static bool BindingsOrNull(JsonElement element, string name)
-    {
-        if (!element.TryGetProperty(name, out var value)) return true;
-        if (value.ValueKind == JsonValueKind.Null) return true;
-        if (value.ValueKind != JsonValueKind.Array) return false;
-        foreach (var item in value.EnumerateArray())
-            if (!ValidBinding(item)) return false;
-        return true;
-    }
-
-    private static bool RetainedOrNull(JsonElement element, string name)
-    {
-        if (!element.TryGetProperty(name, out var value)) return true;
-        if (value.ValueKind == JsonValueKind.Null) return true;
-        if (value.ValueKind != JsonValueKind.Array) return false;
-        foreach (var item in value.EnumerateArray())
-            if (!ValidProviderRecord(item)) return false;
-        return true;
-    }
-
-    private static readonly string[] ProviderStringFields =
-    [
-        "ConnectionId", "Provider", "AccountId", "RootNamespaceId", "HomeNamespaceId",
-        "DisplayName", "Email", "AccountType", "CredentialReference"
-    ];
-
-    /// <summary>The predecessor's typed retained-provider record: string members accept null/absent, IsActive is a
-    /// Boolean when present, and only the known capability flags are type-checked; unknown members are ignored.</summary>
-    private static bool ValidProviderRecord(JsonElement record)
-    {
-        if (record.ValueKind != JsonValueKind.Object) return false;
-        foreach (var name in ProviderStringFields)
-            if (!StringOrNull(record, name)) return false;
-        if (record.TryGetProperty("IsActive", out var active) &&
-            active.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return false;
-        if (!record.TryGetProperty("Capabilities", out var capabilities) ||
-            capabilities.ValueKind == JsonValueKind.Null) return true; // a typed reference may be absent or null
-        if (capabilities.ValueKind != JsonValueKind.Object) return false;
-        return true; // unknown properties are ignored, as the framework reader does
-    }
-
-    private static readonly string[] ProviderCapabilityFields =
-    [
-        "ContentRead", "ContentWrite", "MetadataRead", "MetadataWrite", "SharingRead", "SharingWrite",
-        "StableObjectIds", "DeltaCursor", "NativeMove", "Revisions", "DeletedItems", "ProgrammaticRewind",
-        "FileRequestsRead", "FileRequestsWrite", "NativeDocuments", "Shortcuts", "SharedDrives", "ConditionalWrites"
-    ];
-
-    /// <summary>Projects the validated payload to ids: the explicit trimmed id, or the predecessor's derived account id.</summary>
-    private static void ProjectBinding(JsonElement binding, List<string> ids)
-    {
-        ids.Add(BindingId(binding));
-        if (!binding.TryGetProperty("AdditionalConnections", out var additional) ||
-            additional.ValueKind != JsonValueKind.Array) return;
-        foreach (var connection in additional.EnumerateArray()) ids.Add(BindingId(connection));
-    }
-
-    private static string BindingId(JsonElement binding)
-    {
-        if (binding.ValueKind != JsonValueKind.Object) throw InvalidList();
-        if (binding.TryGetProperty("ConnectionId", out var id) && id.ValueKind == JsonValueKind.String)
-        {
-            var explicitId = id.GetString()!.Trim();
-            if (explicitId.Length > 0) return ValidatedConnectionId(explicitId);
-        }
-        if (binding.TryGetProperty("AccountId", out var account) && account.ValueKind == JsonValueKind.String &&
-            !string.IsNullOrWhiteSpace(account.GetString()))
-            return CreateConnectionId(account.GetString()!);
         throw InvalidList();
     }
 

@@ -78,7 +78,7 @@ public sealed class CredentialStore
     public string? Read(string connectionId)
     {
         var target = AccountTarget(connectionId);
-        return ReadTarget(RegisteredTarget) ?? ReadTarget(target);
+        return ReadTarget(target) ?? ReadTarget(RegisteredTarget);
     }
 
     /// <summary>Reads only the connection's own protected target; never the fixed legacy target.</summary>

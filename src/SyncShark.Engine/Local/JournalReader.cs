@@ -5,6 +5,8 @@ public sealed class JournalReader
 {
     /// <summary>Attach membership before any volume read, including paused pairs; a stopped or paused member still holds its oldest unsettled input.</summary>
     public void Attach(PairConfig pair) => throw new NotImplementedException();
+    /// <summary>Return the member's actual contiguous settlement; unknown is not coverage.</summary>
+    public Task<JournalPosition?> SettledJournalAsync(PairConfig pair,CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Save only the common contiguous volume position after this pair’s settlement, without reading another page.</summary>
     public Task SettleAsync(PairConfig pair, JournalPosition position, IStore store, CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Attach for the selected JournalReader operation.</summary>
