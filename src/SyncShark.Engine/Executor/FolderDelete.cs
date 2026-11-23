@@ -14,7 +14,7 @@ public sealed class FolderDelete
     /// <summary>RecoverHeldAsync for the selected FolderDelete operation.</summary>
     internal static Task<bool> RecoverHeldAsync(PairConfig pair,Scope scope,Side side,ISide local,ISide dropbox,IStore store,Func<Scope,IEnumerable<Change>> heldInput,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,CancellationToken ct,Notice? retry=null,ActionKind origin=ActionKind.None,Func<Scope,Side,Entry,CancellationToken,Task<EffectOutcome>>? resolveConflict=null,IdentityLocation? actualVictim=null) => throw new NotImplementedException();
     /// <summary>Retry recovery for the exact reviewed notice.</summary>
-    public static Task<bool> RetryHeldAsync(PairConfig pair, Scope scope, Notice notice, ISide local, ISide dropbox, IStore store, Func<Scope, IEnumerable<Change>> heldInput, Func<Scope, Side, Recovery.Folder, CancellationToken, Task> populate, CancellationToken ct) => throw new NotImplementedException();
+    public static Task<bool> RetryHeldAsync(PairConfig pair, Scope scope, Notice notice, ISide local, ISide dropbox, IStore store, Func<Scope, IEnumerable<Change>> heldInput, Func<Scope, Side, Recovery.Folder, CancellationToken, Task> populate, CancellationToken ct, Func<Scope,Side,Entry,CancellationToken,Task<EffectOutcome>>? resolveConflict=null) => throw new NotImplementedException();
     /// <summary>Put back the identified substitute rather than treating it as the selected victim.</summary>
     public static Task<bool> PutBackSubstituteAsync(PairConfig pair,Scope scope,IdentityLocation receipt,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,CancellationToken ct) => throw new NotImplementedException();
 }

@@ -3,6 +3,11 @@ namespace Massdex.SyncShark.Engine.Tests.Dropbox;
 /// <summary>Contract checks for Dispatcher.</summary>
 public static class DispatcherChecks
 {
+    public static Task DeferredSettlementAsync() => throw new NotImplementedException();
+    public static Task SelectedDigestAsync() => throw new NotImplementedException();
+    public static Task BodyWaitAsync() => throw new NotImplementedException();
+    public static Task FinishCursorAsync() => throw new NotImplementedException();
+
     /// <summary>Check upload receipt validation across the provider modules.</summary>
     public static Task UploadReceiptAsync() => throw new NotImplementedException();
     /// <summary>Check throttled write at integration.</summary>

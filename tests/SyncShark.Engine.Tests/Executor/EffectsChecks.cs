@@ -3,6 +3,7 @@ namespace Massdex.SyncShark.Engine.Tests.Executor;
 /// <summary>Contract checks for Effects.</summary>
 public static class EffectsChecks
 {
+    public static Task ChangedChildTargetAsync() => throw new NotImplementedException();
     public static Task ForeignDestinationAsync() => throw new NotImplementedException();
     public static Task RecycleEvidenceAsync() => throw new NotImplementedException();
 

@@ -790,3 +790,4 @@ $failed = @($results | Where-Object Result -ne 'PASS')
 foreach ($f in $failed) { Write-Host "FAIL $($f.Fixture): $($f.Detail)" }
 Write-Host "Fixture roots are under $base; no production process or registry write was performed."
 if ($failed.Count) { exit 1 }
+exit 0

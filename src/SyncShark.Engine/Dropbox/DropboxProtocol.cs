@@ -5,6 +5,17 @@ public static class DropboxProtocol
 {
     public const string Path = "path";
     public const string ClientModifiedFormat = "yyyy-MM-ddTHH:mm:ssZ";
+    public const string Upload = "files/upload";
+    public const string UploadSessionStart = "files/upload_session/start";
+    public const string UploadSessionAppend = "files/upload_session/append_v2";
+    public const string UploadSessionFinish = "files/upload_session/finish";
+    public const string CreateFolder = "files/create_folder_v2";
+    public const string CreateFolderBatch = "files/create_folder_batch";
+    public const string Delete = "files/delete_v2";
+    public const string DeleteBatch = "files/delete_batch";
+    public const string Move = "files/move_v2";
+    public const string MoveBatch = "files/move_batch_v2";
+    public const string UploadSessionFinishBatch = "files/upload_session/finish_batch_v2";
     public const int DeletionHistoryHeadLimit = 1;
     public const string ListFolder = "files/list_folder";
     public const string ListFolderContinue = "files/list_folder/continue";

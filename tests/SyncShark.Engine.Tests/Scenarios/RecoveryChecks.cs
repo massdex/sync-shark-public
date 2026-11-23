@@ -38,8 +38,15 @@ public static class RecoveryChecks
     public static async Task KeptVersionsAsync(bool folder)
     {
         using var x=new PairState(); await x.InitializeAsync();
-        x.Pc.Seed(ItemChecks.File(Side.Local,"same",1,"pc"),[1]);
-        x.Cloud.Seed(ItemChecks.File(Side.Dropbox,"same",2,"cloud",folder),folder?[]:[2]);
+        var pc=ItemChecks.File(Side.Local,"same",1,"pc");
+        var cloud=ItemChecks.File(Side.Dropbox,"same",2,"cloud",folder);
+        if(!folder)
+        {
+            pc=pc with { Modified=new DateTimeOffset(2020,5,17,8,37,0,TimeSpan.Zero) };
+            cloud=cloud with { Modified=pc.Modified };
+        }
+        x.Pc.Seed(pc,[1]);
+        x.Cloud.Seed(cloud,folder?[]:[2]);
         if(folder) x.Cloud.Seed(ItemChecks.File(Side.Dropbox,"same/quiet-child",3,"child"),[3]);
         await x.CompareAsync();
         x.VerifyLinks();
@@ -49,7 +56,12 @@ public static class RecoveryChecks
             Check.Require(side.Items.Values.Where(a=>!a.Entry.IsFolder).Select(a=>a.Bytes.Single()).Order().SequenceEqual(folder?new byte[]{1,3}:new byte[]{1,2}),"A version was lost");
             if(folder) Check.Require(side.Items.Values.Single(a=>a.Bytes.SequenceEqual(new byte[]{3})).Entry.Path.EndsWith("/quiet-child",StringComparison.Ordinal),"Missing quiet descendant");
         }
-        if(!folder) Check.Require(x.Pc.Items.Keys.Any(path=>path.Contains(ItemChecks.Settings.ComputerName,StringComparison.Ordinal)) || x.Pc.Items.Keys.Any(path=>path.Contains(ItemChecks.Settings.ConflictLabelDropboxName,StringComparison.Ordinal)),"Conflict label has no source name");
+        if(!folder)
+        {
+            var expected=$"same [Local version {Environment.MachineName} 17 May 08.37]";
+            Check.Require(x.Cloud.Items.Any(item=>string.Equals(item.Key,expected,StringComparison.Ordinal) && item.Value.Bytes.SequenceEqual(new byte[]{1})),
+                "Original PC bytes were not published at the exact PC-labelled Dropbox path");
+        }
         Check.Require(x.Store.Records.Count==(folder?3:2) && x.Store.OpenNotices.Single().Cause==TextKey.InfoKeptBoth,"Keep-both notice or binding missing");
     }
     public static async Task ChurnAsync()
@@ -467,8 +479,41 @@ public static class RecoveryChecks
     public static Task A47LogsWhileHostDownAsync() => throw new NotImplementedException();
     public static async Task A47OtherReadWhileHostDownAsync()
     {
-        using var output=new StringWriter();using var errors=new StringWriter();await global::Massdex.SyncShark.Engine.Edge.Cli.RunAsync(["status"],null!,output,errors,default);
-        Check.Require((output.ToString()+errors.ToString()).Contains(Text.Get(TextKey.HostNotRunning),StringComparison.Ordinal),"Detached status did not distinguish absence from an unavailable status");
+        // The default pipe and data root are per user. Never run this against a developer's installed host.
+        if(Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted" ||
+            Directory.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),ResourceNames.ProductFolder)))
+            throw new NotImplementedException("Requires a clean disposable Windows runner");
+        const string reason="Detached status did not distinguish absence from an unavailable status";
+        var client=new global::Massdex.SyncShark.Engine.Edge.HostClient();
+        async Task<bool> Absent() => (await client.SendAsync(["status"],TextWriter.Null,TextWriter.Null,default)) is (null,false);
+        Check.Require(await Absent(),reason);
+        using var output=new StringWriter();using var errors=new StringWriter();
+        var code=await global::Massdex.SyncShark.Engine.Edge.Cli.RunAsync(["status"],null!,output,errors,default);
+        Check.Require(code==global::Massdex.SyncShark.Engine.Edge.Cli.HostAbsentExitCode &&
+            output.ToString().TrimEnd()==Text.Get(TextKey.HostNotRunning) && errors.ToString().Length==0 && await Absent(),reason);
+
+        // At F1, stage the matched signed candidate peers beside the test runner; never resolve them through PATH.
+        var hostFile=Path.Combine(AppContext.BaseDirectory,ResourceNames.HostExecutable);
+        var cliFile=Path.Combine(AppContext.BaseDirectory,ResourceNames.CliExecutable);
+        if(!File.Exists(hostFile) || !File.Exists(cliFile)) throw new NotImplementedException("Attached status requires both candidate peers");
+        using var limit=new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        using var owner=new System.Diagnostics.Process {StartInfo=new(hostFile){UseShellExecute=false,RedirectStandardOutput=true}};
+        owner.StartInfo.ArgumentList.Add("--notify-ready");owner.Start();
+        try
+        {
+            Check.Require(await owner.StandardOutput.ReadLineAsync(limit.Token)=="1" && !owner.HasExited,reason);
+            using var cli=new System.Diagnostics.Process {StartInfo=new(cliFile){UseShellExecute=false,RedirectStandardOutput=true,RedirectStandardError=true}};
+            cli.StartInfo.ArgumentList.Add("status");cli.Start();
+            try
+            {
+                var stdout=cli.StandardOutput.ReadToEndAsync(limit.Token);var stderr=cli.StandardError.ReadToEndAsync(limit.Token);
+                await cli.WaitForExitAsync(limit.Token);
+                Check.Require(cli.ExitCode==0 && (await stdout).TrimEnd()==Text.Get(TextKey.NoPairsYet) &&
+                    (await stderr).Length==0 && !owner.HasExited,reason);
+            }
+            finally { if(!cli.HasExited) {cli.Kill();await cli.WaitForExitAsync();} }
+        }
+        finally { if(!owner.HasExited) {owner.Kill();await owner.WaitForExitAsync();} }
     }
     public static Task A47MutationWhileHostDownAsync() => throw new NotImplementedException();
     public static Task A47PerPairPauseSharedVolumeAsync() => throw new NotImplementedException();
