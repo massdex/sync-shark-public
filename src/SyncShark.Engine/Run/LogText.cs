@@ -12,14 +12,13 @@ public static class LogText
     /// <summary>Formats a historical event at its recorded time, not the time the reader opened the log.</summary>
     public static string Format(RunEvent value, DateTimeOffset recordedAt)
     {
-        var clock = recordedAt.UtcDateTime.ToString(Text.Get(TextKey.HumanClockFormat), CultureInfo.InvariantCulture);
+        if (value.Kind == RunEventKind.Effect) return EffectText(value, recordedAt);
+        if (value.Kind == RunEventKind.ProviderRequest && value.Outcome.Length != 0) return string.Empty;
+        var clock = DisplayClock(recordedAt);
         switch (value.Kind)
         {
             case RunEventKind.Stage: return StageText(value, clock);
-            case RunEventKind.Effect: return EffectText(value, clock);
             case RunEventKind.ProviderRequest:
-                // Completed requests are diagnostics, not sync results.
-                if (value.Outcome.Length != 0) return string.Empty;
                 var active = Text.Get(TextKey.HumanStageActive, (TextArg.Time, clock));
                 return value.Detail.Length == 0 ? active : active + Environment.NewLine + Text.Get(TextKey.HumanIndent) + RunLog.EscapeDisplay(value.Detail);
             case RunEventKind.Wait:
@@ -67,7 +66,10 @@ public static class LogText
         return builder.ToString();
     }
 
-    private static string EffectText(RunEvent item, string clock)
+    private static string DisplayClock(DateTimeOffset at) =>
+        at.UtcDateTime.ToString(Text.Get(TextKey.HumanClockFormat), CultureInfo.InvariantCulture);
+
+    private static string EffectText(RunEvent item, DateTimeOffset recordedAt)
     {
         var action = item.Action ?? (EnumNames.TryExact<ActionKind>(item.What, out var kind) ? kind : item.What switch
         {
@@ -77,10 +79,11 @@ public static class LogText
             "KeptBoth" => ActionKind.KeepBoth, "Recorded" => ActionKind.Record, "Forgotten" => ActionKind.ForgetOnly,
             "Replaced" => ActionKind.ReplaceKind, _ => ActionKind.None,
         });
-        var side = item.Side ?? (EnumNames.TryExact<Side>(item.Outcome, out var endSide) ? endSide : (Side?)null);
         var move = action is ActionKind.MoveLocal or ActionKind.MoveDropbox or ActionKind.MoveUnlinked;
         var committed = RunLog.IsCommittedEffect(item.Outcome);
         if (move && committed && (item.Detail.Length == 0 || item.Path.Length == 0)) return string.Empty;
+        var clock = DisplayClock(recordedAt);
+        var side = item.Side ?? (EnumNames.TryExact<Side>(item.Outcome, out var endSide) ? endSide : (Side?)null);
         var card = committed ? CardText(action) : null;
         var heading = card is { } known ? Text.Get(TextKey.HumanCardHeading, (TextArg.Time, clock),
             (TextArg.Label, Text.Get(TextKey.HumanOkLabel)), (TextArg.Operation, Text.Get(known.Operation))) :
