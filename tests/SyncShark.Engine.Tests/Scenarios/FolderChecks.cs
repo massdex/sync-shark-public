@@ -795,9 +795,10 @@ public static class FolderChecks
         run.Db.Items.Remove("Old/Child");
         run.Db.Seed(ItemChecks.File(Side.Dropbox, "Old/Child", 9, "new-occupant"), [9]);
         await RepairWithProofAsync(run);
-        Check.Require(!run.Pc.Items.ContainsKey("New/Child"), "The tombstone did not follow the real child to the moved endpoint");
-        Check.Require(run.Store.Records.Values.All(r => r.LocalPath != "New/Child"), "The deleted child's binding survived at the moved endpoint");
-        Check.Require(run.Db.Items.TryGetValue("Old/Child", out var occupant) && occupant.Entry.Id == "new-occupant", "The new occupant at the old path was removed by the queued delete");
+        Check.Require(run.Db.Items.TryGetValue("New/Child", out var moved) && moved.Entry.Id == "new-occupant" && moved.Bytes.SequenceEqual(new byte[]{9}) && !run.Db.Items.ContainsKey("Old/Child"), "The occupant did not travel with the moved Dropbox folder");
+        await ItemSync.ApplyAsync(run.Pair, ItemChecks.Settings, _ => { }, run.Paths, new Change(Side.Dropbox, ChangeKind.Changed, "New/Child", null, "new-occupant", moved.Entry, false, false), run.Pc, run.Db, run.Store,
+            ItemChecks.Population(run.Pair, run.Paths, run.Pc, run.Db, run.Store), ItemChecks.Hop(run.Pair, run.Paths, run.Queue, run.Pc, run.Db, run.Store), default, run.Queue.Held, coversThrough: _ => true);
+        Check.Require(run.Pc.Items.TryGetValue("New/Child", out var local) && local.Bytes.SequenceEqual(new byte[]{9}) && run.Store.Records.Values.Any(r => r.LocalPath == "New/Child" && r.DropboxId == "new-occupant"), "The moved occupant was not synced at its real endpoint");
     }
     private static Task<RemovalResult> MergeAsync(PairRun run, Entry source, Entry dest,
         Func<Entry, Entry, Entry?, SyncedEntry?, CancellationToken, Task<EffectOutcome>>? collide = null) =>

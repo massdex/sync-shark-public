@@ -525,7 +525,7 @@ public static class RepairChecks
         var recorded=await new global::Massdex.SyncShark.Engine.Executor.Effects().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,
             new global::Massdex.SyncShark.Engine.Planner.SyncAction(ActionKind.Record,parentRow),
             pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),token);
-        Check.Require(recorded==global::Massdex.SyncShark.Engine.Executor.EffectOutcome.Applied && store.Records.Values.Any(r=>r.LocalPath=="new"&&r.DropboxPath=="new"),"The parent move did not settle at its final peer endpoints");
+        Check.Require(recorded==global::Massdex.SyncShark.Engine.Executor.EffectOutcome.Applied && await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("new"),token) is {LocalPath:"new",DropboxPath:"new"},"The parent move did not settle at its final peer endpoints");
         Check.Require(db.Items.TryGetValue("new/item",out var propagated) && propagated.Bytes.SequenceEqual(new byte[]{2}),"The mapped changed child did not settle at its projected path");
         var settled=await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(edited.Path),token);
         Check.Require(settled!=null && settled.LocalId==edited.Id && settled.DropboxPath=="new/item","The mapped child binding did not follow the hop");
@@ -551,7 +551,7 @@ public static class RepairChecks
             var outcome2=await new global::Massdex.SyncShark.Engine.Executor.Effects().ApplyAsync(pair2,ItemChecks.Settings,_=>{},paths2,
                 new global::Massdex.SyncShark.Engine.Planner.SyncAction(ActionKind.Record,row2),
                 pc2,db2,store2,ItemChecks.Population(pair2,paths2,pc2,db2,store2),ItemChecks.Hop(pair2,paths2,queue2,pc2,db2,store2),ct2);
-            Check.Require(outcome2==global::Massdex.SyncShark.Engine.Executor.EffectOutcome.Applied && store2.Records.Values.Any(r=>r.LocalPath=="new"&&r.DropboxPath=="new"),"The unproved hop did not settle its parent");
+            Check.Require(outcome2==global::Massdex.SyncShark.Engine.Executor.EffectOutcome.Applied && await store2.FindAsync(pair2.PairId,Side.Local,PathNames.Key("new"),ct2) is {LocalPath:"new",DropboxPath:"new"},"The unproved hop did not settle its parent");
             Check.Require(pc2.Items.ContainsKey("new/item") && pc2.Items["new/item"].Bytes.SequenceEqual(new byte[]{1}) && !db2.Items.ContainsKey("new/item"),"An unproved child was guessed at the projected or old name");
             Check.Require(pc2.Items["old/item"].Entry==occupant2 && db2.Items["old/item"].Entry==destination2,"A guessed write touched a reused old name");
             // The ordinary observation then arrives at the projected path with its own live proof and settles there.
@@ -563,7 +563,7 @@ public static class RepairChecks
                 ItemChecks.Hop(pair2,paths2,queue2,pc2,db2,store2),token,queue2.Held,(_,_)=>throw new WorkQueue.Unsettled(),coversThrough:_=>true),
                 null,(cursor,token)=>store2.SaveCursorAsync(pair2.PairId,cursor,token),null,ct2);
             Check.Require(await store2.CursorAsync(pair2.PairId,ct2)=="after-projection" && !pc2.Items.ContainsKey("new/item") && pc2.History.Any(x=>x.Entry.Id==localChild.Id),"The later child observation did not settle at the projected path");
-            Check.Require(store2.Records.Values.All(r=>!PathNames.Same(r.LocalPath,"new/item")),"The deleted child binding survived its projected observation");
+            Check.Require(await store2.FindAsync(pair2.PairId,Side.Local,PathNames.Key("new/item"),ct2)==null,"The deleted child binding survived its projected observation");
         });
     });
 }
