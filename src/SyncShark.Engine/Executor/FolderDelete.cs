@@ -265,7 +265,7 @@ public sealed class FolderDelete
             {
                 await compareOldBinding(saved,footprint,footprint,ct);
                 // Effects owns its root commit; direct and recursive deletes have no outer writer.
-                if(origin is (ActionKind.DeleteLocal or ActionKind.DeleteDropbox) && (entry!=folder || covered==null && !splitSelected) && await store.FindAsync(pair.PairId,deleting,saved.KeyOn(deleting),ct)==saved)
+                if((origin==ActionKind.ReplaceKind || origin is (ActionKind.DeleteLocal or ActionKind.DeleteDropbox) && (entry!=folder || covered==null && !splitSelected)) && await store.FindAsync(pair.PairId,deleting,saved.KeyOn(deleting),ct)==saved)
                     await store.CommitAsync(pair.PairId,saved,null,null,null,ct);
             }
             if(selection!=null) await store.DisarmAsync(pair.PairId,selection,null,ct);
