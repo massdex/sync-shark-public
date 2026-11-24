@@ -25,7 +25,6 @@ internal sealed class HeldRun(PairConfig pair,Scope scope,Side side,ISide local,
     private readonly Dictionary<string,long> pathDeletes=new(PathNames.Comparer);
     private readonly List<((string Path,string Id) Key,Action Ack)> acks=[];
     private readonly List<Action> superseded=[];
-    private readonly HashSet<(string Path,string Id)> settled=[];
     private Entry? distinct,echoed;
     private bool complete=true;
     private long order;
@@ -44,10 +43,11 @@ internal sealed class HeldRun(PairConfig pair,Scope scope,Side side,ISide local,
             latest.TryAdd(key,(0,new(Side,ChangeKind.Changed,pinned.Entry.Path,null,pinned.Entry.Id,pinned.Entry,true,false)));
         }
         if(Retry!=null && latest.Count==0 && !await RecoverBinAsync()) return false;
+        var settled=new HashSet<(string Path,string Id)>();
         foreach(var (key,candidate) in latest)
         {
             var last=candidate.Report;
-            if(pathDeletes.GetValueOrDefault(key.Path)>candidate.Order || last.Kind==ChangeKind.Deleted || last.Observed is {} version && await PrepareAsync(last,version) is {} held && await held.SettleAsync()) settled.Add(key);
+            if(pathDeletes.GetValueOrDefault(key.Path)>candidate.Order || last.Kind==ChangeKind.Deleted || last.Observed is {} version && await new HeldCandidate(this,last.Path,version).SettleAsync()) settled.Add(key);
             else complete=false;
         }
         if(Retry!=null)
@@ -57,27 +57,6 @@ internal sealed class HeldRun(PairConfig pair,Scope scope,Side side,ISide local,
         }
         foreach(var entry in acks) if(settled.Contains(entry.Key)) entry.Ack();
         return complete;
-    }
-
-    /// <summary>Null when the report does not name a settleable version under the run's root.</summary>
-    private async Task<HeldCandidate?> PrepareAsync(Change last,Entry version)
-    {
-        if(!PathNames.Same(last.Path,version.Path) || !PathNames.IsSelfOrUnder(version.Path,Root)) return null;
-        var saved=await Store.FindAsync(Pair.PairId,Side,PathNames.KeyFor(Side,version.Path),Ct);
-        bool foreign=saved!=null && saved.IdOn(Side)!=version.Id;
-        bool substitute=ActualVictim?.Entry.Id==version.Id;
-        // A loop, not Any(lambda): a lambda over version would add a closure object per subject.
-        if(!substitute && foreign && Retry!=null)
-            foreach(var i in Retry.Subject.Items) if(i.Side==Side && i.Id==version.Id && PathNames.Same(i.Path,version.Path)) {substitute=true;break;}
-
-        Notice? owner=Retry;
-        if(owner==null) await foreach(var open in Store.NoticesAtAsync(Pair.PairId,PathNames.Key(version.Path),Ct))
-            if(open.Kind==NoticeKind.PutBack && open.Subject.Incoming==Side && open.Subject.Items.FirstOrDefault() is {} original && original.Id==version.Id && PathNames.Same(original.Path,version.Path)) owner=open;
-        var exact=owner?.Subject.DropboxVersion;
-        if(exact!=null && (exact.Entry!=version || exact.Domain!=Pair.Roots?.Dropbox.RootNamespaceId)) return null;
-        var items=owner?.Subject.Items.ToList()??[new(Side,version.Path,version.Id)];
-        var tail=version.Path[Root.Length..]; var endpoints=new Scope(saved?.LocalPath??PathNames.LocalSpelling(Scope.LocalPath+tail),saved?.DropboxPath??Scope.DropboxPath+tail);
-        return new(this,version,saved,foreign,substitute,owner,exact,items,endpoints);
     }
 
     // Keep the latest report per subject. False: the pinned version itself was reported removed.

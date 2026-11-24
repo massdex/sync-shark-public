@@ -1,8 +1,14 @@
 namespace Massdex.SyncShark.Engine.Executor;
 
 /// <summary>Settle one subject's latest held version: restore it, hand a competing name to the conflict owner, or keep it held.</summary>
-internal sealed class HeldCandidate(HeldRun run,Entry version,SyncedEntry? saved,bool foreign,bool substitute,Notice? owner,IdentityLocation? exact,List<NoticeItem> items,Scope endpoints)
+internal sealed class HeldCandidate(HeldRun run,string? reported,Entry version)
 {
+    private SyncedEntry? saved;
+    private bool foreign,substitute;
+    private Notice? owner;
+    private IdentityLocation? exact;
+    private List<NoticeItem> items=null!;
+    private Scope endpoints=null!;
     private (IdentityLocation Location,bool InScope)? located;
     private IdentityLocation? location;
     private (RemovalSelection Victim,StageProof? Stage)? armed;
@@ -10,9 +16,24 @@ internal sealed class HeldCandidate(HeldRun run,Entry version,SyncedEntry? saved
     private Recovery.File? provenFile;
     private Stream? verifiedBytes;
 
-    /// <summary>True when the subject settled; false keeps it held for Retry.</summary>
+    /// <summary>True when the subject settled; false keeps it held for Retry, as does a report naming no settleable version under the run's root.</summary>
     internal async Task<bool> SettleAsync()
     {
+        // Preparation stays before the try, so its failures stay unclassified, and runs in this frame: no separate preparation Task.
+        if(!PathNames.Same(reported,version.Path) || !PathNames.IsSelfOrUnder(version.Path,run.Root)) return false;
+        saved=await run.Store.FindAsync(run.Pair.PairId,run.Side,PathNames.KeyFor(run.Side,version.Path),run.Ct);
+        foreign=saved!=null && saved.IdOn(run.Side)!=version.Id;
+        substitute=run.ActualVictim?.Entry.Id==version.Id;
+        // A loop, not Any(lambda): a lambda over version would add a closure object per subject.
+        if(!substitute && foreign && run.Retry!=null)
+            foreach(var i in run.Retry.Subject.Items) if(i.Side==run.Side && i.Id==version.Id && PathNames.Same(i.Path,version.Path)) {substitute=true;break;}
+        owner=run.Retry;
+        if(owner==null) await foreach(var open in run.Store.NoticesAtAsync(run.Pair.PairId,PathNames.Key(version.Path),run.Ct))
+            if(open.Kind==NoticeKind.PutBack && open.Subject.Incoming==run.Side && open.Subject.Items.FirstOrDefault() is {} original && original.Id==version.Id && PathNames.Same(original.Path,version.Path)) owner=open;
+        exact=owner?.Subject.DropboxVersion;
+        if(exact!=null && (exact.Entry!=version || exact.Domain!=run.Pair.Roots?.Dropbox.RootNamespaceId)) return false;
+        items=owner?.Subject.Items.ToList()??[new(run.Side,version.Path,version.Id)];
+        var tail=version.Path[run.Root.Length..]; endpoints=new Scope(saved?.LocalPath??PathNames.LocalSpelling(run.Scope.LocalPath+tail),saved?.DropboxPath??run.Scope.DropboxPath+tail);
         try {return await AttemptAsync();}
         catch(Exception ex) when(ClassifiedFailure(ex))
         {
