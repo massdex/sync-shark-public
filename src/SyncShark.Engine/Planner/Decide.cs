@@ -69,16 +69,17 @@ public static class Decide
     {
         var local = row.Local;
         var dropbox = row.Dropbox;
-        var context = row.Context;
-        var chosen = context.FirstRun ? policy : FirstRunPolicy.NewestWins;
 
         if (local is null)
         {
             return dropbox is null
                 ? None(row, NoneReason.InSync)
-                : Target(row, SyncAction.CopyOn(dropbox.IsFolder, Side.Local), context.Destination);
+                : Target(row, SyncAction.CopyOn(dropbox.IsFolder, Side.Local), row.Context.Destination);
         }
         if (dropbox is null) return FirstRunDeletions.ForLocalOnly(row, local, policy, comparedAt);
+
+        var context = row.Context;
+        var chosen = context.FirstRun ? policy : FirstRunPolicy.NewestWins;
         if (local.IsFolder != dropbox.IsFolder) return chosen switch
         {
             FirstRunPolicy.LocalWins => ReplaceKind(row, Side.Dropbox, dropbox.Path),
