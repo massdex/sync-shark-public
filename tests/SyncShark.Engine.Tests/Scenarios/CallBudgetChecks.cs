@@ -130,7 +130,7 @@ public static class CallBudgetChecks
         static Uri Endpoint(string name) => new(new Uri("https://example.invalid/"), name);
         var file = ItemChecks.File(Side.Local, "item", 1, "source");
         var sent = new List<(string Route, bool Close, int Length)>();
-        async Task<System.Net.HttpResponseMessage> Send(System.Net.Http.HttpRequestMessage request, CancellationToken ct)
+        async Task<System.Net.Http.HttpResponseMessage> Send(System.Net.Http.HttpRequestMessage request, CancellationToken ct)
         {
             using var args = System.Text.Json.JsonDocument.Parse(request.Headers.GetValues("Dropbox-API-Arg").Single());
             var close = args.RootElement.GetProperty("close").GetBoolean();
@@ -761,7 +761,8 @@ public static class CallBudgetChecks
                 await db.OpenAsync();
                 db.CreateFunction<string, string>("pathkey", PathNames.Key, isDeterministic: true);
                 using var schema = db.CreateCommand();
-                schema.CommandText = global::Massdex.SyncShark.Engine.Storage.Schema.Create + $"PRAGMA user_version={global::Massdex.SyncShark.Engine.Storage.Schema.Version};";
+                var version = global::Massdex.SyncShark.Engine.Storage.Schema.Version;
+                schema.CommandText = global::Massdex.SyncShark.Engine.Storage.Schema.Create + $"PRAGMA user_version={version};";
                 await schema.ExecuteNonQueryAsync();
             }
             using var store = new global::Massdex.SyncShark.Engine.Storage.Store(image, false, ItemChecks.Settings);
