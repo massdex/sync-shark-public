@@ -9,7 +9,6 @@ public sealed class RecycleBin
 {
     private const string ShellLibrary = "shell32.dll";
     private const string FileOperationClassId = "3ad05575-8857-4850-9277-11b85bdb8e09";
-    private const string ShellItemInterfaceId = "43826d1e-e718-42ee-bc55-a1e261c37bfe";
     private const uint FOF_ALLOWUNDO = 0x0040;
     private const uint FOF_NOCONFIRMATION = 0x0010;
     private const uint FOF_NOERRORUI = 0x0400;
@@ -42,7 +41,7 @@ public sealed class RecycleBin
                 Type.GetTypeFromCLSID(new Guid(FileOperationClassId), throwOnError: true)!)!;
             CheckResult(operation.SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMATION |
                 FOF_NOERRORUI | FOF_SILENT | FOFX_RECYCLEONDELETE), fullPath);
-            var iid = new Guid(ShellItemInterfaceId);
+            var iid = new Guid(IShellItem.InterfaceId);
             CheckResult(SHCreateItemFromParsingName(fullPath, IntPtr.Zero, ref iid, out item), fullPath);
             CheckResult(operation.DeleteItem(item, sink), fullPath);
             int aggregate;
