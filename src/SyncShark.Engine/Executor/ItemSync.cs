@@ -141,7 +141,12 @@ public static class ItemSync
         if(successor!=null && !safeSave) pc=null;
         var incoming=change.Side==Side.Local?pc:db;
         if(member!=null && incoming?.Id!=member.Id) return (false,null!,null,false,null);
-        if(!selectedRemoval && change.Id is {Length:>0} expected && incoming?.Id!=expected) return (true,null!,null,false,null);
+        if(!selectedRemoval && change.Id is {Length:>0} expected && incoming?.Id!=expected)
+        {
+            // Without a binding or an occupant, a missing feed identity can still become visible.
+            if(incoming==null && saved==null && change is {Side:Side.Dropbox,Kind:ChangeKind.Changed}) Retain(key,failed);
+            return (true,null!,null,false,null);
+        }
         bool Matches(Notice n) => n.Subject.Items.Any(i=>i.Id==(i.Side==Side.Local?pc:db)?.Id);
         var tie=notices.FirstOrDefault(n=>n.Kind==NoticeKind.Tie && Matches(n));
         var historical=reviewed!=null && reviewed.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && Matches(reviewed) ? reviewed : notices.FirstOrDefault(n=>n.Kind==NoticeKind.Failure && n.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && Matches(n));
