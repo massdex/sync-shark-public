@@ -108,7 +108,7 @@ public static class SignInChecks
             try
             {
                 await SignIn.RunAuthorizationAttemptAsync(watch.Token, TimeSpan.FromMilliseconds(250),
-                    attempt => SignInCallback.ReceiveCallbackAsync(redirect, path, "state-first", attempt));
+                    attempt => SignIn.ReceiveCallbackAsync(redirect, path, "state-first", attempt));
             }
             catch (TimeoutException) { timedOut = true; }
         }
@@ -116,7 +116,7 @@ public static class SignInChecks
 
         var state = "state-second";
         var pending = SignIn.RunAuthorizationAttemptAsync(CancellationToken.None, TimeSpan.FromSeconds(10),
-            attempt => SignInCallback.ReceiveCallbackAsync(redirect, path, state, attempt));
+            attempt => SignIn.ReceiveCallbackAsync(redirect, path, state, attempt));
         var page = await SendAsync(port, "GET " + path + "?code=abc&state=" + Uri.EscapeDataString(state) + " HTTP/1.1\r\nHost: localhost\r\n\r\n");
         Check.Require(await pending == "abc", "A retry after an abandoned return did not complete");
         Check.Require(page.Contains(Text.Get(TextKey.SignInReturnReceived), StringComparison.Ordinal),
@@ -130,7 +130,7 @@ public static class SignInChecks
         var path = redirect.AbsolutePath;
 
         var pending = SignIn.RunAuthorizationAttemptAsync(CancellationToken.None, TimeSpan.FromSeconds(10),
-            attempt => SignInCallback.ReceiveCallbackAsync(redirect, path, "state-third", attempt));
+            attempt => SignIn.ReceiveCallbackAsync(redirect, path, "state-third", attempt));
         var invalidPage = await SendAsync(port, "BOGUS / HTTP/1.1\r\n\r\n");
         var rejected = false;
         try { await pending; }
@@ -139,7 +139,7 @@ public static class SignInChecks
             "An invalid request line did not serve the retry copy");
 
         pending = SignIn.RunAuthorizationAttemptAsync(CancellationToken.None, TimeSpan.FromSeconds(10),
-            attempt => SignInCallback.ReceiveCallbackAsync(redirect, path, "state-fourth", attempt));
+            attempt => SignIn.ReceiveCallbackAsync(redirect, path, "state-fourth", attempt));
         var wrongStatePage = await SendAsync(port, "GET " + path + "?code=abc&state=wrong HTTP/1.1\r\nHost: localhost\r\n\r\n");
         rejected = false;
         try { await pending; }

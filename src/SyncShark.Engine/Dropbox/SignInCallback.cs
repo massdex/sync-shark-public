@@ -36,53 +36,6 @@ public static class SignInCallback
         return Text.Get(TextKey.SignInPage, (TextArg.Name, product), (TextArg.Message, WebUtility.HtmlEncode(Text.Get(received ? TextKey.SignInReturnReceived : TextKey.SignInReturnRetry))));
     }
 
-    /// <summary>Receives one loopback return on the fixed callback: starts listening, optionally opens the browser,
-    /// verifies the return and serves the receipt page. A malformed or incomplete request serves the retry page when the
-    /// socket is still writable. The supplied token bounds the whole attempt.</summary>
-    public static async Task<string> ReceiveCallbackAsync(Uri redirectUri, string expectedPath, string expectedState,
-        CancellationToken ct, Action? browser = null)
-    {
-        var listener = SignIn.StartListener(redirectUri, expectedPath);
-        try
-        {
-            using var registration = ct.Register(listener.Stop);
-            browser?.Invoke();
-            var client = await AcceptAsync(listener, ct);
-            try
-            {
-                var stream = client.GetStream();
-                try
-                {
-                    string target;
-                    try { target = await ReadCallbackTargetAsync(stream, ct); }
-                    catch
-                    {
-                        await TryWriteRetryAsync(stream, ct);
-                        throw;
-                    }
-                    string code;
-                    try { code = ParseCallbackTarget(target, expectedPath, expectedState); }
-                    catch
-                    {
-                        await TryWriteRetryAsync(stream, ct);
-                        throw;
-                    }
-                    await WritePageAsync(stream, AcknowledgementPage(received: true), ct);
-                    return code;
-                }
-                finally { await stream.DisposeAsync(); }
-            }
-            finally { client.Dispose(); }
-        }
-        finally { listener.Stop(); }
-    }
-
-    private static async Task<TcpClient> AcceptAsync(TcpListener listener, CancellationToken ct)
-    {
-        try { return await listener.AcceptTcpClientAsync(ct); }
-        catch (SocketException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(ct); }
-    }
-
     private static async Task<string> ReadCallbackTargetAsync(Stream stream, CancellationToken ct)
     {
         var buffer = new byte[MaximumCallbackBytes];

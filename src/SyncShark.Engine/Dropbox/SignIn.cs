@@ -61,7 +61,7 @@ public sealed class SignIn
         {
             var redirect = RedirectUri;
             var (verifier, challenge, state) = CreatePkceFlow();
-            var code = await SignInCallback.ReceiveCallbackAsync(redirect, redirect.AbsolutePath, state, attempt,
+            var code = await ReceiveCallbackAsync(redirect, redirect.AbsolutePath, state, attempt,
                 () => StartBrowser(BuildAuthorizationUri(ClientId, redirect, challenge, state)));
             var token = await SignInTokens.TokenAsync(api.SendAsync, new Dictionary<string, string>
             {
@@ -269,6 +269,53 @@ public sealed class SignIn
             catch (DropboxCredentialUnavailableException) { /* Revoked access also needs sign-in. */ }
         }
         throw new ItemFailedException(string.Empty, TextKey.SignInReturnRetry, null);
+    }
+
+    /// <summary>Receives one loopback return on the fixed callback: starts listening, optionally opens the browser,
+    /// verifies the return and serves the receipt page. A malformed or incomplete request serves the retry page when the
+    /// socket is still writable. The supplied token bounds the whole attempt.</summary>
+    public static async Task<string> ReceiveCallbackAsync(Uri redirectUri, string expectedPath, string expectedState,
+        CancellationToken ct, Action? browser = null)
+    {
+        var listener = SignIn.StartListener(redirectUri, expectedPath);
+        try
+        {
+            using var registration = ct.Register(listener.Stop);
+            browser?.Invoke();
+            var client = await AcceptAsync(listener, ct);
+            try
+            {
+                var stream = client.GetStream();
+                try
+                {
+                    string target;
+                    try { target = await SignInCallback.ReadCallbackTargetAsync(stream, ct); }
+                    catch
+                    {
+                        await SignInCallback.TryWriteRetryAsync(stream, ct);
+                        throw;
+                    }
+                    string code;
+                    try { code = SignInCallback.ParseCallbackTarget(target, expectedPath, expectedState); }
+                    catch
+                    {
+                        await SignInCallback.TryWriteRetryAsync(stream, ct);
+                        throw;
+                    }
+                    await SignInCallback.WritePageAsync(stream, SignInCallback.AcknowledgementPage(received: true), ct);
+                    return code;
+                }
+                finally { await stream.DisposeAsync(); }
+            }
+            finally { client.Dispose(); }
+        }
+        finally { listener.Stop(); }
+    }
+
+    private static async Task<TcpClient> AcceptAsync(TcpListener listener, CancellationToken ct)
+    {
+        try { return await listener.AcceptTcpClientAsync(ct); }
+        catch (SocketException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(ct); }
     }
 
     internal static TcpListener StartListener(Uri redirectUri, string expectedPath)
