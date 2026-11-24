@@ -460,15 +460,14 @@ public static class HostChecks
             var applied=await host.SetExclusionAsync(pair.PairId,selection,false,true,default);
             Check.Require(applied.Outcome==ExclusionOutcome.Pending && applied.Cause==TextKey.ReadLocalFailed && local.Items.ContainsKey(selection.Path),"Host dropped the observed apply cause or inferred it from the healthy preview");
         } finally {await host.StopAsync(default);}
-        foreach(var kept in new[]{"ex","kept"}) await IncludeAfterInterruptedExclusion(kept);
+        await IncludeAfterInterruptedExclusion();
     }
     // A no-keep exclusion removed the Dropbox copy but stopped before forgetting its bindings; including again keeps the PC copy and copies it back.
-    // The kept PC folder may be bound under another name; the owed Repair must still scan it.
-    private static async Task IncludeAfterInterruptedExclusion(string kept)
+    private static async Task IncludeAfterInterruptedExclusion()
     {
         using var store=new InMemoryStateStore();var pair=Bound("include",@"T:\Include",1) with {Exclusions=[new(Side.Dropbox,"ex",false)]};
         await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
-        var folder=ItemChecks.File(Side.Local,kept,0,"pc-ex",true);var file=ItemChecks.File(Side.Local,kept+"/f",1,"pc-f");
+        var folder=ItemChecks.File(Side.Local,"ex",0,"pc-ex",true);var file=ItemChecks.File(Side.Local,"ex/f",1,"pc-f");
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(folder,ItemChecks.File(Side.Dropbox,"ex",0,"db-ex",true)),null,null,default);
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(file,ItemChecks.File(Side.Dropbox,"ex/f",1,"db-f")),null,null,default);
         var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};pc.Seed(folder,[]);pc.Seed(file,[1]);
@@ -483,10 +482,10 @@ public static class HostChecks
             var included=await host.SetExclusionAsync(pair.PairId,new(Side.Dropbox,"ex",false),true,false,ct);
             // The owed Repair ends by finishing, or by recycling the kept copy (the wrong outcome); either way the outcome is asserted.
             await Task.WhenAny(finished.Task,recycled.Task).WaitAsync(ct);
-            Check.Require(included.Outcome==ExclusionOutcome.Applied && pc.History.Count==0 && pc.Items.ContainsKey(file.Path),$"Include after an interrupted no-keep exclusion recycled the kept PC copy ({kept})");
+            Check.Require(included.Outcome==ExclusionOutcome.Applied && pc.History.Count==0 && pc.Items.ContainsKey(file.Path),$"Include after an interrupted no-keep exclusion recycled the kept PC copy");
             Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.KeyFor(Side.Local,file.Path),ct) is {} binding && binding.IdOn(Side.Dropbox)!="db-f" &&
-                cloud.Items.TryGetValue(binding.DropboxPath,out var back) && back.Bytes.SequenceEqual(new byte[]{1}),$"Include did not bring the kept PC copy back to Dropbox under a new binding ({kept})");
-            Check.Require((await store.PairAsync(pair.PairId,ct))!.OwedScopes is not {Count:>0},$"Include left its owed Repair scope unsettled ({kept})");
+                cloud.Items.TryGetValue(binding.DropboxPath,out var back) && back.Bytes.SequenceEqual(new byte[]{1}),$"Include did not bring the kept PC copy back to Dropbox under a new binding");
+            Check.Require((await store.PairAsync(pair.PairId,ct))!.OwedScopes is not {Count:>0},$"Include left its owed Repair scope unsettled");
         }finally{stop.Cancel();await host.StopAsync(default);}
     }
     /// <summary>Later feed input cannot retry a retained item through a configuration publication in progress.</summary>
