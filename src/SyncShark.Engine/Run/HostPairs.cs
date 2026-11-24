@@ -147,6 +147,8 @@ internal sealed class HostPairs(Host host)
             var list=p.Exclusions.Where(e => e.Side!=exclusion.Side || !PathNames.Same(e.Path,exclusion.Path)).ToList(); if (!include) list.Add(exclusion);
             var next=p with {Exclusions=list};
             if (!include && !exclusion.Keep) return await Exclude(m,next,exclusion,confirmed,ct);
+            // Map before forgetting: a leftover binding still names the kept side's actual folder, which the owed Repair must scan.
+            var mapped=await Mapped(p,exclusion.Side,exclusion.Path,ct);
             // A no-keep exclusion's removed side was the app's removal: forget leftover bindings so the kept copy comes back.
             if (include && p.Exclusions.FirstOrDefault(e=>e.Side==exclusion.Side && PathNames.Same(e.Path,exclusion.Path)) is {Keep:false} removed)
             {
@@ -156,7 +158,7 @@ internal sealed class HostPairs(Host host)
                 await foreach (var d in host.Store.DescendantsAsync(p.PairId,removed.Side,root,ct)) left.Add(d);
                 foreach (var b in left) if (await side.ReadOneAsync(b.PathOn(removed.Side),ct)==null) await host.Store.CommitAsync(p.PairId,b,null,null,null,ct);
             }
-            var mapped=await Mapped(p,exclusion.Side,exclusion.Path,ct); await Change(m,next,include ? [mapped] : [],ct,mapped); return (ExclusionOutcome.Applied,0,0,0,0,null,null);
+            await Change(m,next,include ? [mapped] : [],ct,mapped); return (ExclusionOutcome.Applied,0,0,0,0,null,null);
         }
         finally { host.Commands.Release(); }
     }

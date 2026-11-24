@@ -12,9 +12,9 @@ public sealed class WorkQueue
     private readonly object gate = new();
     private readonly WorkOrder graph = new();
     private readonly bool[] gap = new bool[2];
-    // Admitted page changes not yet settled, per source side.
     private readonly int[] pendingChanges = [0, 0];
-    internal int Pending(Side source) { lock (gate) return pendingChanges[(int)source]; }
+    /// <summary>Admitted page changes not yet settled, per source side.</summary>
+    public int Pending(Side source) { lock (gate) return pendingChanges[(int)source]; }
 
     /// <summary>A fresh cursor after a reset is not coverage of the history that was lost.</summary>
     public void LoseCoverage(Side source) { lock (gate) gap[(int)source]=true; }
@@ -242,18 +242,9 @@ public sealed class WorkQueue
     {
         WorkInput[] entries;
         lock(gate) entries=(selected!=null ? selected.Subject.Items.Select(x=>PathNames.KeyFor(x.Side,x.Path)).Distinct() : scope==null ? graph.HeldByKey.Keys : Keys([scope.LocalPath,scope.DropboxPath]).SelectMany(graph.Matches))
-            .Where(graph.HeldByKey.ContainsKey).SelectMany(k=>graph.HeldByKey[k]).Distinct().Where(i=>i.Failed && (selected==null || SameSubject(i,selected))).OrderBy(i=>i.Order).ToArray();
+            .Where(graph.HeldByKey.ContainsKey).SelectMany(k=>graph.HeldByKey[k]).Distinct().Where(i=>i.Failed && (selected==null || i.SameSubject(selected))).OrderBy(i=>i.Order).ToArray();
         foreach(var item in entries) await Attempt(item,ct).ConfigureAwait(false);
         return entries.Length!=0;
-    }
-    private static bool SameSubject(WorkInput i,Notice n)
-    {
-        bool Match(Side side,string? id,string? path) => id!=null && path!=null &&
-            n.Subject.Items.Any(s=>s.Side==side && s.Id==id && PathNames.Same(s.Path,path));
-        if(i.Change is {} c) return Match(c.Side,c.Id,c.Path) || Match(c.Side,c.Id,c.OldPath);
-        foreach(var side in new[]{Side.Local,Side.Dropbox})
-            if(i.Row?.EntryOn(side) is {} entry && Match(side,entry.Id,entry.Path)) return true;
-        return i.Moves.Any(m=>Match(m.Side,m.Moved.Id,m.Moved.Path) || Match(m.Side,m.Synced.IdOn(m.Side),m.Synced.PathOn(m.Side)));
     }
     private async Task Attempt(WorkInput item,CancellationToken ct,long? observed=null)
     {

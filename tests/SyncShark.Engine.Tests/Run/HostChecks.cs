@@ -88,7 +88,7 @@ public static class HostChecks
         var pics=ItemChecks.File(Side.Local,"Pics",0,"pics-id",true);var photos=ItemChecks.File(Side.Dropbox,"Photos",0,"photos-id",true);
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(pics,photos),null,null,default);pc.Local.Seed(pics,[]);db.Local.Seed(photos,[]);
         var ledger=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)ledger;tap.Store=store;
-        int picsLookups=0,pcReads=0;tap.Lookup=key=>{if(key==PathNames.Key(pics.Path))Interlocked.Increment(ref picsLookups);};
+        int picsLookups=0,pcReads=0;var picsSeen=Signal();tap.Lookup=key=>{if(key==PathNames.Key(pics.Path)){Interlocked.Increment(ref picsLookups);picsSeen.TrySetResult();}};
         pc.Feed=async (_,token)=>{if(Interlocked.Increment(ref pcReads)==1)return new([new(Side.Local,ChangeKind.Changed,pics.Path,null,"missing",null,false,false)],null,new(1,5));
             await Task.Delay(Timeout.Infinite,token);throw new InvalidOperationException();};
         using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(10));var ct=stop.Token;
@@ -96,6 +96,9 @@ public static class HostChecks
         try{
             await host.StartAsync(ct);await admitted.Task.WaitAsync(ct);
             Check.Require(await store.CursorAsync(pair.PairId,ct)==null && db.Local.Requests[nameof(ISide.ReadOneAsync)]>0,"Missing feed identity did not leave the page unsettled");
+            // Public status counts both held Dropbox changes toward this PC and the held PC change toward Dropbox.
+            await picsSeen.Task.WaitAsync(ct);var waiting=Text.Get(TextKey.StatusPendingIncoming,(TextArg.Pair,pair.PairId),(TextArg.Count,"2"),(TextArg.Total,"1"));
+            Check.Require((await host.StatusAsync(pair.PairId,ct)).Contains(waiting,StringComparison.Ordinal),"Status did not show the held changes in both directions");
             db.Local.Recoverable[(v.Id,v.Revision,v.ContentHash)]=new Recovery.File(v,new MemoryStream([3]));
             await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.PutBack,TextKey.FailChanged,v.Path,new([new(Side.Dropbox,v.Path,v.Id)],Side.Dropbox),DateTimeOffset.UnixEpoch,false),ct);
             Notice? selected=null;await foreach(var n in host.NoticesAsync(pair.PairId,ct))if(n.Kind==NoticeKind.PutBack)selected=n;
@@ -158,12 +161,12 @@ public static class HostChecks
         var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;
         var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};var local=QuietSide(pc);
         var remote=QuietSide(new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)});var cloud=(JournalProbe)(object)remote;
-        var boot=Signal();var failRead=Signal();var finished=Signal();var copied=Signal();int reads=0;
+        var boot=Signal();var failRead=Signal();var finished=Signal();var copied=Signal();int reads=0,rootNotices=-1;
         var injected=new IOException("injected store failure");var item=ItemChecks.File(Side.Dropbox,"later",3,"item-id");
         tap.Finished=()=>finished.TrySetResult();tap.CursorSaved=()=>{if(pc.Items.TryGetValue(item.Path,out var file) && file.Bytes.SequenceEqual(new byte[]{3}))copied.TrySetResult();};
         cloud.Feed=async (_,ct)=>{switch(Interlocked.Increment(ref reads)){
             case 1:await failRead.Task.WaitAsync(ct);if(unexpected)throw new InvalidOperationException("injected read failure");throw new ItemFailedException(string.Empty,TextKey.SignInReturnRetry,null);
-            case 2:if(manual)await finished.Task.WaitAsync(ct);cloud.Local.Seed(item,[3]);return new([new(Side.Dropbox,ChangeKind.Changed,item.Path,null,item.Id,item,true,false)],"later",null);
+            case 2:rootNotices=store.OpenNotices.Count(n=>n.Cause==TextKey.RootUnavailable);if(manual)await finished.Task.WaitAsync(ct);cloud.Local.Seed(item,[3]);return new([new(Side.Dropbox,ChangeKind.Changed,item.Path,null,item.Id,item,true,false)],"later",null);
             default:await Task.Delay(Timeout.Infinite,ct);throw new InvalidOperationException();}};
         var logs=new MemoryLogs();var output=new StringWriter();logs.Capture=output;
         var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_,_)=>Task.FromResult((local,remote)),ItemChecks.Settings,logs,TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask,(_,_,_)=>{boot.TrySetResult();return Task.CompletedTask;});
@@ -178,7 +181,8 @@ public static class HostChecks
             try{await (manual ? Task.WhenAll(copied.Task,finished.Task) : copied.Task).WaitAsync(token);recovered=true;}catch(OperationCanceledException) when(token.IsCancellationRequested){}
         }finally{stop.Cancel();try{await host.StopAsync(default);}catch(IOException e) when(e==injected){recovered=false;}}
         if(manual)Check.Require(recovered && host.Stopping.IsCancellationRequested,"Failed explicit Repair blocked owed Repair or clean shutdown");
-        else Check.Require(recovered && output.ToString().Contains(unexpected ? nameof(InvalidOperationException) : nameof(IOException),StringComparison.Ordinal),unexpected ? "Unexpected pair-loop failure stopped later sync or was logged without its type" : "Failed notice write stopped later sync or was not logged");
+        else if(unexpected) Check.Require(rootNotices==1,$"Unexpected pair-loop failure raised {rootNotices} RootUnavailable notices before the retry, not one");
+        if(!manual) Check.Require(recovered && output.ToString().Contains(unexpected ? nameof(InvalidOperationException) : nameof(IOException),StringComparison.Ordinal),unexpected ? "Unexpected pair-loop failure stopped later sync or was logged without its type" : "Failed notice write stopped later sync or was not logged");
     }
     private sealed class RetryClock : TimeProvider
     {
@@ -456,30 +460,33 @@ public static class HostChecks
             var applied=await host.SetExclusionAsync(pair.PairId,selection,false,true,default);
             Check.Require(applied.Outcome==ExclusionOutcome.Pending && applied.Cause==TextKey.ReadLocalFailed && local.Items.ContainsKey(selection.Path),"Host dropped the observed apply cause or inferred it from the healthy preview");
         } finally {await host.StopAsync(default);}
-        await IncludeAfterInterruptedExclusion();
+        foreach(var kept in new[]{"ex","kept"}) await IncludeAfterInterruptedExclusion(kept);
     }
     // A no-keep exclusion removed the Dropbox copy but stopped before forgetting its bindings; including again keeps the PC copy and copies it back.
-    private static async Task IncludeAfterInterruptedExclusion()
+    // The kept PC folder may be bound under another name; the owed Repair must still scan it.
+    private static async Task IncludeAfterInterruptedExclusion(string kept)
     {
         using var store=new InMemoryStateStore();var pair=Bound("include",@"T:\Include",1) with {Exclusions=[new(Side.Dropbox,"ex",false)]};
         await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
-        var folder=ItemChecks.File(Side.Local,"ex",0,"pc-ex",true);var file=ItemChecks.File(Side.Local,"ex/f",1,"pc-f");
+        var folder=ItemChecks.File(Side.Local,kept,0,"pc-ex",true);var file=ItemChecks.File(Side.Local,kept+"/f",1,"pc-f");
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(folder,ItemChecks.File(Side.Dropbox,"ex",0,"db-ex",true)),null,null,default);
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(file,ItemChecks.File(Side.Dropbox,"ex/f",1,"db-f")),null,null,default);
         var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};pc.Seed(folder,[]);pc.Seed(file,[1]);
         var cloud=new FakeSide(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
         var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;
-        var boot=Signal();var finished=Signal();tap.Finished=()=>finished.TrySetResult();
+        var boot=Signal();var finished=Signal();tap.Finished=()=>finished.TrySetResult();var recycled=Signal();pc.AfterDelete=_=>recycled.TrySetResult();
         var logs=new MemoryLogs();using(var preflight=new RunLog(logs,"include",ItemChecks.Settings)){}
         var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_,_)=>Task.FromResult((QuietSide(pc),QuietSide(cloud))),ItemChecks.Settings,logs,TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask,(_,_,_)=>{boot.TrySetResult();return Task.CompletedTask;});
-        using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(10));var ct=stop.Token;
+        using var stop=new CancellationTokenSource();var ct=stop.Token; // Cleanup only; the CI job watchdog guards a hang.
         try{
             await host.StartAsync(ct);await boot.Task.WaitAsync(ct);
             var included=await host.SetExclusionAsync(pair.PairId,new(Side.Dropbox,"ex",false),true,false,ct);
-            await finished.Task.WaitAsync(ct);
-            Check.Require(included.Outcome==ExclusionOutcome.Applied && pc.History.Count==0 && pc.Items.ContainsKey(file.Path),"Include after an interrupted no-keep exclusion recycled the kept PC copy");
-            Check.Require(cloud.Items.TryGetValue(file.Path,out var back) && back.Bytes.SequenceEqual(new byte[]{1}) &&
-                await store.FindAsync(pair.PairId,Side.Local,PathNames.KeyFor(Side.Local,file.Path),ct) is {} binding && binding.IdOn(Side.Dropbox)!="db-f","Include did not bring the kept PC copy back to Dropbox under a new binding");
+            // The owed Repair ends by finishing, or by recycling the kept copy (the wrong outcome); either way the outcome is asserted.
+            await Task.WhenAny(finished.Task,recycled.Task).WaitAsync(ct);
+            Check.Require(included.Outcome==ExclusionOutcome.Applied && pc.History.Count==0 && pc.Items.ContainsKey(file.Path),$"Include after an interrupted no-keep exclusion recycled the kept PC copy ({kept})");
+            Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.KeyFor(Side.Local,file.Path),ct) is {} binding && binding.IdOn(Side.Dropbox)!="db-f" &&
+                cloud.Items.TryGetValue(binding.DropboxPath,out var back) && back.Bytes.SequenceEqual(new byte[]{1}),$"Include did not bring the kept PC copy back to Dropbox under a new binding ({kept})");
+            Check.Require((await store.PairAsync(pair.PairId,ct))!.OwedScopes is not {Count:>0},$"Include left its owed Repair scope unsettled ({kept})");
         }finally{stop.Cancel();await host.StopAsync(default);}
     }
     /// <summary>Later feed input cannot retry a retained item through a configuration publication in progress.</summary>
@@ -557,7 +564,7 @@ public static class HostChecks
         // Drain's last call pauses the journal member; fail only that one, after admission.
         probe.Published=()=>{if(!probe.Paused)admitted.TrySetResult();else if(failing)throw injected;};
         var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_)=>(local,QuietSide(new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)})),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
-        await host.StartAsync(default);await admitted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await host.StartAsync(default);await admitted.Task; // The CI job watchdog guards a hang.
         failing=true;
         try{await host.StopAsync(default);throw new InvalidDataException("Stop hid the drain failure");}catch(IOException e) when(e==injected){}
         Check.Require(host.Stopping.IsCancellationRequested && tap.Disposed,"A failed drain skipped the stop signal or store disposal");

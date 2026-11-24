@@ -214,9 +214,7 @@ public static class WorkQueueChecks
         Check.Require(regressions.Count==0,string.Join("; ",regressions));
         // Admitted changes count as pending incoming work on their source side until they settle.
         var counted=new WorkQueue();var stall=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        // Pending is internal and the test assembly has no InternalsVisibleTo.
-        var pendingOf=typeof(WorkQueue).GetMethod("Pending",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic) ?? throw new InvalidDataException("WorkQueue has no pending count");
-        int PendingOn(Side side)=>(int)pendingOf.Invoke(counted,[side])!;
+        int PendingOn(Side side)=>counted.Pending(side);
         var twoChanges=counted.AdmitAsync(pair,new([first,first with {Path="independent"}],"pending",null),async (_,ct)=>await stall.Task.WaitAsync(ct),null,default);
         Check.Require(PendingOn(Side.Dropbox)==2 && PendingOn(Side.Local)==0,"Admitted changes were not counted as pending on their source side");
         stall.SetResult();await twoChanges;
