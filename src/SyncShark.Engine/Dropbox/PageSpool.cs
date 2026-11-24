@@ -17,9 +17,7 @@ internal sealed class PageSpool(PairConfig pair)
 
     internal void Begin()
     {
-        _spool = new FileStream(Path.Combine(Path.GetTempPath(), Path.GetRandomFileName()), FileMode.CreateNew,
-            FileAccess.ReadWrite, FileShare.None, bufferSize: DropboxReply.ChunkBytes,
-            options: FileOptions.Asynchronous | FileOptions.DeleteOnClose | FileOptions.SequentialScan);
+        _spool = DropboxReplyShapes.OpenSpool();
         _pending = new MemoryStream();
         _writer = new BinaryWriter(_pending, Encoding.UTF8, leaveOpen: true);
         _failure = null;

@@ -80,6 +80,11 @@ public static class DropboxReplyShapes
             ("entries", entries)), page.SealAsync, page.Begin, page.AbortAsync, page.DrainAsync);
     }
 
+    // System.IO.FileStream is owned by this Dropbox I/O owner (Layout/Dependencies), not by PageSpool.
+    internal static Stream OpenSpool() => new FileStream(Path.Combine(Path.GetTempPath(), Path.GetRandomFileName()),
+        FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, bufferSize: DropboxReply.ChunkBytes,
+        options: FileOptions.Asynchronous | FileOptions.DeleteOnClose | FileOptions.SequentialScan);
+
     public static DropboxReply<Listed> Listed(PairConfig pair) =>
         Of(MetadataValue, root => DropboxEntries.Parse(root, pair));
 
