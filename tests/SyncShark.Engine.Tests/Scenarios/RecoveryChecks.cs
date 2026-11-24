@@ -394,19 +394,17 @@ public static class RecoveryChecks
         using var store=new InMemoryStateStore();await store.SavePairAsync(pair,default);
         int reads=0;
         var boundary=new JournalPosition(1,20);JournalPosition? restartFrom=null;
-        // The source respects the requested [from,end) interval: the one record lives at usn 11 and is surfaced only when
-        // the interval covers it. The first process sees it as an irrelevant reason; a rewinding restart would see it as
-        // work that must not be replayed, so a reader that begins before the stored boundary is caught by both asserts.
+        // The source respects the requested [from,end) interval: one immutable raw record lives at usn 11 and is surfaced
+        // only when the interval covers it. Its reason is irrelevant (basic-info, EA and security bits: no data, create,
+        // delete or rename), so even a reader that rewinds before the stored boundary sees no work; the restartFrom
+        // assertion below is what catches that rewind. A native journal never returns different facts for one USN.
         var source=new JournalSource{Tail=new JournalPosition(1,100)};
         source.Page=(from,end,ct)=>{
             bool first=Interlocked.Increment(ref reads)==1;
             ulong limit=end?.NextUsn ?? from.NextUsn+1;
-            UsnRecord[] records;
-            if(11UL>=from.NextUsn && 11UL<limit)
-                records=first ? new[]{new UsnRecord(12,11,11,0x8C00,FileAttributes.Normal,"item")}
-                    : from.NextUsn<boundary.NextUsn ? new[]{new UsnRecord(14,11,11,0x100,FileAttributes.Normal,"earlier")}
-                    : Array.Empty<UsnRecord>();
-            else records=Array.Empty<UsnRecord>();
+            UsnRecord[] records=11UL>=from.NextUsn && 11UL<limit
+                ? new[]{new UsnRecord(12,11,11,0x8C00,FileAttributes.Normal,"item")}
+                : Array.Empty<UsnRecord>();
             if(!first) restartFrom??=from;
             return Task.FromResult(new NtfsUsnPage(NtfsUsnPageStatus.Complete,limit,null,records));};
         var start=new JournalPosition(1,10);
@@ -455,6 +453,7 @@ public static class RecoveryChecks
                 return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.Observation.Forward(cloud,m,args);});
             await AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),pc,observed,reopened,(null,"done"),()=>{},default);
             Check.Require(requested=="settled","The restarted reader did not request the exact saved cursor");
+            Check.Require(await reopened.CursorAsync(pair.PairId,default)=="done","The restarted reader did not commit the new boundary");
             Check.Require(cloud.Requests[nameof(ISide.ReadOneAsync)]==0 && cloud.Requests[nameof(ISide.PublishAsync)]==0 && pc.Requests[nameof(ISide.PublishAsync)]==0,"An empty page replayed work after the restart");
             var reopenedNotices=new List<Notice>();await foreach(var notice in reopened.NoticesAsync(pair.PairId,default)) reopenedNotices.Add(notice);
             Check.Require((await reopened.FindAsync(pair.PairId,Side.Local,SyncedEntries.From(steady,peer).LocalKey,default)) is not null && reopenedNotices.Count==0 && (await reopened.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason==null,"An empty page changed data or owed a Repair after the reopening");
