@@ -150,7 +150,7 @@ public sealed class Unfinished
         {
             if(completed.Contains(i)) continue;
             var member=job.Launch[i]; var receipt=reply.Members[i];
-            if(job.Route is "files/create_folder_batch" or "files/create_folder_batch/check") {deferred??=await CreatedAsync(call,job,i,member,receipt,completed);continue;}
+            if(job.Route is "files/create_folder_batch" or "files/create_folder_batch/check") {var waiting=await CreatedAsync(call,job,i,member,receipt,completed);deferred??=waiting;continue;}
             // A wire delete alone cannot distinguish removal, replacement and move cleanup on restart.
             var origin=member.Origin;
             if(delete && origin is not (ActionKind.DeleteDropbox or ActionKind.ReplaceKind or ActionKind.MoveDropbox)) continue;
