@@ -30,15 +30,16 @@ public static class ItemSync
         var debt=reviewed?.Subject.FirstRunDeletion??IssueSubject.FirstRunDeletionKind.None;
         try
         {
-            var removal=await SettleTombstoneAsync(pair,settings,events,paths,change,key,saved,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,coversThrough);
-            if(removal.Settled is {} tombstoned) return tombstoned;
+            bool selectedRemoval=SelectedRemoval(change,saved);
+            if(change is {Side:Side.Dropbox,Kind:ChangeKind.Deleted} && selectedRemoval && await dropbox.ReadByIdAsync(saved!.DropboxId,ct) is {InScope:true} location)
+                return TombstoneOwnsName(key,saved!,location.Location.Entry,failed) || await RowExecution.ExecuteAsync(pair,settings,events,paths,null,[new(Side.Dropbox,location.Location.Entry,saved!)],false,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,false,coversThrough:coversThrough);
+            if(saved is {IsFolder:true} && selectedRemoval) return await RowExecution.RemoveBoundAsync(pair,settings,events,paths,saved,change.Side,local,dropbox,store,heldInput,populate,compareOldBinding,failed,ct,coversThrough);
             var pcTask=local.ReadOneAsync(endpoints.LocalPath,ct); var dbTask=dropbox.ReadOneAsync(endpoints.DropboxPath,ct); await Task.WhenAll(pcTask,dbTask);
             var pc=await pcTask; var db=await dbTask; RequireReadable(Side.Local,pc); RequireReadable(Side.Dropbox,db);
             if(await SettleReusedNameAsync(pair,settings,events,paths,change,key,saved,pc,db,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,reviewed,member,coversThrough) is {} reused) return reused;
-            var removed=await SettleRemovalAsync(pair,settings,events,paths,change,key,saved,endpoints,pc,removal.Selected,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,coversThrough);
+            var removed=await SettleRemovalAsync(pair,settings,events,paths,change,key,saved,endpoints,pc,selectedRemoval,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,coversThrough);
             if(removed.Settled is {} settled) return settled;
-            var observed=ObserveReplacement(paths,change,key,path,saved,mapped,endpoints,pc,db,removed.Selected,notices,reviewed,member,failed); if(observed.Settled is {} replaced) return replaced;
-            debt=observed.Historical?.Subject.FirstRunDeletion??IssueSubject.FirstRunDeletionKind.None;
+            var observed=ObserveReplacement(paths,change,key,path,saved,mapped,endpoints,pc,db,removed.Selected,notices,reviewed,member,failed); if(observed.Settled is {} replaced) return replaced; debt=observed.Historical?.Subject.FirstRunDeletion??IssueSubject.FirstRunDeletionKind.None;
             var row=await FirstRunEvidenceAsync(observed.Row,observed.Historical,debt,reviewed,member,endpoints.DropboxPath,dropbox,ct);
             var candidates=await RenameCandidatesAsync(pair,change,key,saved,row,store,failed,ct);
             var incoming=row.EntryOn(change.Side);
@@ -56,20 +57,15 @@ public static class ItemSync
         }
     }
 
-    private static async ValueTask<(bool? Settled,bool Selected)> SettleTombstoneAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,Change change,string key,SyncedEntry? saved,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough)
+    private static bool SelectedRemoval(Change change,SyncedEntry? saved) =>
+        change.Kind==ChangeKind.Deleted && saved!=null && (change.Side==Side.Dropbox ? change.Id==null || change.Id==saved.DropboxId : change.IdentityDeleted && change.Id is {Length:>0} removed && removed==saved.LocalId);
+
+    // True when the same identity still owns this name; this tombstone cannot delete it.
+    private static bool TombstoneOwnsName(string key,SyncedEntry saved,Entry actual,Action<string,bool>? failed)
     {
-        var tombstone=change.Side==Side.Dropbox && change.Kind==ChangeKind.Deleted && saved!=null;
-        bool selectedRemoval=change.Kind==ChangeKind.Deleted && saved!=null && (change.Side==Side.Dropbox ? change.Id==null || change.Id==saved.DropboxId : change.IdentityDeleted && change.Id is {Length:>0} removed && removed==saved.LocalId);
-        if(tombstone && selectedRemoval && await dropbox.ReadByIdAsync(saved!.DropboxId,ct) is {InScope:true} location)
-        {
-            var actual=location.Location.Entry; RequireReadable(Side.Dropbox,actual);
-            if(actual.Id!=saved.DropboxId || actual.IsFolder!=saved.IsFolder) Retain(key,failed);
-            if(actual.Path==saved.DropboxPath) return (true,true); // The same identity still owns this name; this tombstone cannot delete it.
-            return (await RowExecution.ExecuteAsync(pair,settings,events,paths,null,[new(Side.Dropbox,actual,saved)],false,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,false,coversThrough:coversThrough),true);
-        }
-        if(saved is {IsFolder:true} && selectedRemoval)
-            return (await RowExecution.RemoveBoundAsync(pair,settings,events,paths,saved,change.Side,local,dropbox,store,heldInput,populate,compareOldBinding,failed,ct,coversThrough),true);
-        return (null,selectedRemoval);
+        RequireReadable(Side.Dropbox,actual);
+        if(actual.Id!=saved.DropboxId || actual.IsFolder!=saved.IsFolder) Retain(key,failed);
+        return actual.Path==saved.DropboxPath;
     }
 
     // At a reused name settle the old identities, not the item that inherited the name.
