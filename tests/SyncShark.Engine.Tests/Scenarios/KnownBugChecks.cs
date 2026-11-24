@@ -334,77 +334,18 @@ public static class KnownBugChecks
         }
     }
 
-    /// <summary>L119: a crash after the Dropbox-side exclusion removal but before its save must not recycle the PC copy
-    /// that was meant to stay. On restart the owed exclusion settles, and including the path again restores Dropbox.</summary>
-    public static async Task L119CrashAfterExclusionRemovalAsync()
-    {
-        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        var ct = budget.Token;
-        var exclusion = new Exclusion(Side.Dropbox, "x", false);
-        // The pair must carry the exclusion so FolderDelete knows the kept PC copy is the excluded counterpart.
-        var pair = ItemChecks.Pair() with { Exclusions = [exclusion], OwedScopes = [new Scope("x", "x")] };
-        using var store = new InMemoryStateStore();
-        var local = new FakeSide(Side.Local);
-        var remote = new FakeSide(Side.Dropbox);
-        await store.SavePairAsync(pair, ct);
-        var folderL = ItemChecks.File(Side.Local, "x", 0, "lf-x", folder: true);
-        var folderD = ItemChecks.File(Side.Dropbox, "x", 0, "df-x", folder: true);
-        var fileL = ItemChecks.File(Side.Local, "x/a", 1, "lf-a");
-        var fileD = ItemChecks.File(Side.Dropbox, "x/a", 1, "df-a");
-        local.Seed(folderL, []);
-        local.Seed(fileL, [1]);
-        remote.Seed(folderD, []);
-        remote.Seed(fileD, [1]);
-        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(folderL, folderD), null, null, ct);
-        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(fileL, fileD), null, null, ct);
-        // Boundary positions so the exclusion's removal coverage check can pass.
-        local.IdleBoundary = new ChangePage([], "l", new JournalPosition(1, 1));
-        remote.IdleBoundary = new ChangePage([], "r", null);
-        var paths = new PathScope(pair, [pair], DriveType.Fixed);
-        // Crash on the first save after the physical Dropbox removal ("crash after removal, before commit").
-        var removed = false;
-        remote.AfterDelete = entry => { if (entry.Path is "x" or "x/a") removed = true; };
-        var crashed = false;
-        var storeCrash = FolderDeleteChecks.Observe.Wrap<IStore>(store, (op, _) =>
-        {
-            if (op == nameof(IStore.CommitAsync) && removed && !crashed)
-            {
-                crashed = true;
-                throw new IOException("simulated crash after the Dropbox removal, before the save");
-            }
-            return null;
-        });
-        var coverageAsked = false;
-        (ExclusionOutcome Outcome, TextKey? Cause)? first = null;
-        try
-        {
-            first = await new Exclusions().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, exclusion,
-                local, remote, storeCrash, (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, ct,
-                heldInput: _ => [], coversThrough: _ => { coverageAsked = true; return true; });
-        }
-        catch (Exception error) when (error is IOException or AggregateException) { }
-        Check.Require(crashed && !remote.Items.ContainsKey("x") && !remote.Items.ContainsKey("x/a"),
-            $"L119: the crash cut did not remove the excluded Dropbox copy before the save (crashed={crashed} removed={removed} outcome={first?.Outcome} cause={first?.Cause} coverageAsked={coverageAsked} notices={store.OpenNotices.Count()} remoteX={remote.Items.ContainsKey("x")} remoteXA={remote.Items.ContainsKey("x/a")} deletes={remote.Requests[nameof(ISide.DeleteAsync)]} remoteReads={remote.Requests[nameof(ISide.ReadOneAsync)]} localReads={local.Requests[nameof(ISide.ReadOneAsync)]})");
-        Check.Require(store.Records.Values.Any(r => r.LocalPath == "x/a"),
-            "L119: the crash cut committed the binding removal, so the restart has nothing to resolve");
-        // Restart: the owed exclusion re-applies on the plain store (the root is already gone, so it settles).
-        var restart = await new Exclusions().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, exclusion,
-            local, remote, store, (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, ct,
-            heldInput: _ => [], coversThrough: _ => true);
-        Check.Require(restart.Outcome == ExclusionOutcome.Applied, "L119: the owed exclusion did not settle on restart");
-        // Include the path again (drop the owed scope and the exclusion) and run Repair: the copy meant to stay on the PC
-        // must survive and the Dropbox copy must be restored, never the PC copy recycled.
-        var included = pair with { Exclusions = [], OwedScopes = null };
-        local.IdleBoundary = null;
-        remote.IdleBoundary = null;
-        var queue = await ItemChecks.StartQueueAsync(included, new PathScope(included, [included], DriveType.Fixed), local, remote, store);
-        await Repair.RunAsync(included, ItemChecks.Settings, _ => { }, new PathScope(included, [included], DriveType.Fixed), queue, local, remote, store, null, null, ct);
-        Check.Require(local.Items.TryGetValue("x/a", out var kept) && kept.Bytes.SequenceEqual(new byte[] { 1 }) &&
-            local.History.All(h => h.Entry.Path != "x/a" && h.Entry.Id != "lf-a"),
-            "L119: the PC copy meant to stay was recycled after the excluded Dropbox copy's removal crashed (L119)");
-        Check.Require(remote.Items.TryGetValue("x/a", out var restored) && restored.Bytes.SequenceEqual(new byte[] { 1 }),
-            "L119: including the path again did not restore the PC copy to Dropbox");
-    }
+    /// <summary>L119: a crash after the Dropbox-side exclusion removal, before its save, must not recycle the PC copy that
+    /// was meant to stay. Not closed in this lane: the folder removal delegates to FolderDelete, whose folder-exclusion
+    /// delete + deferred-coverage contract this one-file lane cannot reproduce on the finite doubles.</summary>
+    public static Task L119CrashAfterExclusionRemovalAsync() => throw new NotImplementedException(
+        "MISSING CAPABILITY (not closed): the crash-after-exclusion-removal fixture needs a Dropbox folder exclusion whose " +
+        "removal is APPLIED through FolderDelete (not just Preserve), a crash cut between the physical delete and the " +
+        "binding save, then include + Repair restoring the PC copy. Hosted lane CI attempts (runs 45360432692, 45362112730, " +
+        "45363694267, 45365430464) show the folder path returns FailChanged before any DeleteAsync, and carrying the " +
+        "exclusion in the pair to pass FolderDelete's folder-guard then produces an unadvancing wait that exhausts the " +
+        "fixture budget. Recommended disposition for designer approval: author this in the harness lane against " +
+        "FolderDelete's folder-exclusion delete and deferred-coverage contract, using FakeSide.AfterDelete and " +
+        "Observe.Wrap<IStore> for the cut.");
 
     // ---- Remaining DOUBLE / NI stubs with the gap -----------------------
 
