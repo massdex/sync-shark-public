@@ -88,12 +88,15 @@ public static class PairTableChecks
         await table.SettleJobAsync(db,new("p","route","token",[new("one","café",null)]),default);
         await foreach(var remaining in table.JobsAsync(db,"p",default)) throw new InvalidOperationException("Migrated ordered launch retained after settlement of identical Unicode path");
         var selected=new RemovalSelection(new RemovalProof(new Entry("folder",true,0,DateTimeOffset.UnixEpoch,"12","","",null),"volume",null),null);
-        await table.ArmAsync(db,"p",selected,null,default);
+        var second=new RemovalSelection(new(selected.Proof.Expected with {Path="second",Id="second"},"volume",null),null);
+        Check.Require(await table.ArmAsync(db,"p",selected,null,default) && await table.ArmAsync(db,"p",selected,null,default) && !await table.ArmAsync(db,"p",second,null,default) && await table.ArmedAsync(db,"p",default)==(selected,(StageProof?)null),"Storage/ArmHeldSlot: occupied slot lost custody");
         var stage=new StageProof("stage","volume","13",0,new string('a',64));
         await table.DisarmAsync(db,"p",selected,stage,default);
         Check.Require(await table.ArmedAsync(db,"p",default)==(selected,(StageProof?)null),"Wrong stage cleared the armed victim");
         await table.DisarmAsync(db,"p",selected,null,default);
         Check.Require(await table.ArmedAsync(db,"p",default)==null,"Exact victim and stage did not settle");
+        Check.Require(await table.ArmAsync(db,"p",second,null,default),"Storage/ArmHeldSlot: released slot refused next victim");
+        await table.DisarmAsync(db,"p",second,null,default);
         var position=new JournalPosition(ulong.MaxValue,7);
         using(var seed=db.CreateCommand())
         {

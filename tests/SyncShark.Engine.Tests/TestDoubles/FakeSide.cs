@@ -30,6 +30,8 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Queue<RemovalResult> MoveOutcomes { get; } = new();
     internal Action<Entry>? AfterPublish { get; set; }
     internal Action<Entry>? AfterDelete { get; set; }
+    /// <summary>Runs after a successful move with the final entry and its new path.</summary>
+    internal Action<Entry,string>? AfterMove { get; set; }
     internal ChangePage? IdleBoundary { get; set; }
     public Queue<ChangePage> Pages { get; } = [];
     public Dictionary<string, Queue<JobReply>> JobReplies { get; } = [];
@@ -50,6 +52,13 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     {
         if (!Items.TryGetValue(expected.Path, out var at) || at.Entry != expected) throw new ChangedUnderneathException(expected.Path);
         return at;
+    }
+    // Real Dropbox (and Local) refuse a create whose ancestor path is a file: path/conflict/file_ancestor -> ClashNameTaken.
+    private void RequireParentFolders(string path)
+    {
+        foreach (var ancestor in PathNames.Ancestors(path))
+            if (Items.TryGetValue(ancestor, out var at) && !at.Entry.IsFolder)
+                throw new ItemFailedException(path, TextKey.ClashNameTaken, null);
     }
     private Entry Folder(string path) => new(path, true, 0, DateTimeOffset.UnixEpoch, $"{Side}-{++nextId}", "", "", null);
     /// <summary>ReadAll operation on the supplied facts.</summary>
@@ -101,7 +110,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     /// <summary>Stage operation on the supplied facts.</summary>
     public Task<IStaged> StageAsync(string path, Stream content, Entry source, Entry? selectedTarget, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(StageAsync));
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(StageAsync)); RequireParentFolders(path);
         return Copy();
         async Task<IStaged> Copy()
         {
@@ -125,6 +134,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(PublishAsync)); var stage = (Stage)staged;
         if(PublishFailures.TryGetValue(stage.Path,out var failure)) throw failure;
+        RequireParentFolders(stage.Path);
         if (expected != null) { Mutations.Add(expected.Id);var old = Current(expected); History.Add(old); }
         else if (Items.ContainsKey(stage.Path)) throw new PathOccupiedException(stage.Path);
         using var digest = new ContentHash(); digest.Append(stage.Bytes);
@@ -135,7 +145,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     /// <summary>EnsureFolder operation on the supplied facts.</summary>
     public Task<RemovalResult> EnsureFolderAsync(string path, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(EnsureFolderAsync));
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(EnsureFolderAsync)); RequireParentFolders(path);
         if (Items.TryGetValue(path,out var old)) return old.Entry.IsFolder ? Task.FromResult(new RemovalResult(RemovalOutcome.Published,old.Entry,null)) : throw new PathOccupiedException(path);
         var folder = Folder(path); Seed(folder, []); return Task.FromResult(new RemovalResult(RemovalOutcome.Published,folder,null));
     }
@@ -144,8 +154,19 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(DeleteAsync)); Mutations.Add(expected.Id);var old = Current(expected);
         if (RecycleRefusals.TryGetValue(expected.Path, out var failure)) throw failure;
-        foreach (var child in Items.Values.Where(v => expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray()) { History.Add(child); Items.Remove(child.Entry.Path); }
-        History.Add(old); Items.Remove(expected.Path); AfterDelete?.Invoke(expected); return Task.FromResult(new RemovalResult(RemovalOutcome.Removed, null, null));
+        var children = Items.Values.Where(v => expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray();
+        foreach (var child in children) { History.Add(child); Items.Remove(child.Entry.Path); }
+        History.Add(old); Items.Remove(expected.Path); AfterDelete?.Invoke(expected);
+        var removed = new RemovalResult(RemovalOutcome.Removed, null, null);
+        return Task.FromResult(Side == Side.Dropbox
+            ? removed with { Reply = new JobReply.Terminal([(old.Entry, null, null)]) }
+            : removed with { RecycledVictim = new(selection?.Proof.VolumeId ?? Side.ToString(), expected.Path, old.Entry), Recycled = expected.IsFolder && selection != null ? Contents() : null });
+
+        async IAsyncEnumerable<Listed> Contents()
+        {
+            await Task.CompletedTask;
+            foreach (var child in children) yield return new(child.Entry.Path, child.Entry);
+        }
     }
     // Immediate fake deletes mutate the selected entry directly; there is no accepted job to persist an origin on.
     public Task<RemovalResult> DeleteAsync(Entry expected, RemovalSelection? selection, ActionKind origin, CancellationToken ct) =>
@@ -164,7 +185,8 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
         var moving = Items.Values.Where(v => v.Entry.Path == expected.Path || expected.IsFolder && PathNames.IsUnderKey(PathNames.Key(v.Entry.Path), PathNames.Key(expected.Path))).ToArray();
         foreach (var v in moving) Items.Remove(v.Entry.Path);
         foreach (var v in moving) Seed(v.Entry with { Path = newPath + v.Entry.Path[expected.Path.Length..] }, v.Bytes);
-        return Task.FromResult(new RemovalResult(RemovalOutcome.Published,Items[newPath].Entry,null));
+        var final = Items[newPath].Entry; AfterMove?.Invoke(final, newPath);
+        return Task.FromResult(new RemovalResult(RemovalOutcome.Published,final,null));
     }
     /// <summary>ReadById operation on the supplied facts.</summary>
     public Task<(IdentityLocation Location, bool InScope)?> ReadByIdAsync(string id, CancellationToken ct)
@@ -177,7 +199,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     /// <summary>CreateFolderExclusive operation on the supplied facts.</summary>
     public Task<RemovalResult> CreateFolderExclusiveAsync(string path, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(CreateFolderExclusiveAsync));
+        ct.ThrowIfCancellationRequested(); Requests.Count(nameof(CreateFolderExclusiveAsync)); RequireParentFolders(path);
         if (Items.ContainsKey(path)) throw new PathOccupiedException(path);
         var folder = Folder(path); Seed(folder, []); return Task.FromResult(new RemovalResult(RemovalOutcome.Published,folder,null));
     }
@@ -194,7 +216,10 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(RecoverAsync));
         if(Side==Side.Local && actual.Domain=="volume" && actual.Entry==version && History.LastOrDefault(v=>v.Entry==version) is { Entry:not null } retained && !version.IsFolder)
             return Task.FromResult<Recovery?>(new Recovery.File(version,new MemoryStream(retained.Bytes,false)));
-        return Task.FromResult(Recoverable.GetValueOrDefault((actual.Entry.Id,version.Revision,version.ContentHash)));
+        var scripted = Recoverable.GetValueOrDefault((actual.Entry.Id,version.Revision,version.ContentHash));
+        return Task.FromResult(scripted is Recovery.File file
+            ? file with { Bytes = new MemoryStream(((MemoryStream)file.Bytes).ToArray(), false) }
+            : scripted);
     }
     /// <summary>ReadJob operation on the supplied facts.</summary>
     public Task<JobReply> ReadJobAsync(AcceptedJob job, CancellationToken ct)

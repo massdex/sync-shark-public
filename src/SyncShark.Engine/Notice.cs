@@ -56,15 +56,20 @@ public sealed record IssueSubject(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Holder { get; init; }
 
+    // Persisted by number in issue rows; values are a stored format.
     /// <summary>Unfinished first-run provenance retained on the subject. None is the ordinary case and is omitted
     /// from stored JSON so ordinary subjects keep their shape (P4-05 S8).</summary>
     public enum FirstRunDeletionKind
     {
-        None,
-        Item,
-        UnscannedSubtree,
-        PreserveWithHistoryNotice
+        None = 0,
+        Item = 1,
+        UnscannedSubtree = 2,
+        PreserveWithHistoryNotice = 3
     }
+
+    /// <summary>KeepBoth records the two original items first, then the labelled copies, so a kept-both subject's
+    /// label items start after this many.</summary>
+    public const int KeptBothOriginals = 2;
 
     /// <summary>The intended operation of a Dropbox move whose effect is unknown: the expected identity from the
     /// pre-dispatch observation, the original source, the final destination, the case-rename intermediate when the

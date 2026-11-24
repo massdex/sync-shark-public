@@ -29,7 +29,7 @@ public static class HostChecks
         var stop=host.Stopping; await host.StopAsync(default); Check.Require(stop.IsCancellationRequested,"Host did not notify the pipe owner of stop");
         var errors=new List<string>();
         System.Runtime.ExceptionServices.ExceptionDispatchInfo? missing=null;
-        foreach(var check in new Func<Task>[]{IndependentBind,MemberRewind,ForeignCancellation,DisconnectedAdapter,ExplicitBind,PendingOuterScope,RemovingMember,ReleaseFailure,FailedFirstRead,OldPublicationFence})
+        foreach(var check in new Func<Task>[]{IndependentBind,MemberRewind,ForeignCancellation,DisconnectedAdapter,ExplicitBind,PendingOuterScope,RemovingMember,ReleaseFailure,FailedFirstRead,OldPublicationFence,FailedExplicitRepairAsync,FailedNoticeWriteAsync})
             try { await check(); }
             catch(NotImplementedException e) {missing??=System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e);}
             catch(InvalidDataException e) {errors.Add($"{check.Method.Name}: {e}");}
@@ -129,6 +129,37 @@ public static class HostChecks
             Check.Require(seen.Task.IsCompleted && !ended.Task.IsCompleted && lp.Local.Items.TryGetValue(item.Path,out var copy) && copy.Bytes.SequenceEqual(new byte[]{3}) && oneSignIn,"Failed member read ended live sync instead of retrying with one sign-in notice");
         }finally{stop.Cancel();await host.StopAsync(default);}
     }
+    public static Task FailedExplicitRepairAsync()=>FailureRecovery(true);
+    public static Task FailedNoticeWriteAsync()=>FailureRecovery(false);
+    private static async Task FailureRecovery(bool manual)
+    {
+        using var store=new InMemoryStateStore();var pair=Bound("recover",@"T:\Recover",1);
+        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
+        var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;
+        var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};var local=QuietSide(pc);
+        var remote=QuietSide(new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)});var cloud=(JournalProbe)(object)remote;
+        var boot=Signal();var failRead=Signal();var finished=Signal();var copied=Signal();int reads=0;
+        var injected=new IOException("injected store failure");var item=ItemChecks.File(Side.Dropbox,"later",3,"item-id");
+        tap.Finished=()=>finished.TrySetResult();tap.CursorSaved=()=>{if(pc.Items.TryGetValue(item.Path,out var file) && file.Bytes.SequenceEqual(new byte[]{3}))copied.TrySetResult();};
+        cloud.Feed=async (_,ct)=>{switch(Interlocked.Increment(ref reads)){
+            case 1:await failRead.Task.WaitAsync(ct);throw new ItemFailedException(string.Empty,TextKey.SignInReturnRetry,null);
+            case 2:if(manual)await finished.Task.WaitAsync(ct);cloud.Local.Seed(item,[3]);return new([new(Side.Dropbox,ChangeKind.Changed,item.Path,null,item.Id,item,true,false)],"later",null);
+            default:await Task.Delay(Timeout.Infinite,ct);throw new InvalidOperationException();}};
+        var logs=new MemoryLogs();var output=new StringWriter();logs.Capture=output;
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_,_)=>Task.FromResult((local,remote)),ItemChecks.Settings,logs,TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask,(_,_,_)=>{boot.TrySetResult();return Task.CompletedTask;});
+        using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(10));var token=stop.Token;bool recovered=false;
+        try{
+            await host.StartAsync(token);await boot.Task.WaitAsync(token);
+            if(manual){tap.BeforeFinish=()=>throw injected;
+                try{await host.RepairAsync(pair.PairId,token);throw new InvalidDataException("Explicit Repair hid the store failure");}catch(IOException e) when(e==injected){}
+                tap.BeforeFinish=null;
+            }else tap.NoticeFailure=injected;
+            failRead.SetResult();
+            try{await (manual ? Task.WhenAll(copied.Task,finished.Task) : copied.Task).WaitAsync(token);recovered=true;}catch(OperationCanceledException) when(token.IsCancellationRequested){}
+        }finally{stop.Cancel();try{await host.StopAsync(default);}catch(IOException e) when(e==injected){recovered=false;}}
+        if(manual)Check.Require(recovered && host.Stopping.IsCancellationRequested,"Failed explicit Repair blocked owed Repair or clean shutdown");
+        else Check.Require(recovered && output.ToString().Contains(nameof(IOException),StringComparison.Ordinal),"Failed notice write stopped later sync or was not logged");
+    }
     private sealed class RetryClock : TimeProvider
     {
         internal readonly System.Collections.Concurrent.ConcurrentQueue<TimeSpan> Waits=new();
@@ -143,6 +174,7 @@ public static class HostChecks
         // Observe the admission decision before the live runner can write another Failure in the same notice slot.
         probe.Published=()=>published.TrySetResult((!probe.Paused,Volatile.Read(ref calls),store.OpenNotices.Count(n=>n.Kind==NoticeKind.Failure && n.Cause==TextKey.SignInReturnRetry)));
         var cloud=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();var remote=(JournalProbe)(object)cloud;remote.Local=new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
+        probe.Quiet=remote.Quiet=true;
         var clock=new RetryClock();var settings=ItemChecks.Settings with {Backoff=ItemChecks.Settings.Backoff with {BackoffJitter=0}};
         remote.ReadRoot=()=>{if(Interlocked.Increment(ref calls)<3)throw new ItemFailedException(string.Empty,TextKey.SignInReturnRetry,null){ProviderWait=TimeSpan.Zero};};
         var host=new Host((_,_)=>Task.FromResult<IStore?>(store),(_,_,_,_)=>(pc,cloud),settings,new MemoryLogs(),clock,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
@@ -169,9 +201,10 @@ public static class HostChecks
     internal sealed class MemoryLogs : ILogFiles
     {
         internal Action? Closed;
+        internal StringWriter? Capture;
         internal TaskCompletionSource RepairOpened=Signal(); private int opens;
         private sealed class Writer(Action closed):StringWriter {protected override void Dispose(bool disposing){if(disposing)closed();base.Dispose(disposing);}}
-        public TextWriter Open(string path,int bufferCharacters){var n=Interlocked.Increment(ref opens);if(n==3)RepairOpened.TrySetResult();return n==2 && Closed is {} closed ? new Writer(closed) : new StringWriter();}
+        public TextWriter Open(string path,int bufferCharacters){if(Capture!=null)return Capture;var n=Interlocked.Increment(ref opens);if(n==3)RepairOpened.TrySetResult();return n==2 && Closed is {} closed ? new Writer(closed) : new StringWriter();}
         public string? Resolve(string folder,string pairId,string runId)=>null;
         public ILogFiles.ReadStatus Read(string path,Action<string,bool> record,int bufferBytes,CancellationToken ct,out bool trailing){trailing=false;return ILogFiles.ReadStatus.NotFound;}
         public void Prune(string folder,TimeSpan olderThan,DateTimeOffset now) { }
@@ -221,10 +254,14 @@ public static class HostChecks
         internal Action<string>? Lookup;
         internal Func<string,Task>? FindAt;
         internal Action? Finished,CursorSaved,Requested;
+        internal IOException? NoticeFailure;
         internal Func<Task>? BeforeFinish;
+        internal Action<string?>? ReadDropboxDebt;
         protected override object? Invoke(System.Reflection.MethodInfo? method,object?[]? args)
         {
             if(method!.Name==nameof(IStore.FindAsync)){Lookup?.Invoke((string)args![2]!);if(OnFind!=null || FindAt!=null)return Find();}
+            if(method.Name==nameof(IStore.SaveNoticeAsync) && NoticeFailure!=null)return Task.FromException(NoticeFailure);
+            if(method.Name==nameof(IStore.ReadRepairAsync) && ReadDropboxDebt!=null && (Side)args![1]! ==Side.Dropbox) return Debt();
             if(method.Name==nameof(IStore.OweRepairAsync) && Requested!=null){var result=Call();Requested();return result;}
             if(method.Name==nameof(IStore.SaveCursorAsync) && CursorSaved!=null) return Cursor();
             if(method.Name==nameof(IStore.SavePairAsync) && OnSave!=null) return Save();
@@ -237,6 +274,7 @@ public static class HostChecks
                 catch(System.Reflection.TargetInvocationException error) when(error.InnerException!=null)
                 {System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw();throw;}
             }
+            async Task<(long Revision,string? Reason)> Debt(){var debt=await (Task<(long Revision,string? Reason)>)Call()!;ReadDropboxDebt!(debt.Reason);return debt;}
             async Task<bool> Finish(){if(BeforeFinish!=null)await BeforeFinish();var ok=await (Task<bool>)Call()!;if(ok)Finished!();return ok;}
             async Task Cursor(){await (Task)Call()!;CursorSaved!();}
             async Task Save(){await OnSave!();await (Task)Call()!;}
@@ -433,7 +471,7 @@ public static class HostChecks
         int opens=0;var opened=Signal();var entered=Signal();var release=Signal();
         var host=new Host((_,_)=>Task.FromResult<IStore?>(wrapped),(p,_,_,_)=>{
             if(p.PairId==child.PairId){Interlocked.Increment(ref opens);opened.TrySetResult();}
-            return(new FakeSide(Side.Local){Root=(p.Roots!.Local,null,null,DriveType.Fixed)},new FakeSide(Side.Dropbox){Root=(null,p.Roots.Dropbox,null,null)});
+            return(QuietSide(new(Side.Local){Root=(p.Roots!.Local,null,null,DriveType.Fixed)}),QuietSide(new(Side.Dropbox){Root=(null,p.Roots.Dropbox,null,null)}));
         },ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
         try {
             await host.StartAsync(default);await opened.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -476,9 +514,9 @@ public static class HostChecks
         Func<PathScope>? live=null;
         var host=new Host((_,_)=>Task.FromResult<IStore?>(db),async (pair,_,scope,_,ct)=>{
             var side=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();var probe=(JournalProbe)(object)side;
-            probe.Local=new(Side.Local){Root=(roots.Local,null,null,DriveType.Fixed)};
+            probe.Local=new(Side.Local){Root=(roots.Local,null,null,DriveType.Fixed)};probe.Quiet=true;
             if(pair.PairId==outer.PairId) {live=scope; entered.TrySetResult();await release.Task.WaitAsync(ct);probe.Published=()=>published.TrySetResult();}
-            return(side,new FakeSide(Side.Dropbox){Root=(null,roots.Dropbox,null,null)});
+            return(side,QuietSide(new(Side.Dropbox){Root=(null,roots.Dropbox,null,null)}));
         },ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
         try
         {
@@ -488,6 +526,11 @@ public static class HostChecks
             Check.Require(live!().Excludes("child/file","child/file",false),"Late first bind overwrote the published nested scope");
         }
         finally {release.TrySetResult(); await host.StopAsync(default);}
+    }
+    private static ISide QuietSide(FakeSide endpoint)
+    {
+        var side=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();
+        var probe=(JournalProbe)(object)side; probe.Local=endpoint; probe.Quiet=true; return side;
     }
     private static async Task IndependentBind()
     {
@@ -504,9 +547,9 @@ public static class HostChecks
         var host=new Host((_,_)=>Task.FromResult<IStore?>(db),async (p,_,_,_,ct)=>{
             if(p.PairId==slow.PairId) {pairToken=ct; entered.SetResult(); await held.Task.WaitAsync(ct);}
             var local=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>(); var probe=(JournalProbe)(object)local;
-            probe.Local=new(Side.Local){Root=(roots.Local,null,null,DriveType.Fixed)};
+            probe.Local=new(Side.Local){Root=(roots.Local,null,null,DriveType.Fixed)};probe.Quiet=true;
             if(p.PairId==other.PairId) probe.Published=()=>{if(!probe.Paused) observed.TrySetResult();};
-            return (local,new FakeSide(Side.Dropbox){Root=(null,roots.Dropbox,null,null)});
+            return (local,QuietSide(new(Side.Dropbox){Root=(null,roots.Dropbox,null,null)}));
         },ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
         var startup=host.StartAsync(lifetime.Token);
         await WithCleanup(async ()=>{try
@@ -550,6 +593,7 @@ public static class HostChecks
             pc.Local=new(Side.Local){Root=(roots.Local,null,null,DriveType.Fixed)};pc.Published=()=>opened.TrySetResult();
             var cloud=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();var remote=(JournalProbe)(object)cloud;
             remote.Local=new(Side.Dropbox){Root=(null,roots.Dropbox,null,null)};
+            pc.Quiet=remote.Quiet=true;
             remote.ReadRoot=()=>{if(!connected){Interlocked.Increment(ref staleReads);observed.TrySetResult();}};
             return(local,cloud);
         },ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>{connected=false;return Task.CompletedTask;});
@@ -607,11 +651,11 @@ public static class HostChecks
             // Reopening an adapter still addresses the same journal member and its settled position.
             var local=probes.GetOrAdd(pair.PairId,id=>{
                 var side=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>(); var probe=(JournalProbe)(object)side;
-                probe.Local=new(Side.Local){Root=(root.Local,null,null,DriveType.Fixed)};
+                probe.Local=new(Side.Local){Root=(root.Local,null,null,DriveType.Fixed)};probe.Quiet=true;
                 int once=0;probe.Published=()=>{if(Interlocked.Exchange(ref once,1)==0)ready.Signal();};
                 return side;
             });
-            return(local,new FakeSide(Side.Dropbox){Root=(null,root.Dropbox,null,null)});
+            return(local,QuietSide(new(Side.Dropbox){Root=(null,root.Dropbox,null,null)}));
         },ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
         await host.StartAsync(default); Check.Require(ready.Wait(TimeSpan.FromSeconds(5)),"Members not published");
         var a=(JournalProbe)(object)probes[p.PairId]; var b=(JournalProbe)(object)probes[second.PairId]; a.Settled=4;a.ReadAhead=7;b.Settled=3;b.ReadAhead=9;

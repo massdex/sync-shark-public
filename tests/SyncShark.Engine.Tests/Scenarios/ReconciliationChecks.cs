@@ -21,32 +21,66 @@ public static class ReconciliationChecks
             side.Seed(new Entry(f.Path, f.Folder, f.Size ?? (f.Folder ? 0 : 1), modified, id, revision, hash, null), f.Folder ? [] : [f.Value]);
         }
     }
-    internal static async Task CompareAsync(bool baseline, FileAt[] pc, FileAt[] cloud, FileAt[] finalPc, FileAt[] finalCloud,
-        int links, TextKey[] notices, FirstRunPolicy policy = FirstRunPolicy.NewestWins, string[]? ignores = null, Exclusion[]? exclusions = null, bool expectMove=false, bool baselineFolder=false, bool noDeletes=false)
+    // Repair and any full scan need the real store (BeginScan/scan comparison); a fake scan is prohibited.
+    private static async Task WithStoreAsync(PairConfig pair, Func<IStore,Task> run)
+    {
+        var directory=Directory.CreateTempSubdirectory();
+        try
+        {
+            var image=Path.Combine(directory.FullName,"fixture.sqlite");
+            using(var db=new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder{DataSource=image,Pooling=false}.ToString()))
+            {
+                await db.OpenAsync();
+                db.CreateFunction<string,string>("pathkey",PathNames.Key,isDeterministic:true);
+                using var schema=db.CreateCommand();
+                schema.CommandText=global::Massdex.SyncShark.Engine.Storage.Schema.Create+$"PRAGMA user_version={(global::Massdex.SyncShark.Engine.Storage.Schema.Version)};";
+                await schema.ExecuteNonQueryAsync();
+            }
+            using var store=new global::Massdex.SyncShark.Engine.Storage.Store(image,false,ItemChecks.Settings);
+            await store.SavePairAsync(pair,default);
+            await run(store);
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); directory.Delete(true); }
+    }
+    internal static Task CompareAsync(bool baseline, FileAt[] pc, FileAt[] cloud, FileAt[] finalPc, FileAt[] finalCloud,
+        int links, TextKey[] notices, FirstRunPolicy policy = FirstRunPolicy.NewestWins, string[]? ignores = null, Exclusion[]? exclusions = null, bool expectMove=false, bool baselineFolder=false, bool noDeletes=false, bool pastFirstSync=false, bool admit=false)
     {
         var pair = ItemChecks.Pair() with { FirstRun = policy, IgnoreRules = ignores ?? [], Exclusions = exclusions ?? [] };
-        var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
-        using var store = new InMemoryStateStore(); Seed(local,pc); Seed(remote,cloud);
-        await store.SavePairAsync(pair, default);
-        if (baseline) await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
-        if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(
-            ItemChecks.File(Side.Local, Original, baselineFolder?(byte)0:(byte)1, Side.Local.ToString(), baselineFolder), ItemChecks.File(Side.Dropbox, Original, baselineFolder?(byte)0:(byte)1, Side.Dropbox.ToString(), baselineFolder)),null,null,default);
-        var before=new[]{local,remote}.SelectMany(side=>side.Items.Values.Select(v=>(Side:side,v.Entry,v.Bytes))).ToArray();
-        var paths=new PathScope(pair,[pair],DriveType.Fixed);
-        var queue=await ItemChecks.StartQueueAsync(pair,paths,local,remote,store);
-        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue, local, remote, store, null,null, default);
-        foreach(var item in before.Where(x=>!x.Side.Items.Values.Any(v=>v.Entry.Id==x.Entry.Id && v.Bytes.SequenceEqual(x.Bytes))))
-            Check.Require(item.Side.History.Any(v=>v.Entry==item.Entry && v.Bytes.SequenceEqual(item.Bytes)),"Displaced version is not recoverable");
-        if(expectMove) Check.Require(remote.Items["renamed"].Entry.Id==before.Single(x=>x.Side==remote).Entry.Id && remote.Requests[nameof(ISide.MoveAsync)]==1 && remote.Requests[nameof(ISide.DeleteAsync)]==0 && remote.Requests[nameof(ISide.PublishAsync)]==0,"Counterpart recreated instead of moved");
-        VerifySide(local,finalPc); VerifySide(remote,finalCloud);
-        Check.Require(store.Records.Count == links, "Unexpected binding count");
-        foreach (var binding in store.Records.Values)
+        return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
+        await WithStoreAsync(pair, async store =>
         {
-            var a = local.Items[binding.LocalPath].Entry; var b = remote.Items[binding.DropboxPath].Entry;
-            Check.Require(binding == SyncedEntries.From(a,b), "The saved paths, identities or versions do not match both live endpoints");
-        }
-        Check.Require(store.OpenNotices.Select(n=>n.Cause).Order().SequenceEqual(notices.Order()), "Unexpected notices");
-        if (noDeletes) Check.Require(local.Requests[nameof(ISide.DeleteAsync)] == 0 && remote.Requests[nameof(ISide.DeleteAsync)] == 0, "A new folder caused a delete");
+            var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox); Seed(local,pc); Seed(remote,cloud);
+            if (baseline || pastFirstSync) await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
+            if (baseline) await store.CommitAsync(pair.PairId, null, SyncedEntries.From(
+                ItemChecks.File(Side.Local, Original, baselineFolder?(byte)0:(byte)1, Side.Local.ToString(), baselineFolder), ItemChecks.File(Side.Dropbox, Original, baselineFolder?(byte)0:(byte)1, Side.Dropbox.ToString(), baselineFolder)),null,null,default);
+            var before=new[]{local,remote}.SelectMany(side=>side.Items.Values.Select(v=>(Side:side,v.Entry,v.Bytes))).ToArray();
+            var paths=new PathScope(pair,[pair],DriveType.Fixed);
+            var queue=await ItemChecks.StartQueueAsync(pair,paths,local,remote,store);
+            if(admit) FolderChecks.AdmitFullRepair(queue,local,remote);
+            await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue, local, remote, store, null,null, deadline);
+            // A displaced edition is proved by identity, revision and bytes; a counterpart move relocates it, so its path may differ.
+            foreach(var item in before.Where(x=>!x.Side.Items.Values.Any(v=>v.Entry.Id==x.Entry.Id && v.Bytes.SequenceEqual(x.Bytes))))
+                Check.Require(item.Side.History.Any(v=>v.Entry.Id==item.Entry.Id && v.Entry.Revision==item.Entry.Revision && v.Bytes.SequenceEqual(item.Bytes)),"Displaced version is not recoverable");
+            if(expectMove)
+            {
+                // The destination is the expected output, not a fixed spelling; the moved identity must land there by move, never delete+create.
+                var original=before.Single(x=>x.Side==remote);
+                var landed=remote.Items.Values.Where(v=>v.Entry.Id==original.Entry.Id).Select(v=>v.Entry).FirstOrDefault();
+                var destination=finalCloud.Length==1?finalCloud[0].Path:string.Empty;
+                Check.Require(landed is {} now && now.Path==destination && remote.Requests[nameof(ISide.MoveAsync)]==1 && remote.Requests[nameof(ISide.DeleteAsync)]==0 && remote.Requests[nameof(ISide.PublishAsync)]==0,"Counterpart recreated instead of moved");
+            }
+            VerifySide(local,finalPc); VerifySide(remote,finalCloud);
+            var records=new List<SyncedEntry>(); await foreach(var r in store.DescendantsAsync(pair.PairId,Side.Local,"",default)) records.Add(r);
+            Check.Require(records.Count == links, "Unexpected binding count");
+            foreach (var binding in records)
+            {
+                var a = local.Items[binding.LocalPath].Entry; var b = remote.Items[binding.DropboxPath].Entry;
+                Check.Require(binding == SyncedEntries.From(a,b), "The saved paths, identities or versions do not match both live endpoints");
+            }
+            var open=new List<Notice>(); await foreach(var n in store.NoticesAsync(pair.PairId,default)) if(!n.Dismissed) open.Add(n);
+            Check.Require(open.Select(n=>n.Cause).Order().SequenceEqual(notices.Order()), "Unexpected notices");
+            if (noDeletes) Check.Require(local.Requests[nameof(ISide.DeleteAsync)] == 0 && remote.Requests[nameof(ISide.DeleteAsync)] == 0, "A new folder caused a delete");
+        }));
     }
     private static void VerifySide(FakeSide side, FileAt[] expected)
     {
@@ -65,10 +99,28 @@ public static class ReconciliationChecks
     public static Task CapitalsAsync() => CompareAsync(true, [new("ITEM",1)], [new(Original,1)], [new("ITEM",1)], [new("ITEM",1)], 1, []);
     public static Task DifferentCapitalsAsync() => CompareAsync(true, [new("ITEM",1)], [new("Item",1)], [new("ITEM",1)], [new("Item",1)], 1, [TextKey.InfoCapitalsDiffer]);
     public static Task FolderCapitalsAsync() => CompareAsync(false, [new("Folder",0,true)], [new("folder",0,true)], [new("Folder",0,true)], [new("folder",0,true)], 1, []);
-    public static Task FirstRunAsync(FirstRunPolicy policy, byte winner) => CompareAsync(false, [new(Original,policy==FirstRunPolicy.DropboxWins?(byte)5:(byte)2)], [new(Original,4)], [new(Original,winner)], [new(Original,winner)], 1, [], policy);
+    public static Task FirstRunAsync(FirstRunPolicy policy, byte winner, bool admit = false) => CompareAsync(false, [new(Original,policy==FirstRunPolicy.DropboxWins?(byte)5:(byte)2)], [new(Original,4)], [new(Original,winner)], [new(Original,winner)], 1, [], policy, admit: admit);
     public static Task IgnoreAsync() => CompareAsync(false, [new("~$draft",1)], [], [new("~$draft",1)], [], 0, [], ignores:["FileNamePrefix:~$"]);
     public static Task ExcludeKeepAsync() => CompareAsync(false, [new("outside",1)], [], [new("outside",1)], [], 0, [], exclusions:[new(Side.Local,"outside",true)]);
-    public static Task ForbiddenNameAsync() => CompareAsync(false, [], [new("CON",1)], [], [new("CON",1)], 0, [TextKey.SkipReservedName]);
+    // A32: the Dropbox adapter classifies an untransferable name with SkipReservedName. Keep no Local copy and
+    // retain that exact classification; the engine must not transfer or bind a reserved name.
+    public static Task ForbiddenNameAsync()
+    {
+        var pair = ItemChecks.Pair();
+        return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
+        await WithStoreAsync(pair, async store =>
+        {
+            var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
+            remote.Seed(new Entry(Original, false, 1L, DateTimeOffset.UnixEpoch.AddSeconds(1), Side.Dropbox.ToString(), "rev-1", Hash(1), nameof(TextKey.SkipReservedName)), [1]);
+            var paths = new PathScope(pair, [pair], DriveType.Fixed);
+            var queue = await ItemChecks.StartQueueAsync(pair, paths, local, remote, store);
+            await Repair.RunAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, local, remote, store, null, null, deadline);
+            Check.Require(local.Items.Count == 0 && !local.Items.ContainsKey(Original), "A reserved Dropbox name was copied to Local");
+            Check.Require(remote.Items.TryGetValue(Original, out var kept) && kept.Entry.Skip == nameof(TextKey.SkipReservedName) && kept.Bytes.SequenceEqual(new byte[] { 1 }), "The reserved-name classification or the cloud copy changed");
+            var records = new List<SyncedEntry>(); await foreach (var r in store.DescendantsAsync(pair.PairId, Side.Local, "", default)) records.Add(r);
+            Check.Require(records.Count == 0, "A reserved Dropbox name was bound");
+        }));
+    }
     public static Task KindReplacementAsync() => CompareAsync(true, [new(Original,0,true)], [new(Original,1)], [new(Original,0,true)], [new(Original,0,true)], 1, []);
 
     public static Task MoveOutsideAsync() => CompareAsync(true,[new("held/item",1)],[new(Original,1)], [new("held/item",1)], [], 0, [], exclusions:[new(Side.Local,"held",true)]);
@@ -78,20 +130,26 @@ public static class ReconciliationChecks
     public static Task A02ChildlessFolderCreateCloudAsync() => CompareAsync(false,
         [], [new("folder",0,true,"D-folder")], [new("folder",0,true)], [new("folder",0,true)], 1, []);
     public static Task A02PopulatedFolderCreateLocalAsync() => CompareAsync(false,
-        [new("folder",0,true,"L-folder"),new("folder/one",1,"L-one"),new("folder/two",2,"L-two")], [],
+        [new("folder",0,true,"L-folder"),new("folder/one",1,Id:"L-one"),new("folder/two",2,Id:"L-two")], [],
         [new("folder",0,true),new("folder/one",1),new("folder/two",2)],
         [new("folder",0,true),new("folder/one",1),new("folder/two",2)], 3, []);
     public static Task A02PopulatedFolderCreateCloudAsync() => CompareAsync(false,
-        [], [new("folder",0,true,"D-folder"),new("folder/one",1,"D-one"),new("folder/two",2,"D-two")],
+        [], [new("folder",0,true,"D-folder"),new("folder/one",1,Id:"D-one"),new("folder/two",2,Id:"D-two")],
         [new("folder",0,true),new("folder/one",1),new("folder/two",2)],
         [new("folder",0,true),new("folder/one",1),new("folder/two",2)], 3, []);
     public static Task A02OutsideFolderMovedInWithoutChildReportsAsync() => CompareAsync(false,
-        [new("moved",0,true,"L-moved"),new("moved/a",1,"L-a"),new("moved/b",2,"L-b")], [],
+        [new("moved",0,true,"L-moved"),new("moved/a",1,Id:"L-a"),new("moved/b",2,Id:"L-b")], [],
         [new("moved",0,true),new("moved/a",1),new("moved/b",2)],
         [new("moved",0,true),new("moved/a",1),new("moved/b",2)], 3, []);
-    public static Task A02RestartAfterCreateBeforeListingAsync() => throw new NotImplementedException();
+    // The other side already has the folder the interrupted pass created (unrecorded, empty); the replay lists
+    // it again, links the folder and creates its children, never a delete (PLAN A02, M4 add-only).
+    public static Task A02RestartAfterCreateBeforeListingAsync() => CompareAsync(false,
+        [new("folder",0,true,"L-folder"),new("folder/one",1,Id:"L-one"),new("folder/two",2,Id:"L-two")],
+        [new("folder",0,true,"D-folder")],
+        [new("folder",0,true),new("folder/one",1),new("folder/two",2)],
+        [new("folder",0,true),new("folder/one",1),new("folder/two",2)], 3, [], noDeletes:true);
     public static Task A02AddOnlyPopulationNeverDeletesAsync() => CompareAsync(false,
-        [new("folder",0,true,"L-folder"),new("folder/one",1,"L-one"),new("folder/two",2,"L-two")], [],
+        [new("folder",0,true,"L-folder"),new("folder/one",1,Id:"L-one"),new("folder/two",2,Id:"L-two")], [],
         [new("folder",0,true),new("folder/one",1),new("folder/two",2)],
         [new("folder",0,true),new("folder/one",1),new("folder/two",2)], 3, [], noDeletes:true);
     public static Task A03EqualTrustedTimesAsync()
@@ -101,13 +159,63 @@ public static class ReconciliationChecks
         Check.Require(local.Contains(pc,StringComparison.Ordinal) && !remote.Contains(pc,StringComparison.Ordinal) && remote.Contains(settings.ConflictLabelDropboxName,StringComparison.Ordinal),"Conflict label lost its source");
         return RecoveryChecks.KeptVersionsAsync(false);
     }
-    public static Task A03UnequalTrustedTimesAsync() => throw new NotImplementedException();
-    public static Task A03ResolveUsePcAsync() => throw new NotImplementedException();
-    public static Task A03ResolveUseDropboxAsync() => throw new NotImplementedException();
+    // Past the first sync two different no-record files at the same path keep both (PLAN L226), whatever the times.
+    public static Task A03UnequalTrustedTimesAsync() => CompareAsync(false,
+        [new(Original,2)], [new(Original,3)],
+        [new(Original,2), new(Label(Original,Side.Dropbox,At(3)),3)],
+        [new(Original,3), new(Label(Original,Side.Local,At(2)),2)],
+        2, [TextKey.InfoKeptBoth], pastFirstSync:true);
+    // A Tie resolution commits the chosen side's current version to both endpoints and preserves the displaced
+    // version (mirrors Executor/ResolveChecks RemovalProof through the reviewed subject).
+    private static async Task ResolveTieAsync(ResolutionChoice choice)
+    {
+        var pair = ItemChecks.Pair();
+        using var store = new InMemoryStateStore();
+        var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
+        var pc = ItemChecks.File(Side.Local, "item", 1, "pc");
+        var db = ItemChecks.File(Side.Dropbox, "item", 2, "db");
+        local.Seed(pc, [1]); remote.Seed(db, [2]);
+        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(pc, db), null, null, default);
+        await store.SaveNoticeAsync(pair.PairId, new(0, NoticeKind.Tie, TextKey.TieEqualTimes, "item",
+            new([new(Side.Local, pc.Path, pc.Id), new(Side.Dropbox, db.Path, db.Id)], null), DateTimeOffset.UnixEpoch, false), default);
+        var reviewed = store.OpenNotices.Single();
+        var source = choice == ResolutionChoice.UseLocal ? local : remote;
+        var target = choice == ResolutionChoice.UseLocal ? remote : local;
+        source.Items["item"] = (ItemChecks.File(source.Side, "item", 3, source.Items["item"].Entry.Id), [3]);
+        var displaced = ItemChecks.File(target.Side, "item", 4, target.Items["item"].Entry.Id);
+        target.Items["item"] = (displaced, [4]);
+        var outcome = await new Resolve().ApplyAsync(pair, ItemChecks.Settings, _ => { },
+            new PathScope(pair, [pair], DriveType.Fixed), reviewed, choice, null, local, remote, store, null!, null!, default);
+        Check.Require(outcome == EffectOutcome.Applied && store.OpenNotices.Count == 0 &&
+            local.Items["item"].Bytes.SequenceEqual(new byte[]{3}) && remote.Items["item"].Bytes.SequenceEqual(new byte[]{3}) &&
+            target.History.Any(v => v.Entry == displaced && v.Bytes.SequenceEqual(new byte[]{4})) &&
+            store.Records.Values.Single() == SyncedEntries.From(local.Items["item"].Entry, remote.Items["item"].Entry),
+            $"{choice} did not commit the selected version to both endpoints and preserve the displaced content");
+    }
+    public static Task A03ResolveUsePcAsync() => ResolveTieAsync(ResolutionChoice.UseLocal);
+    public static Task A03ResolveUseDropboxAsync() => ResolveTieAsync(ResolutionChoice.UseDropbox);
     public static Task A03ResolveKeepBothAsync() => throw new NotImplementedException();
     public static Task A03ResolveRenamePcAsync() => throw new NotImplementedException();
     public static Task A03ResolveRenameDropboxAsync() => throw new NotImplementedException();
-    public static Task A03FourEndpointNoticeAsync() => throw new NotImplementedException();
+    // One kept-both notice names all four endpoints: both originals and each side's labelled copy (PLAN A03).
+    public static Task A03FourEndpointNoticeAsync()
+    {
+        var pair = ItemChecks.Pair();
+        return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
+        await WithStoreAsync(pair, async store =>
+        {
+            await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
+            var paths=new PathScope(pair,[pair],DriveType.Fixed);
+            var local=new FakeSide(Side.Local); var remote=new FakeSide(Side.Dropbox);
+            local.Seed(ItemChecks.File(Side.Local,"item",2,"pc"),[2]);
+            remote.Seed(ItemChecks.File(Side.Dropbox,"item",3,"db"),[3]);
+            var queue=await ItemChecks.StartQueueAsync(pair,paths,local,remote,store);
+            await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,remote,store,null,null,deadline);
+            var open=new List<Notice>(); await foreach(var n in store.NoticesAsync(pair.PairId,default)) if(!n.Dismissed) open.Add(n);
+            Check.Require(open.Count==1 && open.Single().Cause==TextKey.InfoKeptBoth,"Expected exactly one kept-both notice");
+            Check.Require(open.Single().Subject.Items.Count==4,"Kept-both notice did not name all four endpoints");
+        }));
+    }
     public static async Task A05SameIdSizeMtimeWriteAfterPublicationAsync()
     {
         var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);using var store=new InMemoryStateStore();var local=new FakeSide(Side.Local);var remote=new FakeSide(Side.Dropbox);
@@ -144,7 +252,8 @@ public static class ReconciliationChecks
     public static Task A22CreateOntoIdenticalFileAsync() => throw new NotImplementedException();
     public static Task A22CreateOntoDifferentFileAsync() => throw new NotImplementedException();
     public static Task A22ObsoleteSourceRecoveryAsync() => throw new NotImplementedException();
-    public static Task A24MovedInUnchangedCounterpartAsync() => throw new NotImplementedException();
+    public static Task A24MovedInUnchangedCounterpartAsync() => CompareAsync(true,
+        [new("held/item",1)],[new(Original,1)],[new("held/item",1)],[],0,[],exclusions:[new(Side.Local,"held",true)]);
     public static Task A24MovedInWithEditedCounterpartAsync() => throw new NotImplementedException();
     public static Task A24MovedOutWithOldRecordAsync() => throw new NotImplementedException();
     public static Task A24KeptCounterpartLeftAtExcludedOriginAsync() => throw new NotImplementedException();
@@ -153,10 +262,63 @@ public static class ReconciliationChecks
     public static Task A26RepairSafeSaveAsync() => throw new NotImplementedException();
     public static Task A26RepairIdenticalBytesAsync() => throw new NotImplementedException();
     public static Task A26RepairCounterpartEditedAsync() => throw new NotImplementedException();
-    public static Task A27CloudOnlyCapitalRenameAsync() => throw new NotImplementedException();
-    public static Task A27BothPhysicalCaseHopsAsync() => throw new NotImplementedException();
-    public static Task A27UnavailableRemainingHopAsync() => throw new NotImplementedException();
-    public static Task A27NoTemporaryBindingAsync() => throw new NotImplementedException();
+    // A capitals-only rename made on Dropbox propagates to the PC (PLAN A27).
+    public static Task A27CloudOnlyCapitalRenameAsync() => CompareAsync(true,
+        [new(Original,1)], [new("ITEM",1)],
+        [new("ITEM",1)], [new("ITEM",1)], 1, []);
+    // A case-only rename on Dropbox runs both physical hops in order, then settles the logical binding (mirrors
+    // Executor/CaseRenameChecks).
+    public static async Task A27BothPhysicalCaseHopsAsync()
+    {
+        var side = new FakeSide(Side.Dropbox);
+        var folder = ItemChecks.File(Side.Dropbox, "old", 0, "folder", true);
+        side.Seed(folder, []);
+        var binding = SyncedEntries.From(folder with { Id = "pc" }, folder);
+        var start = new Scope("OLD", folder.Path); var goal = new Scope("OLD", "OLD");
+        var temporary = goal with { DropboxPath = PathNames.CaseRenamePath(goal.DropboxPath, ItemChecks.Settings.CaseRenameSuffix) };
+        var hops = new List<(Scope Before, Scope After)>();
+        var result = await new CaseRename().MoveAsync(side, folder, goal.DropboxPath, ItemChecks.Settings.CaseRenameSuffix, binding, start,
+            (saved, before, after, _) =>
+            {
+                Check.Require(saved == binding && side.Items[after!.DropboxPath].Entry.Path == after!.DropboxPath,
+                    "Handoff lost binding or ran before physical movement");
+                hops.Add((before, after!)); return Task.CompletedTask;
+            }, default);
+        Check.Require(result.Final?.Id == folder.Id && hops.SequenceEqual(new[] { (start, temporary), (temporary, goal) }),
+            "Both physical folder ranges must be compared in order");
+    }
+    // The second physical hop is refused: the confirmed temporary source is retained and the goal is never reached.
+    public static async Task A27UnavailableRemainingHopAsync()
+    {
+        var side = new FakeSide(Side.Dropbox);
+        var folder = ItemChecks.File(Side.Dropbox, "old", 0, "folder", true);
+        side.Seed(folder, []);
+        var binding = SyncedEntries.From(folder with { Id = "pc" }, folder);
+        var start = new Scope("OLD", folder.Path); var goal = new Scope("OLD", "OLD");
+        var temporary = goal with { DropboxPath = PathNames.CaseRenamePath(goal.DropboxPath, ItemChecks.Settings.CaseRenameSuffix) };
+        var blocked = await new CaseRename().MoveAsync(side, folder, goal.DropboxPath, ItemChecks.Settings.CaseRenameSuffix, binding, start, (_, _, _, _) =>
+        {
+            side.MoveOutcomes.Enqueue(new(RemovalOutcome.NoEffect, null, TextKey.FailChanged)); return Task.CompletedTask;
+        }, default);
+        Check.Require(blocked.Outcome == RemovalOutcome.NoEffect && blocked.Final?.Id == folder.Id && blocked.Final.Path == temporary.DropboxPath,
+            "Second leg refusal lost the confirmed temporary source");
+        Check.Require(side.Items.Count == 1 && side.Items[temporary.DropboxPath].Entry == blocked.Final &&
+            !side.Items.ContainsKey(goal.DropboxPath) && !side.Items.ContainsKey(folder.Path),
+            "Receipt did not match the actual physical temporary entry");
+    }
+    // No physical case hop may compare or commit a temporary spelling as the binding; the logical binding is unchanged.
+    public static async Task A27NoTemporaryBindingAsync()
+    {
+        var side = new FakeSide(Side.Dropbox);
+        var folder = ItemChecks.File(Side.Dropbox, "old", 0, "folder", true);
+        side.Seed(folder, []);
+        var binding = SyncedEntries.From(folder with { Id = "pc" }, folder);
+        var start = new Scope("OLD", folder.Path); var goal = new Scope("OLD", "OLD");
+        var seen = new List<SyncedEntry>();
+        await new CaseRename().MoveAsync(side, folder, goal.DropboxPath, ItemChecks.Settings.CaseRenameSuffix, binding, start,
+            (saved, _, _, _) => { seen.Add(saved); return Task.CompletedTask; }, default);
+        Check.Require(seen.Count == 2 && seen.All(s => s == binding), "A physical case hop compared or committed a temporary binding");
+    }
     public static Task A28ExcludeKeepPcAsync() => throw new NotImplementedException();
     public static Task A28ExcludeKeepCloudAsync() => throw new NotImplementedException();
     public static Task A28RecreateInKeepScopeAsync() => throw new NotImplementedException();
@@ -199,10 +361,14 @@ public static class ReconciliationChecks
     public static Task A28SameScopeReissuedBeforeClearAsync() => throw new NotImplementedException();
     public static Task A28TwoDistinctOwedScopesAsync() => throw new NotImplementedException();
     public static Task A28PartialCompareKeepsDebtAsync() => throw new NotImplementedException();
-    public static Task A29DotTildePrefixAsync() => throw new NotImplementedException();
-    public static Task A29FileExtensionAsync() => throw new NotImplementedException();
-    public static Task A29FileNameAsync() => throw new NotImplementedException();
-    public static Task A29FolderNameAsync() => throw new NotImplementedException();
+    public static Task A29DotTildePrefixAsync() => CompareAsync(false,
+        [new("~$draft",1)],[],[new("~$draft",1)],[],0,[],ignores:["FileNamePrefix:~$"]);
+    public static Task A29FileExtensionAsync() => CompareAsync(false,
+        [new("report.tmp",1)],[],[new("report.tmp",1)],[],0,[],ignores:["FileExtension:.tmp"]);
+    public static Task A29FileNameAsync() => CompareAsync(false,
+        [new("secret",1)],[],[new("secret",1)],[],0,[],ignores:["FileName:secret"]);
+    public static Task A29FolderNameAsync() => CompareAsync(false,
+        [new("cache",0,true,"L-c"),new("cache/x",1,Id:"L-x")],[],[new("cache",0,true),new("cache/x",1)],[],0,[],ignores:["FolderName:cache"]);
     public static Task A29UnignoreQuietScopeAsync() => throw new NotImplementedException();
     public static Task A29OtherMatchingRuleRemainsAsync() => throw new NotImplementedException();
     public static Task A29IgnoredChildTravelsWithFolderAsync() => throw new NotImplementedException();
@@ -230,20 +396,87 @@ public static class ReconciliationChecks
             [new(Original,2),new(Label(Original,Side.Dropbox,now),3)],
             [new(Original,3),new(Label(Original,Side.Local,future),2)],2,[TextKey.InfoKeptBoth]);
     }
-    public static Task A34FileFolderNewestAsync() => throw new NotImplementedException();
+    // A file against a folder under newest-wins is kept both (PLAN A34, BC3): the PC keeps its file, Dropbox its
+    // folder, and each side gets the other version at a labelled copy.
+    public static Task A34FileFolderNewestAsync() => CompareAsync(false,
+        [new(Original,2)], [new(Original,4,true)],
+        [new(Original,2), new(Label(Original,Side.Dropbox,At(4)),0,true)],
+        [new(Original,0,true), new(Label(Original,Side.Local,At(2)),2)],
+        2, [TextKey.InfoKeptBoth]);
     public static Task A34FileFolderPcWinsAsync() => CompareAsync(false,
-        [new(Original,2)],[new(Original,0,true)],[new(Original,2)],[new(Original,2)],1,[],FirstRunPolicy.LocalWins);
+        [new(Original,2)],[new(Original,0,true)],[new(Original,2)],[new(Original,2)],1,[],FirstRunPolicy.LocalWins, admit: true);
     public static Task A34FileFolderDropboxWinsAsync() => CompareAsync(false,
-        [new(Original,2)],[new(Original,0,true)],[new(Original,0,true)],[new(Original,0,true)],1,[],FirstRunPolicy.DropboxWins);
-    public static Task A35DifferentDeletedHashAsync() => throw new NotImplementedException();
-    public static Task A35EarlierDeleteAsync() => throw new NotImplementedException();
-    public static Task A35MissingTimeAsync() => throw new NotImplementedException();
-    public static Task A35MalformedTimeAsync() => throw new NotImplementedException();
-    public static Task A35MissingHashAsync() => throw new NotImplementedException();
-    public static Task A35MalformedHashAsync() => throw new NotImplementedException();
-    public static Task A35InsideOffsetUncertaintyAsync() => throw new NotImplementedException();
-    public static Task A35LiveAtTargetAsync() => throw new NotImplementedException();
+        [new(Original,2)],[new(Original,0,true)],[new(Original,0,true)],[new(Original,0,true)],1,[],FirstRunPolicy.DropboxWins, admit: true);
+    private static string Hash(byte v){using var h=new ContentHash();h.Append([v]);return h.Finish();}
+    // A PC-only file on first run with a Dropbox deleted entry that cannot confirm equal-content-later-delete:
+    // it is uploaded with one edit-beats-delete notice, never recycled.
+    private static Task FirstRunCannotRecycleAsync(DeletionEvidence evidence,(TimeSpan Offset,TimeSpan Uncertainty)? clock)
+    {
+        var pair=ItemChecks.Pair();
+        return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
+        await WithStoreAsync(pair,async store =>
+        {
+            var paths=new PathScope(pair,[pair],DriveType.Fixed);
+            var local=new FakeSide(Side.Local); var remote=new FakeSide(Side.Dropbox);
+            var queue=await ItemChecks.StartQueueAsync(pair,paths,local,remote,store);
+            const string path="item";
+            var entry=ItemChecks.File(Side.Local,path,1,"pc"); local.Seed(entry,[1]);
+            remote.DeletedHistory[path]=evidence; remote.ClockOffset=clock;
+            await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,remote,store,null,null,deadline);
+            Check.Require(local.Items.TryGetValue(path,out var pcv) && pcv.Bytes.SequenceEqual(new byte[]{1}),"PC file lost on unconfirmed evidence");
+            Check.Require(remote.Items.TryGetValue(path,out var dbv) && dbv.Bytes.SequenceEqual(new byte[]{1}),"File was not uploaded");
+            Check.Require(local.Requests[nameof(ISide.DeleteAsync)]==0 && remote.Requests[nameof(ISide.DeleteAsync)]==0,"Unconfirmed evidence recycled a file");
+            var open=new List<Notice>(); await foreach(var n in store.NoticesAsync(pair.PairId,default)) if(!n.Dismissed) open.Add(n);
+            Check.Require(open.Count==1 && open.Single().Cause==TextKey.InfoEditBeatsDelete,"Missing edit-beats-delete notice");
+            var records=new List<SyncedEntry>(); await foreach(var r in store.DescendantsAsync(pair.PairId,Side.Local,"",default)) records.Add(r);
+            Check.Require(records.Count==1,"Upload not linked");
+        }));
+    }
+    public static Task A35DifferentDeletedHashAsync() => FirstRunCannotRecycleAsync(
+        new DeletionEvidence.DeletedFile("item","dropbox","deleted","r1",DateTimeOffset.UnixEpoch.AddDays(2),null,Hash(9),null),(TimeSpan.Zero,TimeSpan.Zero));
+    public static Task A35EarlierDeleteAsync() => FirstRunCannotRecycleAsync(
+        new DeletionEvidence.DeletedFile("item","dropbox","deleted","r1",DateTimeOffset.UnixEpoch.AddSeconds(-100),null,Hash(1),null),(TimeSpan.Zero,TimeSpan.Zero));
+    public static Task A35MissingTimeAsync() => FirstRunCannotRecycleAsync(
+        new DeletionEvidence.DeletedFile("item","dropbox","deleted","r1",null,TextKey.DeletionTimeMissing,Hash(1),null),(TimeSpan.Zero,TimeSpan.Zero));
+    public static Task A35MalformedTimeAsync() => FirstRunCannotRecycleAsync(
+        new DeletionEvidence.DeletedFile("item","dropbox","deleted","r1",null,TextKey.DeletionTimeMalformed,Hash(1),null),(TimeSpan.Zero,TimeSpan.Zero));
+    public static Task A35MissingHashAsync() => FirstRunCannotRecycleAsync(
+        new DeletionEvidence.DeletedFile("item","dropbox","deleted","r1",DateTimeOffset.UnixEpoch.AddDays(2),null,null,TextKey.DeletionHashMissing),(TimeSpan.Zero,TimeSpan.Zero));
+    public static Task A35MalformedHashAsync() => FirstRunCannotRecycleAsync(
+        new DeletionEvidence.DeletedFile("item","dropbox","deleted","r1",DateTimeOffset.UnixEpoch.AddDays(2),null,null,TextKey.DeletionHashMalformed),(TimeSpan.Zero,TimeSpan.Zero));
+    public static Task A35InsideOffsetUncertaintyAsync() => FirstRunCannotRecycleAsync(
+        new DeletionEvidence.DeletedFile("item","dropbox","deleted","r1",DateTimeOffset.UnixEpoch.AddDays(2),null,Hash(1),null),(TimeSpan.Zero,TimeSpan.FromDays(5)));
+    public static Task A35LiveAtTargetAsync() => CompareAsync(false,[new(Original,2)],[new(Original,2)],[new(Original,2)],[new(Original,2)],1,[]);
     public static Task A35LiveElsewhereAsync() => throw new NotImplementedException();
     public static Task A35RetryMatchingHistoricalDeleteAsync() => throw new NotImplementedException();
     public static Task A35RetryChangedHistoricalEvidenceAsync() => throw new NotImplementedException();
+    // L47 / A50: two pairs with an identical local root both map the same PC folder. Neither `pairs add`
+    // (Host.AddPairAsync:404 has no overlap refusal) nor PathScope isolates equal roots (PathNames
+    // .RelativeUnderLocalRoot:318-325 needs a strict sub-path), so both pairs co-own the folder. This asserts
+    // the sole-version safety invariant (D-1121-8, A50 "protect both mapped endpoints"): a version removed by one
+    // pair is never left nowhere - it stays live or is retained in the recycle bin - and the pair does not
+    // overwrite its endpoint for an unchanged counterpart.
+    public static Task A50IdenticalRootsPreserveSoleCopyAsync()
+    {
+        var p1 = ItemChecks.Pair() with { PairId = "p1", LocalRoot = @"T:\A", DropboxRoot = "/X" };
+        var p2 = ItemChecks.Pair() with { PairId = "p2", LocalRoot = @"T:\A", DropboxRoot = "/Y" };
+        return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
+        await WithStoreAsync(p1, async store =>
+        {
+            await store.FinishRepairAsync(p1.PairId,(0,await store.OweRepairAsync(p1.PairId,Side.Dropbox,"requested",default)),"{}",default);
+            var local = new FakeSide(Side.Local); var cloud = new FakeSide(Side.Dropbox);
+            var pc = ItemChecks.File(Side.Local, @"T:\A\doc", 1, "pc-doc");
+            var db = ItemChecks.File(Side.Dropbox, "/X/doc", 1, "db-doc");
+            local.Seed(pc, [1]);
+            await store.CommitAsync(p1.PairId, null, SyncedEntries.From(pc, db), null, null, default);
+            var paths = new PathScope(p1, [p1, p2], DriveType.Fixed);
+            var queue = await ItemChecks.StartQueueAsync(p1, paths, local, cloud, store);
+            await Repair.RunAsync(p1, ItemChecks.Settings, _=>{}, paths, queue, local, cloud, store, null, null, deadline);
+            var live = local.Items.TryGetValue(pc.Path, out var kept) && kept.Bytes.SequenceEqual(new byte[]{1});
+            var binned = local.History.Any(h => h.Entry.Path == pc.Path && h.Bytes.SequenceEqual(new byte[]{1}));
+            Check.Require(live || binned, "A version shared by two identical-root pairs ended up nowhere");
+            Check.Require(cloud.Requests[nameof(ISide.PublishAsync)]==0 && cloud.Requests[nameof(ISide.MoveAsync)]==0,
+                "The pair overwrote an endpoint for an unchanged counterpart");
+        }));
+    }
 }

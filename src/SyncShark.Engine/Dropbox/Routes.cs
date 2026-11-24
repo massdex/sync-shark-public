@@ -30,6 +30,12 @@ public static class Routes
     /// <summary>The number of files the provider permits in one relocation.</summary>
     public static int RelocationFiles => Embedded.Value.RelocationFiles;
 
+    /// <summary>The HTTP version the sign-in loopback callback accepts and answers with.</summary>
+    public static string LoopbackHttpVersion => Embedded.Value.LoopbackHttpVersion;
+
+    /// <summary>The loopback acknowledgement's response head, with {LoopbackHttpVersion} and {Length} placeholders.</summary>
+    public static string LoopbackResponseHead => Embedded.Value.LoopbackResponseHead;
+
     /// <summary>Resolve an endpoint without classifying an OAuth bootstrap URL as an API route.</summary>
     public static Uri Endpoint(string name) => name switch
     {
@@ -138,14 +144,18 @@ public static class Routes
             nameByEndpoint[endpoint] = name;
         }
         var limits = root.GetProperty("limits");
+        var loopback = root.GetProperty("loopback");
         return new Catalog(byName, nameByEndpoint,
             limits.GetProperty("contentRequestMiB").GetInt64() * BytesPerMiB,
-            limits.GetProperty("relocationFiles").GetInt32());
+            limits.GetProperty("relocationFiles").GetInt32(),
+            loopback.GetProperty("httpVersion").GetString() ?? throw new InvalidDataException(ResourceNames.Routes),
+            loopback.GetProperty("responseHead").GetString() ?? throw new InvalidDataException(ResourceNames.Routes));
     }
 
     private sealed record RouteInfo(Style RouteStyle, Policy RoutePolicy, Special? RouteSpecial, bool NoAuth,
         bool VoidArg, int? MaxEntries, Uri Endpoint);
 
     private sealed record Catalog(IReadOnlyDictionary<string, RouteInfo> ByName,
-        IReadOnlyDictionary<Uri, string> NameByEndpoint, long ContentRequestBytes, int RelocationFiles);
+        IReadOnlyDictionary<Uri, string> NameByEndpoint, long ContentRequestBytes, int RelocationFiles,
+        string LoopbackHttpVersion, string LoopbackResponseHead);
 }

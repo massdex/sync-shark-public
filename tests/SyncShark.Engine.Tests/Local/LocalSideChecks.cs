@@ -7,6 +7,7 @@ public static class LocalSideChecks
 {
     public static async Task RunAsync()
     {
+        await SecondRecycleWaitsAsync();
         // A selected non-readable entry must be refused before even resolving a data filename.
         var pair = new PairConfig("pair","Pair","invalid\0root","/root","account",[],[],FirstRunPolicy.NewestWins,true,null);
         var side = LocalSide.Factory()(pair,()=>throw new InvalidOperationException(),SettingsParser.Load(),new TestDoubles.InMemoryStateStore());
@@ -27,6 +28,14 @@ public static class LocalSideChecks
 
     [System.Runtime.InteropServices.DllImport("kernel32",EntryPoint="CreateFileW",CharSet=System.Runtime.InteropServices.CharSet.Unicode,SetLastError=true,ExactSpelling=true)]
     private static extern Microsoft.Win32.SafeHandles.SafeFileHandle OpenDirectory(string path,uint access,FileShare share,IntPtr security,uint disposition,uint flags,IntPtr template);
+    // A parent pin denies delete sharing, so a delete-access open of a pinned directory is a sharing violation.
+    private static bool Pinned(string directory)
+    {
+        using var probe=OpenDirectory(directory,0x10000,FileShare.ReadWrite|FileShare.Delete,IntPtr.Zero,3,0x02000000,IntPtr.Zero);
+        if(!probe.IsInvalid) return false;
+        var code=System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        return code==32?true:throw new System.ComponentModel.Win32Exception(code);
+    }
     // Registered separately: the cross-group checks must stay NOT IMPLEMENTED until their owners land.
     public static async Task LateReadFailureAsync()
     {
@@ -48,14 +57,75 @@ public static class LocalSideChecks
         }
         finally { home.Delete(true); }
     }
+    public static async Task ReceiptNoteAsync(int row)
+    {
+        // These calls reach the actual Windows bin. Only the disposable hosted runner may run them.
+        if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true" || Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted") throw new NotImplementedException("Requires disposable Windows runner");
+        var home=Directory.CreateTempSubdirectory();
+        try
+        {
+            using var state=new TestDoubles.InMemoryStateStore();var first=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var second=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);int calls=0;bool early=false;
+            async Task<bool> Arm(RemovalSelection v,StageProof? stage,CancellationToken ct)
+            {
+                if(Interlocked.Increment(ref calls)==1){first.SetResult();early=await Task.WhenAny(second.Task,Task.Delay(TimeSpan.FromSeconds(2),ct))==second.Task;}
+                else second.TrySetResult();return await state.ArmAsync("pair",v,stage,ct);
+            }
+            IStore store=row==4?Executor.FolderDeleteChecks.Observe.Wrap<IStore>(state,(m,args)=>m==nameof(IStore.ArmAsync)?Arm((RemovalSelection)args[1]!, (StageProof?)args[2],(CancellationToken)args[3]!):null):state;
+            var factory=LocalSide.Factory();var side=BoundSide(home.FullName,store,factory);var domain=DriveIdentity.Read(home.FullName).Identity.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            async Task<RemovalSelection> Select(string name,bool folder)
+            {
+                var path=Path.Combine(home.FullName,name);if(folder)Directory.CreateDirectory(path);else File.WriteAllBytes(path,[1]);
+                var e=(await side.ReadOneAsync(name,default))!;return new(new(e,domain,folder?null:await side.ContentHashAsync(e,default)),null);
+            }
+            var a=await Select("a",row==3);
+            if(row==2)
+            {
+                var source=Scenarios.ItemChecks.File(Side.Dropbox,"a",2,"peer");await using var stage=await side.StageAsync("a",new MemoryStream([2]),source,a.Proof.Expected,default);
+                var result=await side.PublishAsync(stage,a.Proof.Expected,a,default);Check.Require(result.Outcome==RemovalOutcome.Published && result.Final?.Id==stage.Proof!.FileId && await store.ArmedAsync("pair",default)==null && File.ReadAllBytes(Path.Combine(home.FullName,"a")).SequenceEqual(new byte[]{2}),"Replacement did not settle at receipt");
+            }
+            else if(row==4)
+            {
+                var b=await Select("b",false);var other=BoundSide(home.FullName,store,factory);
+                var one=side.DeleteAsync(a.Proof.Expected,a,default);await Task.WhenAny(first.Task,one);var results=await Task.WhenAll(one,other.DeleteAsync(b.Proof.Expected,b,default));
+                Check.Require(results.All(r=>r.Outcome==RemovalOutcome.Removed) && calls==2 && !early && await store.ArmedAsync("pair",default)==null,"Concurrent recycles did not take turns");
+            }
+            else
+            {
+                var result=await side.DeleteAsync(a.Proof.Expected,a,default);var note=await store.ArmedAsync("pair",default);
+                Check.Require(result.Outcome==RemovalOutcome.Removed && (row==3?note?.Victim==a:note==null && await side.ReadOneAsync("a",default)==null),"Unexpected note at recycle receipt");
+            }
+        }
+        finally {home.Delete(true);}
+    }
+    private static async Task SecondRecycleWaitsAsync()
+    {
+        var home=Directory.CreateTempSubdirectory();
+        try
+        {
+            using var store=new TestDoubles.InMemoryStateStore();var side=BoundSide(home.FullName,store);
+            var domain=DriveIdentity.Read(home.FullName).Identity.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            async Task<RemovalSelection> Select(string name,byte value)
+            {
+                File.WriteAllBytes(Path.Combine(home.FullName,name),[value]);var entry=(await side.ReadOneAsync(name,default))!;
+                return new(new(entry,domain,await side.ContentHashAsync(entry,default)),null);
+            }
+            var a=await Select("a",1);var b=await Select("b",2);
+            Check.Require(await store.ArmAsync("pair",a,null,default),"First arm failed");
+            var result=await side.DeleteAsync(b.Proof.Expected,b,default);
+            Check.Require(result.Outcome==RemovalOutcome.Pending && (await side.ReadOneAsync("b",default))?.Id==b.Proof.Expected.Id && File.ReadAllBytes(Path.Combine(home.FullName,"b")).SequenceEqual(new byte[]{2}) && await store.ArmedAsync("pair",default)==(a,(StageProof?)null),"Local/SecondRecycleWaits: busy recycle moved the second file or lost the original note");
+        }
+        finally {home.Delete(true);}
+    }
     private static LocalSide BoundSide(string root,params Exclusion[] exclusions)=>BoundSide(root,new TestDoubles.InMemoryStateStore(),exclusions);
-    private static LocalSide BoundSide(string root,IStore store,params Exclusion[] exclusions)
+    private static LocalSide BoundSide(string root,IStore store,params Exclusion[] exclusions)=>BoundSide(root,store,LocalSide.Factory(),exclusions);
+    private static LocalSide BoundSide(string root,IStore store,Func<PairConfig,Func<PathScope>,EngineSettings,IStore,LocalSide> factory,params Exclusion[] exclusions)
     {
         var (id,type)=DriveIdentity.Read(root);
         var pair=new PairConfig("pair","Pair",root,"/root","account",[],exclusions,FirstRunPolicy.NewestWins,true,null,
             new(root,"/root","account",id,new("account","root","home","folder")));
         var scope=new PathScope(pair,[pair],type);
-        return LocalSide.Factory()(pair,()=>scope,SettingsParser.Load(),store);
+        return factory(pair,()=>scope,SettingsParser.Load(),store);
     }
 
     public static async Task ArmedOfflineStageAsync()
@@ -300,7 +370,7 @@ public static class LocalSideChecks
         }
         finally { Directory.Delete(home,true); }
     }
-    // Stop at the real arm boundary, before the recycle call. Count held native handles, not source tokens.
+    // Stop at the real arm boundary, before the recycle call. Probe each parent for its held pin.
     public static async Task ParentPinCountAsync()
     {
         var root=Directory.CreateTempSubdirectory().FullName;
@@ -324,17 +394,14 @@ public static class LocalSideChecks
                 var selected=new RemovalSelection(new RemovalProof(victim,bound.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),oldDigest),null);
                 using var input=new MemoryStream(replacement);
                 await using var stage=await side.StageAsync(path,input,victim with {ContentHash=newDigest},victim,default);
-                var start=ArmHandleSample.Handles();
                 try { await side.PublishAsync(stage,victim,selected,default); throw new InvalidDataException("expected pre-recycle arm"); }
-                catch(ArmHandleSample.AtArm) { return sample.Count-start; }
+                catch(ArmHandleSample.AtArm) { return sample.Count; }
             }
-            await Count("warm");
             const int extra=20; var deep="parent/"+string.Join("/",Enumerable.Repeat("p",extra));
-            var shallowCount=await Count("parent"); var deepCount=await Count(deep);
-            var added=deepCount-shallowCount;
-            // A second retained source chain adds another twenty handles; allow only small process background drift.
-            Check.Require(Math.Abs(added-extra)<=2,"parent pin count did not grow by one handle per added directory");
-
+            var chain=new List<string>{root}; foreach(var name in deep.Split('/')) chain.Add(Path.Combine(chain[^1],name));
+            sample.Chain=chain;
+            Check.Require(await Count(deep)==chain.Count,"parent pin count did not hold one pin per parent directory at arm");
+            Check.Require(!chain.Any(Pinned),"parent pin probe saw a pin after the publish ended");
         }
         finally { Directory.Delete(root,true); }
     }
@@ -342,15 +409,13 @@ public static class LocalSideChecks
     {
         internal sealed class AtArm : Exception { }
         private readonly IStore memory=new TestDoubles.InMemoryStateStore();
+        internal IReadOnlyList<string> Chain { get; set; }=[];
         internal int Count { get; private set; }
-        internal static int Handles()=>GetProcessHandleCount(new IntPtr(-1),out var n)?n:throw new System.ComponentModel.Win32Exception();
         protected override object? Invoke(System.Reflection.MethodInfo? method,object?[]? args)
         {
-            if(method?.Name==nameof(IStore.ArmAsync)) { Count=Handles(); throw new AtArm(); }
+            if(method?.Name==nameof(IStore.ArmAsync)) { Count=Chain.Count(Pinned); throw new AtArm(); }
             return method!.Invoke(memory,args);
         }
-        [System.Runtime.InteropServices.DllImport("kernel32",SetLastError=true)]
-        private static extern bool GetProcessHandleCount(IntPtr process,out int count);
     }
     public static async Task ExcludedFirstAliasAsync()
     {

@@ -56,6 +56,7 @@ public static class AutoSync
     {
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var evidence=new ReadEvidence(stop.Token);
+        var proofNow=queue.ProofNow=()=>Volatile.Read(ref evidence).ForRemoval();
         int liveReset=0,firstSourceDone=0;
         var finite=continueLive ? new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) : null;
         var pending=new HashSet<Task>();
@@ -146,7 +147,7 @@ public static class AutoSync
             catch(Exception error) {Abort(error);throw;}
             async Task Settle(ChangePage page,ReadEvidence interval)
             {
-                try { await ApplyRegisteredPage(pair,settings,events,paths,queue,side.Side,page,local,dropbox,store,token,interval,()=>Volatile.Read(ref evidence).ForRemoval()); }
+                try { await ApplyRegisteredPage(pair,settings,events,paths,queue,side.Side,page,local,dropbox,store,token,interval,proofNow); }
                 catch(Exception error) {Abort(error);throw;}
             }
         }
@@ -234,7 +235,11 @@ public static class AutoSync
             source==Side.Dropbox ? (cursor,token)=>store.SaveCursorAsync(pair.PairId,cursor,token) : null,
             source==Side.Dropbox ? (change,token)=>queue.Unfinished.CheckAsync(pair,settings,events,paths,change,local,dropbox,store,queue.Held,Populate,Hop,token) : null,ct);
         if(!settlement.IsFaulted && !settlement.IsCanceled) Registered(); // Empty and prerequisite-blocked pages have no immediate callback.
-        if(gained) await Task.WhenAll(settlement,queue.RetryHeldAsync(null,ct));
+        if(gained)
+        {
+            await queue.Unfinished.CheckLiveStageAsync(pair,settings,events,queue.CurrentScope(paths),local,dropbox,store,queue.Held,Populate,Hop,ct);
+            await Task.WhenAll(settlement,queue.RetryHeldAsync(null,ct));
+        }
         else await settlement;
     }
 

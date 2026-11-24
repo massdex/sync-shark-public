@@ -6,6 +6,39 @@ namespace Massdex.SyncShark.Engine.Tests.Executor;
 /// <summary>An exact Dropbox echo consumes no provider reads and no record writes.</summary>
 public static class ItemSyncChecks
 {
+    public static async Task HopOneSidedChildDecidesAtFinalNames()
+    {
+        var pair=ItemChecks.Pair(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); using var store=new InMemoryStateStore();
+        var old=ItemChecks.File(Side.Local,"Old/c",1,"local"); var peer=ItemChecks.File(Side.Dropbox,"Old/c",1,"peer");
+        var saved=SyncedEntries.From(old,peer); await store.CommitAsync(pair.PairId,null,saved,null,null,default);
+        var edited=old with {Path="New/c",Size=2}; pc.Seed(edited,[7,7]);
+        var row=new Row(saved.LocalKey,edited,null,saved,[],null,RowContext.Neutral with {Destination="New/c",CompleteInventory=true});
+        await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
+        Check.Require(db.Items.ContainsKey("New/c") && !db.Items.ContainsKey("Old/c") && store.Records.Values.Single().DropboxPath=="New/c","A one-sided hop child was decided at its old name");
+    }
+
+    public static async Task GoneTargetFolderRemovalSettles()
+    {
+        var pair=ItemChecks.Pair(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); using var store=new InMemoryStateStore();
+        var old=ItemChecks.File(Side.Local,"parent",0,"local",true); var peer=ItemChecks.File(Side.Dropbox,"parent",0,"peer",true);
+        await store.CommitAsync(pair.PairId,null,SyncedEntries.From(old,peer),null,null,default);
+        var deleted=new Change(Side.Local,ChangeKind.Deleted,old.Path,null,old.Id,null,false,true);
+        Check.Require(await (Task<bool>)ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,deleted,pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[])==true && store.Records.Count==0 && db.Requests[nameof(ISide.DeleteAsync)]==0,"An already-removed peer folder kept its binding or was deleted again");
+    }
+
+    public static async Task DeliberateRefusalIsNotRetained()
+    {
+        var pair=ItemChecks.Pair(); var inner=pair with {PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"top/nested"),DropboxRoot=pair.DropboxRoot+"/top/nested"};
+        var paths=new PathScope(pair,[pair,inner],DriveType.Fixed); var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); using var store=new InMemoryStateStore();
+        var old=ItemChecks.File(Side.Local,"top",0,"local",true); var peer=ItemChecks.File(Side.Dropbox,"top",0,"peer",true);
+        await store.CommitAsync(pair.PairId,null,SyncedEntries.From(old,peer),null,null,default); var moved=old with {Path="moved"}; pc.Seed(moved,[]); db.Seed(peer,[]);
+        var change=new Change(Side.Local,ChangeKind.Renamed,moved.Path,old.Path,old.Id,moved,false,false); int calls=0;
+        await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,change,pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,failed:(_,_)=>calls++);
+        Check.Require(calls==0 && store.OpenNotices.Any(n=>n.Cause==TextKey.FailCarriesOtherPair),"A deliberate refusal was retained as a race");
+    }
+
     public static async Task RunAsync()
     {
         var pair=ItemChecks.Pair(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
@@ -17,6 +50,10 @@ public static class ItemSyncChecks
         await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Dropbox,ChangeKind.Changed,b.Path,null,b.Id,b,false,false),pc,db,store,(_,_,_,_)=>throw new InvalidOperationException(),(_,_,_,_)=>throw new InvalidOperationException(),default);
         await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Local,ChangeKind.Changed,a.Path,null,a.Id,a,true,false,10,JournalId:3),pc,db,store,(_,_,_,_)=>throw new InvalidOperationException(),(_,_,_,_)=>throw new InvalidOperationException(),default);
         Check.Require(pc.Requests[nameof(ISide.ReadOneAsync)]==0 && db.Requests[nameof(ISide.ReadOneAsync)]==0 && store.Requests[nameof(IStore.CommitAsync)]==commits,"Matching feed entry was re-read or re-committed");
+        await HopOneSidedChildDecidesAtFinalNames();
+        await GoneTargetFolderRemovalSettles();
+        await DeliberateRefusalIsNotRetained();
+        await JournalExitAsync();
         await MoveBeforeRecheckAsync();
         var defects=new List<string>();
         await RemoteReplacementAsync(defects);
@@ -203,6 +240,24 @@ public static class ItemSyncChecks
         if(pc.Requests[nameof(ISide.ReadByIdAsync)]==0 || !pc.Items.TryGetValue("B",out var source) || source.Entry.Id!=a.Id || !db.Items.TryGetValue("A",out var kept) || kept.Entry.Id!=replacement.Id || db.Mutations.Contains(replacement.Id)) defects.Add("Dropbox replacement at A was treated as the old victim without locating Local original B");
     }
 
+    private static async Task JournalExitAsync()
+    {
+        foreach(var destination in new[]{"bin/file","outside/file","inside/file"})
+        {
+            var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);using var store=new InMemoryStateStore();
+            var original=ItemChecks.File(Side.Local,"file",1,"12");var peer=ItemChecks.File(Side.Dropbox,"file",1,"peer");var moved=original with {Path=destination};
+            await store.CommitAsync(pair.PairId,null,SyncedEntries.From(original,peer),null,null,default);db.Seed(peer,[1]);
+            bool inside=destination=="inside/file";if(inside) pc.Seed(moved,[1]);else pc.History.Add((moved,[1]));
+            var deleted=new Change(Side.Local,ChangeKind.Deleted,original.Path,null,original.Id,null,false,false,11,JournalId:3);
+            var rename=deleted with {Kind=ChangeKind.Renamed,OldPath=original.Path,Path=destination,Usn=12};
+            bool held=false;
+            try {await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,deleted,pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>inside?[rename]:[],(_,_)=>held=true);}
+            catch(InventoryIncompleteException) when(held) { }
+            if(inside) Check.Require(!held && db.History.Count==0 && !db.Items.ContainsKey(peer.Path) && db.Items[destination].Entry.Id==peer.Id && store.Records.Values.Single().LocalPath==destination && !store.OpenNotices.Any(),"An in-scope journal relocation must move the linked peer without deleting it");
+            else Check.Require(!held && !db.Items.ContainsKey(peer.Path) && db.History.Count==1 && db.History[0].Entry==peer && db.History[0].Bytes.SequenceEqual(new byte[]{1}) && !store.Records.Any() && !store.OpenNotices.Any(),"An out-of-scope journal delete must settle, archive the peer and forget the binding without a notice");
+        }
+    }
+
     private static async Task UncertainDeleteAsync(List<string> defects)
     {
         foreach(bool postProof in new[]{true,false})
@@ -284,9 +339,12 @@ public static class ItemSyncChecks
         var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);using var store=new InMemoryStateStore();
         var folder=ItemChecks.File(Side.Local,"parent",0,"pc-parent",true);pc.Seed(folder,[]);
         var context=RowContext.Neutral with {FirstRun=true,CompleteInventory=true,DeletionEligible=true,ProtectedContents=true,UnreadableCause=TextKey.ReadLocalFailed,Destination=folder.Path};
-        var row=new Row(PathNames.Key(folder.Path),folder,null,null,[],null,context);Notice? original=null;bool retained=false;
-        try {await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[],(key,ok)=>{retained=!ok && key==row.Key && original!=null;throw new global::Massdex.SyncShark.Engine.Run.WorkQueue.Unsettled();},failedNotice:n=>original=n);} catch(global::Massdex.SyncShark.Engine.Run.WorkQueue.Unsettled) { }
-        var stored=store.OpenNotices.Single();Check.Require(retained && original!=null && stored.Matches(original with {Id=stored.Id}) && pc.Items.ContainsKey(folder.Path),"R4 planned failure did not hand Repair the exact saved envelope before retaining input");
+        var row=new Row(PathNames.Key(folder.Path),folder,null,null,[],null,context);
+        var envelopes=new List<Notice>();int retained=0;
+        // A planned refusal is the decision: one saved envelope, no retained input, and the source untouched.
+        var outcome=await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[],(_,_)=>retained++,failedNotice:envelopes.Add);
+        var stored=store.OpenNotices.Single();
+        Check.Require(outcome==EffectOutcome.Refused && retained==0 && envelopes.Count==1 && stored.Matches(envelopes[0] with {Id=stored.Id}) && pc.Items.ContainsKey(folder.Path) && pc.History.Count==0,"R4 planned failure did not hand Repair the exact saved envelope without retaining input or touching the source");
     }
 
     private static async Task MoveBeforeRecheckAsync()

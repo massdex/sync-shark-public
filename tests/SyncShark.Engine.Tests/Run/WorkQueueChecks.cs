@@ -1,11 +1,46 @@
 using Massdex.SyncShark.Engine.Run;
 using Massdex.SyncShark.Engine.Tests.Scenarios;
+using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Run;
 
 /// <summary>Held feed evidence belongs to the removal until its exact subjects settle.</summary>
 public static class WorkQueueChecks
 {
+    public static async Task RepairHeldRowEndsAsync()
+    {
+        using var store=new InMemoryStateStore();
+        var pair=ItemChecks.Pair(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var pc=new FakeSide(Side.Local,async proof=>(await store.ArmedAsync(pair.PairId,default))?.Stage==proof);
+        var cloud=new FakeSide(Side.Dropbox){ClockOffset=(TimeSpan.Zero,TimeSpan.Zero)};
+        await store.SavePairAsync(pair,default);
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,cloud,store);
+        const string path="formerly-deleted"; var entry=ItemChecks.File(Side.Local,path,1,"pc");
+        pc.Seed(entry,[1]); pc.Seed(ItemChecks.File(Side.Local,"unrelated",1,"pc-other"),[1]);
+        cloud.Seed(ItemChecks.File(Side.Dropbox,"unrelated",1,"other"),[1]);
+        cloud.DeletedHistory[path]=new DeletionEvidence.DeletedFile(path,"cloud","previous","r1",entry.Modified.AddDays(1),null,entry.ContentHash,null);
+        using var end=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try { await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,null,null,end.Token).WaitAsync(end.Token); }
+        catch(OperationCanceledException) when(end.IsCancellationRequested) { throw new InvalidDataException("Repair waited on a retained row input"); }
+        Check.Require(pc.Items["formerly-deleted"].Bytes.SequenceEqual(new byte[]{1}) && pc.History.Count==0,"Repair recycled an unproved version");
+        Check.Require(await queue.RetryHeldAsync(null,default)==true,"Repair dropped its retained row input");
+    }
+
+    public static async Task HeldRowStillOrdersAsync()
+    {
+        using var end=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var queue=new WorkQueue(); var pair=ItemChecks.Pair();
+        var entry=ItemChecks.File(Side.Local,"held",1,"pc"); bool ready=false; int calls=0;
+        await queue.AdmitAsync(pair,new Row(entry.Path,entry,null,null,[],null,null!),[],
+            _=>ready ? Task.CompletedTask : throw new WorkQueue.Unsettled(),end.Token);
+        var change=new Change(Side.Local,ChangeKind.Changed,entry.Path,null,entry.Id,entry,false,false);
+        var page=queue.AdmitAsync(pair,new([change],null,new(1,1)),(_,_)=>{Interlocked.Increment(ref calls);return Task.CompletedTask;},(_,_)=>Task.CompletedTask,end.Token);
+        Check.Require(calls==0 && !page.IsCompleted,"An overlapping page ran before the retained row settled");
+        ready=true; Check.Require(await queue.RetryHeldAsync(null,end.Token),"Retry did not find the retained row");
+        await page.WaitAsync(end.Token);
+        Check.Require(calls==1,"The overlapping page did not run exactly once after the retained row settled");
+    }
+
     public static async Task RunAsync()
     {
         JournalPosition? clamped=new(2,9);
@@ -74,7 +109,7 @@ public static class WorkQueueChecks
         var feed = queue.AdmitAsync(pair,new([first],hop.Dropbox,null),(_,_)=>release.Task,null,default);
         Check.Require(!queue.CoversHop(hop),"An unread or unsettled feed range was covered");
         release.SetResult(); await feed;
-        Check.Require(!queue.CoversHop(hop),"The offered PC USN exceeded the journal owner’s settled prefix");
+        Check.Require(!queue.CoversHop(hop),"The offered PC USN exceeded the journal owner's settled prefix");
         clamped=hop.Local;
         await queue.AdmitAsync(pair,new([],null,hop.Local),(_,_)=>Task.CompletedTask,(_,_)=>Task.CompletedTask,default);
         Check.Require(queue.CoversHop(hop) && !queue.CoversHop((new(3,10),hop.Dropbox)) &&
