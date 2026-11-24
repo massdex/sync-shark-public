@@ -112,8 +112,7 @@ internal sealed class StageRecovery(Unfinished owner,PairConfig pair,EngineSetti
     internal static async Task EndNoteAsync(IStore store,ISide local,PairConfig pair,RemovalSelection victim,StageProof? stage,CancellationToken ct)
     {
         IStaged? held=null;
-        if(stage!=null) try {held=await local.ReopenStageAsync(victim,stage,ct);}
-        catch(Exception e) when(e is ChangedUnderneathException or IOException) { /* Never discard an unverifiable stage. */ }
+        // Leave the stage behind.
         await using(held) await store.DisarmAsync(pair.PairId,victim,stage,ct);
     }
 
