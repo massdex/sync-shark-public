@@ -1,4 +1,5 @@
 using Massdex.SyncShark.Engine.Executor;
+using Massdex.SyncShark.Engine.Local;
 using Massdex.SyncShark.Engine.Run;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
@@ -374,26 +375,67 @@ public static class RecoveryChecks
         Check.Require(x.Pc.Requests[nameof(ISide.SettleJournalAsync)]>=1,"An irrelevant local page did not advance its settled position");
         x.VerifyLinks();Check.Require(x.Pc.Items.Count==1 && x.Cloud.Items.Count==1 && x.Store.Records.Count==1 && x.Store.OpenNotices.Count==0,"An irrelevant local page touched data");
     }
+    /// <summary>Supplies raw USN pages so a check drives the real journal reader, as JournalReaderChecks does.</summary>
+    private sealed class JournalSource : UsnJournal
+    {
+        internal JournalPosition Tail=new(1,100);
+        internal Func<JournalPosition,JournalPosition?,CancellationToken,Task<NtfsUsnPage>> Page=null!;
+        public override (ulong First,JournalPosition Tail) Retained(string root)=>(0,Tail);
+        public override Task<NtfsUsnPage> ReadAsync(string root,JournalPosition from,JournalPosition? end,int bytes,CancellationToken ct)=>Page(from,end,ct);
+    }
     public static async Task A38JournalPageIrrelevantReasonsAsync()
     {
-        using var x=new PairState();await x.InitializeAsync();await x.LinkAsync("steady",1);
-        // An irrelevant local journal page, then a restart re-reads from the settled position: a no-op both times.
-        await AutoSync.ApplyPageAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,Side.Local,ItemChecks.Journal([],4),x.Pc,x.Cloud,x.Store,default);
-        await AutoSync.ApplyPageAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,Side.Local,ItemChecks.Journal([],5),x.Pc,x.Cloud,x.Store,default);
-        Check.Require((await x.Store.ReadRepairAsync(x.Pair.PairId,Side.Local,default)).Reason==null,"An irrelevant local page owed a Repair after the restart");
-        Check.Require(x.Pc.Requests[nameof(ISide.SettleJournalAsync)]>=1,"An irrelevant local page did not advance its settled position");
-        x.VerifyLinks();Check.Require(x.Pc.Items.Count==1 && x.Cloud.Items.Count==1 && x.Store.Records.Count==1 && x.Store.OpenNotices.Count==0,"An irrelevant local page replayed work after the restart");
+        // A page whose only record carries irrelevant reasons (basic-info, EA, security: no data, create, delete or
+        // rename bit) is a no-op that must settle at its exact position and owe no Repair.
+        const string root="Pair A";
+        var identity=new RootIdentity(root,"/a","connection",new(1,11,null),new("a","b","c","d"));
+        var pair=new PairConfig("a","Pair A",root,"/a","connection",[],[],FirstRunPolicy.NewestWins,true,null,identity);
+        var scope=new PathScope(pair,[pair],DriveType.Fixed);
+        using var store=new InMemoryStateStore();await store.SavePairAsync(pair,default);
+        int reads=0;
+        var source=new JournalSource();
+        source.Page=(from,end,ct)=>{
+            ulong consumed=end is {} e ? e.NextUsn : from.NextUsn+10;
+            UsnRecord[] records=Interlocked.Increment(ref reads)==1?new[]{new UsnRecord(12,11,11,0x8C00,FileAttributes.Normal,"item")}:Array.Empty<UsnRecord>();
+            return Task.FromResult(new NtfsUsnPage(NtfsUsnPageStatus.Complete,consumed,null,records));};
+        var reader=new JournalReader(source);
+        reader.Attach(pair,store,()=>scope,(_,_,_)=>((string?)null,(IReadOnlyList<string>?)null),_=>(Entry?)null);
+        var start=new JournalPosition(1,10);var end=new JournalPosition(1,20);
+        var page=await reader.ReadPageAsync(pair,start,end,ItemChecks.Settings,default);
+        Check.Require(page.Changes.Count==0 && !page.ContinuityLost && page.Position==end,"An irrelevant journal reason produced sync work or blocked its position");
+        Check.Require((await store.ReadRepairAsync(pair.PairId,Side.Local,default)).Revision==0,"An irrelevant journal page owed a Repair");
+        await reader.SettleAsync(pair,page.Position!,store,default);
+        Check.Require(await store.PositionAsync("1",default)==end,"An irrelevant journal page did not settle at the exact expected journal position");
+        var replay=await reader.ReadPageAsync(pair,end,new JournalPosition(1,21),ItemChecks.Settings,default);
+        Check.Require(replay.Changes.Count==0,"An irrelevant journal page replayed after the restart");
     }
     public static async Task A38RestartAfterEmptyPageAsync()
     {
-        using var x=new PairState();await x.InitializeAsync();await x.LinkAsync("steady",1);
-        await x.Store.SaveCursorAsync(x.Pair.PairId,"before",default);
-        // An empty Dropbox page with a new cursor, then a restart: the settled cursor stands and nothing replays.
-        await AutoSync.ApplyPageAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,Side.Dropbox,new([],"settled",null),x.Pc,x.Cloud,x.Store,default);
-        await AutoSync.ApplyPageAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,Side.Dropbox,new([],"settled",null),x.Pc,x.Cloud,x.Store,default);
-        Check.Require(await x.Store.CursorAsync(x.Pair.PairId,default)=="settled","An empty page did not persist its cursor across a restart");
-        Check.Require((await x.Store.ReadRepairAsync(x.Pair.PairId,Side.Dropbox,default)).Reason==null,"An empty page owed a Repair after the restart");
-        x.VerifyLinks();Check.Require(x.Store.Records.Count==1 && x.Store.OpenNotices.Count==0 && x.Cloud.Requests[nameof(ISide.ReadOneAsync)]==0,"An empty page replayed work after the restart");
+        var pair=ItemChecks.Pair();
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        // First process: an empty Dropbox page with a new cursor is applied once and its cursor persists.
+        string? saved;
+        {
+            using var store=new InMemoryStateStore();await store.SavePairAsync(pair,default);
+            await AutoSync.ApplyPageAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),Side.Dropbox,new([],"settled",null),new FakeSide(Side.Local),new FakeSide(Side.Dropbox),store,default);
+            saved=await store.CursorAsync(pair.PairId,default);
+        }
+        Check.Require(saved=="settled","An empty page did not persist its cursor");
+        // Reopen a fresh store that carries only the persisted cursor. The restarted reader must request exactly it,
+        // then advance to the finite boundary, and replay none of the earlier work.
+        using var reopened=new InMemoryStateStore();await reopened.SavePairAsync(pair,default);await reopened.SaveCursorAsync(pair.PairId,saved!,default);
+        var steady=ItemChecks.File(Side.Local,"steady",1,"pc-steady");var peer=ItemChecks.File(Side.Dropbox,"steady",1,"db-steady");
+        var pc=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox);pc.Seed(steady,[1]);cloud.Seed(peer,[1]);
+        await reopened.CommitAsync(pair.PairId,null,SyncedEntries.From(steady,peer),null,null,default);
+        cloud.Pages.Enqueue(new([],"done",null));
+        string? requested=null;bool first=true;
+        var observed=global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>{
+            if(first && m.Name==nameof(ISide.ReadChangesAsync)){first=false;requested=(string?)args[0];}
+            return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.Observation.Forward(cloud,m,args);});
+        await AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),pc,observed,reopened,(null,"done"),()=>{},default);
+        Check.Require(requested=="settled","The restarted reader did not request the exact saved cursor");
+        Check.Require(cloud.Requests[nameof(ISide.ReadOneAsync)]==0 && cloud.Requests[nameof(ISide.PublishAsync)]==0 && pc.Requests[nameof(ISide.PublishAsync)]==0,"An empty page replayed work after the restart");
+        Check.Require(reopened.Records.Count==1 && reopened.OpenNotices.Count==0 && (await reopened.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason==null,"An empty page changed data or owed a Repair after the restart");
     }
     public static Task A38OneFailedReadThenSuccessNoRepairAsync() => throw new NotImplementedException();
     public static async Task A39InUseHolderNameAsync()
