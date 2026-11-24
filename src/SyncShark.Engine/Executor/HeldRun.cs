@@ -19,7 +19,7 @@ internal sealed class HeldRun(PairConfig pair,Scope scope,Side side,ISide local,
     internal Notice? Retry=retry;
     /// <summary>The positively observed bin occupant: supplied by the caller or found for a reviewed bin subject.</summary>
     internal IdentityLocation? ActualVictim=actualVictim;
-    private readonly NoticeItem? subject=retry?.Subject.Items.FirstOrDefault(i=>i.Side==side && PathNames.Same(i.Path,retry.Path));
+    private NoticeItem? subject;
     private readonly IdentityLocation? pinned=retry?.Subject.DropboxVersion;
     private readonly Dictionary<(string Path,string Id),(long Order,Change Report)> latest=[];
     private readonly Dictionary<string,long> pathDeletes=new(PathNames.Comparer);
@@ -33,6 +33,8 @@ internal sealed class HeldRun(PairConfig pair,Scope scope,Side side,ISide local,
     /// <summary>True only when every latest report settled and a retried notice closed.</summary>
     internal async Task<bool> RunAsync()
     {
+        // Set here, not in an initializer: a lambda over constructor parameters would add a closure object per run.
+        subject=Retry?.Subject.Items.FirstOrDefault(i=>i.Side==Side && PathNames.Same(i.Path,Retry!.Path));
         if(pinned!=null && (Side!=Side.Dropbox || subject==null || pinned.Domain!=Pair.Roots?.Dropbox.RootNamespaceId || pinned.Entry.Id!=subject.Id || pinned.Entry.Path!=subject.Path || pinned.NativePath!=PathNames.RootedDropboxPath(Pair.DropboxRoot,subject.Path))) return false;
         if(!Collect(heldInput(Scope))) return false;
         if(pinned!=null)
@@ -63,7 +65,10 @@ internal sealed class HeldRun(PairConfig pair,Scope scope,Side side,ISide local,
         if(!PathNames.Same(last.Path,version.Path) || !PathNames.IsSelfOrUnder(version.Path,Root)) return null;
         var saved=await Store.FindAsync(Pair.PairId,Side,PathNames.KeyFor(Side,version.Path),Ct);
         bool foreign=saved!=null && saved.IdOn(Side)!=version.Id;
-        bool substitute=ActualVictim?.Entry.Id==version.Id || foreign && Retry?.Subject.Items.Any(i=>i.Side==Side && i.Id==version.Id && PathNames.Same(i.Path,version.Path))==true;
+        bool substitute=ActualVictim?.Entry.Id==version.Id;
+        // A loop, not Any(lambda): a lambda over version would add a closure object per subject.
+        if(!substitute && foreign && Retry!=null)
+            foreach(var i in Retry.Subject.Items) if(i.Side==Side && i.Id==version.Id && PathNames.Same(i.Path,version.Path)) {substitute=true;break;}
 
         Notice? owner=Retry;
         if(owner==null) await foreach(var open in Store.NoticesAtAsync(Pair.PairId,PathNames.Key(version.Path),Ct))
