@@ -100,22 +100,20 @@ public sealed class NoticeTable
         // Independent root failures and Info notices share the existing cause-keyed slot.
         var byCause=notice.Kind==NoticeKind.Info || (notice.Kind==NoticeKind.Failure && notice.Path.Length==0);
         var predicate=(putBack?"pathkey(path)":"path")+"=$path AND kind=$kind"+(byCause?" AND cause=$cause":"");
-        var (stale,displaced,prior)=await FindSlotAsync(tx,pairId,notice,predicate,ct);
-        if(stale) return (false,null);
-        if(notice.Kind==NoticeKind.Failure)
+        (long Id,string Path,NoticeKind Kind,TextKey Cause,string SubjectJson)? displaced=null;
+        Notice? prior=null;
+        using var select=StorageCommand.Create(tx.Connection!,tx,Select+predicate,("$p",pairId),("$path",putBack?PathNames.Key(notice.Path):notice.Path),("$kind",(int)notice.Kind));
+        if(byCause) select.Parameters.AddWithValue("$cause",notice.Cause.ToString());
+        using(var row=await select.ExecuteReaderAsync(ct)) if(await row.ReadAsync(ct))
         {
-            if(prior?.Subject.Move is {} move && notice.Subject.Move!=move) return (false,null);
-            if(prior!=null && prior.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None &&
-                (notice.Subject.FirstRunDeletion==IssueSubject.FirstRunDeletionKind.None || prior.Subject.FirstRunDeletion==IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice) &&
-                prior.Subject.Items.Any(old=>old.Side==Side.Local && old.Id.Length!=0 && notice.Subject.Items.Any(next=>next.Side==Side.Local && next.Id==old.Id && PathNames.Same(next.Path,old.Path))))
-                notice=notice with {Subject=notice.Subject with { FirstRunDeletion=prior.Subject.FirstRunDeletion }};
-            if(prior!=null && prior.Cause==notice.Cause && prior.Subject.HasSameItems(notice.Subject) && !(prior.Dismissed && prior.Cause==TextKey.FailRecycledLate))
-            {
-                var subject=notice.Subject;
-                if(prior.Subject.Incoming==subject.Incoming && prior.Subject.FirstRunDeletion==subject.FirstRunDeletion && prior.Subject.Holder==subject.Holder) return (false,null);
-                notice=prior with {Subject=subject};
-            }
+            if(putBack && row.GetInt64(5)>notice.At.UtcTicks) return (false,null);
+            if(!EnumNames.TryExact<TextKey>(row.GetString(2),out var cause)) throw new InvalidDataException();
+            displaced=(row.GetInt64(0),row.GetString(3),notice.Kind,cause,row.GetString(4));
+            if(notice.Kind==NoticeKind.Failure) prior=Row(row);
         }
+        var (reject,reconciled)=ReconcileFailure(notice,prior);
+        if(reject) return (false,null);
+        notice=reconciled;
         if(displaced is {} old && (old.Path!=notice.Path || old.Cause!=notice.Cause))
         {
             using var rekey=StorageCommand.Create(tx.Connection!,tx,"UPDATE issue SET path=$path,cause=$cause WHERE issue_id=$id",("$path",notice.Path),("$cause",notice.Cause.ToString()),("$id",old.Id));
@@ -128,23 +126,22 @@ public sealed class NoticeTable
         foreach(var item in notice.Subject.Items.Distinct()) await Member(tx,pairId,id,item,notice.Subject,notice.Kind==NoticeKind.Skipped?notice.Cause:null,ct);
         return (true,displaced);
     }
-    private static async Task<(bool Stale,(long Id,string Path,NoticeKind Kind,TextKey Cause,string SubjectJson)? Displaced,Notice? Prior)> FindSlotAsync(SqliteTransaction tx,string pairId,Notice notice,string predicate,CancellationToken ct)
+    // Pure: decides refusal and any carried-over fields for a failure notice against the stored preimage.
+    private static (bool Reject,Notice Notice) ReconcileFailure(Notice notice,Notice? prior)
     {
-        var putBack=notice.Kind==NoticeKind.PutBack;
-        var byCause=notice.Kind==NoticeKind.Info || (notice.Kind==NoticeKind.Failure && notice.Path.Length==0);
-        (long Id,string Path,NoticeKind Kind,TextKey Cause,string SubjectJson)? displaced=null;
-        Notice? prior=null;
-        using var select=StorageCommand.Create(tx.Connection!,tx,Select+predicate,("$p",pairId),("$path",putBack?PathNames.Key(notice.Path):notice.Path),("$kind",(int)notice.Kind));
-        if(byCause) select.Parameters.AddWithValue("$cause",notice.Cause.ToString());
-        using var row=await select.ExecuteReaderAsync(ct);
-        if(await row.ReadAsync(ct))
+        if(notice.Kind!=NoticeKind.Failure) return (false,notice);
+        if(prior?.Subject.Move is {} move && notice.Subject.Move!=move) return (true,notice);
+        if(prior!=null && prior.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None &&
+            (notice.Subject.FirstRunDeletion==IssueSubject.FirstRunDeletionKind.None || prior.Subject.FirstRunDeletion==IssueSubject.FirstRunDeletionKind.PreserveWithHistoryNotice) &&
+            prior.Subject.Items.Any(old=>old.Side==Side.Local && old.Id.Length!=0 && notice.Subject.Items.Any(next=>next.Side==Side.Local && next.Id==old.Id && PathNames.Same(next.Path,old.Path))))
+            notice=notice with {Subject=notice.Subject with { FirstRunDeletion=prior.Subject.FirstRunDeletion }};
+        if(prior!=null && prior.Cause==notice.Cause && prior.Subject.HasSameItems(notice.Subject) && !(prior.Dismissed && prior.Cause==TextKey.FailRecycledLate))
         {
-            if(putBack && row.GetInt64(5)>notice.At.UtcTicks) return (true,null,null);
-            if(!EnumNames.TryExact<TextKey>(row.GetString(2),out var cause)) throw new InvalidDataException();
-            displaced=(row.GetInt64(0),row.GetString(3),notice.Kind,cause,row.GetString(4));
-            if(notice.Kind==NoticeKind.Failure) prior=Row(row);
+            var subject=notice.Subject;
+            if(prior.Subject.Incoming==subject.Incoming && prior.Subject.FirstRunDeletion==subject.FirstRunDeletion && prior.Subject.Holder==subject.Holder) return (true,notice);
+            notice=prior with {Subject=subject};
         }
-        return (false,displaced,prior);
+        return (false,notice);
     }
     /// <summary>Set visibility only for the exact reviewed notice still present in the transaction.</summary>
     public async Task<bool> UpdateNoticeVisibilityAsync(SqliteConnection db,string pairId,Notice expected,bool ignored,CancellationToken ct)
@@ -171,34 +168,6 @@ public sealed class NoticeTable
     {
         var local=PathNames.Key(footprint.LocalPath); var cloud=PathNames.DropboxKey(footprint.DropboxPath);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pageSize);
-        await foreach(var linked in HeaderAsync(db,pairId,footprint,pageSize,ct)) yield return linked;
-        // Separate range and ancestor seeks. An OR mixed with an empty-root predicate would scan the whole pair.
-        var hits=string.Join(" UNION ALL ",Branch(true,true,local,cloud),Branch(true,false,local,cloud),Branch(false,true,local,cloud),Branch(false,false,local,cloud));
-        var sql="WITH hits(id,member) AS ("+hits+") SELECT "+Columns+" FROM (SELECT DISTINCT id FROM hits) r CROSS JOIN issue i ON i.issue_id=r.id";
-        using var query=StorageCommand.Create(db,null,sql,"$p",pairId);
-        void Bind(string prefix,string key)
-        {
-            if(key.Length==0) return;var (low,high)=PathNames.DescendantBounds(key);
-            query.Parameters.AddWithValue(prefix+"low",low);query.Parameters.AddWithValue(prefix+"high",high);
-            query.Parameters.AddWithValue(prefix+"parents",JsonSerializer.Serialize(PathNames.Ancestors(key).Append(key)));
-        }
-        Bind("$l",local); Bind("$d",cloud);
-        using var rd=await query.ExecuteReaderAsync(ct);while(await rd.ReadAsync(ct)) yield return Row(rd);
-    }
-    private static string Branch(bool members,bool pc,string local,string cloud)
-    {
-        var key=pc?local:cloud; var k=pc?"$l":"$d";
-        var column=members?"path_key":"pathkey(path)";
-        var prefix=members?"SELECT issue_id,member_id FROM issue_member WHERE pair_id="+Owner+" AND side="+(pc?"0":"1"):
-            "SELECT issue_id,NULL FROM issue WHERE pair_id="+Owner;
-        var extra=members?" AND skip_cause IS NOT 'SkipLink'":" AND NOT EXISTS(SELECT 1 FROM issue_member m WHERE m.issue_id=issue.issue_id)";
-        if(key.Length==0) return prefix+extra;
-        return prefix+" AND "+column+" IN (SELECT value FROM json_each("+k+"parents))"+extra+" UNION ALL "+prefix+
-            " AND "+column+">="+k+"low AND "+column+"<"+k+"high"+extra;
-    }
-    private static async IAsyncEnumerable<Notice> HeaderAsync(SqliteConnection db,string pairId,Scope footprint,int pageSize,[EnumeratorCancellation]CancellationToken ct)
-    {
-        var local=PathNames.Key(footprint.LocalPath); var cloud=PathNames.DropboxKey(footprint.DropboxPath);
         using var header=StorageCommand.Create(db,null,Select+"path='' AND kind=$kind AND cause=$cause",("$p",pairId),("$kind",(int)NoticeKind.Info),("$cause",nameof(TextKey.InfoLinks)));
         Notice? link;
         using(var h=await header.ExecuteReaderAsync(ct)) link=await h.ReadAsync(ct)?Row(h):null;
@@ -223,6 +192,38 @@ public sealed class NoticeTable
                 } while(exact==null && count==pageSize);
             }
         }
+        // Separate range and ancestor seeks. An OR mixed with an empty-root predicate would scan the whole pair.
+        using var query=RangeQuery(db,pairId,local,cloud);
+        using var rd=await query.ExecuteReaderAsync(ct);while(await rd.ReadAsync(ct)) yield return Row(rd);
+    }
+    private static string Branch(bool members,bool pc,string local,string cloud)
+    {
+        var key=pc?local:cloud; var k=pc?"$l":"$d";
+        var column=members?"path_key":"pathkey(path)";
+        var prefix=members?"SELECT issue_id,member_id FROM issue_member WHERE pair_id="+Owner+" AND side="+(pc?"0":"1"):
+            "SELECT issue_id,NULL FROM issue WHERE pair_id="+Owner;
+        var extra=members?" AND skip_cause IS NOT 'SkipLink'":" AND NOT EXISTS(SELECT 1 FROM issue_member m WHERE m.issue_id=issue.issue_id)";
+        if(key.Length==0) return prefix+extra;
+        return prefix+" AND "+column+" IN (SELECT value FROM json_each("+k+"parents))"+extra+" UNION ALL "+prefix+
+            " AND "+column+">="+k+"low AND "+column+"<"+k+"high"+extra;
+    }
+    private static SqliteCommand RangeQuery(SqliteConnection db,string pairId,string local,string cloud)
+    {
+        var hits=string.Join(" UNION ALL ",Branch(true,true,local,cloud),Branch(true,false,local,cloud),Branch(false,true,local,cloud),Branch(false,false,local,cloud));
+        var sql="WITH hits(id,member) AS ("+hits+") SELECT "+Columns+" FROM (SELECT DISTINCT id FROM hits) r CROSS JOIN issue i ON i.issue_id=r.id";
+        var query=StorageCommand.Create(db,null,sql,"$p",pairId);
+        try
+        {
+            Bind(query,"$l",local); Bind(query,"$d",cloud);
+            return query;
+        }
+        catch { query.Dispose(); throw; }
+    }
+    private static void Bind(SqliteCommand query,string prefix,string key)
+    {
+        if(key.Length==0) return;var (low,high)=PathNames.DescendantBounds(key);
+        query.Parameters.AddWithValue(prefix+"low",low);query.Parameters.AddWithValue(prefix+"high",high);
+        query.Parameters.AddWithValue(prefix+"parents",JsonSerializer.Serialize(PathNames.Ancestors(key).Append(key)));
     }
     /// <summary>Add or retire only the observed link identity; remove the one pair notice when its last member goes.</summary>
     public async Task<bool> UpdateLinkMemberAsync(SqliteConnection db,string pairId,NoticeItem member,bool present,CancellationToken ct)
