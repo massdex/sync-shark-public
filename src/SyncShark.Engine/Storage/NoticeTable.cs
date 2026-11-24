@@ -102,14 +102,16 @@ public sealed class NoticeTable
         var predicate=(putBack?"pathkey(path)":"path")+"=$path AND kind=$kind"+(byCause?" AND cause=$cause":"");
         (long Id,string Path,NoticeKind Kind,TextKey Cause,string SubjectJson)? displaced=null;
         Notice? prior=null;
-        using var select=StorageCommand.Create(tx.Connection!,tx,Select+predicate,("$p",pairId),("$path",putBack?PathNames.Key(notice.Path):notice.Path),("$kind",(int)notice.Kind));
-        if(byCause) select.Parameters.AddWithValue("$cause",notice.Cause.ToString());
-        using(var row=await select.ExecuteReaderAsync(ct)) if(await row.ReadAsync(ct))
+        using(var select=StorageCommand.Create(tx.Connection!,tx,Select+predicate,("$p",pairId),("$path",putBack?PathNames.Key(notice.Path):notice.Path),("$kind",(int)notice.Kind)))
         {
-            if(putBack && row.GetInt64(5)>notice.At.UtcTicks) return (false,null);
-            if(!EnumNames.TryExact<TextKey>(row.GetString(2),out var cause)) throw new InvalidDataException();
-            displaced=(row.GetInt64(0),row.GetString(3),notice.Kind,cause,row.GetString(4));
-            if(notice.Kind==NoticeKind.Failure) prior=Row(row);
+            if(byCause) select.Parameters.AddWithValue("$cause",notice.Cause.ToString());
+            using(var row=await select.ExecuteReaderAsync(ct)) if(await row.ReadAsync(ct))
+            {
+                if(putBack && row.GetInt64(5)>notice.At.UtcTicks) return (false,null);
+                if(!EnumNames.TryExact<TextKey>(row.GetString(2),out var cause)) throw new InvalidDataException();
+                displaced=(row.GetInt64(0),row.GetString(3),notice.Kind,cause,row.GetString(4));
+                if(notice.Kind==NoticeKind.Failure) prior=Row(row);
+            }
         }
         var (reject,reconciled)=ReconcileFailure(notice,prior);
         if(reject) return (false,null);
@@ -168,32 +170,35 @@ public sealed class NoticeTable
     {
         var local=PathNames.Key(footprint.LocalPath); var cloud=PathNames.DropboxKey(footprint.DropboxPath);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pageSize);
-        using var header=StorageCommand.Create(db,null,Select+"path='' AND kind=$kind AND cause=$cause",("$p",pairId),("$kind",(int)NoticeKind.Info),("$cause",nameof(TextKey.InfoLinks)));
-        Notice? link;
-        using(var h=await header.ExecuteReaderAsync(ct)) link=await h.ReadAsync(ct)?Row(h):null;
-        if(link!=null)
-        foreach(var side in new[]{Side.Local,Side.Dropbox})
+        using(var header=StorageCommand.Create(db,null,Select+"path='' AND kind=$kind AND cause=$cause",("$p",pairId),("$kind",(int)NoticeKind.Info),("$cause",nameof(TextKey.InfoLinks))))
         {
-            var key=side==Side.Local?local:cloud;
-            var (low,high)=PathNames.DescendantBounds(key);
-            // At most one link per side/key. Ancestors are exact probes; descendants resume on that same index.
-            foreach(var exact in (key.Length==0?Enumerable.Empty<string>():PathNames.Ancestors(key).Append(key)).Cast<string?>().Append(null))
+            Notice? link;
+            using(var h=await header.ExecuteReaderAsync(ct)) link=await h.ReadAsync(ct)?Row(h):null;
+            if(link!=null)
+            foreach(var side in new[]{Side.Local,Side.Dropbox})
             {
-                string? after=null; int count;
-                do
+                var key=side==Side.Local?local:cloud;
+                var (low,high)=PathNames.DescendantBounds(key);
+                // At most one link per side/key. Ancestors are exact probes; descendants resume on that same index.
+                foreach(var exact in (key.Length==0?Enumerable.Empty<string>():PathNames.Ancestors(key).Append(key)).Cast<string?>().Append(null))
                 {
-                    var range=exact!=null?"path_key=$key":key.Length==0?"1=1":"path_key>=$low AND path_key<$high";
-                    using var cmd=StorageCommand.Create(db,null,"SELECT path_key,subject_json FROM issue_member WHERE issue_id=$id AND side=$side AND "+range+(after==null?"":" AND path_key>$after")+" ORDER BY path_key LIMIT $take",("$id",link.Id),("$side",(int)side),("$take",pageSize));
-                    if(exact!=null) cmd.Parameters.AddWithValue("$key",exact);
-                    else if(key.Length!=0) { cmd.Parameters.AddWithValue("$low",low);cmd.Parameters.AddWithValue("$high",high); }
-                    if(after!=null) cmd.Parameters.AddWithValue("$after",after);
-                    using var rows=await cmd.ExecuteReaderAsync(ct);count=0;
-                    while(await rows.ReadAsync(ct)) { after=rows.GetString(0);count++;yield return link with {Subject=Encoding.DecodeMemberSubject(rows.GetString(1))}; }
-                } while(exact==null && count==pageSize);
+                    string? after=null; int count;
+                    do
+                    {
+                        var range=exact!=null?"path_key=$key":key.Length==0?"1=1":"path_key>=$low AND path_key<$high";
+                        using var cmd=StorageCommand.Create(db,null,"SELECT path_key,subject_json FROM issue_member WHERE issue_id=$id AND side=$side AND "+range+(after==null?"":" AND path_key>$after")+" ORDER BY path_key LIMIT $take",("$id",link.Id),("$side",(int)side),("$take",pageSize));
+                        if(exact!=null) cmd.Parameters.AddWithValue("$key",exact);
+                        else if(key.Length!=0) { cmd.Parameters.AddWithValue("$low",low);cmd.Parameters.AddWithValue("$high",high); }
+                        if(after!=null) cmd.Parameters.AddWithValue("$after",after);
+                        using var rows=await cmd.ExecuteReaderAsync(ct);count=0;
+                        while(await rows.ReadAsync(ct)) { after=rows.GetString(0);count++;yield return link with {Subject=Encoding.DecodeMemberSubject(rows.GetString(1))}; }
+                    } while(exact==null && count==pageSize);
+                }
             }
         }
         // Separate range and ancestor seeks. An OR mixed with an empty-root predicate would scan the whole pair.
-        using var query=RangeQuery(db,pairId,local,cloud);
+        using var query=StorageCommand.Create(db,null,RangeSql(local,cloud),"$p",pairId);
+        Bind(query,"$l",local); Bind(query,"$d",cloud);
         using var rd=await query.ExecuteReaderAsync(ct);while(await rd.ReadAsync(ct)) yield return Row(rd);
     }
     private static string Branch(bool members,bool pc,string local,string cloud)
@@ -207,17 +212,10 @@ public sealed class NoticeTable
         return prefix+" AND "+column+" IN (SELECT value FROM json_each("+k+"parents))"+extra+" UNION ALL "+prefix+
             " AND "+column+">="+k+"low AND "+column+"<"+k+"high"+extra;
     }
-    private static SqliteCommand RangeQuery(SqliteConnection db,string pairId,string local,string cloud)
+    private static string RangeSql(string local,string cloud)
     {
         var hits=string.Join(" UNION ALL ",Branch(true,true,local,cloud),Branch(true,false,local,cloud),Branch(false,true,local,cloud),Branch(false,false,local,cloud));
-        var sql="WITH hits(id,member) AS ("+hits+") SELECT "+Columns+" FROM (SELECT DISTINCT id FROM hits) r CROSS JOIN issue i ON i.issue_id=r.id";
-        var query=StorageCommand.Create(db,null,sql,"$p",pairId);
-        try
-        {
-            Bind(query,"$l",local); Bind(query,"$d",cloud);
-            return query;
-        }
-        catch { query.Dispose(); throw; }
+        return "WITH hits(id,member) AS ("+hits+") SELECT "+Columns+" FROM (SELECT DISTINCT id FROM hits) r CROSS JOIN issue i ON i.issue_id=r.id";
     }
     private static void Bind(SqliteCommand query,string prefix,string key)
     {
