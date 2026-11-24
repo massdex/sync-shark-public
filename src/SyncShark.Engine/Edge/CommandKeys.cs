@@ -1,3 +1,5 @@
+namespace Massdex.SyncShark.Engine.Edge;
+
 /// <summary>Stable catalog keys of the approved commands. Help and parsing read them from the catalog.</summary>
 internal static class CommandKeys
 {

@@ -1,3 +1,5 @@
+namespace Massdex.SyncShark.Engine.Edge;
+
 /// <summary>One parsed invocation: its catalog key and the option values and flags it named.</summary>
 public sealed class CliInvocation
 {

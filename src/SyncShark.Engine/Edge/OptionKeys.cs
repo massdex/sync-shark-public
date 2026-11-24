@@ -1,3 +1,5 @@
+namespace Massdex.SyncShark.Engine.Edge;
+
 /// <summary>Stable catalog keys of the command options.</summary>
 internal static class OptionKeys
 {
