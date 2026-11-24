@@ -51,9 +51,13 @@ internal static class HarnessSelfCheck
             Check.Require(afterWindow2 - afterWindow1 == 1, $"Second window counted {afterWindow2 - afterWindow1} rows, expected 1");
             Check.Require(afterWindow2 == 4, $"SQL observer counted {afterWindow2} rows since Attach, expected 4");
             Check.Require(trace.Statements == 3, $"SQL observer saw {trace.Statements} statements since Attach, expected 3");
+            // Statements on two connections running on two threads must all be counted (the counter is shared across handles).
+            await Task.WhenAll(Task.Run(() => Burst(first, 50)), Task.Run(() => Burst(second, 50)));
+            Check.Require(trace.Statements == 103, $"Concurrent windows saw {trace.Statements} statements since Attach, expected 103");
+            Check.Require(trace.TotalChanges == 104, $"Concurrent windows counted {trace.TotalChanges} rows since Attach, expected 104");
             trace.Detach();
             await ExecAsync(first, "INSERT INTO t(v) VALUES('after');", ct);
-            Check.Require(trace.Statements == 3, "SQL observer kept counting after Detach");
+            Check.Require(trace.Statements == 103, "SQL observer kept counting after Detach");
         }
         finally
         {
@@ -71,6 +75,18 @@ internal static class HarnessSelfCheck
         using var command = db.CreateCommand();
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    // A run of statements on one connection, so two runs on two connections execute simultaneously on separate threads
+    // (Microsoft.Data.Sqlite's async methods run synchronously, so this must be a real thread to exercise the shared counter).
+    private static void Burst(Microsoft.Data.Sqlite.SqliteConnection db, int count)
+    {
+        for (var i = 0; i < count; i++)
+        {
+            using var command = db.CreateCommand();
+            command.CommandText = "INSERT INTO t(v) VALUES('burst');";
+            command.ExecuteNonQuery();
+        }
     }
 
     private static async Task LoopbackSeamAsync(CancellationToken ct)

@@ -21,7 +21,8 @@ internal sealed class SqlTrace
     internal static SqlTrace Attach(params SqliteConnection[] connections)
     {
         var trace = new SqlTrace();
-        SQLitePCL.strdelegate_trace handler = (_, text) => { if (!string.IsNullOrEmpty(text)) trace._statements++; };
+        // Statements on separate connections run on separate threads; count with an interlocked increment so none is lost.
+        SQLitePCL.strdelegate_trace handler = (_, text) => { if (!string.IsNullOrEmpty(text)) Interlocked.Increment(ref trace._statements); };
         trace._trace = handler;
         foreach (var db in connections)
         {
@@ -32,7 +33,7 @@ internal sealed class SqlTrace
     }
 
     /// <summary>Statements observed on the observed connections since <see cref="Attach"/>.</summary>
-    internal int Statements => _statements;
+    internal int Statements => Volatile.Read(ref _statements);
 
     /// <summary>Rows changed on the observed connections since <see cref="Attach"/>; read natively, so no statement is emitted.</summary>
     internal int TotalChanges =>
