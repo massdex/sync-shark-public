@@ -28,92 +28,120 @@ public static class DirectoryListing
     private const int FileIdOffset = 96;
     private const int FileNameOffset = 104;
     // NTFS maximum name length, 255 UTF-16 units.
-    private const int MaxNameCharacters = 255;
+    internal const int MaxNameCharacters = 255;
     private const int NamedBufferSize = FileNameOffset + MaxNameCharacters * sizeof(char);
 
     /// <summary>Lists native entries only after authenticating the root on the held enumeration handle.</summary>
     public static async IAsyncEnumerable<Listed> ReadAsync(string root, DirectoryIdentity expectedRoot,
         PathScope paths, string under, ListOptions options, [EnumeratorCancellation] CancellationToken ct)
-    {
+        {
         ct.ThrowIfCancellationRequested();
         await Task.CompletedTask;
         var held = new Stack<SafeFileHandle>();
         try
         {
-            var folder = string.Empty;
-            long completed = 0;
-            var startingId = unchecked((long)expectedRoot.FileId);
+            var start = (Path: string.Empty, Id: unchecked((long)expectedRoot.FileId));
             held.Push(DriveIdentity.Open(root, list: true, expectedRoot: expectedRoot));
-            try
+            foreach (var step in StartingFolders(root, under, held.Peek(), paths, options, ct))
             {
-                if (under.Length != 0)
-                {
-                    if (Path.IsPathRooted(under)) throw new ArgumentException(Text.Get(TextKey.RelativePathRequired), nameof(under));
-                    foreach (var name in PathNames.NormalizeRelative(under).Split('/'))
-                    {
-                        ct.ThrowIfCancellationRequested();
-                        folder = PathNames.Child(folder, name);
-                        if (!options.IncludeOutOfScope && paths.Excludes(folder, null, true)) yield break;
-                        var info = Named(held.Peek(), name, held.Count == 1 ? root : null);
-                        if (info is null || !info.Attributes.HasFlag(FileAttributes.Directory) || Placeholders.Skip(info.Attributes, info.ReparseTag) is not null)
-                            throw new ChangedUnderneathException(folder);
-                        held.Push(OpenListed(held.Peek(), info.Name, info.FileId, folder));
-                        startingId = info.FileId;
-                    }
-                }
+                if (step.Handle is null) yield break;
+                held.Push(step.Handle);
+                start = (step.Path, step.Id);
             }
-            catch (Exception e) when (LocalErrors.IsFileFailure(e) || e is ChangedUnderneathException changed && changed.Path != root)
-            {
-                throw new InventoryIncompleteException(e.Message, e);
-            }
-
-            // Finish one native buffer before descending. Keep ancestors pinned, not buffers for every depth.
             var pending = new Stack<(Entry? Child, long Id, string? Close)>();
-            pending.Push((null, 0, null));
+            long completed = 0;
+            pending.Push((null, start.Id, null));
             while (pending.TryPop(out var visit))
             {
                 ct.ThrowIfCancellationRequested();
                 if (visit.Close is { } done)
                 {
                     held.Pop().Dispose();
-                    if (done.Length != 0) options.DirectoryAcquired?.Invoke(done, LocalIdentity.FileIdText(unchecked((ulong)visit.Id)));
-                    options.Progress?.Invoke(done, ++completed);
+                    NotifyClosed(done, visit.Id, ++completed, options);
                     continue;
                 }
-                var observed = visit.Child;
-                var path = observed?.Path ?? folder;
+                var path = visit.Child?.Path ?? start.Path;
                 Exception? failure = null;
-                if (observed is not null)
-                {
-                    try { held.Push(OpenListed(held.Peek(), Path.GetFileName(path), visit.Id, path)); }
-                    catch (Exception e) when (LocalErrors.IsFileFailure(e) || e is ChangedUnderneathException) { failure = e; }
-                }
+                if (visit.Child is not null && TryOpenChild(held.Peek(), path, visit.Id, out failure) is { } child) held.Push(child);
                 if (failure is null)
                 {
-                    var start = pending.Count;
-                    pending.Push((null, observed is null ? startingId : visit.Id, path));
+                    var mark = pending.Count;
+                    pending.Push((null, visit.Id, path));
                     using var entries = Enumerate(held.Peek(), path.Length == 0 ? root : null).GetEnumerator();
                     while (Advance(entries, out failure))
                     {
                         ct.ThrowIfCancellationRequested();
-                        var info = entries.Current;
-                        var childPath = PathNames.Child(path, info.Name);
-                        var isFolder = info.Attributes.HasFlag(FileAttributes.Directory);
-                        if ((!isFolder && StageNames.IsStage(info.Name)) ||
-                            (!options.IncludeOutOfScope && paths.Excludes(childPath, null, isFolder))) continue;
-                        var child = Classify(childPath, info, isFolder);
-                        yield return new(childPath, child);
-                        if (options.Recursive && child.IsFolder && child.Skip is null) pending.Push((child, info.FileId, null));
+                        if (ListEntry(entries.Current, path, paths, options, pending) is { } row) yield return row;
                     }
                     if (failure is null) continue;
-                    while (pending.Count > start) pending.Pop();
+                    while (pending.Count > mark) pending.Pop();
                     held.Pop().Dispose();
                 }
-                if (observed is null) throw new InventoryIncompleteException(failure.Message, failure);
-                yield return new(path, observed with { Skip = TextKey.SkipUnreadable.ToString() });
+                if (visit.Child is null) throw new InventoryIncompleteException(failure.Message, failure);
+                yield return new(path, visit.Child with { Skip = TextKey.SkipUnreadable.ToString() });
             }
         }
-        finally { while (held.TryPop(out var handle)) handle.Dispose(); }
+        finally
+        {
+            while (held.TryPop(out var handle)) handle.Dispose();
+        }
+    }
+
+    private static IEnumerable<(string Path, long Id, SafeFileHandle? Handle)> StartingFolders(string root, string under,
+        SafeFileHandle parent, PathScope paths, ListOptions options, CancellationToken ct)
+    {
+        if (under.Length == 0) yield break;
+        if (Path.IsPathRooted(under)) throw new ArgumentException(Text.Get(TextKey.RelativePathRequired), nameof(under));
+        var folder = string.Empty;
+        string? configuredRoot = root;
+        foreach (var name in PathNames.NormalizeRelative(under).Split('/'))
+        {
+            ct.ThrowIfCancellationRequested();
+            folder = PathNames.Child(folder, name);
+            (string, long, SafeFileHandle?) step = (folder, 0, null);
+            try
+            {
+                if (options.IncludeOutOfScope || !paths.Excludes(folder, null, true))
+                {
+                    var info = Named(parent, name, configuredRoot);
+                    if (info is null || !info.Attributes.HasFlag(FileAttributes.Directory) || Placeholders.Skip(info.Attributes, info.ReparseTag) is not null)
+                        throw new ChangedUnderneathException(folder);
+                    parent = OpenListed(parent, info.Name, info.FileId, folder);
+                    step = (folder, info.FileId, parent);
+                }
+            }
+            catch (Exception e) when (LocalErrors.IsFileFailure(e) || e is ChangedUnderneathException changed && changed.Path != root)
+            {
+                throw new InventoryIncompleteException(e.Message, e);
+            }
+            yield return step;
+            configuredRoot = null;
+        }
+    }
+
+    private static void NotifyClosed(string path, long id, long completed, ListOptions options)
+    {
+        if (path.Length != 0) options.DirectoryAcquired?.Invoke(path, LocalIdentity.FileIdText(unchecked((ulong)id)));
+        options.Progress?.Invoke(path, completed);
+    }
+
+    private static SafeFileHandle? TryOpenChild(SafeFileHandle parent, string path, long id, out Exception? failure)
+    {
+        failure = null;
+        try { return OpenListed(parent, Path.GetFileName(path), id, path); }
+        catch (Exception e) when (LocalErrors.IsFileFailure(e) || e is ChangedUnderneathException) { failure = e; return null; }
+    }
+
+    private static Listed? ListEntry(DirectoryEntryInfo info, string path, PathScope paths, ListOptions options,
+        Stack<(Entry? Child, long Id, string? Close)> pending)
+    {
+        var childPath = PathNames.Child(path, info.Name);
+        var isFolder = info.Attributes.HasFlag(FileAttributes.Directory);
+        if ((!isFolder && StageNames.IsStage(info.Name)) ||
+            (!options.IncludeOutOfScope && paths.Excludes(childPath, null, isFolder))) return null;
+        var child = Classify(childPath, info, isFolder);
+        if (options.Recursive && child.IsFolder && child.Skip is null) pending.Push((child, info.FileId, null));
+        return new(childPath, child);
     }
 
     // One direct child of the still-held directory. Opening a substitute by name never authenticates it.

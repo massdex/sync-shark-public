@@ -66,10 +66,10 @@ public sealed class LogFiles : ILogFiles
         }
     }
 
-    private static void ReadRecords(FileStream stream, Action<string, bool> record, int bufferCharacters,
+    private static void ReadRecords(FileStream stream, Action<string, bool> record, int bufferBytes,
         CancellationToken ct, out bool unfinishedTrailingRecord)
     {
-        var bytes = new byte[bufferCharacters];
+        var bytes = new byte[bufferBytes];
         var pending = new ArrayBufferWriter<byte>();
         var firstRecord = true;
         ct.ThrowIfCancellationRequested();

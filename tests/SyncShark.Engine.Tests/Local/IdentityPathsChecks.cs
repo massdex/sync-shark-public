@@ -1,3 +1,7 @@
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using Microsoft.Win32.SafeHandles;
 using L = Massdex.SyncShark.Engine.Local;
 namespace Massdex.SyncShark.Engine.Tests.Local;
 
@@ -25,6 +29,7 @@ public static class IdentityPathsChecks
             File.Delete(path); var outside=await reader.LocateAsync(root,expected,id,default);
             Check.Require(outside?.NativePath==alias && outside.Entry.Id==id,"Outside-only alias became absence");
             File.Delete(alias); Check.Require(await reader.LocateAsync(root,expected,id,default) is null,"Retired identity was still present");
+            RequireRetiredError(root, expected.FileId, number);
             var scope = new PathScope(pair,[pair],DriveType.Fixed);
             Check.Require(await reader.LocateInScopeAsync(root,expected,id,scope,default) is null,"Retired child under verified root was treated as a root failure");
             Directory.Move(root,Path.Combine(dir.FullName,"moved-root"));
@@ -35,6 +40,34 @@ public static class IdentityPathsChecks
         }
         finally { dir.Delete(true); }
     }
-    [System.Runtime.InteropServices.DllImport("kernel32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode,ExactSpelling=true,SetLastError=true)]
+    private static void RequireRetiredError(string root, ulong rootId, ulong retiredId)
+    {
+        const uint backupSemantics = 0x02000000; // FILE_FLAG_BACKUP_SEMANTICS, WinBase.h
+        const FileShare share = FileShare.ReadWrite | FileShare.Delete;
+        using var hint = CreateFileW(root, FileSystemRights.ReadAttributes, share, IntPtr.Zero, FileMode.Open, backupSemantics, IntPtr.Zero);
+        if (hint.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+        var descriptor = new FileIdDescriptor { Size = (uint)Marshal.SizeOf<FileIdDescriptor>(), Id = rootId };
+        using var control = OpenFileById(hint, ref descriptor, FileSystemRights.ReadAttributes, share, IntPtr.Zero, backupSemantics);
+        if (control.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+        descriptor.Id = retiredId;
+        using var retired = OpenFileById(hint, ref descriptor, FileSystemRights.ReadAttributes, share, IntPtr.Zero, backupSemantics);
+        var error = Marshal.GetLastWin32Error();
+        const int invalidParameter = 87; // ERROR_INVALID_PARAMETER, WinError.h
+        Check.Require(retired.IsInvalid && error == invalidParameter, $"Retired OpenFileById: invalid={retired.IsInvalid}, actual error {error}, expected {invalidParameter}");
+    }
+
+    // FILE_ID_DESCRIPTOR (WinBase.h): size and FileIdType followed by the 16-byte identifier union.
+    [StructLayout(LayoutKind.Explicit, Size = 24)]
+    private struct FileIdDescriptor
+    {
+        [FieldOffset(0)] public uint Size;
+        [FieldOffset(8)] public ulong Id;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string path, FileSystemRights access, FileShare share, IntPtr security, FileMode creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+    private static extern SafeFileHandle OpenFileById(SafeFileHandle volume, ref FileIdDescriptor id, FileSystemRights access, FileShare share, IntPtr security, uint flags);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]
     private static extern bool CreateHardLinkW(string newName,string existing,IntPtr security);
 }

@@ -161,13 +161,11 @@ public sealed class IdentityPaths
     private const int LinkNameOffset = 20;
     private const int ParentIdOffset = 8;
     private const int NameLengthOffset = 16;
-    // NTFS maximum name length 255.
-    private const int MaximumNameCharacters = 255;
 
     private static IReadOnlyList<(ulong Parent, string Name)> QueryLinks(SafeFileHandle handle, ulong fileId,
         CancellationToken ct)
     {
-        var buffer = new byte[LinksHeader + LinkNameOffset + MaximumNameCharacters * sizeof(char)];
+        var buffer = new byte[LinksHeader + LinkNameOffset + DirectoryListing.MaxNameCharacters * sizeof(char)];
         while (true)
         {
             ct.ThrowIfCancellationRequested();
