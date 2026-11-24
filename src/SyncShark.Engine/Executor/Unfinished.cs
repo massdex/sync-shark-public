@@ -155,6 +155,7 @@ public sealed class Unfinished
             // A wire delete alone cannot distinguish removal, replacement and move cleanup on restart.
             var origin=member.Origin;
             if(delete && origin is not (null or ActionKind.DeleteDropbox or ActionKind.ReplaceKind or ActionKind.MoveDropbox)) continue;
+            if(delete && origin==null && receipt.Entry!=null) continue;
             var binding=await call.Store.FindAsync(call.Pair.PairId,Side.Dropbox,PathNames.DropboxKey(member.Path),call.Ct);
             if(binding!=null && binding.DropboxId!=member.Id) binding=null;
             var scope=new Scope(binding?.LocalPath??await FolderDelete.MapAsync(call.Pair,call.Store,Side.Dropbox,member.Path,call.Ct),member.Path);
