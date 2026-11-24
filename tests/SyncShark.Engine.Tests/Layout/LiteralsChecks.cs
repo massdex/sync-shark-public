@@ -163,7 +163,7 @@ public static class LiteralsChecks
         }
         else if (owner is not null && (owner == "StateSchema" || !text.Contains(' ') ||
             owner == "ResourceNames" && MemberOf(token.Parent) == nameof(ResourceNames.HostAssembly))) return null;
-        if (relativePath == ReplyTokensFile &&
+        if (relativePath == DropboxEntriesFile &&
             token.Parent is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.Utf8StringLiteralExpression) &&
             literal.Parent is ArrowExpressionClauseSyntax { Parent: PropertyDeclarationSyntax })
         {
