@@ -46,7 +46,7 @@ internal sealed class ReviewedResolution(PairConfig pair, EngineSettings setting
         }
     }
 
-    private async Task ReportFailureAsync(ItemFailedException error)
+    private Task ReportFailureAsync(ItemFailedException error)
     {
         var token = error.Disposition == FailureDisposition.UnknownEffect ? CancellationToken.None : ct;
         token.ThrowIfCancellationRequested();
@@ -55,7 +55,7 @@ internal sealed class ReviewedResolution(PairConfig pair, EngineSettings setting
         var member = entry is not null && entry.Path == error.Path ? new NoticeItem(side!.Value, entry.Path, entry.Id) :
             executing is null ? stored.Subject.Items.FirstOrDefault(i => i.Side == side && i.Path == error.Path) : null;
         var key = side is { } endpoint ? PathNames.KeyFor(endpoint, error.Path) : PathNames.Key(error.Path);
-        await ItemSync.ReportFailureAsync(pair, store, events, error, new(member is null ? [] : [member], side),
+        return ItemSync.ReportFailureAsync(pair, store, events, error, new(member is null ? [] : [member], side),
             key, false, null, token);
     }
 
