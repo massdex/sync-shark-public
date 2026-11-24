@@ -31,7 +31,7 @@ public sealed class Retries
             {
                 var observed=await ObserveMoveAsync(pair,paths,move,local,dropbox,store,ct);
                 if(observed is not {} input) { await Stale(); return; }
-                if(await ItemSync.ExecuteAsync(pair,settings,events,paths,input.Row,input.Group,false,local,dropbox,store,populate,compareOldBinding,ct,heldInput,null,false,coversThrough:coversThrough))
+                if(await RowExecution.ExecuteAsync(pair,settings,events,paths,input.Row,input.Group,false,local,dropbox,store,populate,compareOldBinding,ct,heldInput,null,false,coversThrough:coversThrough))
                     await store.CloseNoticeAsync(pair.PairId,failure,ct);
                 return;
             }
@@ -49,7 +49,7 @@ public sealed class Retries
                     if(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(subject.Path),ct) is not {} bound) continue;
                     var observed=bound.LocalId==subject.Id ? await ItemSync.ObserveBindingAsync(paths,bound,local,dropbox,ct) : default;
                     if(observed.Row is not {Local:null,Dropbox:null}) { await Stale(); done=false; continue; }
-                    done &= await ItemSync.ExecuteAsync(pair,settings,events,paths,observed.Row,observed.Group,false,local,dropbox,store,populate,compareOldBinding,ct,heldInput,null,false,coversThrough:coversThrough);
+                    done &= await RowExecution.ExecuteAsync(pair,settings,events,paths,observed.Row,observed.Group,false,local,dropbox,store,populate,compareOldBinding,ct,heldInput,null,false,coversThrough:coversThrough);
                     continue;
                 }
                 if(at is not {InScope:true} hit || hit.Location.Entry.Path!=subject.Path) { await Stale(); done=false; continue; }

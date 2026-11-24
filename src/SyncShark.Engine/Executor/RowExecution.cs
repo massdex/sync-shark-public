@@ -34,22 +34,33 @@ public static class RowExecution
         ItemSync.RequireReadable(Side.Local,row?.Local); ItemSync.RequireReadable(Side.Dropbox,row?.Dropbox);
         var now=DateTimeOffset.UtcNow;
         var action=await DecideAsync(pair,settings,paths,row,candidates,dirty,now,local,dropbox,store,failed,ct);
-        row=action.Row;
         if(action.Kind==ActionKind.None) return (ItemSync.FinishDecision(action,failed),null);
-        if(addOnly && !(action.Kind==ActionKind.Record || action.Kind is (ActionKind.Upload or ActionKind.EnsureDropboxFolder) && row.Dropbox==null || action.Kind is (ActionKind.Download or ActionKind.EnsureLocalFolder) && row.Local==null)) return (true,null);
-        if(action.Kind==ActionKind.DeferFolder && row.Synced is {} selectedFolder)
+        if(addOnly && !(action.Kind==ActionKind.Record || action.Kind is (ActionKind.Upload or ActionKind.EnsureDropboxFolder) && action.Row.Dropbox==null || action.Kind is (ActionKind.Download or ActionKind.EnsureLocalFolder) && action.Row.Local==null)) return (true,null);
+        if(action.Kind==ActionKind.DeferFolder && action.Row.Synced is {} selectedFolder)
         {
-            var removed=await RemoveBoundAsync(pair,settings,events,paths,selectedFolder,row.Local==null?Side.Local:Side.Dropbox,local,dropbox,store,heldInput,populate,compareOldBinding,failed,ct,coversThrough);
+            var removed=await RemoveBoundAsync(pair,settings,events,paths,selectedFolder,action.Row.Local==null?Side.Local:Side.Dropbox,local,dropbox,store,heldInput,populate,compareOldBinding,failed,ct,coversThrough);
             return (removed,null);
         }
-        var endpoints=Row.Paths(row);
+        var endpoints=Row.Paths(action.Row);
         var (admitted,successor,missing)=await OccupantAsync(pair,action,now,dirty,observedMissing,local,dropbox,ct);
         action=admitted;
         var incumbent=await IncumbentAsync(pair,action,local,dropbox,store,ct);
-        return await ApplyDecidedAsync(pair,settings,events,paths,action,candidates,endpoints,successor,missing,incumbent,dirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,addOnly,failedNotice,coversThrough,observedMissing);
+        Task<(bool,EffectOutcome?)> Locked() => ApplyLockedAsync(pair,settings,events,paths,action,candidates,endpoints,successor,missing,incumbent,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,failedNotice,coversThrough,observedMissing);
+        var applied=Moves.IsFileSplit(action) ? await Locks.RunAsync(await SplitKeysAsync(pair,action.Row,store,ct),Locked,ct) : await Locks.RunAsync(pair,action,candidates,Locked,ct,settings.CaseRenameSuffix,incumbent);
+        if(applied.Item1 && candidates.Count!=0 && candidates[0] is {Moved.IsFolder:false} move)
+        {
+            var settled=await store.FindAsync(pair.PairId,move.Side,PathNames.KeyFor(move.Side,move.Moved.Path),ct);
+            if(settled!=null && settled.LocalId==move.Synced.LocalId && settled.DropboxId==move.Synced.DropboxId && settled.PathOn(move.Side)==move.Moved.Path)
+            {
+                var final=await ItemSync.ObserveBindingAsync(paths,settled,local,dropbox,ct);
+                if(final.Group.Count!=0 || final.Row.Local==null || final.Row.Dropbox==null) ItemSync.Retain(action.Row.Key,failed);
+                if(!await ExecuteAsync(pair,settings,events,paths,final.Row,[],dirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,addOnly,failedNotice,coversThrough)) ItemSync.Retain(action.Row.Key,failed);
+            }
+        }
+        return applied;
     }
 
-    private static async Task<SyncAction> DecideAsync(PairConfig pair,EngineSettings settings,PathScope paths,Row? row,IReadOnlyList<RenameCandidate> candidates,bool dirty,DateTimeOffset now,ISide local,ISide dropbox,IStore store,Action<string,bool>? failed,CancellationToken ct)
+    private static async ValueTask<SyncAction> DecideAsync(PairConfig pair,EngineSettings settings,PathScope paths,Row? row,IReadOnlyList<RenameCandidate> candidates,bool dirty,DateTimeOffset now,ISide local,ISide dropbox,IStore store,Action<string,bool>? failed,CancellationToken ct)
     {
         var priorBinding=row?.Synced;
         (row,bool mappedChild)=await MapChildAsync(pair,row,candidates,store,failed,ct);
@@ -82,7 +93,7 @@ public static class RowExecution
     }
 
     // Use final mapped names for the content decision, but commit against the actual old binding.
-    private static async Task<(Row? Row,bool Mapped)> MapChildAsync(PairConfig pair,Row? row,IReadOnlyList<RenameCandidate> candidates,IStore store,Action<string,bool>? failed,CancellationToken ct)
+    private static async ValueTask<(Row? Row,bool Mapped)> MapChildAsync(PairConfig pair,Row? row,IReadOnlyList<RenameCandidate> candidates,IStore store,Action<string,bool>? failed,CancellationToken ct)
     {
         if(candidates.Count==0 && row?.Synced is {IsFolder:false} original && row.Local is {IsFolder:false} left && row.Dropbox is {IsFolder:false} right &&
             left.Id==original.LocalId && right.Id==original.DropboxId && left.Path!=original.LocalPath && right.Path!=original.DropboxPath)
@@ -110,7 +121,7 @@ public static class RowExecution
     }
 
     // Only a create into the absent bound leg can collide with an independent successor.
-    private static async Task<(SyncAction Action,Entry? Successor,Side? Missing)> OccupantAsync(PairConfig pair,SyncAction action,DateTimeOffset now,bool dirty,(Side Side,Entry? Occupant)? observedMissing,ISide local,ISide dropbox,CancellationToken ct)
+    private static async ValueTask<(SyncAction Action,Entry? Successor,Side? Missing)> OccupantAsync(PairConfig pair,SyncAction action,DateTimeOffset now,bool dirty,(Side Side,Entry? Occupant)? observedMissing,ISide local,ISide dropbox,CancellationToken ct)
     {
         var row=action.Row;
         Entry? successor=null;Side? missing=null;
@@ -150,25 +161,7 @@ public static class RowExecution
         return incumbent;
     }
 
-    private static async Task<(bool,EffectOutcome?)> ApplyDecidedAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,SyncAction action,IReadOnlyList<RenameCandidate> candidates,(string Local,string Dropbox) endpoints,Entry? successor,Side? missing,SyncedEntry? incumbent,bool dirty,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,bool addOnly,Action<Notice>? failedNotice,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough,(Side Side,Entry? Occupant)? observedMissing)
-    {
-        var row=action.Row;
-        Task<(bool,EffectOutcome?)> Locked() => ApplyLockedAsync(pair,settings,events,paths,action,candidates,endpoints,successor,missing,incumbent,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,failedNotice,coversThrough,observedMissing);
-        var applied=Moves.IsFileSplit(action) ? await Locks.RunAsync(await SplitKeysAsync(pair,row,store,ct),Locked,ct) : await Locks.RunAsync(pair,action,candidates,Locked,ct,settings.CaseRenameSuffix,incumbent);
-        if(applied.Item1 && candidates.Count!=0 && candidates[0] is {Moved.IsFolder:false} move)
-        {
-            var settled=await store.FindAsync(pair.PairId,move.Side,PathNames.KeyFor(move.Side,move.Moved.Path),ct);
-            if(settled!=null && settled.LocalId==move.Synced.LocalId && settled.DropboxId==move.Synced.DropboxId && settled.PathOn(move.Side)==move.Moved.Path)
-            {
-                var final=await ItemSync.ObserveBindingAsync(paths,settled,local,dropbox,ct);
-                if(final.Group.Count!=0 || final.Row.Local==null || final.Row.Dropbox==null) ItemSync.Retain(row.Key,failed);
-                if(!await ExecuteAsync(pair,settings,events,paths,final.Row,[],dirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,addOnly,failedNotice,coversThrough)) ItemSync.Retain(row.Key,failed);
-            }
-        }
-        return applied;
-    }
-
-    private static async Task<List<(Side,string,bool)>> SplitKeysAsync(PairConfig pair,Row row,IStore store,CancellationToken ct)
+    private static async ValueTask<List<(Side,string,bool)>> SplitKeysAsync(PairConfig pair,Row row,IStore store,CancellationToken ct)
     {
         var keys=new List<(Side,string,bool)>();
         foreach(var side in new[]{Side.Local,Side.Dropbox})

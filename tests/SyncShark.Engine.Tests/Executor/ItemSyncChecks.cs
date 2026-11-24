@@ -14,7 +14,7 @@ public static class ItemSyncChecks
         var saved=SyncedEntries.From(old,peer); await store.CommitAsync(pair.PairId,null,saved,null,null,default);
         var edited=old with {Path="New/c",Size=2}; pc.Seed(edited,[7,7]);
         var row=new Row(saved.LocalKey,edited,null,saved,[],null,RowContext.Neutral with {Destination="New/c",CompleteInventory=true});
-        await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
+        await RowExecution.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
         Check.Require(db.Items.ContainsKey("New/c") && !db.Items.ContainsKey("Old/c") && store.Records.Values.Single().DropboxPath=="New/c","A one-sided hop child was decided at its old name");
     }
 
@@ -140,7 +140,7 @@ public static class ItemSyncChecks
             var folder=ItemChecks.File(Side.Local,"empty",0,"folder",true);pc.Seed(folder,[]);db.DeletedHistory[folder.Path]=new DeletionEvidence.DeletedPath(folder.Path,folder.Path);
             var row=new Row(PathNames.Key(folder.Path),folder,null,null,[],null,RowContext.Neutral with {FirstRun=true,CompleteInventory=true,DeletionEligible=true,ProtectedContents=mark,UnreadableCause=cause,Destination=folder.Path});
             bool retained=false;
-            try { await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[],(_,_)=>retained=true,coversThrough:RemovalCoverage(pc,db,Side.Local,folder)); }
+            try { await RowExecution.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[],(_,_)=>retained=true,coversThrough:RemovalCoverage(pc,db,Side.Local,folder)); }
             catch(InventoryIncompleteException) when(retained && mark==null) { }
             catch(ChangedUnderneathException) when(retained && cause!=null) { }
             if(mark==false) Check.Require(db.Requests[nameof(ISide.DeletedAsync)]==1 && pc.History.Count(h=>h.Entry==folder)==1 && !pc.Items.ContainsKey(folder.Path) && !db.Items.ContainsKey(folder.Path) && pc.Requests[nameof(ISide.ReadChangesAsync)]==2 && db.Requests[nameof(ISide.ReadChangesAsync)]==2,"Empty folder removal needs both exact fences and its history receipt");
@@ -198,10 +198,10 @@ public static class ItemSyncChecks
         var waypoint=finalDb with {Path=PathNames.Child(PathNames.CaseRenamePath("new-parent",ItemChecks.Settings.CaseRenameSuffix),"child")};
         pc.Seed(finalPc,[2]);db.Seed(waypoint,[1]);pc.Seed(oldPcOccupant,[3]);db.Seed(oldDbOccupant,[4]);await store.CommitAsync(pair.PairId,null,link,null,null,default);
         bool held=false;
-        try {await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Row(link.LocalKey,finalPc,waypoint,link,[],null,RowContext.Neutral with {CompleteInventory=true}),[],pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),default,queue.Held,(_,_)=>held=true);} catch(InventoryIncompleteException) when(held) { }
+        try {await RowExecution.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Row(link.LocalKey,finalPc,waypoint,link,[],null,RowContext.Neutral with {CompleteInventory=true}),[],pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),default,queue.Held,(_,_)=>held=true);} catch(InventoryIncompleteException) when(held) { }
         Check.Require(held && store.Records.Values.Contains(link) && db.Items[waypoint.Path].Bytes.SequenceEqual(new byte[]{1}),"An uncovered hop must not write or record the waypoint");
         await db.MoveAsync(waypoint,finalDb.Path,default);
-        Task<EffectOutcome?> ApplyPrepared(bool addOnly)=>ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Row(link.LocalKey,finalPc,finalDb,link,[],null,RowContext.Neutral),[],pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),default,queue.Held,addOnly:addOnly);
+        Task<EffectOutcome?> ApplyPrepared(bool addOnly)=>RowExecution.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Row(link.LocalKey,finalPc,finalDb,link,[],null,RowContext.Neutral),[],pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),default,queue.Held,addOnly:addOnly);
         var filtered=await ApplyPrepared(true);var applied=await ApplyPrepared(false);
         Check.Require(filtered is null && applied==EffectOutcome.Applied,"Prepared update must return null when filtered and Applied when executed");
         Check.Require(db.Items[finalDb.Path].Bytes.SequenceEqual(new byte[]{2}) && db.Items[oldDbOccupant.Path].Entry==oldDbOccupant && pc.Items[oldPcOccupant.Path].Entry==oldPcOccupant && store.Records.Values.Any(x=>x.LocalId==finalPc.Id && x.LocalPath==finalPc.Path && x.DropboxPath==finalDb.Path) && !store.Records.Values.Contains(link),"Mapped edit must publish at the verified receiving path, retire the original binding and preserve both old occupants");
@@ -214,7 +214,7 @@ public static class ItemSyncChecks
             var folder=ItemChecks.File(Side.Dropbox,"removed-folder",0,"peer-folder",true);
             var saved=SyncedEntries.From(ItemChecks.File(Side.Local,folder.Path,0,"missing-folder",true),folder);
             remote.Seed(folder,[]);await scanStore.CommitAsync(scanPair.PairId,null,saved,null,null,ct);
-            var bypass=await ItemSync.ApplyAsync(scanPair,ItemChecks.Settings,_=>{},scope,new Row(saved.LocalKey,null,folder,saved,[],null,RowContext.Neutral),[],local,cloud,scanStore,ItemChecks.Population(scanPair,scope,local,cloud,scanStore),ItemChecks.Hop(scanPair,scope,scanQueue,local,cloud,scanStore),ct,scanQueue.Held,coversThrough:RemovalCoverage(local,remote,Side.Dropbox,folder));
+            var bypass=await RowExecution.ApplyAsync(scanPair,ItemChecks.Settings,_=>{},scope,new Row(saved.LocalKey,null,folder,saved,[],null,RowContext.Neutral),[],local,cloud,scanStore,ItemChecks.Population(scanPair,scope,local,cloud,scanStore),ItemChecks.Hop(scanPair,scope,scanQueue,local,cloud,scanStore),ct,scanQueue.Held,coversThrough:RemovalCoverage(local,remote,Side.Dropbox,folder));
             Check.Require(bypass is null && remote.History.Any(v=>v.Entry==folder),"Settled folder removal must not return a prepared row effect");
         });
     }
@@ -225,7 +225,7 @@ public static class ItemSyncChecks
         var file=ItemChecks.File(Side.Local,"item",1,"pc");var dir=ItemChecks.File(Side.Dropbox,"item",0,"folder",true);var child=ItemChecks.File(Side.Dropbox,"item/child",2,"edit");
         pc.Seed(file,[1]);db.Seed(dir,[]);db.Seed(child,[2]);var claim=new Change(Side.Dropbox,ChangeKind.Changed,child.Path,null,child.Id,child,false,false);var ack=false;claim=claim with {ConsumeHeld=()=>ack=true};
         var row=new Row(PathNames.Key(file.Path),file,dir,null,[],null,RowContext.Neutral with {FirstRun=true,CompleteInventory=true,ProtectedContents=false});
-        try {await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,s=>{if(!PathNames.Same(s.DropboxPath,dir.Path))return [];return [claim];});} catch(ItemFailedException) { } catch(InventoryIncompleteException) { } catch(ChangedUnderneathException) { }
+        try {await RowExecution.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,s=>{if(!PathNames.Same(s.DropboxPath,dir.Path))return [];return [claim];});} catch(ItemFailedException) { } catch(InventoryIncompleteException) { } catch(ChangedUnderneathException) { }
         var exactFailure=store.OpenNotices.Any(n=>n.Kind==NoticeKind.PutBack && n.Path==child.Path && n.Subject.Items.Any(m=>m.Side==Side.Dropbox && m.Id==child.Id && m.Path==child.Path));
         var settledConflict=store.Records.Values.Any(r=>r.DropboxId==child.Id && r.DropboxContentHash==child.ContentHash);
         Check.Require((ack?settledConflict:exactFailure) && db.Items.TryGetValue(child.Path,out var kept) && kept.Bytes.SequenceEqual(new byte[]{2}) && pc.Items[file.Path].Bytes.SequenceEqual(new byte[]{1}),"Replacement neither settled the held version nor retained its exact recovery notice");
@@ -342,7 +342,7 @@ public static class ItemSyncChecks
         var row=new Row(PathNames.Key(folder.Path),folder,null,null,[],null,context);
         var envelopes=new List<Notice>();int retained=0;
         // A planned refusal is the decision: one saved envelope, no retained input, and the source untouched.
-        var outcome=await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[],(_,_)=>retained++,failedNotice:envelopes.Add);
+        var outcome=await RowExecution.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,row,[],pc,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[],(_,_)=>retained++,failedNotice:envelopes.Add);
         var stored=store.OpenNotices.Single();
         Check.Require(outcome==EffectOutcome.Refused && retained==0 && envelopes.Count==1 && stored.Matches(envelopes[0] with {Id=stored.Id}) && pc.Items.ContainsKey(folder.Path) && pc.History.Count==0,"R4 planned failure did not hand Repair the exact saved envelope without retaining input or touching the source");
     }

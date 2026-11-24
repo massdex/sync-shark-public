@@ -2,7 +2,7 @@ using Massdex.SyncShark.Engine.Planner;
 
 namespace Massdex.SyncShark.Engine.Executor;
 
-/// <summary>One observe, decide and apply path. Returning means the input settled; exceptions retain it.</summary>
+/// <summary>Change intake: observe one input and hand its row to RowExecution. Returning means the input settled; exceptions retain it.</summary>
 public static class ItemSync
 {
     public static Task ApplyAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Change change, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding, CancellationToken ct, Func<Scope,IEnumerable<Change>>? heldInput=null, Action<string,bool>? failed=null,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough=null) =>
@@ -12,7 +12,7 @@ public static class ItemSync
     public static Task<EffectOutcome?> ApplyAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Row? prepared, IReadOnlyList<RenameCandidate> bindingCandidates, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding, CancellationToken ct, Func<Scope,IEnumerable<Change>>? heldInput=null, Action<string,bool>? failed=null, bool addOnly=false, Action<Notice>? failedNotice=null,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough=null) =>
         RowExecution.ApplyAsync(pair,settings,events,paths,prepared,bindingCandidates,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,addOnly,failedNotice,coversThrough);
 
-    // shortcut: forwards until the Retries and Unfinished callers name RowExecution; then delete it.
+    // shortcut: forwards until the two Unfinished callers (Folder effects lane) name RowExecution; then delete it.
     internal static Task<bool> ExecuteAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,Row? row,IReadOnlyList<RenameCandidate> candidates,bool dirty,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,bool addOnly,Action<Notice>? failedNotice=null,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough=null,(Side Side,Entry? Occupant)? observedMissing=null)
         => RowExecution.ExecuteAsync(pair,settings,events,paths,row,candidates,dirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,addOnly,failedNotice,coversThrough,observedMissing);
 
@@ -32,11 +32,12 @@ public static class ItemSync
         {
             var removal=await SettleTombstoneAsync(pair,settings,events,paths,change,key,saved,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,coversThrough);
             if(removal.Settled is {} tombstoned) return tombstoned;
-            var (pc,db)=await ReadBothAsync(local,dropbox,endpoints,ct);
+            var pcTask=local.ReadOneAsync(endpoints.LocalPath,ct); var dbTask=dropbox.ReadOneAsync(endpoints.DropboxPath,ct); await Task.WhenAll(pcTask,dbTask);
+            var pc=await pcTask; var db=await dbTask; RequireReadable(Side.Local,pc); RequireReadable(Side.Dropbox,db);
             if(await SettleReusedNameAsync(pair,settings,events,paths,change,key,saved,pc,db,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,reviewed,member,coversThrough) is {} reused) return reused;
             var removed=await SettleRemovalAsync(pair,settings,events,paths,change,key,saved,endpoints,pc,removal.Selected,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,coversThrough);
             if(removed.Settled is {} settled) return settled;
-            if(ObserveReplacement(paths,change,key,path,saved,mapped,endpoints,pc,db,removed.Selected,notices,reviewed,member,failed) is not {} observed) return false;
+            var observed=ObserveReplacement(paths,change,key,path,saved,mapped,endpoints,pc,db,removed.Selected,notices,reviewed,member,failed); if(observed.Settled is {} replaced) return replaced;
             debt=observed.Historical?.Subject.FirstRunDeletion??IssueSubject.FirstRunDeletionKind.None;
             var row=await FirstRunEvidenceAsync(observed.Row,observed.Historical,debt,reviewed,member,endpoints.DropboxPath,dropbox,ct);
             var candidates=await RenameCandidatesAsync(pair,change,key,saved,row,store,failed,ct);
@@ -55,7 +56,7 @@ public static class ItemSync
         }
     }
 
-    private static async Task<(bool? Settled,bool Selected)> SettleTombstoneAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,Change change,string key,SyncedEntry? saved,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough)
+    private static async ValueTask<(bool? Settled,bool Selected)> SettleTombstoneAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,Change change,string key,SyncedEntry? saved,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough)
     {
         var tombstone=change.Side==Side.Dropbox && change.Kind==ChangeKind.Deleted && saved!=null;
         bool selectedRemoval=change.Kind==ChangeKind.Deleted && saved!=null && (change.Side==Side.Dropbox ? change.Id==null || change.Id==saved.DropboxId : change.IdentityDeleted && change.Id is {Length:>0} removed && removed==saved.LocalId);
@@ -69,15 +70,6 @@ public static class ItemSync
         if(saved is {IsFolder:true} && selectedRemoval)
             return (await RowExecution.RemoveBoundAsync(pair,settings,events,paths,saved,change.Side,local,dropbox,store,heldInput,populate,compareOldBinding,failed,ct,coversThrough),true);
         return (null,selectedRemoval);
-    }
-
-    private static async Task<(Entry? Local,Entry? Dropbox)> ReadBothAsync(ISide local,ISide dropbox,Scope endpoints,CancellationToken ct)
-    {
-        var pcTask=local.ReadOneAsync(endpoints.LocalPath,ct); var dbTask=dropbox.ReadOneAsync(endpoints.DropboxPath,ct);
-        await Task.WhenAll(pcTask,dbTask);
-        var pc=await pcTask; var db=await dbTask;
-        RequireReadable(Side.Local,pc); RequireReadable(Side.Dropbox,db);
-        return (pc,db);
     }
 
     // At a reused name settle the old identities, not the item that inherited the name.
@@ -94,7 +86,7 @@ public static class ItemSync
     }
 
     // A missing journal path may already have moved. Only the selected identity's removal authorizes deletion.
-    private static async Task<(bool? Settled,bool Selected)> SettleRemovalAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,Change change,string key,SyncedEntry? saved,Scope endpoints,Entry? pc,bool selectedRemoval,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough)
+    private static async ValueTask<(bool? Settled,bool Selected)> SettleRemovalAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,Change change,string key,SyncedEntry? saved,Scope endpoints,Entry? pc,bool selectedRemoval,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough)
     {
         if(change.Side==Side.Local && saved!=null && !selectedRemoval && (pc==null || change.Id==saved.LocalId && pc.Id!=saved.LocalId))
         {
@@ -120,7 +112,7 @@ public static class ItemSync
         return (null,selectedRemoval);
     }
 
-    private static (Row Row,Entry? Successor,bool SafeSave,Notice? Historical)? ObserveReplacement(PathScope paths,Change change,string key,string path,SyncedEntry? saved,string mapped,Scope endpoints,Entry? pc,Entry? db,bool selectedRemoval,List<Notice> notices,Notice? reviewed,NoticeItem? member,Action<string,bool>? failed)
+    private static (bool? Settled,Row Row,Entry? Successor,bool SafeSave,Notice? Historical) ObserveReplacement(PathScope paths,Change change,string key,string path,SyncedEntry? saved,string mapped,Scope endpoints,Entry? pc,Entry? db,bool selectedRemoval,List<Notice> notices,Notice? reviewed,NoticeItem? member,Action<string,bool>? failed)
     {
         // A successor at the old name belongs to its own input, not the removed file's row.
         var successor=selectedRemoval && change.Side==Side.Local && pc?.Id!=saved!.LocalId ? pc : null;
@@ -129,15 +121,15 @@ public static class ItemSync
         if(successor!=null && !safeSave) pc=null;
         var incoming=change.Side==Side.Local?pc:db;
         if(!selectedRemoval && change.Id is {Length:>0} expected && incoming?.Id!=expected) Retain(key,failed);
-        if(member!=null && (change.Side==Side.Local?pc:db)?.Id!=member.Id) return null;
+        if(member!=null && (change.Side==Side.Local?pc:db)?.Id!=member.Id) return (false,null!,null,false,null);
         bool Matches(Notice n) => n.Subject.Items.Any(i=>i.Id==(i.Side==Side.Local?pc:db)?.Id);
         var tie=notices.FirstOrDefault(n=>n.Kind==NoticeKind.Tie && Matches(n));
         var historical=reviewed!=null && reviewed.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && Matches(reviewed) ? reviewed : notices.FirstOrDefault(n=>n.Kind==NoticeKind.Failure && n.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && Matches(n));
         var context=RowContext.Neutral with { Destination=mapped, OutOfScope=paths.Excludes(endpoints.LocalPath,endpoints.DropboxPath,(pc??db)?.IsFolder??saved?.IsFolder??false),Skipped=pc?.Skip!=null || db?.Skip!=null,Held=tie!=null,HeldKind=tie?.Kind, FirstRunDeletion=historical?.Subject.FirstRunDeletion??IssueSubject.FirstRunDeletionKind.None, DeletionEligible=historical!=null };
-        return (new Row(key,pc,db,saved,[],null,context){ObservationPath=path},successor,safeSave,historical);
+        return (null,new Row(key,pc,db,saved,[],null,context){ObservationPath=path},successor,safeSave,historical);
     }
 
-    private static async Task<Row> FirstRunEvidenceAsync(Row row,Notice? historical,IssueSubject.FirstRunDeletionKind debt,Notice? reviewed,NoticeItem? member,string dropboxPath,ISide dropbox,CancellationToken ct)
+    private static async ValueTask<Row> FirstRunEvidenceAsync(Row row,Notice? historical,IssueSubject.FirstRunDeletionKind debt,Notice? reviewed,NoticeItem? member,string dropboxPath,ISide dropbox,CancellationToken ct)
     {
         if (row.Synced is null && row.Local is {IsFolder:false} pc && row.Dropbox is null && debt==IssueSubject.FirstRunDeletionKind.Item && historical!.Subject.Items.Any(i=>i.Side==Side.Local && i.Id==pc.Id && PathNames.Same(i.Path,pc.Path)))
             row=row with {Deletion=await dropbox.DeletedAsync(dropboxPath,false,ct),DeletionClock=dropbox.ClockOffset,
@@ -145,7 +137,7 @@ public static class ItemSync
         return row;
     }
 
-    private static async Task<IReadOnlyList<RenameCandidate>> RenameCandidatesAsync(PairConfig pair,Change change,string key,SyncedEntry? saved,Row row,IStore store,Action<string,bool>? failed,CancellationToken ct)
+    private static async ValueTask<IReadOnlyList<RenameCandidate>> RenameCandidatesAsync(PairConfig pair,Change change,string key,SyncedEntry? saved,Row row,IStore store,Action<string,bool>? failed,CancellationToken ct)
     {
         IReadOnlyList<RenameCandidate> candidates=[];
         if (change.Kind==ChangeKind.Renamed && change.OldPath is {} old && row.EntryOn(change.Side) is {} moved)
@@ -165,7 +157,7 @@ public static class ItemSync
         return candidates;
     }
 
-    private static async Task<(Row Row,Notice? PutBack)> ChangedPutBackAsync(PairConfig pair,Change change,string key,SyncedEntry? saved,Row row,Entry? incoming,IReadOnlyList<RenameCandidate> candidates,List<Notice> notices,Notice? reviewed,ISide local,IStore store,CancellationToken ct)
+    private static async ValueTask<(Row Row,Notice? PutBack)> ChangedPutBackAsync(PairConfig pair,Change change,string key,SyncedEntry? saved,Row row,Entry? incoming,IReadOnlyList<RenameCandidate> candidates,List<Notice> notices,Notice? reviewed,ISide local,IStore store,CancellationToken ct)
     {
         Notice? changedPutBack=null;
         var baseline=candidates.FirstOrDefault(c=>c.Side==change.Side && c.Moved.Id==incoming?.Id)?.Synced??saved;
