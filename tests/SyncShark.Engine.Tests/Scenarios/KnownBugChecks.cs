@@ -373,16 +373,17 @@ public static class KnownBugChecks
             }
             return null;
         });
-        ExclusionOutcome? firstOutcome = null;
+        var coverageAsked = false;
+        (ExclusionOutcome Outcome, TextKey? Cause)? first = null;
         try
         {
-            firstOutcome = (await new Exclusions().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, exclusion,
+            first = await new Exclusions().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, exclusion,
                 local, remote, storeCrash, (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, ct,
-                heldInput: _ => [], coversThrough: _ => true)).Outcome;
+                heldInput: _ => [], coversThrough: _ => { coverageAsked = true; return true; });
         }
         catch (Exception error) when (error is IOException or AggregateException) { }
         Check.Require(crashed && !remote.Items.ContainsKey("x") && !remote.Items.ContainsKey("x/a"),
-            $"L119: the crash cut did not remove the excluded Dropbox copy before the save (crashed={crashed} removed={removed} outcome={firstOutcome} remoteX={remote.Items.ContainsKey("x")} remoteXA={remote.Items.ContainsKey("x/a")} deletes={remote.Requests[nameof(ISide.DeleteAsync)]} reads={remote.Requests[nameof(ISide.ReadOneAsync)]})");
+            $"L119: the crash cut did not remove the excluded Dropbox copy before the save (crashed={crashed} removed={removed} outcome={first?.Outcome} cause={first?.Cause} coverageAsked={coverageAsked} notices={store.OpenNotices.Count()} remoteX={remote.Items.ContainsKey("x")} remoteXA={remote.Items.ContainsKey("x/a")} deletes={remote.Requests[nameof(ISide.DeleteAsync)]} remoteReads={remote.Requests[nameof(ISide.ReadOneAsync)]} localReads={local.Requests[nameof(ISide.ReadOneAsync)]})");
         Check.Require(store.Records.Values.Any(r => r.LocalPath == "x/a"),
             "L119: the crash cut committed the binding removal, so the restart has nothing to resolve");
         // Restart: the owed exclusion re-applies on the plain store (the root is already gone, so it settles).
