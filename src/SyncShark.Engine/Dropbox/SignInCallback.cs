@@ -36,7 +36,7 @@ public static class SignInCallback
         return Text.Get(TextKey.SignInPage, (TextArg.Name, product), (TextArg.Message, WebUtility.HtmlEncode(Text.Get(received ? TextKey.SignInReturnReceived : TextKey.SignInReturnRetry))));
     }
 
-    private static async Task<string> ReadCallbackTargetAsync(Stream stream, CancellationToken ct)
+    internal static async Task<string> ReadCallbackTargetAsync(Stream stream, CancellationToken ct)
     {
         var buffer = new byte[MaximumCallbackBytes];
         var length = 0;
@@ -66,14 +66,14 @@ public static class SignInCallback
 
     // Best effort for a return that cannot be verified, bounded by the same attempt token; a closed socket or a
     // cancelled attempt simply ends it without waiting.
-    private static async Task TryWriteRetryAsync(Stream stream, CancellationToken ct)
+    internal static async Task TryWriteRetryAsync(Stream stream, CancellationToken ct)
     {
         if (ct.IsCancellationRequested) return;
         try { await WritePageAsync(stream, AcknowledgementPage(received: false), ct); }
         catch (Exception error) when (error is IOException or SocketException or ObjectDisposedException or OperationCanceledException) { }
     }
 
-    private static async Task WritePageAsync(Stream stream, string html, CancellationToken ct)
+    internal static async Task WritePageAsync(Stream stream, string html, CancellationToken ct)
     {
         var bytes = Encoding.UTF8.GetBytes(html);
         var header = Encoding.ASCII.GetBytes(
