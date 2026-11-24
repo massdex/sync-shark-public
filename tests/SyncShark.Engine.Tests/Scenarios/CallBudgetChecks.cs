@@ -791,7 +791,8 @@ public static class CallBudgetChecks
         using var db = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = image + ".scan", Pooling = false }.ToString());
         await db.OpenAsync();
         db.CreateFunction<string, string>("pathkey", PathNames.Key, isDeterministic: true);
-        using var cmd = db.CreateCommand(); cmd.CommandText = "PRAGMA busy_timeout=5000; SELECT path FROM scan ORDER BY path";
+        using (var pragma = db.CreateCommand()) { pragma.CommandText = "PRAGMA busy_timeout=5000"; await pragma.ExecuteNonQueryAsync(); }
+        using var cmd = db.CreateCommand(); cmd.CommandText = "SELECT path FROM scan ORDER BY path";
         using var reader = await cmd.ExecuteReaderAsync();
         var paths = new List<string>();
         while (await reader.ReadAsync()) paths.Add(reader.GetString(0));
