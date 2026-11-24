@@ -50,7 +50,12 @@ public sealed class Retries
                 continue;
             }
             if(at is not {InScope:true} hit || !PathNames.Same(hit.Location.Entry.Path,subject.Path)) { await ReportStaleAsync(pair,failure,store,ct); done=false; continue; }
-            done &= await Apply(subject.Side,hit.Location.Entry.Path,subject);
+            if(!await Apply(subject.Side,hit.Location.Entry.Path,subject))
+            {
+                done=false;
+                // A fresh refusal replaces the reviewed notice; its peer is not a separate change to apply.
+                if(await store.NoticeAsync(pair.PairId,failure.Id,ct) is not {} open || !open.Matches(failure)) return;
+            }
         }
         if(done) await store.CloseNoticeAsync(pair.PairId,failure,ct);
         Task<bool> Apply(Side source,string path,NoticeItem? subject)=>ItemSync.ChangeAsync(pair,settings,events,paths,
