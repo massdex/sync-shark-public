@@ -718,7 +718,9 @@ public static class CallBudgetChecks
         using var db = await Massdex.SyncShark.Engine.Tests.Storage.DeletedNamesChecks.OpenAsync();
         var table = new Massdex.SyncShark.Engine.Storage.ScanTable();
         var scan = Guid.NewGuid();
-        var keys = Enumerable.Range(0, size).Select(i => PathNames.Key($"old/{i:D6}")).ToArray();
+        // One compressed block holds at most the provider's row cap; use that many names regardless of population.
+        var count = Math.Min(size, Massdex.SyncShark.Engine.Storage.Encoding.DeletedBlockRows);
+        var keys = Enumerable.Range(0, count).Select(i => PathNames.Key($"old/{i:D6}")).ToArray();
         var bytes = Massdex.SyncShark.Engine.Storage.Encoding.EncodeDeletedNames(keys);
         const string delta = "append";
         using (var seed = db.CreateCommand())
@@ -727,7 +729,7 @@ public static class CallBudgetChecks
                 + "INSERT INTO discovery_deleted_block VALUES(1,$last,$count,$bytes);"
                 + "INSERT INTO discovery_deleted_delta VALUES(1,'append',0);";
             seed.Parameters.AddWithValue("$last", keys[^1]);
-            seed.Parameters.AddWithValue("$count", size);
+            seed.Parameters.AddWithValue("$count", count);
             seed.Parameters.AddWithValue("$bytes", bytes);
             await seed.ExecuteNonQueryAsync();
         }
@@ -740,7 +742,7 @@ public static class CallBudgetChecks
         try
         {
             // Probe both partitions: names from the compressed block and the independent delta name.
-            foreach (var index in new[] { 0, size / 3, size / 2, size * 2 / 3, size - 1 })
+            foreach (var index in new[] { 0, count / 3, count / 2, count * 2 / 3, count - 1 })
                 Check.Require(await table.History.ContainsAsync(db, "p", scan, keys[index], false, default), "A compact block name was lost");
             Check.Require(await table.History.ContainsAsync(db, "p", scan, delta, false, default), "The independent delta name was lost");
             Check.Require(!await table.History.ContainsAsync(db, "p", scan, PathNames.Key("absent"), false, default), "A missing name was selected");
