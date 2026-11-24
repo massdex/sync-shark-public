@@ -26,6 +26,7 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
         catch(ChangedUnderneathException race) when(!PathNames.Same(race.Path,run.pair.LocalRoot) && !PathNames.Same(race.Path,run.pair.DropboxRoot)) {}
     }
 
+    /// <summary>One attempt of this submission. Not split by job: an async preparation helper would allocate a task per row even when nothing suspends.</summary>
     private async Task Attempt(CancellationToken token)
     {
         if(row!=null && !(run.removal && row is {Local:null,Dropbox:null,Synced:not null}) && run.Touched(row,row.IsFolder()) || candidates.Any(c=>run.store.ScanTouched(run.id,run.scan,c.Side,c.Moved.Path,c.Moved.IsFolder)))
@@ -35,9 +36,33 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
             // Our own Failure touched this scan. Retry the retained input, not a notice that replaced it.
             if(retained!=null && await Repair.CurrentRetryAsync(run.store,run.id,retained,token)==null) throw new WorkQueue.Unsettled();
         }
-        var current=run.queue.CurrentScope(run.paths);
-        var moves=reobserve && candidates.Count!=0 ? await Reobserved(token) : candidates;
-        var prepared=row==null ? null : await Prepared(row,current,token);
+        var current=run.queue.CurrentScope(run.paths); var prepared=row; var moves=candidates;
+        if(reobserve && candidates.Count!=0)
+        {
+            // Keep the admitted move's identity and footprint; the move planner rechecks both ends.
+            var fresh=new List<RenameCandidate>(candidates.Count);
+            foreach(var original in candidates)
+            {
+                var leg=original.Side==Side.Local?run.local:run.dropbox;
+                if(await leg.ReadOneAsync(original.Moved.Path,token) is not {} now || now.Id!=original.Moved.Id) throw new WorkQueue.Unsettled();
+                fresh.Add(original with {Moved=now});
+            }
+            moves=fresh;
+        }
+        if(prepared!=null)
+        {
+            var (lp,dp)=Row.Paths(prepared);
+            if(reobserve)
+            {
+                var pc=run.local.ReadOneAsync(lp,token);var db=run.dropbox.ReadOneAsync(dp,token);await Task.WhenAll(pc,db);
+                var left=await pc;var right=await db;
+                // An old identity's scan facts are not authority over a different occupant.
+                if(prepared.Local is {} a && a.Id!=left?.Id || prepared.Dropbox is {} b && b.Id!=right?.Id) throw new WorkQueue.Unsettled();
+                prepared=prepared with {Local=left,Dropbox=right,LocalHash=null,Deletion=null,DeletionClock=null,
+                    Context=prepared.Context with {Skipped=left?.Skip!=null || right?.Skip!=null}};
+            }
+            prepared=prepared with {Context=prepared.Context with {OutOfScope=current.Excludes(lp,dp,prepared.IsFolder())}};
+        }
         Notice? own=null; EffectOutcome? outcome;
         try { outcome=await ItemSync.ApplyAsync(run.pair,run.settings,run.Log,current,prepared,moves,run.local,run.dropbox,run.store,coveredFolder && !reobserve?PopulateCovered:run.Populate,run.Hop,token,run.queue.Held,
             (_,reproducible)=>{if(!reproducible) throw new WorkQueue.Unsettled();},failedNotice:n=>own=n,coversThrough:run.queue.ProofNow?.Invoke()); }
@@ -55,34 +80,6 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
             await run.discoveryEnded.Task.WaitAsync(token); endAttempted=true;
             await RetryOwn(own,token);
         }
-    }
-
-    private async Task<IReadOnlyList<RenameCandidate>> Reobserved(CancellationToken token)
-    {
-        // Keep the admitted move's identity and footprint; the move planner rechecks both ends.
-        var fresh=new List<RenameCandidate>(candidates.Count);
-        foreach(var original in candidates)
-        {
-            var leg=original.Side==Side.Local?run.local:run.dropbox;
-            if(await leg.ReadOneAsync(original.Moved.Path,token) is not {} now || now.Id!=original.Moved.Id) throw new WorkQueue.Unsettled();
-            fresh.Add(original with {Moved=now});
-        }
-        return fresh;
-    }
-
-    private async Task<Row> Prepared(Row prepared,PathScope current,CancellationToken token)
-    {
-        var (lp,dp)=Row.Paths(prepared);
-        if(reobserve)
-        {
-            var pc=run.local.ReadOneAsync(lp,token);var db=run.dropbox.ReadOneAsync(dp,token);await Task.WhenAll(pc,db);
-            var left=await pc;var right=await db;
-            // An old identity's scan facts are not authority over a different occupant.
-            if(prepared.Local is {} a && a.Id!=left?.Id || prepared.Dropbox is {} b && b.Id!=right?.Id) throw new WorkQueue.Unsettled();
-            prepared=prepared with {Local=left,Dropbox=right,LocalHash=null,Deletion=null,DeletionClock=null,
-                Context=prepared.Context with {Skipped=left?.Skip!=null || right?.Skip!=null}};
-        }
-        return prepared with {Context=prepared.Context with {OutOfScope=current.Excludes(lp,dp,prepared.IsFolder())}};
     }
 
     private async Task RetryOwn(Notice original,CancellationToken token)

@@ -110,6 +110,7 @@ internal sealed class RepairRun
         return false;
     }
 
+    /// <summary>Acquire the scan, then submit moves and compared rows in order. Not split by job: a per-row async helper would allocate a task whenever its row suspends.</summary>
     internal async Task ScanAsync()
     {
         if (full)
@@ -132,7 +133,81 @@ internal sealed class RepairRun
             moves.Add(move);
         }
         if(moves.Count!=0) await Submit(null,moves);
-        await foreach(var (raw,notices) in store.CompareAsync(id,scan,physicalHop!=null?logical:scope,Evidence,ct)) await CompareRowAsync(raw,notices);
+        await foreach(var (raw,notices) in store.CompareAsync(id,scan,physicalHop!=null?logical:scope,Evidence,ct))
+        {
+            // Descendant listings omit the hop's own root; its caller owns that binding (Record, Relink or meeting).
+            if(physicalHop is {} owner && raw.Local==null && raw.Dropbox==null && raw.Synced==owner.Binding) continue;
+            await FinishFolders(raw.Key);
+            if(notices.Count==0 && !raw.Ambiguous && raw.Local is {Skip:null} pc && raw.Dropbox is {Skip:null} db && pc.IsFolder==db.IsFolder && raw.Synced is {} old && SyncedEntries.From(pc,db)==(old with {LocalPublished=null})) continue;
+            if(mapped)
+            {
+                var left=raw.Local; var right=raw.Dropbox; var link=raw.Synced;
+                if(notices.Count!=0 || raw.Ambiguous || !raw.Context.CompleteInventory || left==null && right==null || left?.Skip!=null || right?.Skip!=null ||
+                    (link==null ? left!=null && right!=null : link.IsFolder || left!=null && (left.IsFolder || left.Id!=link.LocalId) || right!=null && (right.IsFolder || right.Id!=link.DropboxId)) ||
+                    await MissingPath(Side.Dropbox,selected.LocalPath)!=selected.DropboxPath) continue;
+                var l=PathNames.RelativeUnderDropboxRoot(logical.LocalPath,left?.Path??link?.LocalPath??string.Empty);
+                var d=PathNames.RelativeUnderDropboxRoot(logical.DropboxPath,right?.Path??link?.DropboxPath??string.Empty);
+                if(link==null){l??=d;d??=l;}
+                if(l==null || d==null) continue;
+                var pcPath=PathNames.Child(selected.LocalPath,l); var dbPath=PathNames.Child(selected.DropboxPath,d); var current=queue.CurrentScope(paths);
+                if(current.Excludes(pcPath,dbPath,raw.IsFolder()) || link!=null && current.ExcludesBinding(link) || Touched(raw,false)) continue;
+                var actual=raw with {Local=left is null?null:left with {Path=pcPath},Dropbox=right is null?null:right with {Path=dbPath},
+                    Context=raw.Context with {Destination=left is null?pcPath:dbPath}};
+                try { await ItemSync.ApplyAsync(pair,settings,Log,current,actual,[],local,dropbox,store,Populate,Hop,ct,queue.Held,(_,_)=>throw new WorkQueue.Unsettled(),coversThrough:queue.ProofNow?.Invoke()); }
+                catch(WorkQueue.Unsettled)
+                {
+                    if(link!=null && (left==null || right==null))
+                    {
+                        var item=actual.Local??actual.Dropbox!; var side=left==null?Side.Dropbox:Side.Local;
+                        await new Notices().RaiseAsync(store,id,new(0,NoticeKind.Failure,TextKey.WaitItemRetry,item.Path,new([new(side,item.Path,item.Id)],side),DateTimeOffset.UtcNow,false),ct);
+                    }
+                }
+                catch(ChangedUnderneathException race) when(!PathNames.Same(race.Path,pair.LocalRoot) && !PathNames.Same(race.Path,pair.DropboxRoot)) {}
+                continue;
+            }
+            var row=raw;
+            var parent=NearestPending(row.Key);
+            if(parent!=null && row.Local is {} child)
+            {
+                if(child.Skip==nameof(TextKey.SkipUnreadable)) parent.Unreadable=TextKey.ReadLocalFailed;
+                if(paths.CoversKey(Side.Local,row.Key) || child.Skip!=null || (!child.IsFolder && !paths.Excludes(child.Path,null,false))) parent.Content=true;
+            }
+            var coveredChild=parent!=null && row.Local!=null && row.Dropbox==null && row.Synced==null;
+            List<(Scope Footprint,Notice Notice)>? retiring=null;
+            foreach(var (notice,member,covered,touched) in notices)
+            {
+                if(notice.Kind==NoticeKind.PutBack) continue;
+                if(!covered || touched || member!=null && store.ScanTouched(id,scan,member.Side,member.Path,false)) continue;
+                if(!coveredChild && await retirement.RetiringFootprint(raw,notice,member,ct) is {} footprint)
+                {
+                    if(raw.Local==null && raw.Dropbox==null && raw.Synced==null) await new Notices().CloseAsync(store,id,notice,ct);
+                    else (retiring??=[]).Add((footprint,notice));
+                }
+                if(notice.Cause==TextKey.InfoLinks && member!=null && !(row.EntryOn(member.Side) is {} current && current.Skip==nameof(TextKey.SkipLink) && current.Id==member.Id))
+                    linkWrites.Add((member,false));
+            }
+            if(row.Local==null && row.Dropbox==null && row.Synced==null) continue;
+            var lp=row.Local?.Path??row.Synced?.LocalPath??row.Context.Destination;
+            var dp=row.Dropbox?.Path??row.Synced?.DropboxPath??row.Context.Destination;
+            lp??=await MissingPath(Side.Local,dp!); dp??=await MissingPath(Side.Dropbox,lp);
+            var coveredLocal=Evidence(Side.Local,lp).Covered; var coveredRemote=Evidence(Side.Dropbox,dp).Covered;
+            if((row.Local==null && !coveredLocal) || (row.Dropbox==null && !coveredRemote)) continue;
+            foreach(var side in new[]{Side.Local,Side.Dropbox})
+                if(row.EntryOn(side) is {Skip:nameof(TextKey.SkipLink)} link && !store.ScanTouched(id,scan,side,link.Path,false) && !notices.Any(n=>n.Notice.Cause==TextKey.InfoLinks && n.Member==new NoticeItem(side,link.Path,link.Id)))
+                    linkWrites.Add((new(side,link.Path,link.Id),true));
+            if(row.Local?.Skip==nameof(TextKey.SkipLink) || row.Dropbox?.Skip==nameof(TextKey.SkipLink)) continue;
+            var historical=notices.Where(n=>n.Notice.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && n.Notice.Subject.Items.Any(m=>row.EntryOn(m.Side)?.Id==m.Id)).Select(n=>n.Notice.Subject.FirstRunDeletion).FirstOrDefault();
+            var eligible=first && row.Local is {} pcItem && row.Dropbox==null && row.Synced==null && coveredRemote && pcItem.Skip==null && !paths.Excludes(lp,dp,pcItem.IsFolder) && await store.DeletedNameAsync(id,scan,PathNames.DropboxKey(dp),pcItem.IsFolder,ct);
+            var hold=notices.Select(n=>n.Notice).FirstOrDefault(n=>n.Kind==NoticeKind.Tie || n.Kind==NoticeKind.NameClash);
+            // Coverage only: touch is decided at Attempt, which keeps the confirmed-removal exception for absent rows.
+            row=row with {Context=row.Context with {FirstRun=first, CompleteInventory=coveredLocal&&coveredRemote, DeletionEligible=eligible,FirstRunDeletion=historical,
+                Held=hold!=null,HeldKind=hold?.Kind,OutOfScope=paths.Excludes(lp,dp,row.IsFolder()),Skipped=row.Local?.Skip!=null || row.Dropbox?.Skip!=null,Destination=row.Local==null?lp:dp}};
+            if (eligible && row.Local is {IsFolder:true})
+            {
+                folders.Add(new(row,PathNames.DescendantBounds(row.Key).High) {Retiring=retiring,Content=paths.HoldsNestedRoot(Side.Local,lp)||paths.HoldsNestedRoot(Side.Dropbox,dp)});
+            }
+            else if(!coveredChild) await Submit(row,[],retiring,coveredFolder:row.IsFolder() && row.Synced==null && coveredLocal && coveredRemote);
+        }
         await FinishFolders(null);
         discoveryEnded.TrySetResult();
         await Drain();
@@ -141,91 +216,6 @@ internal sealed class RepairRun
     {
         if(removal && await side.ReadOneAsync(path,token) is null or {IsFolder:false,Skip:null}) yield break;
         await foreach(var item in Repair.ReadInventory(side.ReadAllAsync,path,Log,cursor,token)) yield return item;
-    }
-
-    private async Task CompareRowAsync(Row raw,IReadOnlyList<(Notice Notice,NoticeItem? Member,bool Covered,bool Touched)> notices)
-    {
-        // Descendant listings omit the hop's own root; its caller owns that binding (Record, Relink or meeting).
-        if(physicalHop is {} owner && raw.Local==null && raw.Dropbox==null && raw.Synced==owner.Binding) return;
-        await FinishFolders(raw.Key);
-        if(notices.Count==0 && !raw.Ambiguous && raw.Local is {Skip:null} pc && raw.Dropbox is {Skip:null} db && pc.IsFolder==db.IsFolder && raw.Synced is {} old && SyncedEntries.From(pc,db)==(old with {LocalPublished=null})) return;
-        if(mapped) { await ApplyMappedAsync(raw,notices); return; }
-        var row=raw;
-        var parent=NearestPending(row.Key);
-        if(parent!=null && row.Local is {} child)
-        {
-            if(child.Skip==nameof(TextKey.SkipUnreadable)) parent.Unreadable=TextKey.ReadLocalFailed;
-            if(paths.CoversKey(Side.Local,row.Key) || child.Skip!=null || (!child.IsFolder && !paths.Excludes(child.Path,null,false))) parent.Content=true;
-        }
-        var coveredChild=parent!=null && row.Local!=null && row.Dropbox==null && row.Synced==null;
-        var retiring=await RetiringNotices(row,notices,coveredChild);
-        if(row.Local==null && row.Dropbox==null && row.Synced==null) return;
-        await SubmitObservedAsync(row,notices,retiring,coveredChild);
-    }
-    private async Task ApplyMappedAsync(Row raw,IReadOnlyList<(Notice Notice,NoticeItem? Member,bool Covered,bool Touched)> notices)
-    {
-        var left=raw.Local; var right=raw.Dropbox; var link=raw.Synced;
-        if(notices.Count!=0 || raw.Ambiguous || !raw.Context.CompleteInventory || left==null && right==null || left?.Skip!=null || right?.Skip!=null ||
-            (link==null ? left!=null && right!=null : link.IsFolder || left!=null && (left.IsFolder || left.Id!=link.LocalId) || right!=null && (right.IsFolder || right.Id!=link.DropboxId)) ||
-            await MissingPath(Side.Dropbox,selected.LocalPath)!=selected.DropboxPath) return;
-        var l=PathNames.RelativeUnderDropboxRoot(logical.LocalPath,left?.Path??link?.LocalPath??string.Empty);
-        var d=PathNames.RelativeUnderDropboxRoot(logical.DropboxPath,right?.Path??link?.DropboxPath??string.Empty);
-        if(link==null){l??=d;d??=l;}
-        if(l==null || d==null) return;
-        var pcPath=PathNames.Child(selected.LocalPath,l); var dbPath=PathNames.Child(selected.DropboxPath,d); var current=queue.CurrentScope(paths);
-        if(current.Excludes(pcPath,dbPath,raw.IsFolder()) || link!=null && current.ExcludesBinding(link) || Touched(raw,false)) return;
-        var actual=raw with {Local=left is null?null:left with {Path=pcPath},Dropbox=right is null?null:right with {Path=dbPath},
-            Context=raw.Context with {Destination=left is null?pcPath:dbPath}};
-        try { await ItemSync.ApplyAsync(pair,settings,Log,current,actual,[],local,dropbox,store,Populate,Hop,ct,queue.Held,(_,_)=>throw new WorkQueue.Unsettled(),coversThrough:queue.ProofNow?.Invoke()); }
-        catch(WorkQueue.Unsettled)
-        {
-            if(link!=null && (left==null || right==null))
-            {
-                var item=actual.Local??actual.Dropbox!; var side=left==null?Side.Dropbox:Side.Local;
-                await new Notices().RaiseAsync(store,id,new(0,NoticeKind.Failure,TextKey.WaitItemRetry,item.Path,new([new(side,item.Path,item.Id)],side),DateTimeOffset.UtcNow,false),ct);
-            }
-        }
-        catch(ChangedUnderneathException race) when(!PathNames.Same(race.Path,pair.LocalRoot) && !PathNames.Same(race.Path,pair.DropboxRoot)) {}
-    }
-    private async Task<List<(Scope Footprint,Notice Notice)>?> RetiringNotices(Row raw,IReadOnlyList<(Notice Notice,NoticeItem? Member,bool Covered,bool Touched)> notices,bool coveredChild)
-    {
-        List<(Scope Footprint,Notice Notice)>? retiring=null;
-        foreach(var (notice,member,covered,touched) in notices)
-        {
-            if(notice.Kind==NoticeKind.PutBack) continue;
-            if(!covered || touched || member!=null && store.ScanTouched(id,scan,member.Side,member.Path,false)) continue;
-            if(!coveredChild && await retirement.RetiringFootprint(raw,notice,member,ct) is {} footprint)
-            {
-                if(raw.Local==null && raw.Dropbox==null && raw.Synced==null) await new Notices().CloseAsync(store,id,notice,ct);
-                else (retiring??=[]).Add((footprint,notice));
-            }
-            if(notice.Cause==TextKey.InfoLinks && member!=null && !(raw.EntryOn(member.Side) is {} current && current.Skip==nameof(TextKey.SkipLink) && current.Id==member.Id))
-                linkWrites.Add((member,false));
-        }
-        return retiring;
-    }
-    private async Task SubmitObservedAsync(Row row,IReadOnlyList<(Notice Notice,NoticeItem? Member,bool Covered,bool Touched)> notices,List<(Scope Footprint,Notice Notice)>? retiring,bool coveredChild)
-    {
-        var lp=row.Local?.Path??row.Synced?.LocalPath??row.Context.Destination;
-        var dp=row.Dropbox?.Path??row.Synced?.DropboxPath??row.Context.Destination;
-        lp??=await MissingPath(Side.Local,dp!); dp??=await MissingPath(Side.Dropbox,lp);
-        var coveredLocal=Evidence(Side.Local,lp).Covered; var coveredRemote=Evidence(Side.Dropbox,dp).Covered;
-        if((row.Local==null && !coveredLocal) || (row.Dropbox==null && !coveredRemote)) return;
-        foreach(var side in new[]{Side.Local,Side.Dropbox})
-            if(row.EntryOn(side) is {Skip:nameof(TextKey.SkipLink)} link && !store.ScanTouched(id,scan,side,link.Path,false) && !notices.Any(n=>n.Notice.Cause==TextKey.InfoLinks && n.Member==new NoticeItem(side,link.Path,link.Id)))
-                linkWrites.Add((new(side,link.Path,link.Id),true));
-        if(row.Local?.Skip==nameof(TextKey.SkipLink) || row.Dropbox?.Skip==nameof(TextKey.SkipLink)) return;
-        var historical=notices.Where(n=>n.Notice.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && n.Notice.Subject.Items.Any(m=>row.EntryOn(m.Side)?.Id==m.Id)).Select(n=>n.Notice.Subject.FirstRunDeletion).FirstOrDefault();
-        var eligible=first && row.Local is {} pcItem && row.Dropbox==null && row.Synced==null && coveredRemote && pcItem.Skip==null && !paths.Excludes(lp,dp,pcItem.IsFolder) && await store.DeletedNameAsync(id,scan,PathNames.DropboxKey(dp),pcItem.IsFolder,ct);
-        var hold=notices.Select(n=>n.Notice).FirstOrDefault(n=>n.Kind==NoticeKind.Tie || n.Kind==NoticeKind.NameClash);
-        // Coverage only: touch is decided at Attempt, which keeps the confirmed-removal exception for absent rows.
-        row=row with {Context=row.Context with {FirstRun=first, CompleteInventory=coveredLocal&&coveredRemote, DeletionEligible=eligible,FirstRunDeletion=historical,
-            Held=hold!=null,HeldKind=hold?.Kind,OutOfScope=paths.Excludes(lp,dp,row.IsFolder()),Skipped=row.Local?.Skip!=null || row.Dropbox?.Skip!=null,Destination=row.Local==null?lp:dp}};
-        if (eligible && row.Local is {IsFolder:true})
-        {
-            folders.Add(new(row,PathNames.DescendantBounds(row.Key).High) {Retiring=retiring,Content=paths.HoldsNestedRoot(Side.Local,lp)||paths.HoldsNestedRoot(Side.Dropbox,dp)});
-        }
-        else if(!coveredChild) await Submit(row,[],retiring,coveredFolder:row.IsFolder() && row.Synced==null && coveredLocal && coveredRemote);
     }
 
     internal async Task BookkeepingAsync()
