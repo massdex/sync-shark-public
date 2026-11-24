@@ -1215,6 +1215,12 @@ public static class FolderChecks
             await NextStartAsync(root);
             Check.Require(ReleaseScalar(target, "SELECT (SELECT count(*) FROM issue WHERE pair_id=1 AND kind=3 AND cause='InfoLinks')=1 AND (SELECT count(*) FROM issue_member m JOIN issue i USING(issue_id) WHERE m.member_id IN(1,4) AND i.cause='InfoLinks')=2 AND NOT EXISTS(SELECT 1 FROM issue WHERE issue_id IN(8,10))") == 1,
                 "Two pure link notices were not folded into one InfoLinks notice");
+            // The folded notice's caller projection (link count and top folders) is derived by the public reader from
+            // the migrated member subjects, not from raw rows: a stale, dropped or re-sided member subject changes it.
+            var foldedId = ReleaseScalar(target, "SELECT issue_id FROM issue WHERE pair_id=1 AND cause='InfoLinks'");
+            var folded = await ReadNoticeAsync(target, "p", foldedId);
+            Check.Require(folded is { Cause: TextKey.InfoLinks } f && f.LinkCount == 2 && f.LinkFolders!.SequenceEqual(new[] { "a", "c" }),
+                "The folded link notice did not expose both migrated member folders to the caller");
         }
         finally { Directory.Delete(root, true); }
     }
@@ -1424,6 +1430,8 @@ public static class FolderChecks
         }
         finally { Directory.Delete(root, true); }
     }
+    // NI (CHECK-r2 B1): needs the shared Host VolumeTrim gate across two pairs on one volume; recovery-before-trim
+    // ordering is already proven green by Run/HostChecks.TrimAtHostAsync. Owner: harness lane (shared Host trim double).
     public static Task A48TwoPairsOneVolumeAsync() => throw new NotImplementedException();
     public static async Task A48DriveRootScopeAsync()
     {
@@ -1542,7 +1550,11 @@ public static class FolderChecks
         }
         finally { Directory.Delete(root, true); }
     }
+    // NI (CHECK-r2 B1): needs the shared Host VolumeTrim gate holding an accepted job across trim; proven green by
+    // Run/HostChecks.TrimAtHostAsync. Owner: harness lane.
     public static Task A48QuietJobBeforeTrimAsync() => throw new NotImplementedException();
+    // NI (CHECK-r2 B1): needs the Host trim gate and a recorded expected outcome for a failed put-back relative to
+    // trim (none exists; writing one would invent a product decision). Owner: designer (outcome) + harness (gate).
     public static Task A48FailedPutBackBeforeTrimAsync() => throw new NotImplementedException();
     public static async Task A48BinOnNativeBinVolumeNotTrimmedAsync()
     {
@@ -1590,7 +1602,11 @@ public static class FolderChecks
         }
         finally { Directory.Delete(rootA, true); Directory.Delete(rootB, true); }
     }
+    // NI (CHECK-r2 B1): needs the shared Host trim gate held across a pending bind / long catch-up; proven green by
+    // Run/HostChecks.TrimAtHostAsync. Owner: harness lane.
     public static Task A48LongDowntimeRecoverBeforeTrimAsync() => throw new NotImplementedException();
+    // NI (CHECK-r2 B1): expected trim behaviour when a member's journal history is unavailable is not recorded.
+    // Owner: designer (outcome) + harness (gate).
     public static Task A48UnavailableHistoryAsync() => throw new NotImplementedException();
     public static Task A48UnknownDriveUsesShellOrAbortAsync() => throw new NotImplementedException();
     public static async Task A48StampBeforeNonreplacingMoveAsync()
@@ -1654,8 +1670,8 @@ public static class FolderChecks
           (8,1,4,'SkipLink','a','{"Items":[],"Incoming":null}',1,0),
           (10,1,4,'SkipLink','c','{"Items":[],"Incoming":null}',3,0);
         INSERT INTO issue_member(member_id,issue_id,pair_id,side,path_key,subject_json,skip_cause) VALUES
-          (1,8,1,0,pathkey('a'),'{"Version":1,"Value":{"Items":[],"Incoming":null}}','SkipLink'),
-          (4,10,1,0,pathkey('c'),'{"Version":1,"Value":{"Items":[],"Incoming":null}}','SkipLink');
+          (1,8,1,0,pathkey('a'),'{"Version":1,"Value":{"Items":[{"Side":"Local","Path":"a/one","Id":"link-one"}],"Incoming":null}}','SkipLink'),
+          (4,10,1,1,pathkey('c'),'{"Version":1,"Value":{"Items":[{"Side":"Dropbox","Path":"c/two","Id":"link-two"}],"Incoming":null}}','SkipLink');
         """;
     private const string UnchangedFacts = """
         INSERT INTO pair(id,pair_id,def_json) VALUES(1,'p','{"ConnectionId":"c"}');
