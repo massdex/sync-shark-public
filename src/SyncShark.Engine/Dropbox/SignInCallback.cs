@@ -42,7 +42,7 @@ public static class SignInCallback
     public static async Task<string> ReceiveCallbackAsync(Uri redirectUri, string expectedPath, string expectedState,
         CancellationToken ct, Action? browser = null)
     {
-        var listener = StartListener(redirectUri, expectedPath);
+        var listener = SignIn.StartListener(redirectUri, expectedPath);
         try
         {
             using var registration = ct.Register(listener.Stop);
@@ -75,16 +75,6 @@ public static class SignInCallback
             finally { client.Dispose(); }
         }
         finally { listener.Stop(); }
-    }
-
-    private static TcpListener StartListener(Uri redirectUri, string expectedPath)
-    {
-        ArgumentNullException.ThrowIfNull(redirectUri, nameof(redirectUri));
-        ArgumentException.ThrowIfNullOrWhiteSpace(expectedPath, nameof(expectedPath));
-        var listener = new TcpListener(IPAddress.Loopback, redirectUri.Port);
-        try { listener.Start(1); }
-        catch (SocketException) { throw new InvalidOperationException(Text.Get(TextKey.SignInReturnRetry)); }
-        return listener;
     }
 
     private static async Task<TcpClient> AcceptAsync(TcpListener listener, CancellationToken ct)

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -268,6 +269,16 @@ public sealed class SignIn
             catch (DropboxCredentialUnavailableException) { /* Revoked access also needs sign-in. */ }
         }
         throw new ItemFailedException(string.Empty, TextKey.SignInReturnRetry, null);
+    }
+
+    internal static TcpListener StartListener(Uri redirectUri, string expectedPath)
+    {
+        ArgumentNullException.ThrowIfNull(redirectUri, nameof(redirectUri));
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedPath, nameof(expectedPath));
+        var listener = new TcpListener(IPAddress.Loopback, redirectUri.Port);
+        try { listener.Start(1); }
+        catch (SocketException) { throw new InvalidOperationException(Text.Get(TextKey.SignInReturnRetry)); }
+        return listener;
     }
 
     private static void StartBrowser(Uri uri)
