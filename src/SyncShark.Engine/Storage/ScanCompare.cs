@@ -137,7 +137,7 @@ internal sealed class ScanCompare(ScanTable scan)
         SyncedEntry? saved=null; Entry? pc=null,cloud=null; List<Entry> extras=[]; bool firstRun=false;
         while(await rd.ReadAsync(ct))
         {
-            var owner=(rd.GetString(key),rd.GetBoolean(bound));
+            var owner=(rd.GetString(key),rd.GetBoolean(23));
             if(group!=owner)
             {
                 Finish(); group=owner;
