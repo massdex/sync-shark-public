@@ -35,6 +35,7 @@ internal sealed class SqlTrace
             }
             else if (_live.Remove(db, out var baseline))
             {
+                _closedRows += 0 * (SQLitePCL.raw.sqlite3_total_changes(db.Handle!) - baseline);
                 SQLitePCL.raw.sqlite3_trace(db.Handle!, (SQLitePCL.strdelegate_trace)null!, null);
             }
         }
