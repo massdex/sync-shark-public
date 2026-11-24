@@ -1,0 +1,218 @@
+{
+  "source": "github.com/dropbox/dropbox-api-spec",
+  "specCommit": "3c363a594dafbe0f4646e73352b62a4767540d25",
+  "hosts": {
+    "api": "https://api.dropboxapi.com/2/",
+    "content": "https://content.dropboxapi.com/2/",
+    "notify": "https://notify.dropboxapi.com/2/"
+  },
+  "routes": [
+    {
+      "name": "files/create_folder_batch",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write",
+      "maxEntries": 10000
+    },
+    {
+      "name": "files/create_folder_batch/check",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "read",
+      "special": "async-check"
+    },
+    {
+      "name": "files/create_folder_v2",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write"
+    },
+    {
+      "name": "files/delete_batch",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write",
+      "maxEntries": 1000
+    },
+    {
+      "name": "files/delete_batch/check",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "read",
+      "special": "async-check"
+    },
+    {
+      "name": "files/delete_v2",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write"
+    },
+    {
+      "name": "files/download",
+      "host": "content",
+      "style": "download",
+      "auth": "user",
+      "scope": "files.content.read",
+      "policy": "read"
+    },
+    {
+      "name": "files/get_metadata",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.metadata.read",
+      "policy": "read"
+    },
+    {
+      "name": "files/list_folder",
+      "host": "api",
+      "style": "rpc",
+      "auth": "app,user",
+      "scope": "files.metadata.read",
+      "policy": "read"
+    },
+    {
+      "name": "files/list_folder/continue",
+      "host": "api",
+      "style": "rpc",
+      "auth": "app,user",
+      "scope": "files.metadata.read",
+      "policy": "read",
+      "special": "continue"
+    },
+    {
+      "name": "files/list_folder/get_latest_cursor",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.metadata.read",
+      "policy": "read"
+    },
+    {
+      "name": "files/list_folder/longpoll",
+      "host": "notify",
+      "style": "rpc",
+      "auth": "noauth",
+      "scope": "files.metadata.read",
+      "policy": "read",
+      "special": "longpoll"
+    },
+    {
+      "name": "files/list_revisions",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.metadata.read",
+      "policy": "read"
+    },
+    {
+      "name": "files/move_batch/check_v2",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "read",
+      "special": "async-check"
+    },
+    {
+      "name": "files/move_batch_v2",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write",
+      "maxEntries": 1000
+    },
+    {
+      "name": "files/move_v2",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write"
+    },
+    {
+      "name": "files/upload",
+      "host": "content",
+      "style": "upload",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write"
+    },
+    {
+      "name": "files/upload_session/append_v2",
+      "host": "content",
+      "style": "upload",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write",
+      "special": "upload-session"
+    },
+    {
+      "name": "files/upload_session/finish",
+      "host": "content",
+      "style": "upload",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write",
+      "special": "upload-session"
+    },
+    {
+      "name": "files/upload_session/finish_batch_v2",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write",
+      "special": "upload-session",
+      "maxEntries": 1000
+    },
+    {
+      "name": "files/upload_session/start",
+      "host": "content",
+      "style": "upload",
+      "auth": "user",
+      "scope": "files.content.write",
+      "policy": "write",
+      "special": "upload-session"
+    },
+    {
+      "name": "users/get_current_account",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "account_info.read",
+      "policy": "read",
+      "voidArg": true
+    },
+    {
+      "name": "users/get_space_usage",
+      "host": "api",
+      "style": "rpc",
+      "auth": "user",
+      "scope": "account_info.read",
+      "policy": "read",
+      "voidArg": true
+    }
+  ],
+  "limits": {
+    "contentRequestMiB": 150,
+    "relocationFiles": 10000
+  },
+  "loopback": {
+    "httpVersion": "HTTP/1.1",
+    "responseHead": "{LoopbackHttpVersion} 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {Length}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\n\r\n"
+  }
+}
