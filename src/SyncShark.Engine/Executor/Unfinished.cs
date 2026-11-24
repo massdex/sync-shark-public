@@ -214,7 +214,7 @@ public sealed class Unfinished
         if(found is not {InScope:true} located || !located.Location.Entry.IsFolder || !PathNames.Same(located.Location.Entry.Path,member.Path))
         {
             await CompareReturnedAsync(call,binding,scope,found.Value);
-            completed.Add(i);return true;
+            return true;
         }
         var res=await new FolderDelete().ApplyAsync(call.Pair,call.Settings,call.Events,call.Paths,located.Location.Entry,binding,Side.Dropbox,ActionKind.DeleteDropbox,call.Local,call.Dropbox,call.Store,call.HeldInput,call.Populate,call.CompareOldBinding,call.Ct,splitSelected:true,coversThrough:AcquiredThrough);
         if(res is {Outcome:RemovalOutcome.Pending,Accepted:{} accepted} && accepted.Launch.Any(m=>m.Id==id && m.Path==member.Path && m.Origin==origin)) completed.Add(i);
