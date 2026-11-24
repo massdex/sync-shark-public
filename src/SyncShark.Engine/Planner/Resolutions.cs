@@ -53,7 +53,9 @@ public static class Resolutions
             var losing = side == Side.Local ? localRow : dropboxRow;
             return [Delete(notice, side, losing), Delete(notice, PathNames.Other(side), losing)];
         }
-        if (RequireOriginals(notice, choice, name, localRow, dropboxRow) is { } rename) return rename;
+        RequireOriginals(notice, localRow, dropboxRow);
+        var renameSide = choice == ResolutionChoice.RenameLocal ? Side.Local : choice == ResolutionChoice.RenameDropbox ? Side.Dropbox : (Side?)null;
+        if (renameSide is { } rename) return [Unlinked(rename, rename == Side.Local ? dropboxRow.Local! : localRow.Dropbox!, name, localRow, dropboxRow)];
         var written = choice == ResolutionChoice.UseLocal ? Side.Dropbox : Side.Local;
         var pc = localRow.Local!;
         var remote = dropboxRow.Dropbox!;
@@ -73,9 +75,8 @@ public static class Resolutions
         entry is { Skip: null } && item.Side == side && item.Id == entry.Id && item.Path == entry.Path;
 
     // The producer records both originals first, then any labels; a reviewed original is not a label. Validate the
-    // kept-both subject and, for a rename, return the single unlinked action; otherwise null to continue.
-    private static IReadOnlyList<SyncAction>? RequireOriginals(Notice notice, ResolutionChoice choice, string? name,
-        Row localRow, Row dropboxRow)
+    // kept-both subject and label positions; the caller turns a rename choice into the single unlinked action.
+    private static void RequireOriginals(Notice notice, Row localRow, Row dropboxRow)
     {
         var subjects = notice.Subject.Items;
         if (subjects.Count is < 3 or > 4 || !MatchesEndpoint(subjects[0], Side.Local, localRow.Local) ||
@@ -87,10 +88,6 @@ public static class Resolutions
             if (label is null ? expected.Length != 0 : expected.Length != 1 || !MatchesEndpoint(expected[0], side, label) ||
                 label.Id == (side == Side.Local ? localRow.Local : dropboxRow.Dropbox)!.Id) throw Stale();
         }
-        if (choice is not (ResolutionChoice.RenameLocal or ResolutionChoice.RenameDropbox)) return null;
-        var renameSide = choice == ResolutionChoice.RenameLocal ? Side.Local : Side.Dropbox;
-        var renameLabel = renameSide == Side.Local ? dropboxRow.Local : localRow.Dropbox;
-        return [Unlinked(renameSide, renameLabel!, name, localRow, dropboxRow)];
     }
 
     private static Entry Require(Notice notice, Side side, Entry? entry) => entry is { Skip: null } &&
