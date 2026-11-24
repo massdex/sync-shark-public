@@ -334,17 +334,72 @@ public static class KnownBugChecks
         }
     }
 
-    /// <summary>L119: a crash after a no-keep exclusion removal before commit must not recycle the copy meant to stay
-    /// on the PC. Missing capability recorded below; not closed.</summary>
-    public static Task L119CrashAfterExclusionRemovalAsync() => throw new NotImplementedException(
-        "MISSING CAPABILITY (not closed): no passing fixture drives an APPLIED Dropbox-side exclusion removal through " +
-        "Exclusions.ApplyAsync (the planner must choose DeleteDropbox for the folder and child and RemovalCoveredAsync " +
-        "must pass) so that a crash cut between the physical DeleteAsync and the following CommitAsync can be taken; the " +
-        "exclusion checks only ever assert Pending or Refused and never apply a removal. FakeSide.AfterDelete and " +
-        "Observe.Wrap give the fault points, but the exact post-restart kept-byte state (owed re-apply, then un-exclude " +
-        "and Repair keeping the PC copy) is not pinned down without a local build; L119 is recorded UNCLEAR in the bug " +
-        "list. Recommended disposition for designer approval: author this fixture in the harness lane and confirm the " +
-        "post-restart kept-byte behaviour there.");
+    /// <summary>L119: a crash after the Dropbox-side exclusion removal but before its save must not recycle the PC copy
+    /// that was meant to stay. On restart the owed exclusion settles, and including the path again restores Dropbox.</summary>
+    public static async Task L119CrashAfterExclusionRemovalAsync()
+    {
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var ct = budget.Token;
+        var pair = ItemChecks.Pair() with { OwedScopes = [new Scope("x", "x")] };
+        using var store = new InMemoryStateStore();
+        var local = new FakeSide(Side.Local);
+        var remote = new FakeSide(Side.Dropbox);
+        await store.SavePairAsync(pair, ct);
+        var folderL = ItemChecks.File(Side.Local, "x", 0, "lf-x", folder: true);
+        var folderD = ItemChecks.File(Side.Dropbox, "x", 0, "df-x", folder: true);
+        var fileL = ItemChecks.File(Side.Local, "x/a", 1, "lf-a");
+        var fileD = ItemChecks.File(Side.Dropbox, "x/a", 1, "df-a");
+        local.Seed(folderL, []);
+        local.Seed(fileL, [1]);
+        remote.Seed(folderD, []);
+        remote.Seed(fileD, [1]);
+        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(folderL, folderD), null, null, ct);
+        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(fileL, fileD), null, null, ct);
+        // Boundary positions so the exclusion's removal coverage check can pass.
+        local.IdleBoundary = new ChangePage([], "l", new JournalPosition(1, 1));
+        remote.IdleBoundary = new ChangePage([], "r", null);
+        var paths = new PathScope(pair, [pair], DriveType.Fixed);
+        var exclusion = new Exclusion(Side.Dropbox, "x", false);
+        // Crash on the first save after the physical Dropbox removal ("crash after removal, before commit").
+        var crashed = false;
+        var storeCrash = FolderDeleteChecks.Observe.Wrap<IStore>(store, (op, _) =>
+        {
+            if (op == nameof(IStore.CommitAsync) && !crashed)
+            {
+                crashed = true;
+                throw new IOException("simulated crash after the Dropbox removal, before the save");
+            }
+            return null;
+        });
+        try
+        {
+            await new Exclusions().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, exclusion,
+                local, remote, storeCrash, (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, ct,
+                heldInput: _ => [], coversThrough: _ => true);
+        }
+        catch (Exception error) when (error is IOException or AggregateException) { }
+        Check.Require(crashed && !remote.Items.ContainsKey("x") && !remote.Items.ContainsKey("x/a"),
+            "L119: the crash cut did not remove the excluded Dropbox copy before the save");
+        Check.Require(store.Records.Values.Any(r => r.LocalPath == "x/a"),
+            "L119: the crash cut committed the binding removal, so the restart has nothing to resolve");
+        // Restart: the owed exclusion re-applies on the plain store (the root is already gone, so it settles).
+        var restart = await new Exclusions().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, exclusion,
+            local, remote, store, (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, ct,
+            heldInput: _ => [], coversThrough: _ => true);
+        Check.Require(restart.Outcome == ExclusionOutcome.Applied, "L119: the owed exclusion did not settle on restart");
+        // Include the path again (drop the owed scope and the exclusion) and run Repair: the copy meant to stay on the PC
+        // must survive and the Dropbox copy must be restored, never the PC copy recycled.
+        var included = pair with { Exclusions = [], OwedScopes = null };
+        local.IdleBoundary = null;
+        remote.IdleBoundary = null;
+        var queue = await ItemChecks.StartQueueAsync(included, new PathScope(included, [included], DriveType.Fixed), local, remote, store);
+        await Repair.RunAsync(included, ItemChecks.Settings, _ => { }, new PathScope(included, [included], DriveType.Fixed), queue, local, remote, store, null, null, ct);
+        Check.Require(local.Items.TryGetValue("x/a", out var kept) && kept.Bytes.SequenceEqual(new byte[] { 1 }) &&
+            local.History.All(h => h.Entry.Path != "x/a" && h.Entry.Id != "lf-a"),
+            "L119: the PC copy meant to stay was recycled after the excluded Dropbox copy's removal crashed (L119)");
+        Check.Require(remote.Items.TryGetValue("x/a", out var restored) && restored.Bytes.SequenceEqual(new byte[] { 1 }),
+            "L119: including the path again did not restore the PC copy to Dropbox");
+    }
 
     // ---- Remaining DOUBLE / NI stubs with the gap -----------------------
 
@@ -367,24 +422,35 @@ public static class KnownBugChecks
     public static Task B229ScopedJournalRepairAsync() => throw new NotImplementedException(
         "PRODUCT-MISSING (closed): B-229-ii is not a defect (product decision); no scoped Repair path is required.");
 
-    /// <summary>B-231: an unrelated effect reporting into a move notice's caption (same path and kind) must not displace
-    /// or close the reviewable move; the real SQLite NoticeTable rejects a differing move subject in the same slot.</summary>
+    /// <summary>B-231: an unrelated successful sync of a different identity at a move notice's path must not close that
+    /// notice. The close matches the compared identity (ItemSync.CloseComparedNoticesAsync), never the path alone.</summary>
     public static Task B231UnrelatedEffectKeepsMoveNoticeAsync() =>
         global::Massdex.SyncShark.Engine.Tests.Run.RepairChecks.WithRepairStore(async (store, pair, ct) =>
         {
-            var move = new IssueSubject.UnknownMove("cloud-item", "item", "target", null, false);
-            var subject = new IssueSubject([new(Side.Dropbox, "item", "cloud-item")], Side.Dropbox) { Move = move };
-            var moveNotice = new Notice(0, NoticeKind.Failure, TextKey.FailChanged, "item", subject, DateTimeOffset.UnixEpoch, false);
-            await store.SaveNoticeAsync(pair.PairId, moveNotice, ct);
-            // An unrelated effect reports the same caption with a different move subject; it must be rejected in place.
-            var other = new IssueSubject([new(Side.Dropbox, "item", "other-id")], Side.Dropbox)
-                { Move = new IssueSubject.UnknownMove("other-id", "item", "elsewhere", null, false) };
-            await store.SaveNoticeAsync(pair.PairId, moveNotice with { Subject = other }, ct);
+            var local = new FakeSide(Side.Local);
+            var remote = new FakeSide(Side.Dropbox);
+            var paths = new PathScope(pair, [pair], DriveType.Fixed);
+            // The original move notice is saved in the real SQLite store for identity "original-id" at "item".
+            var move = new IssueSubject.UnknownMove("original-id", "item", "target", null, false);
+            var subject = new IssueSubject([new(Side.Dropbox, "item", "original-id")], Side.Dropbox) { Move = move };
+            await store.SaveNoticeAsync(pair.PairId,
+                new Notice(0, NoticeKind.Failure, TextKey.FailChanged, "item", subject, DateTimeOffset.UnixEpoch, false), ct);
+            // A different identity arrives at the same path through the ordinary ItemSync comparison and syncs.
+            var incoming = ItemChecks.File(Side.Dropbox, "item", 2, "other-id");
+            remote.Seed(incoming, [2]);
+            var change = new Change(Side.Dropbox, ChangeKind.Changed, "item", null, incoming.Id, incoming, false, false);
+            await ItemSync.ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, change, local, remote, store,
+                (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, ct);
+            // The unrelated bytes arrived...
+            Check.Require(local.Items.TryGetValue("item", out var arrived) && arrived.Bytes.SequenceEqual(new byte[] { 2 }),
+                "B-231: the different identity at the move notice's path did not sync");
+            // ...and the exact original move notice is still open, because the close matches the identity, not the path.
             var open = new List<Notice>();
             await foreach (var notice in store.NoticesAsync(pair.PairId, ct)) open.Add(notice);
             var kept = open.SingleOrDefault(n => n.Path == "item" && n.Kind == NoticeKind.Failure);
-            Check.Require(kept?.Subject.Move == move,
-                "An unrelated effect sharing the move notice's caption displaced the review that still needs the move (B-231)");
+            Check.Require(kept is not null && kept.Subject.Move == move &&
+                kept.Subject.Items.Any(i => i.Side == Side.Dropbox && i.Id == "original-id"),
+                "B-231: an unrelated successful sync closed the review that still needs the original move (B-231)");
         });
 
     /// <summary>B-240: a slow arrival flood must not take the opportunity from small unrelated arrivals; each of the five
@@ -421,38 +487,96 @@ public static class KnownBugChecks
             await Task.WhenAll(floodPage, smallPage).WaitAsync(ct);
         });
 
-    public static Task B250CapacityWaitCancellationAsync() => throw new NotImplementedException(
-        "MISSING CAPABILITY (not closed): a two-pair Host fixture where one pair's Local BoundaryAsync raises a foreign " +
-        "OperationCanceledException on every call while the other pair syncs, proving the host keeps the canceled pair's " +
-        "loop alive and does not end, has no existing passing pattern to mirror; it needs the Host external-side factory " +
-        "and JournalProbe wiring tuned for two live pairs, which cannot be confirmed without a local build. Recommended " +
-        "disposition for designer approval: author it in the harness lane (as already handed off there).");
+    /// <summary>B-250: a foreign cancellation raised inside one pair's boundary wait must not end that pair or the host;
+    /// the affected pair keeps retrying its loop and an unrelated pair still syncs, answers status and stops.</summary>
+    public static Task B250CapacityWaitCancellationAsync() =>
+        global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
+        {
+            var pairA = B250Pair("a", @"T:\A", 1);
+            var pairB = B250Pair("b", @"T:\B", 2);
+            using var store = new InMemoryStateStore();
+            await store.SavePairAsync(pairA, ct);
+            await store.SavePairAsync(pairB, ct);
+            await store.FinishRepairAsync(pairA.PairId, (0, 0), "{}", ct);
+            await store.FinishRepairAsync(pairB.PairId, (0, 0), "{}", ct);
+            var aBoundaries = new int[1];
+            var bArrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var bFile = ItemChecks.File(Side.Dropbox, "b", 7, "b-id");
+            var sides = new Dictionary<string, (ISide Local, ISide Dropbox)>(StringComparer.Ordinal);
+            global::Massdex.SyncShark.Engine.Tests.Run.HostChecks.JournalProbe Probe(ISide side) =>
+                (global::Massdex.SyncShark.Engine.Tests.Run.HostChecks.JournalProbe)(object)side;
+            // Pair A: its Local boundary raises a foreign cancellation forever; the pair must retry, not end.
+            {
+                var localSide = new FakeSide(Side.Local) { Root = (pairA.Roots!.Local, null, null, DriveType.Fixed) };
+                var local = System.Reflection.DispatchProxy.Create<ISide, global::Massdex.SyncShark.Engine.Tests.Run.HostChecks.JournalProbe>();
+                var lp = Probe(local); lp.Quiet = true; lp.Local = localSide;
+                lp.Boundary = _ => { Interlocked.Increment(ref aBoundaries[0]);
+                    return Task.FromException<(string? Cursor, JournalPosition? Position)>(new OperationCanceledException()); };
+                var remoteSide = new FakeSide(Side.Dropbox) { Root = (null, pairA.Roots.Dropbox, null, null) };
+                var remote = System.Reflection.DispatchProxy.Create<ISide, global::Massdex.SyncShark.Engine.Tests.Run.HostChecks.JournalProbe>();
+                var rp = Probe(remote); rp.Quiet = true; rp.Local = remoteSide;
+                sides[pairA.PairId] = (local, remote);
+            }
+            // Pair B: one page with a changed file "b" reaches its PC side.
+            {
+                var localSide = new FakeSide(Side.Local) { Root = (pairB.Roots!.Local, null, null, DriveType.Fixed) };
+                localSide.AfterPublish = entry => { if (entry.Path == "b") bArrived.TrySetResult(); };
+                var local = System.Reflection.DispatchProxy.Create<ISide, global::Massdex.SyncShark.Engine.Tests.Run.HostChecks.JournalProbe>();
+                var lp = Probe(local); lp.Quiet = true; lp.Local = localSide;
+                var remoteSide = new FakeSide(Side.Dropbox) { Root = (null, pairB.Roots.Dropbox, null, null) };
+                remoteSide.Seed(bFile, [7]);
+                var remote = System.Reflection.DispatchProxy.Create<ISide, global::Massdex.SyncShark.Engine.Tests.Run.HostChecks.JournalProbe>();
+                var rp = Probe(remote); rp.Quiet = true; rp.Local = remoteSide;
+                var served = new int[1];
+                rp.Feed = async (_, token) =>
+                {
+                    if (Interlocked.Exchange(ref served[0], 1) == 0)
+                        return new ChangePage([new Change(Side.Dropbox, ChangeKind.Changed, bFile.Path, null, bFile.Id, bFile, false, false)], "b", null);
+                    await Task.Delay(System.Threading.Timeout.Infinite, token);
+                    throw new InvalidOperationException();
+                };
+                sides[pairB.PairId] = (local, remote);
+            }
+            var host = new Host((_, _) => Task.FromResult<IStore?>(store),
+                (pair, _, _, _, _) => Task.FromResult(sides[pair.PairId]),
+                ItemChecks.Settings, new global::Massdex.SyncShark.Engine.Tests.Run.HostChecks.MemoryLogs(),
+                TimeProvider.System, _ => Task.FromResult(""), (_, _) => Task.CompletedTask);
+            try
+            {
+                await host.StartAsync(ct);
+                await bArrived.Task.WaitAsync(ct);
+                var bLocal = Probe(sides[pairB.PairId].Local);
+                Check.Require(bLocal.Local.Items.TryGetValue("b", out var received) && received.Bytes.SequenceEqual(new byte[] { 7 }),
+                    "B-250: another pair stopped making progress while one pair's wait was canceled");
+                var status = await host.StatusAsync(null, ct);
+                Check.Require(status is not null, "B-250: the host stopped answering status while one pair's wait was canceled");
+                Check.Require(Volatile.Read(ref aBoundaries[0]) >= 2,
+                    "B-250: a foreign cancellation inside one pair's wait ended that pair instead of retrying it (B-250)");
+            }
+            finally { await host.StopAsync(default); }
+        });
 
-    /// <summary>L60: a small set of actual folder removals held while unrelated work settles must not occupy a bounded
-    /// continuation pool; every held removal then completes on its own side once released.</summary>
+    /// <summary>L60: held folder removals must not occupy a bounded continuation pool. More removals than the engine's
+    /// largest capacity (the Committer's StoreBatchRows slots) are held; unrelated work still settles, and every removal
+    /// completes on its own endpoint once released.</summary>
     public static Task L60FolderRemovalSaturationAsync() =>
         global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
         {
             var queue = new WorkQueue();
             var pair = ItemChecks.Pair();
+            // Derived, not invented: one more held removal than the largest capacity the engine has.
+            var held = ItemChecks.Settings.StoreBatchRows + 1;
             var gate = new int[1]; // 0 = removals held; 1 = released
             var completed = new Dictionary<string, Side>(StringComparer.Ordinal);
-            // A small set of folder removals; the count only has to exceed one (C1 A4), not the storage batch size.
-            var folders = new[] { "a", "b", "c" };
-            var removals = new List<Task>();
-            foreach (var name in folders)
+            var removals = Enumerable.Range(0, held)
+                .Select(i => new Change(Side.Dropbox, ChangeKind.Deleted, $"f{i}", null, $"id{i}", null, false, false)).ToArray();
+            var page = queue.AdmitAsync(pair, new(removals, "removals", null), (c, _) =>
             {
-                var folder = ItemChecks.File(Side.Dropbox, name, 0, $"id-{name}", folder: true);
-                var change = new Change(Side.Dropbox, ChangeKind.Deleted, name, null, folder.Id, folder, false, false);
-                removals.Add(queue.AdmitAsync(pair, new([change], $"r-{name}", null),
-                    (c, _) =>
-                    {
-                        if (Volatile.Read(ref gate[0]) == 0) throw new WorkQueue.Unsettled();
-                        lock (completed) completed[c.Path!] = c.Side;
-                        return Task.CompletedTask;
-                    }, null, ct));
-            }
-            // Unrelated work must settle while every removal is still held.
+                if (Volatile.Read(ref gate[0]) == 0) throw new WorkQueue.Unsettled();
+                lock (completed) completed[c.Path!] = c.Side;
+                return Task.CompletedTask;
+            }, null, ct);
+            // Unrelated work must settle while every removal is still held (no room in a StoreBatchRows-sized pool).
             var ran = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var unrelated = queue.AdmitAsync(pair,
                 new([new Change(Side.Dropbox, ChangeKind.Changed, "unrelated", null, "unrelated-id", null, false, false)], "unrelated", null),
@@ -463,39 +587,51 @@ public static class KnownBugChecks
             lock (completed) Check.Require(completed.Count == 0, "A held folder removal ran before release (L60)");
             Volatile.Write(ref gate[0], 1);
             Check.Require(await queue.RetryHeldAsync(null, ct), "Held folder removals were dropped instead of retried (L60)");
-            await Task.WhenAll(removals).WaitAsync(ct);
+            await page.WaitAsync(ct);
             await unrelated.WaitAsync(ct);
             lock (completed)
-                Check.Require(completed.Count == folders.Length && completed.Values.All(side => side == Side.Dropbox),
-                    $"Not every held folder removal completed on its own side ({completed.Count}/{folders.Length}) (L60)");
+                Check.Require(completed.Count == removals.Length && completed.Values.All(side => side == Side.Dropbox),
+                    $"Not every held folder removal completed on its own endpoint ({completed.Count}/{removals.Length}) (L60)");
         });
 
-    /// <summary>L64/L100: repeated same-key refusals must not starve unrelated work. A refused key stays held while a
-    /// replenished run of unrelated changes settles round by round, then settles once permitted.</summary>
+    /// <summary>L64/L100: a repeatedly refusing key that keeps receiving fresh same-key arrivals must not starve unrelated
+    /// work, and every fresh arrival must be applied once it is permitted - not just the first attempt retried forever.</summary>
     public static Task L64ChurnOpportunityAsync() =>
         global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
         {
             var queue = new WorkQueue();
             var pair = ItemChecks.Pair();
-            var gate = new int[1];
-            var hot = new Change(Side.Dropbox, ChangeKind.Changed, "hot", null, "hot-id", null, false, false);
-            var hotPage = queue.AdmitAsync(pair, new([hot], "hot", null),
-                (_, _) => { if (Volatile.Read(ref gate[0]) == 0) throw new WorkQueue.Unsettled(); return Task.CompletedTask; }, null, ct);
-            // Replenished churn: one unrelated page per round (the count only has to exceed one, C1 A4).
+            var gate = new int[1]; // 0 = refusing; 1 = permitted
+            var applied = new HashSet<string>(StringComparer.Ordinal);
+            void Apply(Change change)
+            {
+                if (Volatile.Read(ref gate[0]) == 0) throw new WorkQueue.Unsettled();
+                lock (applied) applied.Add(change.Id!);
+            }
+            // The hot key is refused and retained, then keeps receiving fresh overlapping arrivals (same key, new news).
+            var hot = new List<Task>();
+            for (var r = 0; r <= 3; r++)
+            {
+                var fresh = new Change(Side.Dropbox, ChangeKind.Changed, "hot", null, $"hot-{r}", null, false, false);
+                hot.Add(queue.AdmitAsync(pair, new([fresh], $"h{r}", null), (c, _) => { Apply(c); return Task.CompletedTask; }, null, ct));
+            }
+            // Unrelated work must make progress round by round while the hot key is refused and still receiving news.
             var others = new List<Task>();
             for (var r = 0; r < ItemChecks.Settings.StoragePageSize; r++)
             {
                 var other = new Change(Side.Dropbox, ChangeKind.Changed, $"other{r}", null, $"other{r}", null, false, false);
                 var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                others.Add(queue.AdmitAsync(pair, new([other], $"o{r}", null),
-                    (_, _) => { done.TrySetResult(); return Task.CompletedTask; }, null, ct));
+                others.Add(queue.AdmitAsync(pair, new([other], $"o{r}", null), (_, _) => { done.TrySetResult(); return Task.CompletedTask; }, null, ct));
                 await done.Task.WaitAsync(ct);
             }
-            Check.Require(!hotPage.IsCompleted, "A refused key settled before it was permitted (L64/L100)");
+            lock (applied) Check.Require(applied.Count == 0, "A refused hot key ran while it was still refusing (L64/L100)");
             Volatile.Write(ref gate[0], 1);
             Check.Require(await queue.RetryHeldAsync(null, ct), "A refused key was dropped instead of retried (L64/L100)");
-            await hotPage.WaitAsync(ct);
+            await Task.WhenAll(hot).WaitAsync(ct);
             await Task.WhenAll(others).WaitAsync(ct);
+            lock (applied)
+                Check.Require(applied.SetEquals(new[] { "hot-0", "hot-1", "hot-2", "hot-3" }),
+                    "Fresh news on a refused key was lost, or only the original attempt was retried (L64/L100)");
         });
 
     public static Task L66SqlOrdinalsAndParserDepthsAsync() => throw new NotImplementedException(
@@ -630,4 +766,11 @@ public static class KnownBugChecks
 
     private static Task RepairOnceAsync(PairConfig pair, PathScope paths, WorkQueue queue, FakeSide local, FakeSide remote, InMemoryStateStore store) =>
         Repair.RunAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, local, remote, store, null, null, default);
+
+    /// <summary>A bound pair with declared roots, matching HostChecks.Bound, for the two-pair Host fixture.</summary>
+    private static PairConfig B250Pair(string id, string path, ulong serial)
+    {
+        var p = ItemChecks.Pair() with { PairId = id, LocalRoot = path, DropboxRoot = "/" + id };
+        return p with { Roots = new(p.LocalRoot, p.DropboxRoot, p.ConnectionId, new(serial, 2, null), new("account", "root", "home", id)) };
+    }
 }
