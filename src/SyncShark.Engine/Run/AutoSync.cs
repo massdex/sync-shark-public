@@ -14,6 +14,7 @@ public static class AutoSync
     // Evidence belongs to one uninterrupted reader interval, never to the queue or the durable cursor.
     internal sealed class ReadEvidence
     {
+        private readonly object gate=new();
         private readonly CancellationToken lifetime;
         private readonly Func<(JournalPosition? Local,string? Dropbox),bool> covers;
         public ReadEvidence(CancellationToken lifetime){this.lifetime=lifetime;covers=Covers;}
@@ -22,16 +23,16 @@ public static class AutoSync
         private bool wholeLocal, closed;
         public ReadEvidence Restart(Side lost)
         {
-            lock(this)
+            lock(gate)
             {
                 closed=true;
                 return new(lifetime){cursor=lost==Side.Local?cursor:null,projected=lost==Side.Dropbox?projected:null,wholeLocal=lost==Side.Dropbox && wholeLocal};
             }
         }
-        public void Close(){lock(this) closed=true;}
+        public void Close(){lock(gate) closed=true;}
         public bool Register(Side side,ChangePage page,ref bool registered)
         {
-            lock(this)
+            lock(gate)
             {
                 if(registered || closed) return false;
                 var changed=NeedsRegistration(side,page);
@@ -42,12 +43,12 @@ public static class AutoSync
             }
         }
         public bool NeedsRegistration(Side side,ChangePage page)
-        {lock(this) return side==Side.Local ? (projected!=page.ProjectedThrough || wholeLocal!=(page.ProjectedThrough!=null && page.ProjectedThrough==page.Position)) : cursor!=page.Cursor;}
+        {lock(gate) return side==Side.Local ? (projected!=page.ProjectedThrough || wholeLocal!=(page.ProjectedThrough!=null && page.ProjectedThrough==page.Position)) : cursor!=page.Cursor;}
         public Func<(JournalPosition? Local,string? Dropbox),bool>? ForRemoval()
-        {lock(this) return !closed && !lifetime.IsCancellationRequested && wholeLocal && !string.IsNullOrEmpty(cursor) ? covers : null;}
+        {lock(gate) return !closed && !lifetime.IsCancellationRequested && wholeLocal && !string.IsNullOrEmpty(cursor) ? covers : null;}
         private bool Covers((JournalPosition? Local,string? Dropbox) fence)
         {
-            lock(this) return !closed && !lifetime.IsCancellationRequested && wholeLocal && projected is {} at && fence.Local is {} required &&
+            lock(gate) return !closed && !lifetime.IsCancellationRequested && wholeLocal && projected is {} at && fence.Local is {} required &&
                 at.JournalId==required.JournalId && at.NextUsn>=required.NextUsn && !string.IsNullOrEmpty(fence.Dropbox) && fence.Dropbox==cursor;
         }
     }

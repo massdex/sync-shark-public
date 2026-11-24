@@ -46,20 +46,10 @@ internal sealed class RepairRun
 
     internal bool ScanCleared => Volatile.Read(ref scanCleared);
 
-    /// <summary>False when the queue's live coverage already includes this hop.</summary>
-    internal async Task<bool> PrepareAsync()
+    internal async Task PrepareAsync()
     {
-        // A null After marks live meeting folders; their caller owns the root binding.
-        var meetingRoot=physicalHop is {After:null} meeting ? meeting.Binding : null;
-        if(physicalHop!=null && meetingRoot==null)
-        {
-            var localEnd=local.BoundaryAsync(ct); var remoteEnd=dropbox.BoundaryAsync(ct);
-            await Task.WhenAll(localEnd,remoteEnd);
-            if(queue.CoversHop(((await localEnd).Position,(await remoteEnd).Cursor))) return false;
-        }
         localDebt=await store.ReadRepairAsync(id,Side.Local,ct); remoteDebt=await store.ReadRepairAsync(id,Side.Dropbox,ct);
         first=!(await store.RepairStateAsync(id,ct)).FirstRepairDone;
-        return true;
     }
 
     private void Schedule(Task work)
@@ -149,7 +139,7 @@ internal sealed class RepairRun
     }
     private async IAsyncEnumerable<Listed> Inventory(ISide side,string path,Action<string>? cursor,[EnumeratorCancellation] CancellationToken token)
     {
-        if(physicalHop is {After:{} end} hopRoot && end==hopRoot.Before && await side.ReadOneAsync(path,token) is null or {IsFolder:false,Skip:null}) yield break;
+        if(removal && await side.ReadOneAsync(path,token) is null or {IsFolder:false,Skip:null}) yield break;
         await foreach(var item in Repair.ReadInventory(side.ReadAllAsync,path,Log,cursor,token)) yield return item;
     }
 
@@ -228,6 +218,7 @@ internal sealed class RepairRun
         var historical=notices.Where(n=>n.Notice.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && n.Notice.Subject.Items.Any(m=>row.EntryOn(m.Side)?.Id==m.Id)).Select(n=>n.Notice.Subject.FirstRunDeletion).FirstOrDefault();
         var eligible=first && row.Local is {} pcItem && row.Dropbox==null && row.Synced==null && coveredRemote && pcItem.Skip==null && !paths.Excludes(lp,dp,pcItem.IsFolder) && await store.DeletedNameAsync(id,scan,PathNames.DropboxKey(dp),pcItem.IsFolder,ct);
         var hold=notices.Select(n=>n.Notice).FirstOrDefault(n=>n.Kind==NoticeKind.Tie || n.Kind==NoticeKind.NameClash);
+        // Coverage only: touch is decided at Attempt, which keeps the confirmed-removal exception for absent rows.
         row=row with {Context=row.Context with {FirstRun=first, CompleteInventory=coveredLocal&&coveredRemote, DeletionEligible=eligible,FirstRunDeletion=historical,
             Held=hold!=null,HeldKind=hold?.Kind,OutOfScope=paths.Excludes(lp,dp,row.IsFolder()),Skipped=row.Local?.Skip!=null || row.Dropbox?.Skip!=null,Destination=row.Local==null?lp:dp}};
         if (eligible && row.Local is {IsFolder:true})

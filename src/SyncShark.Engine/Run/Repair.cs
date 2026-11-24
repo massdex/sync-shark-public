@@ -7,8 +7,16 @@ public static class Repair
 {
     public static async Task RunAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, WorkQueue queue, ISide local, ISide dropbox, IStore store, Scope? scope, (SyncedEntry Binding, Scope Before, Scope? After)? physicalHop, CancellationToken ct,bool caughtUp=false,Action? localRepaired=null)
     {
+        // A null After marks live meeting folders; their caller owns the root binding. Coverage exits before any scan state exists.
+        if(physicalHop is {After:not null})
+        {
+            var localEnd=local.BoundaryAsync(ct); var remoteEnd=dropbox.BoundaryAsync(ct);
+            await Task.WhenAll(localEnd,remoteEnd);
+            if(queue.CoversHop(((await localEnd).Position,(await remoteEnd).Cursor))) return;
+        }
         var run=new RepairRun(pair,settings,events,paths,queue,local,dropbox,store,scope,physicalHop,ct,caughtUp,localRepaired);
-        if(!await run.PrepareAsync() || await run.FastPathAsync()) return;
+        await run.PrepareAsync();
+        if(await run.FastPathAsync()) return;
         store.BeginScan(pair.PairId,run.scan);
         try
         {

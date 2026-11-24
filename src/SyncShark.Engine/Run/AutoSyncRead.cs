@@ -77,41 +77,38 @@ internal sealed class AutoSyncRead
                 position = side.Side == Side.Local && read.pair.Roots?.LocalVolumeKey() is {} volume ? await read.store.PositionAsync(volume,token) : null;
                 through=read.captured;
                 if (through is {} target && (side.Side==Side.Dropbox ? target.Dropbox==null : target.Local==null) && !await BeginLive()) return;
+                // Suspending reads stay in this loop so a page costs no extra Task layer.
                 while (true)
                 {
-                    if(await ReadPageAsync() is not {} page) continue;
-                    if(!await ApplyPageAsync(page)) break;
+                    token.ThrowIfCancellationRequested();
+                    var replay=side.Side==Side.Local && through==null ? read.journalReplay?.Invoke() : null;
+                    using var acquisition=replay is { Wake.CanBeCanceled:true } armed ? CancellationTokenSource.CreateLinkedTokenSource(token,armed.Wake) : null;
+                    ChangePage page;
+                    try
+                    {
+                        var readToken=acquisition?.Token ?? token;
+                        readToken.ThrowIfCancellationRequested();
+                        page=await AutoSync.ReadPageAsync(t=>through is {} end ? side.ReadChangesAsync(cursor,position,(end.Dropbox,end.Local),t) : side.ReadChangesAsync(cursor,position,t),side.Side,read.settings,read.events,readToken);
+                    }
+                    catch(OperationCanceledException) when(!token.IsCancellationRequested && replay is {} wake && wake.Wake.IsCancellationRequested)
+                    {
+                        // Only acquisition yields; prior effects and the Dropbox feed retain their own lifetimes.
+                        read.RestartEvidence(Side.Local);
+                        position=await wake.Rewind(token) ?? position;
+                        continue;
+                    }
+                    if (page.ContinuityLost) { if(await ResetAsync(page)) continue; break; }
+                    if (!Register(page)) break;
+                    if (through!=null && page.CaughtUp && !await BeginLive()) break;
                 }
             }
             catch(OperationCanceledException) when(Volatile.Read(ref read.liveReset)!=0 && !read.ct.IsCancellationRequested) {throw;}
             catch(Exception error) {read.Abort(error);throw;}
         }
 
-        /// <summary>Null when a journal wake rewound acquisition before a page arrived.</summary>
-        private async Task<ChangePage?> ReadPageAsync()
+        /// <summary>False when a drained live reset already stopped intake.</summary>
+        private bool Register(ChangePage page)
         {
-            token.ThrowIfCancellationRequested();
-            var replay=side.Side==Side.Local && through==null ? read.journalReplay?.Invoke() : null;
-            using var acquisition=replay is { Wake.CanBeCanceled:true } armed ? CancellationTokenSource.CreateLinkedTokenSource(token,armed.Wake) : null;
-            try
-            {
-                var readToken=acquisition?.Token ?? token;
-                readToken.ThrowIfCancellationRequested();
-                return await AutoSync.ReadPageAsync(t=>through is {} end ? side.ReadChangesAsync(cursor,position,(end.Dropbox,end.Local),t) : side.ReadChangesAsync(cursor,position,t),side.Side,read.settings,read.events,readToken);
-            }
-            catch(OperationCanceledException) when(!token.IsCancellationRequested && replay is {} wake && wake.Wake.IsCancellationRequested)
-            {
-                // Only acquisition yields; prior effects and the Dropbox feed retain their own lifetimes.
-                read.RestartEvidence(Side.Local);
-                position=await wake.Rewind(token) ?? position;
-                return null;
-            }
-        }
-
-        /// <summary>False when this source stops reading.</summary>
-        private async Task<bool> ApplyPageAsync(ChangePage page)
-        {
-            if (page.ContinuityLost) return await ResetAsync(page);
             if (page.Changes.Count!=0 || page.Cursor!=cursor || page.Position!=position || Volatile.Read(ref read.evidence).NeedsRegistration(side.Side,page))
             {
                 Task work;
@@ -124,7 +121,7 @@ internal sealed class AutoSyncRead
                 _ = read.RetireAsync(work);
             }
             (cursor,position)=(page.Cursor,page.Position);
-            return !(through!=null && page.CaughtUp && !await BeginLive());
+            return true;
         }
 
         private async Task<bool> ResetAsync(ChangePage page)
