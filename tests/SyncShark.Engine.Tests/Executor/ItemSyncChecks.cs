@@ -6,24 +6,52 @@ namespace Massdex.SyncShark.Engine.Tests.Executor;
 /// <summary>An exact Dropbox echo consumes no provider reads and no record writes.</summary>
 public static class ItemSyncChecks
 {
-    public static Task SupersededInputAsync() => Run.AutoSyncChecks.WithinDeadline(async ct=>
+    public static async Task SupersededInputAsync()
     {
         var pair=ItemChecks.Pair(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
         using var store=new InMemoryStateStore(); var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox);
-        var queue=new global::Massdex.SyncShark.Engine.Run.WorkQueue();
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,db,store);
         var replacement=ItemChecks.File(Side.Local,"doc",2,"replacement"); pc.Seed(replacement,[2]);
-        var stale=new Change(Side.Local,ChangeKind.Changed,"doc",null,"temporary",null,true,false,1,JournalId:3);
-        Task Page(Side side,ChangePage page)=>global::Massdex.SyncShark.Engine.Run.AutoSync.ApplyPageAsync(pair,ItemChecks.Settings,_=>{},paths,queue,side,page,pc,db,store,ct);
-        await Page(Side.Local,new([stale,stale with {Id=replacement.Id,Observed=replacement,Usn=2}],null,new(3,3)));
+        var stale=new Change(Side.Local,ChangeKind.Changed,"doc",null,"temporary",null,true,false,1,JournalId:1);
+        Task Page(string label,Side side,ChangePage page)=>Run.AutoSyncChecks.WithinDeadline(ct=>global::Massdex.SyncShark.Engine.Run.AutoSync.ApplyPageAsync(pair,ItemChecks.Settings,_=>{},paths,queue,side,page,pc,db,store,ct),label);
+        await Page("Superseded local edit",Side.Local,new([stale,stale with {Id=replacement.Id,Observed=replacement,Usn=2}],null,new(1,3)));
         Check.Require(pc.Requests[nameof(ISide.SettleJournalAsync)]==2 && db.Items["doc"].Bytes.SequenceEqual(new byte[]{2}),"The successor did not settle both journal inputs");
         var saved=store.Records.Values.Single(); var later=ItemChecks.File(Side.Dropbox,"doc",3,"later"); db.Items["doc"]=(later,[3]);
         var obsolete=new Change(Side.Dropbox,ChangeKind.Changed,"doc",null,saved.DropboxId,null,false,false);
-        await Page(Side.Dropbox,new([obsolete,obsolete with {Id=later.Id,Observed=later}],"after",null));
-        Check.Require(await store.CursorAsync(pair.PairId,ct)=="after" && store.Records.Values.Single().DropboxId==later.Id && pc.Items["doc"].Bytes.SequenceEqual(new byte[]{3}),"Obsolete edit blocked the successor or its cursor");
+        await Run.AutoSyncChecks.WithinDeadline(async ct=>
+        {
+            // Overwriting the local file needs the projected journal, including the publication echo.
+            var journal=await ItemChecks.ReadPrefixAsync(pc,ItemChecks.Journal([],3),ct);
+            var feed=await ItemChecks.ReadPrefixAsync(db,new([obsolete,obsolete with {Id=later.Id,Observed=later}],"after",null),ct);
+            ChangePage? echo=null;
+            pc.AfterPublish=entry=>ItemChecks.Script(pc,echo=ItemChecks.Journal([new(Side.Local,ChangeKind.Changed,entry.Path,null,entry.Id,entry,true,false,3,JournalId:1)],4));
+            bool Covered((JournalPosition? Local,string? Dropbox) fence)
+            {
+                if(echo==null) return fence==(journal.ProjectedThrough,feed.Cursor);
+                var read=pc.ReadChangesAsync(null,journal.Position,(fence.Dropbox,fence.Local),ct).GetAwaiter().GetResult();
+                return read.CaughtUp && !read.ContinuityLost && read.ProjectedThrough==read.Position && fence==(read.Position,feed.Cursor) && read.Changes.SequenceEqual(echo.Changes);
+            }
+            await queue.AdmitAsync(pair,journal,(_,_)=>throw new InvalidDataException("Unexpected journal input"),pc.SettleJournalAsync,ct);
+            await queue.AdmitAsync(pair,feed,(input,token)=>ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,input,pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),token,queue.Held,(_,_)=>throw new global::Massdex.SyncShark.Engine.Run.WorkQueue.Unsettled(),coversThrough:Covered),null,(cursor,token)=>store.SaveCursorAsync(pair.PairId,cursor,token),null,ct);
+            Check.Require(echo!=null && pc.Pages.Count==0,"Publication echo was not projected");
+            pc.AfterPublish=null;
+        },"Superseded Dropbox edit");
+        Check.Require(await store.CursorAsync(pair.PairId,default)=="after" && store.Records.Values.Single().DropboxId==later.Id && pc.Items["doc"].Bytes.SequenceEqual(new byte[]{3}),"Obsolete edit blocked the successor or its cursor");
         var current=store.Records.Values.Single(); pc.Items.Clear();
-        await Page(Side.Local,new([stale with {Usn=3},new(Side.Local,ChangeKind.Deleted,"doc",null,current.LocalId,null,false,true,4,JournalId:3)],null,new(3,5)));
+        await Page("Superseded edit before bound deletion",Side.Local,new([stale with {Usn=4},new(Side.Local,ChangeKind.Deleted,"doc",null,current.LocalId,null,false,true,5,JournalId:1)],null,new(1,6)));
         Check.Require(store.Records.Count==0 && db.History.Last().Entry.Id==later.Id && store.OpenNotices.Count==0,"Stale identity at an empty name blocked the bound deletion");
-    });
+        await Run.AutoSyncChecks.WithinDeadline(async ct=>
+        {
+            var delayed=ItemChecks.File(Side.Dropbox,"delayed",4,"delayed-id");
+            var input=obsolete with {Path=delayed.Path,Id=delayed.Id,Observed=delayed};
+            var pending=global::Massdex.SyncShark.Engine.Run.AutoSync.ApplyPageAsync(pair,ItemChecks.Settings,_=>{},paths,queue,Side.Dropbox,new([input],"visible",null),pc,db,store,ct);
+            Check.Require(!pending.IsCompleted && await store.CursorAsync(pair.PairId,ct)=="after","Missing identity advanced the cursor");
+            db.Seed(delayed,[4]);
+            Check.Require(await queue.RetryHeldAsync(new(delayed.Path,delayed.Path),ct),"Missing identity was not retained");
+            await pending;
+            Check.Require(pc.Items[delayed.Path].Bytes.SequenceEqual(new byte[]{4}) && await store.CursorAsync(pair.PairId,ct)=="visible","Visible identity did not settle the retained input");
+        },"Empty unbound Dropbox name");
+    }
 
     public static Task ReverseFolderKeepsChildAsync() => Run.AutoSyncChecks.WithinDeadline(async ct=>
     {
@@ -113,7 +141,7 @@ public static class ItemSyncChecks
     private static async Task CheckRemoval(bool retry,CancellationToken token)
     {
         var pair=ItemChecks.Pair(); var paths=new PathScope(pair,[pair],DriveType.Fixed); using var store=new InMemoryStateStore();
-        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); var queue=new global::Massdex.SyncShark.Engine.Run.WorkQueue();
+        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,db,store);
         foreach(var path in new[]{"folder","folder/child"})
             await store.CommitAsync(pair.PairId,null,SyncedEntries.From(ItemChecks.File(Side.Local,path,1,"pc-"+path,path=="folder"),ItemChecks.File(Side.Dropbox,path,1,"db-"+path,path=="folder")),null,null,default);
         await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,TextKey.FailLocalInUse,"folder/child",new([new(Side.Local,"folder/child","pc-folder/child")],Side.Local),DateTimeOffset.UnixEpoch,false),default);

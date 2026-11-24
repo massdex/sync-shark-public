@@ -14,25 +14,25 @@ public static class RetriesChecks
         var old=ItemChecks.File(Side.Local,"Doc.txt",1,"file"); var peer=ItemChecks.File(Side.Dropbox,old.Path,1,"peer");
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(old,peer),null,null,default);
         pc.Seed(ItemChecks.File(Side.Local,"doc.txt",2,old.Id),[2]); db.Seed(peer,[1]);
-        await Retry(pair,paths,pc,db,store,old);
+        await Retry(pair,paths,pc,db,store,old,TextKey.FailLocalInUse,[new(Side.Local,old.Path,old.Id)]);
         Check.Require(store.OpenNotices.Count==0 && db.Items["doc.txt"].Bytes.SequenceEqual(new byte[]{2}),"Case-only rename turned the retry stale");
     }
 
     public static async Task RetryCarryingFolderAsync()
     {
-        var pair=ItemChecks.Pair(); var inner=pair with {PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"G/inner"),DropboxRoot=pair.DropboxRoot+"/nested"};
+        var pair=ItemChecks.Pair(); var inner=pair with {PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"G/inner"),DropboxRoot=pair.DropboxRoot+"/G/inner"};
         var paths=new PathScope(pair,[pair,inner],DriveType.Fixed); using var store=new InMemoryStateStore(); var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox);
         var old=ItemChecks.File(Side.Local,"F",0,"left",true); var peer=ItemChecks.File(Side.Dropbox,"F",0,"right",true); var moved=old with {Path="G"};
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(old,peer),null,null,default); pc.Seed(moved,[]); db.Seed(peer,[]);
-        await Retry(pair,paths,pc,db,store,moved);
-        Check.Require(!db.Items.ContainsKey("G") && db.Requests[nameof(ISide.CreateFolderExclusiveAsync)]==0 && db.Requests[nameof(ISide.EnsureFolderAsync)]==0 && store.OpenNotices.Any(n=>n.Cause==TextKey.FailCarriesOtherPair),"Retry copied a folder carrying another pair");
+        await Retry(pair,paths,pc,db,store,moved,TextKey.FailCarriesOtherPair,[new(Side.Local,moved.Path,moved.Id),new(Side.Dropbox,peer.Path,peer.Id)]);
+        Check.Require(pc.Requests[nameof(ISide.ReadByIdAsync)]>0 && db.Items.TryGetValue("F",out var still) && still.Entry==peer && !db.Items.ContainsKey("G") && db.Requests[nameof(ISide.CreateFolderExclusiveAsync)]==0 && db.Requests[nameof(ISide.EnsureFolderAsync)]==0 && store.OpenNotices.Any(n=>n.Cause==TextKey.FailCarriesOtherPair && n.At!=DateTimeOffset.UnixEpoch),"Retry copied a folder carrying another pair");
     }
 
-    private static async Task Retry(PairConfig pair,PathScope paths,FakeSide pc,FakeSide db,InMemoryStateStore store,Entry subject)
+    private static async Task Retry(PairConfig pair,PathScope paths,FakeSide pc,FakeSide db,InMemoryStateStore store,Entry subject,TextKey cause,NoticeItem[] items)
     {
-        await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,TextKey.FailLocalInUse,subject.Path,new([new(Side.Local,subject.Path,subject.Id)],Side.Local),DateTimeOffset.UnixEpoch,false),default);
+        await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,cause,subject.Path,new(items,Side.Local),DateTimeOffset.UnixEpoch,false),default);
         var failure=store.OpenNotices.Single(); var owner=new Unfinished();
-        await owner.CheckAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Local,ChangeKind.Changed,subject.Path,null,subject.Id,null,false,false),pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
+        await owner.CheckAsync(pair,ItemChecks.Settings,_=>{},paths,null,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
         await new Retries(owner).RetryAsync(pair,ItemChecks.Settings,_=>{},paths,failure,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
     }
 
