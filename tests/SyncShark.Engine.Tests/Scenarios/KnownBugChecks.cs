@@ -17,7 +17,7 @@ namespace Massdex.SyncShark.Engine.Tests.Scenarios;
 /// so it fails while the bug exists and passes once it is fixed. Rows that could not be exercised on the
 /// F1 doubles are stubbed (NI/DOUBLE) with the gap named. No assertion is weakened to pass.
 /// The wrong-move / wrong-delete safety subset runs over the parity-checked in-memory store
-/// (ruling R93, TestDoubles/StoreParityChecks) through the real Repair, ItemSync, Retries and ItemLocks paths.
+/// (TestDoubles/StoreParityChecks) through the real Repair, ItemSync, Retries and ItemLocks paths.
 /// </summary>
 public static class KnownBugChecks
 {
@@ -28,7 +28,7 @@ public static class KnownBugChecks
     public static Task B207BothSidesGoneAsync() =>
         ReconciliationChecks.CompareAsync(true, [], [], [], [], 0, []);
 
-    /// <summary>B-223: an untagged HTTP 500 on upload-session start carries no proof of no effect. product-0519 makes a
+    /// <summary>B-223: an untagged HTTP 500 on upload-session start carries no proof of no effect. The product decision makes a
     /// 500 a failure and forbids resending a dispatched write without proof, so it stays UnknownEffect (no unsafe
     /// resend) rather than a temporary in-place retry. The host's normal later retry is a separate, later opportunity.</summary>
     public static Task B223Untagged500UploadSessionAsync()
@@ -39,7 +39,7 @@ public static class KnownBugChecks
             new DropboxErrors.RequestEvidence(false, true, false, false));
         Check.Require(classified.Disposition == FailureDisposition.UnknownEffect && !classified.ProvenNoEffect,
             $"Untagged 500 on upload_session/start settled as {classified.Disposition}/{classified.Cause}; " +
-            "product-0519 makes a 500 a failure and forbids resending a dispatched write without proof of no effect.");
+            "The product decision makes a 500 a failure and forbids resending a dispatched write without proof of no effect.");
         return Task.CompletedTask;
     }
 
@@ -376,11 +376,17 @@ public static class KnownBugChecks
             var local = new FakeSide(Side.Local);
             var remote = new FakeSide(Side.Dropbox);
             var paths = new PathScope(pair, [pair], DriveType.Fixed);
-            // The original move notice is saved in the real SQLite store for identity "original-id" at "item".
+            // The original notice is the designed unknown-outcome move review, saved in the real SQLite store.
             var move = new IssueSubject.UnknownMove("original-id", "item", "target", null, false);
             var subject = new IssueSubject([new(Side.Dropbox, "item", "original-id")], Side.Dropbox) { Move = move };
             await store.SaveNoticeAsync(pair.PairId,
-                new Notice(0, NoticeKind.Failure, TextKey.FailChanged, "item", subject, DateTimeOffset.UnixEpoch, false), ct);
+                new Notice(0, NoticeKind.Failure, TextKey.FailDropboxOutcomeUnknown, "item", subject, DateTimeOffset.UnixEpoch, false), ct);
+            // The exact stored review, read back before the unrelated effect.
+            Notice? before = null;
+            await foreach (var notice in store.NoticesAsync(pair.PairId, ct))
+                if (notice.Kind == NoticeKind.Failure && notice.Path == "item") before = notice;
+            Check.Require(before is not null && before.Subject.Move == move,
+                "B-231: the fixture did not persist the designed unknown-outcome move review");
             // A different identity arrives at the same path through the ordinary ItemSync comparison and syncs.
             var incoming = ItemChecks.File(Side.Dropbox, "item", 2, "other-id");
             remote.Seed(incoming, [2]);
@@ -390,13 +396,12 @@ public static class KnownBugChecks
             // The unrelated bytes arrived...
             Check.Require(local.Items.TryGetValue("item", out var arrived) && arrived.Bytes.SequenceEqual(new byte[] { 2 }),
                 "B-231: the different identity at the move notice's path did not sync");
-            // ...and the exact original move notice is still open, because the close matches the identity, not the path.
+            // ...and the exact original review is still open, identity and move evidence unchanged, never path-matched.
             var open = new List<Notice>();
             await foreach (var notice in store.NoticesAsync(pair.PairId, ct)) open.Add(notice);
             var kept = open.SingleOrDefault(n => n.Path == "item" && n.Kind == NoticeKind.Failure);
-            Check.Require(kept is not null && kept.Subject.Move == move &&
-                kept.Subject.Items.Any(i => i.Side == Side.Dropbox && i.Id == "original-id"),
-                "B-231: an unrelated successful sync closed the review that still needs the original move (B-231)");
+            Check.Require(kept is not null && kept.Matches(before!),
+                "B-231: an unrelated successful sync changed or closed the exact original review (B-231)");
         });
 
     /// <summary>B-240: a slow arrival flood must not take the opportunity from small unrelated arrivals; each of the five
@@ -434,7 +439,9 @@ public static class KnownBugChecks
         });
 
     /// <summary>B-250: a foreign cancellation raised inside one pair's boundary wait must not end that pair or the host;
-    /// the affected pair keeps retrying its loop and an unrelated pair still syncs, answers status and stops.</summary>
+    /// the affected pair keeps retrying its loop and an unrelated pair still syncs, answers status and stops.
+    /// This is the Host-level claim only: cancellation while queued on provider capacity is proven by the gated-provider
+    /// fixture in the product lane, not here.</summary>
     public static Task B250CapacityWaitCancellationAsync() =>
         global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
         {
@@ -507,27 +514,34 @@ public static class KnownBugChecks
             finally { await host.StopAsync(default); }
         });
 
-    /// <summary>L60: held folder removals must not occupy a bounded continuation pool. More removals than the engine's
-    /// largest capacity (the Committer's StoreBatchRows slots) are held; unrelated work still settles, and every removal
-    /// completes on its own endpoint once released.</summary>
+    /// <summary>L60: held folder removals must not occupy a bounded continuation pool. More real endpoint removals than the
+    /// engine's largest capacity (the Committer's StoreBatchRows slots) are left pending in flight; unrelated work still
+    /// settles while they are pending, and every folder is removed on its own endpoint once released.</summary>
     public static Task L60FolderRemovalSaturationAsync() =>
         global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
         {
             var queue = new WorkQueue();
             var pair = ItemChecks.Pair();
-            // Derived, not invented: one more held removal than the largest capacity the engine has.
+            // Derived, not invented: one more pending removal than the largest capacity the engine has.
             var held = ItemChecks.Settings.StoreBatchRows + 1;
-            var gate = new int[1]; // 0 = removals held; 1 = released
-            var completed = new Dictionary<string, Side>(StringComparer.Ordinal);
-            var removals = Enumerable.Range(0, held)
-                .Select(i => new Change(Side.Dropbox, ChangeKind.Deleted, $"f{i}", null, $"id{i}", null, false, false)).ToArray();
-            var page = queue.AdmitAsync(pair, new(removals, "removals", null), (c, _) =>
+            var remote = new FakeSide(Side.Dropbox);
+            var removals = new Change[held];
+            for (var i = 0; i < held; i++)
             {
-                if (Volatile.Read(ref gate[0]) == 0) throw new WorkQueue.Unsettled();
-                lock (completed) completed[c.Path!] = c.Side;
-                return Task.CompletedTask;
-            }, null, ct);
-            // Unrelated work must settle while every removal is still held (no room in a StoreBatchRows-sized pool).
+                var folder = ItemChecks.File(Side.Dropbox, $"f{i}", 0, $"id{i}", folder: true);
+                remote.Seed(folder, []);
+                removals[i] = new Change(Side.Dropbox, ChangeKind.Deleted, folder.Path, null, folder.Id, null, false, false);
+            }
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var applyLock = new object();
+            async Task Apply(Change change, CancellationToken token)
+            {
+                // Pending for the whole hold: the removal occupies its slot but has not reached its endpoint yet.
+                await release.Task.WaitAsync(token);
+                lock (applyLock) remote.DeleteAsync(remote.Items[change.Path!].Entry, null, token).GetAwaiter().GetResult();
+            }
+            var page = queue.AdmitAsync(pair, new(removals, "removals", null), Apply, null, ct);
+            // Unrelated work must settle while every folder removal is still pending (no room in a pool smaller than held).
             var ran = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var unrelated = queue.AdmitAsync(pair,
                 new([new Change(Side.Dropbox, ChangeKind.Changed, "unrelated", null, "unrelated-id", null, false, false)], "unrelated", null),
@@ -535,33 +549,38 @@ public static class KnownBugChecks
             try { await ran.Task.WaitAsync(ct); }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             { throw new InvalidDataException("An unrelated change waited behind held folder removals (L60)"); }
-            lock (completed) Check.Require(completed.Count == 0, "A held folder removal ran before release (L60)");
-            Volatile.Write(ref gate[0], 1);
-            Check.Require(await queue.RetryHeldAsync(null, ct), "Held folder removals were dropped instead of retried (L60)");
+            // Every held removal is still pending: none reached its endpoint before release.
+            Check.Require(remote.Items.Count == held && remote.Requests[nameof(ISide.DeleteAsync)] == 0,
+                "A held folder removal reached its endpoint before release (L60)");
+            release.TrySetResult();
             await page.WaitAsync(ct);
             await unrelated.WaitAsync(ct);
-            lock (completed)
-                Check.Require(completed.Count == removals.Length && completed.Values.All(side => side == Side.Dropbox),
-                    $"Not every held folder removal completed on its own endpoint ({completed.Count}/{removals.Length}) (L60)");
+            // The endpoint, not the input side, proves the removals completed.
+            Check.Require(remote.Items.Count == 0 && remote.Requests[nameof(ISide.DeleteAsync)] == held,
+                $"Not every held folder removal completed on its own endpoint ({held - remote.Items.Count}/{held}) (L60)");
         });
 
     /// <summary>L64/L100: a repeatedly refusing key that keeps receiving fresh same-key arrivals must not starve unrelated
-    /// work, and every fresh arrival must be applied once it is permitted - not just the first attempt retried forever.</summary>
+    /// work, must not retry more often than its arrivals allow, and every fresh arrival must be applied exactly once once
+    /// it is permitted - never a duplicate execution or a permanent retry of only the first attempt.</summary>
     public static Task L64ChurnOpportunityAsync() =>
         global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
         {
             var queue = new WorkQueue();
             var pair = ItemChecks.Pair();
             var gate = new int[1]; // 0 = refusing; 1 = permitted
-            var applied = new HashSet<string>(StringComparer.Ordinal);
+            const int arrivals = 4; // the bug report's four fresh overlapping arrivals on the same key
+            var hotAttempts = 0;   // every apply attempt on the hot key, refused cancels and permitted applies alike
+            var applied = new Dictionary<string, int>(StringComparer.Ordinal);
             void Apply(Change change)
             {
+                Interlocked.Increment(ref hotAttempts);
                 if (Volatile.Read(ref gate[0]) == 0) throw new WorkQueue.Unsettled();
-                lock (applied) applied.Add(change.Id!);
+                lock (applied) applied[change.Id!] = applied.GetValueOrDefault(change.Id!) + 1;
             }
             // The hot key is refused and retained, then keeps receiving fresh overlapping arrivals (same key, new news).
-            var hot = new List<Task>();
-            for (var r = 0; r <= 3; r++)
+            var hot = new List<Task>(arrivals);
+            for (var r = 0; r < arrivals; r++)
             {
                 var fresh = new Change(Side.Dropbox, ChangeKind.Changed, "hot", null, $"hot-{r}", null, false, false);
                 hot.Add(queue.AdmitAsync(pair, new([fresh], $"h{r}", null), (c, _) => { Apply(c); return Task.CompletedTask; }, null, ct));
@@ -576,13 +595,22 @@ public static class KnownBugChecks
                 await done.Task.WaitAsync(ct);
             }
             lock (applied) Check.Require(applied.Count == 0, "A refused hot key ran while it was still refusing (L64/L100)");
+            // Retry contract (WorkQueue.Attempt): each apply path is one attempt plus at most one immediate replay, and the
+            // single held head is retried once per newer overlapping arrival, so attempts stay within two per arrival plus the
+            // head's admission replay. A retry storm (the regression) is unbounded and exceeds this.
+            Check.Require(Volatile.Read(ref hotAttempts) <= 2 * arrivals + 2,
+                "A refused key was retried more often than its arrivals allow (L64/L100)");
             Volatile.Write(ref gate[0], 1);
             Check.Require(await queue.RetryHeldAsync(null, ct), "A refused key was dropped instead of retried (L64/L100)");
             await Task.WhenAll(hot).WaitAsync(ct);
             await Task.WhenAll(others).WaitAsync(ct);
             lock (applied)
-                Check.Require(applied.SetEquals(new[] { "hot-0", "hot-1", "hot-2", "hot-3" }),
-                    "Fresh news on a refused key was lost, or only the original attempt was retried (L64/L100)");
+            {
+                // Exactly one successful execution per arrival id: a duplicate execution would push a count above one.
+                Check.Require(applied.Count == arrivals &&
+                    Enumerable.Range(0, arrivals).All(r => applied.GetValueOrDefault($"hot-{r}") == 1),
+                    "Fresh news on a refused key was lost, duplicated, or only the original attempt was retried (L64/L100)");
+            }
         });
 
     public static Task L66SqlOrdinalsAndParserDepthsAsync() => throw new NotImplementedException(
