@@ -18,6 +18,8 @@ public sealed partial class DropboxEntries
     // JSON surrogate tokens preserve grammar/depth without retaining discarded input tokens.
     private const string EmptyObjectToken = "{}";
     private const string EmptyArrayToken = "[]";
+    // An item is the reply object at depth 1, so its sharing_info member object is at depth 2.
+    private const int SharingDepth = 2;
 
     internal static partial Entry RequireLive(JsonElement metadata, PairConfig pair,
         string? untaggedKind, string acceptedFileTag);
@@ -50,8 +52,6 @@ public sealed partial class DropboxEntries
         private byte[]? _sharedFolderId;
         private bool _sharing;
         private bool _sharingField;
-        // The depth of the entered sharing_info object, taken from the depth where it opens.
-        private int _sharingDepth;
         private int _depth;
         private int _field = ReplyTokens.NoField;
         private bool _started;
@@ -61,7 +61,7 @@ public sealed partial class DropboxEntries
 
         /// <summary>The names the tokenizer matches next: the item's fields, or inside sharing_info its one member.</summary>
         internal ReadOnlySpan<string> Names =>
-            _depth == 1 && _rootObject ? Fields : _sharing && _depth == _sharingDepth ? SharingFields : ReadOnlySpan<string>.Empty;
+            _depth == 1 && _rootObject ? Fields : _sharing && _depth == SharingDepth ? SharingFields : ReadOnlySpan<string>.Empty;
 
         /// <summary>Whether the tokenizer keeps the next scalar: a selected field's value.</summary>
         internal bool Retain => (_depth == 1 && _rootObject && _field >= 0) || _sharingField;
@@ -78,7 +78,7 @@ public sealed partial class DropboxEntries
                     if (field >= Fields.Length || field < ReplyTokens.NoField) throw new JsonException();
                     _field = field;
                 }
-                else if (_sharing && _depth == _sharingDepth) _sharingField = field == 0;
+                else if (_sharing && _depth == SharingDepth) _sharingField = field == 0;
                 return;
             }
             var container = token is JsonTokenType.StartObject or JsonTokenType.StartArray;
@@ -97,7 +97,6 @@ public sealed partial class DropboxEntries
                 if (_field == SharingField)
                 {
                     _sharing = token == JsonTokenType.StartObject;
-                    _sharingDepth = _depth + 1;
                     _sharedFolderId = null;
                 }
                 _field = ReplyTokens.NoField;
@@ -111,7 +110,7 @@ public sealed partial class DropboxEntries
             }
             if (container) _depth++;
             else if (token is JsonTokenType.EndObject or JsonTokenType.EndArray) _depth--;
-            if (_depth < _sharingDepth) _sharing = false;
+            if (_depth < SharingDepth) _sharing = false;
             if (_depth == 0) _complete = true;
         }
 
