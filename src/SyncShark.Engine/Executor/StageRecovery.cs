@@ -106,7 +106,7 @@ internal sealed class StageRecovery(Unfinished owner,PairConfig pair,EngineSetti
             await store.CommitAsync(pair.PairId,saved,SyncedEntries.From(current,other),null,null,ct);
             await store.DisarmAsync(pair.PairId,victim,stage,ct);
         }
-        catch(Exception e) when(e is ChangedUnderneathException or IOException) { /* An unverified or in-use stage stays armed. */ }
+        catch(ChangedUnderneathException) { /* An unverified stage stays armed. */ }
     }
 
     internal static async Task EndNoteAsync(IStore store,ISide local,PairConfig pair,RemovalSelection victim,StageProof? stage,CancellationToken ct)
