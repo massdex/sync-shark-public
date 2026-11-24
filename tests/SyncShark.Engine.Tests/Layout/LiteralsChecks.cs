@@ -44,6 +44,16 @@ public static class LiteralsChecks
         var schemaPath="src/SyncShark.Engine/Storage/Schema.cs";
         bool Permits(string code,string path)=>Sites(code,path).Select(x=>JsonSerializer.SerializeToElement(x)).Single().GetProperty("permitted").GetBoolean();
         Check.Require(Permits(schemaText,schemaPath) && !Permits(schemaText,"src/SyncShark.Engine/Run/Schema.cs") && !Permits(schemaText.Replace("CREATE TABLE item(id INTEGER)","Retry this file"),schemaPath),"DDL owner or content scope was lost");
+        var query="class A { void M() { var sql=\"SELECT id FROM item WHERE id=$id\"; } }";
+        var spliced="class A { void M(string c) { var sql=$\"SELECT {c} FROM item WHERE id=$id\"; } }";
+        Check.Require(Permits(query,"src/SyncShark.Engine/Storage/A.cs") && Permits(spliced,"src/SyncShark.Engine/Storage/A.cs") &&
+            !Permits(query,"src/SyncShark.Engine/Run/A.cs") && !Permits(spliced,"src/SyncShark.Engine/Run/A.cs"),"Storage SQL owner or its folder scope was lost");
+        foreach(var message in new[]{"class A { void M() => throw new InvalidOperationException(\"Store row missing\"); }","class A { void M() => writer.WriteLine(\"Store row missing\"); }",
+            "class A { void M() => _ = Text.Get(Lookup(\"Store row missing\")); }","class A { RunEvent M() => new RunEvent(kind, what, path, \"Store row missing\", outcome); }"})
+            Check.Require(!Permits(message,"src/SyncShark.Engine/Storage/A.cs"),"Storage message permitted as SQL: "+message);
+        var names="namespace Example; static class ResourceNames { public const string HostAssembly=\"Sync Shark\"; }";
+        var namesPath="src/SyncShark.Engine/ResourceNames.cs";
+        Check.Require(Permits(names,namesPath) && !Permits(names.Replace("HostAssembly","HostTitle"),namesPath),"Spaced resource name permission is not limited to HostAssembly");
         var sibling=context.AddSyntaxTrees(CSharpSyntaxTree.ParseText("class Labels { public static readonly string Retry=\"Retry this item\"; }"));
         Check.Require(Offends("class A { void M() => Console.WriteLine(Labels.Retry); }","A.cs",words,sibling),"Sibling constant escaped");
         var trees=new[]{"src","apps"}.SelectMany(folder=>Directory.EnumerateFiles(Path.Combine(input.Root,folder),"*.cs",SearchOption.AllDirectories))
@@ -112,8 +122,29 @@ public static class LiteralsChecks
     }
     private const string DropboxEntriesFile = "src/SyncShark.Engine/Dropbox/DropboxEntries.cs";
     private const string EngineNamespace = "Massdex.SyncShark.Engine";
+    private const string StorageFolder = "src/SyncShark.Engine/Storage/";
+
+    // Thrown, written, logged, run-event, catalog or notice text; a literal in any of these is never statement text.
+    // Writes and logs are member calls (writer.Write*, logger.Log*), as Offends reads them; Storage's own Write helper is not one.
+    private static bool InMessagePosition(SyntaxToken token) => token.Parent!.Ancestors().Any(node => node switch
+    {
+        ThrowStatementSyntax or ThrowExpressionSyntax or ImplicitObjectCreationExpressionSyntax => true,
+        ObjectCreationExpressionSyntax creation => creation.Type.ToString().Split('.').Last() is var type &&
+            (type.EndsWith("Exception", StringComparison.Ordinal) || type is "RunEvent" or "Notice"),
+        InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax access } =>
+            access.Name.Identifier.ValueText is var name && (name.StartsWith("Write", StringComparison.Ordinal) ||
+            name.StartsWith("Log", StringComparison.Ordinal) || name == "Trace" ||
+            name == "Get" && access.Expression is IdentifierNameSyntax { Identifier.ValueText: "Text" }),
+        InvocationExpressionSyntax { Expression: IdentifierNameSyntax { Identifier.ValueText: "Trace" } } => true,
+        _ => false,
+    });
     internal static string? StringViolation(SyntaxToken token, string? relativePath, ref SemanticModel? grammarModel)
     {
+        // SQL lives only in Storage (std 1.1) and schema SQL owns its literals (std 2.2 Enforcement): plain or
+        // interpolated Storage text outside a message position is statement text. Schema's members keep their DDL rule.
+        if (relativePath?.StartsWith(StorageFolder, StringComparison.Ordinal) == true &&
+            (token.IsKind(SyntaxKind.InterpolatedStringTextToken) || IsStringLiteral(token)) &&
+            OwnerOf(token.Parent, relativePath) != "Schema" && !InMessagePosition(token)) return null;
         if (token.IsKind(SyntaxKind.InterpolatedStringTextToken))
             return token.Value is string interpolated && interpolated.Length > 0 ? "interpolated text " + token.Text : null;
         if (!IsStringLiteral(token) ||
@@ -125,7 +156,8 @@ public static class LiteralsChecks
             var sql=text.TrimStart();
             if (MemberOf(token.Parent)=="Pragmas" ? sql.StartsWith("PRAGMA ",StringComparison.OrdinalIgnoreCase) : sql.StartsWith("CREATE TABLE ",StringComparison.OrdinalIgnoreCase)) return null;
         }
-        else if (owner is not null && (owner == "StateSchema" || !text.Contains(' '))) return null;
+        else if (owner is not null && (owner == "StateSchema" || !text.Contains(' ') ||
+            owner == "ResourceNames" && MemberOf(token.Parent) == nameof(ResourceNames.HostAssembly))) return null;
         if (relativePath == DropboxEntriesFile &&
             token.Parent is LiteralExpressionSyntax literal && literal.IsKind(SyntaxKind.Utf8StringLiteralExpression) &&
             literal.Parent is ArrowExpressionClauseSyntax { Parent: PropertyDeclarationSyntax })

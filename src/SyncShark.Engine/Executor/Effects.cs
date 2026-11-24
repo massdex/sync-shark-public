@@ -6,7 +6,7 @@ namespace Massdex.SyncShark.Engine.Executor;
 public sealed class Effects
 {
     /// <summary>ItemSync/Retries own failure turnover. Dispatcher saves accepted jobs and signals the per-pair held-news checker.</summary>
-    public async Task<EffectOutcome> ApplyAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, SyncAction action, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding, CancellationToken ct, Func<Scope,IEnumerable<Change>>? heldInput = null, Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough = null, Action<Notice>? failedNotice = null, bool userSelected = false, SyncedEntry? grantedIncumbent = null)
+    public async Task<EffectOutcome> ApplyAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, SyncAction action, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding, CancellationToken ct, Func<Scope,IEnumerable<Change>>? heldInput = null, Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough = null, Action<Notice>? failedNotice = null, bool userSelected = false, SyncedEntry? grantedIncumbent = null, Action<SyncedEntry>? collectCreate = null)
     {
         ct.ThrowIfCancellationRequested();
         var row = action.Row; var saved = row.Synced; var path = Row.Path(row);
@@ -21,6 +21,30 @@ public sealed class Effects
         {
             case ActionKind.None: return action.IsInSync() ? EffectOutcome.Applied : EffectOutcome.Pending;
             case ActionKind.Notice: await Raise(action.NoticeKind,action.Cause); return EffectOutcome.Refused;
+            case ActionKind.ForgetOnly when Moves.IsFileSplit(action):
+                var links=new List<SyncedEntry>(2);
+                var members=new List<NoticeItem>(2);
+                foreach(var sender in new[]{local,dropbox})
+                {
+                    if(row.EntryOn(sender.Side) is not {} original) continue;
+                    var receiver=sender==local?dropbox:local;
+                    var mapped=await ItemSync.CounterpartAsync(pair,sender.Side,original.Path,store,ct);
+                    if(original.Skip!=null || paths.Excludes(sender==local?original.Path:mapped,sender==local?mapped:original.Path,false)) return EffectOutcome.Pending;
+                    if(await ReadOneAsync(sender,original.Path,ct)!=original) throw new ChangedUnderneathException(original.Path);
+                    var owner=await store.FindAsync(pair.PairId,receiver.Side,PathNames.KeyFor(receiver.Side,mapped),ct);
+                    if(owner!=null && owner!=saved) throw new ChangedUnderneathException(mapped);
+                    var createRow=new Row(row.Key,sender==local?original:null,sender==dropbox?original:null,null,[],null,RowContext.Neutral);
+                    var create=new SyncAction(sender==local?ActionKind.Upload:ActionKind.Download,createRow,Target:mapped);
+                    var copied=await ApplyAsync(pair,settings,events,paths,create,local,dropbox,store,populate,compareOldBinding,ct,collectCreate:links.Add);
+                    if(copied!=EffectOutcome.Applied) return copied;
+                    members.Add(new(sender.Side,original.Path,original.Id));
+                }
+                foreach(var member in members)
+                    if(await ReadOneAsync(member.Side==Side.Local?local:dropbox,member.Path,ct)!=row.EntryOn(member.Side)) throw new ChangedUnderneathException(member.Path);
+                var notice=new Notice(0,NoticeKind.Info,action.InfoAfter!.Value,path,new(members,null),DateTimeOffset.UtcNow,false);
+                if(links.Count==2) await store.CommitKeepBothAsync(pair.PairId,saved,links[0],links[1],notice,ct);
+                else await store.CommitKeepBothAsync(pair.PairId,saved,links.Single(),notice,ct);
+                return EffectOutcome.Applied;
             case ActionKind.ForgetOnly: break;
             case ActionKind.Record:
                 if (row.Local is not {} pc || row.Dropbox is not {} db) throw new ChangedUnderneathException(path);
@@ -150,7 +174,6 @@ public sealed class Effects
                         result = await Remove(expected);
                         if (result.Outcome != RemovalOutcome.Removed) return Incomplete(result,target);
                         if (await ReadOneAsync(from,source.Path,ct) != source) throw new ChangedUnderneathException(source.Path){FailedSide=from.Side};
-                        if (await ReadOneAsync(to,target,ct) != null) throw new ChangedUnderneathException(target){FailedSide=to.Side};
                         expected = null;
                     }
                     if (to.Side==Side.Local && expected!=null && !userSelected && (coversThrough==null || heldInput==null)) return EffectOutcome.Pending;
@@ -170,6 +193,7 @@ public sealed class Effects
                         if (await ReadOneAsync(from,source.Path,ct) != source) throw new ChangedUnderneathException(source.Path){FailedSide=from.Side};
                         if (competitor.IsFolder || await to.ContentHashAsync(competitor,ct) != await from.ContentHashAsync(source,ct))
                         {
+                            if(collectCreate!=null) throw new ItemFailedException(target,TextKey.ClashNameTaken,null);
                             var conflict = written == Side.Local ? row with {Local=competitor} : row with {Dropbox=competitor};
                             return await new KeepBoth().ApplyAsync(pair,settings,events,paths,conflict,local,dropbox,store,populate,ct);
                         }
@@ -185,8 +209,11 @@ public sealed class Effects
         }
         if (after is {IsFolder:true} && saved is {IsFolder:true} && (saved.LocalPath != after.LocalPath || saved.DropboxPath != after.DropboxPath))
             await store.ProjectSubtreeAsync(pair.PairId,new(saved.LocalPath,saved.DropboxPath),new(after.LocalPath,after.DropboxPath),ct);
+        if(collectCreate!=null) { collectCreate(after! with {LocalPublished=boundary}); return EffectOutcome.Applied; }
         var spent = row.Deletion is DeletionEvidence.DeletedFile or DeletionEvidence.DeletedPath ? PathNames.DropboxKey(row.Deletion.Path) : null;
         await store.CommitAsync(pair.PairId,saved,after,boundary,spent,ct);
+        // A merged destination holds both sides' children; compare it once at its final names. Merge settlement owns the root.
+        if (mergedSource!=null) await compareOldBinding(after!,new(after!.LocalPath,after.DropboxPath),null,ct);
         if (action.InfoAfter is {} info) await Raise(NoticeKind.Info,info);
         if (armed != null && await store.ArmedAsync(pair.PairId,ct) is {} note && note.Victim == armed && note.Stage == proof) await store.DisarmAsync(pair.PairId,note.Victim,note.Stage,ct);
         if (mergedSource!=null) events(new(RunEventKind.Effect,nameof(ISide.MoveAsync),target,mergedSource.Path,nameof(RemovalOutcome.Published)){Action=action.Kind,Side=written});
@@ -275,8 +302,12 @@ public sealed class Effects
             if (identity==Moves.DestinationIdentity.Moving) break;
         }
         var skipped = oldPc?.Skip != null || oldDb?.Skip != null || newPc?.Skip != null || newDb?.Skip != null;
-        var outside = paths.Excludes(saved.LocalPath,saved.DropboxPath,saved.IsFolder) || paths.Excludes(pcPath,dbPath,saved.IsFolder) || paths.Excludes(pc?.Path,observedDropboxPath,saved.IsFolder);
-        var facts = new Moves.Observations(oldPc?.Id == saved.LocalId ? oldPc : null,oldDb?.Id == saved.DropboxId ? oldDb : null,skipped,held,outside,carries,null,pcPath,dbPath,owner);
+        var savedOutside=paths.Excludes(saved.LocalPath,saved.DropboxPath,saved.IsFolder);
+        var newOutside=paths.Excludes(pcPath,dbPath,saved.IsFolder) || paths.Excludes(pc?.Path,observedDropboxPath,saved.IsFolder);
+        // An already-excluded binding stays out of scope.
+        var leaves=!savedOutside && newOutside && group.Count==1 && !saved.IsFolder;
+        var outside=savedOutside || newOutside && !leaves;
+        var facts = new Moves.Observations(oldPc?.Id == saved.LocalId ? oldPc : null,oldDb?.Id == saved.DropboxId ? oldDb : null,skipped,held,outside,carries,null,pcPath,dbPath,owner,leaves);
         var decision = Moves.For(group,destination,facts,dirty);
         if (decision.Kind == ActionKind.NeedLocalHash && facts.LocalAtSynced is {} file)
             decision = Moves.For(group,destination,facts with {LocalHash=await local.ContentHashAsync(file,ct)},dirty);

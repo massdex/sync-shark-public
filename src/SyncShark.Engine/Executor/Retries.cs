@@ -42,6 +42,16 @@ public sealed class Retries
                 var endpoint=subject.Side==Side.Local?local:dropbox;
                 if(string.IsNullOrEmpty(subject.Id)){await Stale(); done=false;continue;}
                 var at=await endpoint.ReadByIdAsync(subject.Id,ct);
+                // A PC item proven out of the pair under its own id: decide its binding by identity, as a move Retry does (:32-34).
+                // Only both bound identities gone reaches the planner; a live peer is our own recycle's peer, not a user delete.
+                if(subject.Side==Side.Local && at is {InScope:false} binned && binned.Location.Entry.Id==subject.Id && await local.ReadOneAsync(subject.Path,ct)==null)
+                {
+                    if(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(subject.Path),ct) is not {} bound) continue;
+                    var observed=bound.LocalId==subject.Id ? await ItemSync.ObserveBindingAsync(paths,bound,local,dropbox,ct) : default;
+                    if(observed.Row is not {Local:null,Dropbox:null}) { await Stale(); done=false; continue; }
+                    done &= await ItemSync.ExecuteAsync(pair,settings,events,paths,observed.Row,observed.Group,false,local,dropbox,store,populate,compareOldBinding,ct,heldInput,null,false,coversThrough:coversThrough);
+                    continue;
+                }
                 if(at is not {InScope:true} hit || hit.Location.Entry.Path!=subject.Path) { await Stale(); done=false; continue; }
                 done &= await Apply(subject.Side,subject.Path,subject);
             }

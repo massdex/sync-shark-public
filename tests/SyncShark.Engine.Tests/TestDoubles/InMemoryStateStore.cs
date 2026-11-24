@@ -247,10 +247,11 @@ public sealed class InMemoryStateStore : IStore
         if(jobs.GetValueOrDefault((job.PairId,job.Route,job.JobId))==job) jobs.Remove((job.PairId,job.Route,job.JobId)); return Task.CompletedTask;
     }
     /// <summary>Arm operation on the supplied facts.</summary>
-    public Task ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct)
+    public Task<bool> ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        armed.Add(pairId,(victim,stage)); return Task.CompletedTask;
+        if(armed.TryGetValue(pairId,out var existing)) return Task.FromResult(existing==(victim,stage));
+        armed.Add(pairId,(victim,stage)); return Task.FromResult(true);
     }
     /// <summary>Armed operation on the supplied facts.</summary>
     public Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(string pairId, CancellationToken ct)
@@ -364,7 +365,10 @@ public sealed class InMemoryStateStore : IStore
         ct.ThrowIfCancellationRequested();var projected=new List<(SyncedEntry Before,SyncedEntry After)>();
         foreach(var item in Records.Where(k=>k.Key.Pair==pairId).Select(k=>k.Value))
         {
-            string Rewrite(string path,string before,string after)=>PathNames.IsSelfOrUnder(path,before)?after+path[before.Length..]:path;
+            // Strict descendants only: the real store's RebaseDescendantsBoth excludes the moved binding itself,
+            // which the caller then settles with its own Commit.
+            bool Under(string path,string before)=>path.Length>before.Length && PathNames.IsSelfOrUnder(path,before);
+            string Rewrite(string path,string before,string after)=>Under(path,before)?after+path[before.Length..]:path;
             var l=Rewrite(item.LocalPath,from.LocalPath,to.LocalPath);var d=Rewrite(item.DropboxPath,from.DropboxPath,to.DropboxPath);
             if(l!=item.LocalPath || d!=item.DropboxPath) projected.Add((item,item with { LocalPath=l,LocalKey=PathNames.Key(l),DropboxPath=d,DropboxKey=PathNames.DropboxKey(d) }));
         }
@@ -448,11 +452,22 @@ public sealed class InMemoryStateStore : IStore
     /// <summary>Add or retire only this observed link member; close the pair-wide link notice only when no members remain.</summary>
     public Task UpdateLinkMemberAsync(string pairId, NoticeItem member, bool present, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested();var link=notices.Where(x=>x.Key.Pair==pairId && x.Value.Cause==TextKey.InfoLinks).Select(x=>x.Value).SingleOrDefault();
-        if(link==null && !present) return Task.CompletedTask;
-        link??=new Notice(0,NoticeKind.Info,TextKey.InfoLinks,string.Empty,new([],null),DateTimeOffset.UnixEpoch,false);
-        var items=(present?link.Subject.Items.Append(member).Distinct():link.Subject.Items.Where(x=>x!=member)).ToArray();
-        return items.Length==0 ? CloseNoticeAsync(pairId,link,ct) : SaveNoticeAsync(pairId,link with {Subject=link.Subject with {Items=items}},ct);
+        ct.ThrowIfCancellationRequested();
+        lock (pairs)
+        {
+            var slot = notices.FirstOrDefault(x => x.Key.Pair == pairId && x.Value.Cause == TextKey.InfoLinks);
+            var link = slot.Value;
+            var has = link != null && link.Subject.Items.Contains(member);
+            if (link == null && !present || present == has) return Task.CompletedTask;
+            // Mirror the real store: touch only this exact member, never the whole aggregate.
+            Touch(pairId, member.Side, PathNames.KeyFor(member.Side, member.Path), false);
+            link ??= new Notice(0, NoticeKind.Info, TextKey.InfoLinks, string.Empty, new([], null), DateTimeOffset.UnixEpoch, false);
+            var items = present ? link.Subject.Items.Append(member).Distinct().ToArray() : link.Subject.Items.Where(x => x != member).ToArray();
+            if (items.Length == 0) { notices.Remove(slot.Key); return Task.CompletedTask; }
+            var id = link.Id != 0 ? link.Id : checked(++lastNoticeId);
+            notices[(pairId, id)] = link with { Id = id, Subject = link.Subject with { Items = items } };
+            return Task.CompletedTask;
+        }
     }
     /// <summary>Read one indexed notice by pair and ID; the caller must still validate its reviewed token.</summary>
     public Task<Notice?> NoticeAsync(string pairId, long id, CancellationToken ct) { ct.ThrowIfCancellationRequested();return Task.FromResult(notices.GetValueOrDefault((pairId,id))); }

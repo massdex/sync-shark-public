@@ -12,7 +12,7 @@ public static class FolderDeleteChecks
     public static async Task RunAsync()
     {
         var failures=new List<string>();var missing=new List<string>();
-        foreach(var test in new Func<Task>[]{()=>SelectedCloudWindowAsync(["latest"]),()=>SelectedCloudWindowAsync(["unverified"]),()=>SelectedCloudWindowAsync(["moved"]),()=>SelectedCloudWindowAsync(["missing"]),SelectedChildrenAsync,DefiniteNoEffectAsync,SameIdRetryAsync,MovedOutEvidenceAsync,LocatedFileRetryAsync,ExcludedPhysicalAsync,IgnoredPhysicalAsync,NestedPhysicalAsync,AncestorAsync,ArmedSiblingsAsync,ImmediateBoundaryAsync,RecoveryAsync,PartialAsync,OutsideAsync,TombstoneAsync,ForeignTombstoneAsync,ExcludedAsync,UnreadableAsync,CostAsync,NamespaceAsync,MappedAsync,FolderRetryAsync,ReceiptOrderAsync,LateMergeAsync,CrashAfterFirstAsync,LostReplyAsync,NewerAsync,KeptTreeAsync,CoveredAsync,ConflictAsync,ReceiptCoverageAsync,ConflictingLiveAsync,SubstituteAsync,StrandedAsync,SubFolderAsync,QuietAsync})
+        foreach(var test in new Func<Task>[]{()=>SelectedCloudWindowAsync(["latest"]),()=>SelectedCloudWindowAsync(["unverified"]),()=>SelectedCloudWindowAsync(["moved"]),()=>SelectedCloudWindowAsync(["missing"]),SelectedChildrenAsync,DefiniteNoEffectAsync,SameIdRetryAsync,MovedOutEvidenceAsync,LocatedFileRetryAsync,ExcludedPhysicalAsync,IgnoredPhysicalAsync,NestedPhysicalAsync,AncestorAsync,()=>OutsideFolderAsync(true),()=>OutsideFolderAsync(false),RemovalHopLeavesLiveDescendant,ArmedSiblingsAsync,ImmediateBoundaryAsync,SupersededRevisionAsync,RecoveryAsync,PartialAsync,OutsideAsync,TombstoneAsync,ForeignTombstoneAsync,ExcludedAsync,UnreadableAsync,CostAsync,NamespaceAsync,MappedAsync,FolderRetryAsync,ReceiptOrderAsync,LateMergeAsync,CrashAfterFirstAsync,LostReplyAsync,NewerAsync,KeptTreeAsync,CoveredAsync,ConflictAsync,ReceiptCoverageAsync,ConflictingLiveAsync,SubstituteAsync,StrandedAsync,SubFolderAsync,QuietAsync})
         {
             try {await test();}
             catch(NotImplementedException) {missing.Add(test.Method.Name);}
@@ -105,8 +105,50 @@ public static class FolderDeleteChecks
         var pair=ItemChecks.Pair();using var store=new InMemoryStateStore();var cloud=new FakeSide(Side.Dropbox);
         var parent=ItemChecks.File(Side.Dropbox,"p",0,"parent",true);var child=parent with {Path="p/c",Id="child"};
         var a=SyncedEntries.From(parent with {Id="pc-p"},parent);var b=SyncedEntries.From(child with {Id="pc-c"},child);await store.CommitAsync(pair.PairId,null,a,null,null,default);await store.CommitAsync(pair.PairId,null,b,null,null,default);
-        var source=Observe.On(cloud,(op,args)=>op==nameof(ISide.ReadByIdAsync) && (string?)args[0]==parent.Id?Task.FromResult<(IdentityLocation,bool)?>((new("ns","outside",parent with {Skip=nameof(TextKey.SkipUnreadable)}),false)):null);
-        var paths=new PathScope(pair,[pair],DriveType.Fixed);Check.Require(await FolderDelete.HighestMissingAsync(pair,paths,b,source,store,default)==b && await FolderDelete.HighestMissingAsync(pair,paths,b,cloud,store,default)==a && cloud.Mutations.Count==0,"A skipped or out-of-scope ancestor widened the selected footprint");
+        var source=Observe.On(cloud,(op,args)=>op==nameof(ISide.ReadByIdAsync) && (string?)args[0]==parent.Id?Task.FromResult<(IdentityLocation,bool)?>((new("ns",parent.Path,parent with {Skip=nameof(TextKey.SkipUnreadable)}),true)):null);
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);Check.Require(await FolderDelete.HighestMissingAsync(pair,paths,b,source,store,default)==b && await FolderDelete.HighestMissingAsync(pair,paths,b,cloud,store,default)==a && cloud.Mutations.Count==0,"An in-scope ancestor widened the selected footprint");
+    }
+    private static Task RemovalHopLeavesLiveDescendant()=>OutsideFolderAsync(true,true);
+    private static async Task OutsideFolderAsync(bool recycled,bool liveChild=false)
+    {
+        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);using var store=new InMemoryStateStore();
+        var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);var outside=new FakeSide(Side.Local);
+        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
+        var root=ItemChecks.File(Side.Local,"tree",0,"root",true);var folder=ItemChecks.File(Side.Local,"tree/sub",0,"sub",true);var file=ItemChecks.File(Side.Local,"tree/sub/data",1,"data");
+        var peer=root with {Id="remote-root"};var saved=SyncedEntries.From(folder,folder with {Id="remote-sub"});
+        foreach(var entry in new[]{root,folder,file})
+        {
+            var remote=entry with {Id="remote-"+entry.Id};byte[] bytes=entry.IsFolder?[]:[1];
+            pc.Seed(entry,bytes);db.Seed(remote,bytes);await store.CommitAsync(pair.PairId,null,SyncedEntries.From(entry,remote),null,null,default);
+        }
+        Check.Require(await FolderDelete.HighestMissingAsync(pair,paths,saved,pc,store,default)==null,"An in-scope folder was selected for removal");
+        if(liveChild) await pc.MoveAsync(file,"kept/data",default);
+        if(recycled) await pc.DeleteAsync(root,null,default);
+        else foreach(var item in pc.Items.Values.ToArray()){outside.Seed(item.Entry with {Path="outside/"+item.Entry.Path},item.Bytes);pc.Items.Remove(item.Entry.Path);}
+        var local=recycled?(ISide)pc:Observe.On(pc,(op,args)=>op==nameof(ISide.ReadByIdAsync) && outside.Items.Values.FirstOrDefault(v=>v.Entry.Id==(string?)args[0]).Entry is {} moved
+            ?Task.FromResult<(IdentityLocation,bool)?>((new("volume",moved.Path,moved),false)):null);
+        Check.Require(await FolderDelete.HighestMissingAsync(pair,paths,saved,local,store,default)==SyncedEntries.From(root,peer),"Out-of-scope folder did not select its missing ancestor");
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,local,db,store);
+        var result=await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,saved,Side.Local,local,db,store,queue.Held,ItemChecks.Population(pair,paths,local,db,store),ItemChecks.Hop(pair,paths,queue,local,db,store),default,coversThrough:Admitted(pc,db));
+        if(liveChild)
+        {
+            Check.Require(result.Outcome==RemovalOutcome.Removed && store.Records.Values.Single().LocalId==file.Id && pc.Items.ContainsKey("kept/data"),"A removal hop dropped or aborted on a live moved descendant");
+            return;
+        }
+        var failures=new List<string>();
+        void Require(bool met,string message){if(!met) failures.Add(message);}
+        Require(result.Outcome==RemovalOutcome.Removed && db.Items.Count==0,"Dropbox folder removal did not finish");
+        Require(store.Records.Count==0,"Folder removal left bindings");
+        Require(!queue.Held(new(root.Path,peer.Path)).Any(),"Folder removal left held input");
+        Require(db.History.Any(v=>v.Entry==peer) && db.History.Any(v=>v.Entry.Id=="remote-data" && v.Bytes.SequenceEqual(new byte[]{1})) && (recycled?pc.History.Any(v=>v.Entry==file && v.Bytes.SequenceEqual(new byte[]{1})):outside.Items["outside/"+file.Path].Bytes.SequenceEqual(new byte[]{1})),"Outside folder removal lost a retained version");
+        if(recycled)
+        {
+            pc.Seed(file,[1]); // the original ID is restored, unchanged, before any fresh sweep
+            await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Local,ChangeKind.Changed,file.Path,null,file.Id,file,true,false),local,db,store,
+                ItemChecks.Population(pair,paths,local,db,store),ItemChecks.Hop(pair,paths,queue,local,db,store),default,queue.Held);
+            Require(pc.Items.ContainsKey(file.Path) && db.Items.TryGetValue(file.Path,out var up) && up.Bytes.SequenceEqual(new byte[]{1}),"A restored unchanged child was not uploaded after its folder removal");
+        }
+        Check.Require(failures.Count==0,(recycled?"Binned":"Moved out")+": "+string.Join("; ",failures)+$" (outcome={result.Outcome}, cloud={db.Items.Count}, bindings={string.Join(",",store.Records.Values.Select(r=>r.LocalPath))})");
     }
     private static Task ExcludedPhysicalAsync()=>PhysicalFolderAsync(excluded:true);
     private static Task IgnoredPhysicalAsync()=>PhysicalFolderAsync(ignored:true);
@@ -165,6 +207,23 @@ public static class FolderDeleteChecks
     {
         var p=ItemChecks.Pair(); return p with {Roots=new(p.LocalRoot,p.DropboxRoot,p.ConnectionId,new(1,1,null),new("account","bound-namespace","home","root"))};
     }
+    internal static async Task SupersededRevisionAsync()
+    {
+        var pair=BoundPair(); using var store=new InMemoryStateStore(); var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox);
+        var a=ItemChecks.File(Side.Local,"parent",0,"a",true); var b=ItemChecks.File(Side.Dropbox,a.Path,0,"b",true);
+        await store.CommitAsync(pair.PairId,null,SyncedEntries.From(a,b),null,null,default);
+        var first=ItemChecks.File(Side.Dropbox,"parent/child",1,"child"); var last=ItemChecks.File(Side.Dropbox,first.Path,2,first.Id); var newer=ItemChecks.File(Side.Dropbox,first.Path,3,first.Id);
+        db.Recoverable[(last.Id,last.Revision,last.ContentHash)]=new Recovery.File(last,new MemoryStream([2]));
+        var ns=pair.Roots!.Dropbox.RootNamespaceId;
+        await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.PutBack,TextKey.FailLocalInUse,last.Path,new([new(Side.Dropbox,last.Path,last.Id)],Side.Dropbox){DropboxVersion=new(ns,PathNames.RootedDropboxPath(pair.DropboxRoot,last.Path),last)},DateTimeOffset.UtcNow,false),default);
+        var notice=store.OpenNotices.Single(n=>n.Kind==NoticeKind.PutBack);
+        int firstAcks=0,lastAcks=0,newerAcks=0;
+        Change Report(Entry v,Action ack)=>new Change(Side.Dropbox,ChangeKind.Changed,v.Path,null,v.Id,v,false,false){ConsumeHeld=ack};
+        Change[] held=[Report(first,()=>firstAcks++),Report(last,()=>lastAcks++),Report(newer,()=>newerAcks++),Report(last,()=>{})];
+        bool retried=await FolderDelete.RetryHeldAsync(pair,new(last.Path,last.Path),notice,pc,History(db),store,_=>held,(_,_,_,_)=>throw new InvalidOperationException(),default);
+        Check.Require(retried && lastAcks==1 && firstAcks==1 && newerAcks==0 && !store.OpenNotices.Any(n=>n.Kind==NoticeKind.PutBack),"Put-back Retry left a superseded revision of its restored item held");
+    }
+
     internal static Task RecoveryAsync()=>RecoveryAsync(false);
     internal static async Task RecoveryAsync(bool olderSnapshot)
     {
@@ -191,14 +250,14 @@ public static class FolderDeleteChecks
         db.Recoverable[(last.Id,last.Revision,last.ContentHash)]=new Recovery.File(last,new MemoryStream([2]));
         Check.Require(notice.Subject.DropboxVersion?.Entry==last && notice.At!=DateTimeOffset.UnixEpoch,"Held child failure did not retain the exact verified Dropbox revision");
         db.DeletedHistory[last.Path]=new DeletionEvidence.DeletedFile(last.Path,pair.Roots!.Dropbox.RootNamespaceId,last.Id,"later",DateTimeOffset.UnixEpoch,null,first.ContentHash,null);
-        int parentAcks=0,lateTombAcks=0;
+        var tombBeforeRetry=consumedTomb; int parentAcks=0,lateTombAcks=0;
         var parentDelete=new Change(Side.Local,ChangeKind.Deleted,a.Path,null,a.Id,null,false,true){ConsumeHeld=()=>parentAcks++};
         var range=new Scope(a.Path,b.Path);
         bool retried=await FolderDelete.RetryHeldAsync(pair,new(last.Path,last.Path),notice,pc,History(db),store,s=>s==range?[parentDelete,..reports]:[..reports,prior with {Kind=ChangeKind.Deleted,Id=null,Observed=null,ConsumeHeld=()=>lateTombAcks++}],(_,_,_,_)=>throw new InvalidOperationException(),default);
         Check.Require(parentAcks==0 && lateTombAcks==0 && db.Mutations.Count(id=>id==b.Id)==1,"Child retry acknowledged an original parent whose binding was not settled");
         var bound=await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(last.Path),default);
         Check.Require(bound!=null && bound.LocalId==pc.Items[last.Path].Entry.Id && bound.DropboxId==db.Items[last.Path].Entry.Id && !store.OpenNotices.Any(n=>n.Kind==NoticeKind.PutBack),"Missing exact recovered binding or still-open notice");
-        Check.Require(retried && consumedLast && !consumedTomb && pc.Items[last.Path].Bytes.SequenceEqual(new byte[]{2}) && db.Items[last.Path].Bytes.SequenceEqual(new byte[]{2}),"Retry consumed the child without restoring the last reported bytes on both sides");
+        Check.Require(retried && consumedLast && consumedTomb==tombBeforeRetry && pc.Items[last.Path].Bytes.SequenceEqual(new byte[]{2}) && db.Items[last.Path].Bytes.SequenceEqual(new byte[]{2}),"Retry consumed the child without restoring the last reported bytes on both sides");
     }
 
     internal static async Task MappedRetryAsync(string mode)

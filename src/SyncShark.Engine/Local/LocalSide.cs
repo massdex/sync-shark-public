@@ -10,6 +10,8 @@ namespace Massdex.SyncShark.Engine.Local;
 /// <summary>Observes one bound PC root and changes only the selected object, without replacing unselected names.</summary>
 public sealed class LocalSide : ISide
 {
+    // The pair shares one bin-then-rename turn; victim verification stays parallel.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string,SemaphoreSlim> Turns=new();
     private readonly PairConfig pair;
     private readonly Func<PathScope> scope;
     private readonly EngineSettings settings;
@@ -183,36 +185,50 @@ public sealed class LocalSide : ISide
         var heldInfo=Info(file.SafeFileHandle);
         if(local.Published || heldInfo.Domain!=local.Proof.VolumeId || heldInfo.Size!=local.Proof.Size || !PathNames.Same(Path.GetDirectoryName(full),Path.GetDirectoryName(local.Proof.Path)) ||
             heldInfo.Id!=local.Proof.FileId) throw new ChangedUnderneathException(local.Path);
-        RemovalResult? removal=null;
-        if(expected is not null)
-        {
-            if(expected.Path!=local.Path || selection?.Proof.Expected!=expected) throw new ChangedUnderneathException(local.Path);
-            removal=await RemovePinned(expected,selection!,local.Proof,driveType,ct);
-            if(removal.Outcome!=RemovalOutcome.Removed) return removal;
-        }
-        else if(selection is not null) throw new ChangedUnderneathException(local.Path);
-        ct.ThrowIfCancellationRequested(); Rename(file.SafeFileHandle,parents.Last,Path.GetFileName(full)); local.Published=true;
+        var turn=expected==null?null:Turns.GetOrAdd(pair.PairId,_=>new(1)); bool held=false;
         try
         {
-            var final=Info(file.SafeFileHandle);
-            if(final.Domain!=local.Proof.VolumeId || final.Id!=local.Proof.FileId || final.Size!=local.Proof.Size)
-                return new(RemovalOutcome.Unknown,null,TextKey.PublishFailed);
-            return Publication(final.Entry(local.Path,local.Proof.ContentHash),usn.Published(file.SafeFileHandle)) with
-                {Recycled=removal?.Recycled, RecycledVictim=removal?.RecycledVictim};
+            RemovalResult? removal=null;
+            if(expected is not null)
+            {
+                if(expected.Path!=local.Path || selection?.Proof.Expected!=expected) throw new ChangedUnderneathException(local.Path);
+                removal=await RemovePinned(expected,selection!,local.Proof,driveType,ct,async()=>{await turn!.WaitAsync(ct);held=true;});
+                if(removal.Outcome!=RemovalOutcome.Removed) return removal;
+            }
+            else if(selection is not null) throw new ChangedUnderneathException(local.Path);
+            ct.ThrowIfCancellationRequested(); Rename(file.SafeFileHandle,parents.Last,Path.GetFileName(full)); local.Published=true;
+            try
+            {
+                var final=Info(file.SafeFileHandle);
+                if(final.Domain!=local.Proof.VolumeId || final.Id!=local.Proof.FileId || final.Size!=local.Proof.Size)
+                    return new(RemovalOutcome.Unknown,null,TextKey.PublishFailed);
+                var published=Publication(final.Entry(local.Path,local.Proof.ContentHash),usn.Published(file.SafeFileHandle)) with
+                    {Recycled=removal?.Recycled, RecycledVictim=removal?.RecycledVictim};
+                if(selection!=null) await store.DisarmAsync(pair.PairId,selection,local.Proof,ct);
+                return published;
+            }
+            finally { file.Dispose(); }
         }
-        finally { file.Dispose(); }
+        finally { if(held) turn!.Release(); }
     }
     public async Task<RemovalResult> DeleteAsync(Entry expected,RemovalSelection? selection,CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         if(selection?.Proof.Expected!=expected) throw new ChangedUnderneathException(expected.Path);
         using var parents=Parents(Full(pair.LocalRoot,expected.Path),out var driveType);
-        return await RemovePinned(expected,selection!,null,driveType,ct);
+        var turn=Turns.GetOrAdd(pair.PairId,_=>new(1)); bool held=false;
+        try
+        {
+            var result=await RemovePinned(expected,selection!,null,driveType,ct,async()=>{await turn.WaitAsync(ct);held=true;});
+            if(result.Outcome==RemovalOutcome.Removed && !expected.IsFolder) await store.DisarmAsync(pair.PairId,selection!,null,ct);
+            return result;
+        }
+        finally { if(held) turn.Release(); }
     }
-    private Task<RemovalResult> RemovePinned(Entry expected,RemovalSelection selection,StageProof? stage,DriveType driveType,CancellationToken ct)
+    private Task<RemovalResult> RemovePinned(Entry expected,RemovalSelection selection,StageProof? stage,DriveType driveType,CancellationToken ct,Func<Task> enter)
     {
         if(selection.Proof.VolumeId!=Domain(Bound)) throw new ChangedUnderneathException(expected.Path);
-        return new RecycleBin(()=>store.ArmAsync(pair.PairId,selection,stage,ct),scope())
+        return new RecycleBin(async()=>{await enter();return await store.ArmAsync(pair.PairId,selection,stage,ct);},scope())
             .RemoveAsync(pair.LocalRoot,driveType,expected,selection,ct);
     }
     public Task<RemovalResult> EnsureFolderAsync(string path,CancellationToken ct)=>CreateFolder(path,false,ct);

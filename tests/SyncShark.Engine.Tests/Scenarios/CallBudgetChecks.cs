@@ -1,5 +1,6 @@
 using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Run;
+using Massdex.SyncShark.Engine.Tests.Executor;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Scenarios;
@@ -359,9 +360,39 @@ public static class CallBudgetChecks
         Exact(Transfer(pc), 0, "partial folder delete pc work");
     }
 
-    // STOPPED: a refusal split is a Dropbox batch reply (FailDropboxTooManyFiles) that FakeSide does not model;
-    // its child-fan-out counting needs a batch-answer double.
-    public static Task RefusedFolderSplitAsync(int size) => throw new NotImplementedException();
+    // A Dropbox folder delete refused with too-many-files (the real recursive-delete refusal) splits into one
+    // delete per child plus the parent's final delete; the refused recursive attempt costs no provider call. The
+    // fan-out is fixed by the fixture's child count, so it does not grow with the unrelated population `size`.
+    public static async Task RefusedFolderSplitAsync(int size)
+    {
+        var pair = ItemChecks.Pair(); var paths = Paths(pair);
+        var (store, pc, cloud, _) = await SteadyAsync(pair, size);
+        const string root = "folder";
+        var folder = ItemChecks.File(Side.Dropbox, root, 0, "cd-folder", folder: true);
+        cloud.Seed(folder, []);
+        var children = new[] { "folder/a", "folder/b" };
+        foreach (var name in children) cloud.Seed(ItemChecks.File(Side.Dropbox, name, 1, "cd-" + name), [1]);
+        Boundary(pc); Boundary(cloud);
+        bool refused = false;
+        var deleting = FolderDeleteChecks.Observe.On(cloud, (op, args) =>
+        {
+            // One permanent too-many-files refusal on the recursive root delete; children then delete individually.
+            if (op == nameof(ISide.DeleteAsync) && args.Length == 4 && ((Entry)args[0]!).Path == root && !refused)
+            {
+                refused = true;
+                throw new ItemFailedException(root, TextKey.FailDropboxTooManyFiles, null) { Disposition = FailureDisposition.Permanent };
+            }
+            return null;
+        });
+        var result = await new FolderDelete().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, folder, null, Side.Dropbox,
+            ActionKind.DeleteDropbox, pc, deleting, store, _ => [],
+            static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default, coversThrough: _ => true);
+        Check.Require(result.Outcome == RemovalOutcome.Removed, "Refused folder split did not settle");
+        Check.Require(!cloud.Items.ContainsKey(root) && children.All(c => !cloud.Items.ContainsKey(c)), "Refused folder split left an entry");
+        // One delete per child, then the parent's final delete: the refused recursive delete cost no provider call.
+        Exact(cloud.Requests[nameof(ISide.DeleteAsync)], children.Length + 1, "refused folder split child deletes");
+        Exact(Transfer(pc), 0, "refused folder split pc work");
+    }
 
     public static async Task PcRecycleNoteAsync(int size)
     {
@@ -379,19 +410,59 @@ public static class CallBudgetChecks
         Check.Require(!pc.Items.ContainsKey(root) && pc.History.Any(v => v.Entry.Path == root), "PC folder not recycled into history");
     }
 
-    // R94-PENDING: BeginScan now works on the double, so these folder move/merge cases reach the physical-hop Repair.
-    // But the merge's source cleanup runs FolderDelete, which under a standalone Repair retains the removal before
-    // DeleteAsync (coversThrough is hard-coded null until R94(b) adds WorkQueue.ProofNow), so the queue waits for a
-    // settlement with no live reader and the 30s scenario deadline expires (harness-f1: A23/A24/A36 hang). They wait
-    // on R94(b). The destination-create and child-move counts are readable only once the enclosing Repair settles.
-    public static Task MoveOrMergeDestinationAsync(int size) => throw new NotImplementedException();
+    // A folder move/merge moves the written side's children to the destination by identity (no content transfer)
+    // and removes the source in one folder delete. The destination move and the source removal are counted
+    // separately, and both are fixed by the fixture so neither grows with the unrelated population `size`.
+    public static async Task MoveOrMergeDestinationAsync(int size)
+    {
+        var pair = ItemChecks.Pair(); var paths = Paths(pair);
+        var (store, pc, cloud, _) = await SteadyAsync(pair, size);
+        var source = ItemChecks.File(Side.Local, "old", 0, "source", folder: true);
+        var dest = source with { Path = "new", Id = "dest" };
+        var child = ItemChecks.File(Side.Local, "old/free", 1, "file");
+        var peer = ItemChecks.File(Side.Dropbox, "old/free", 1, "peer");
+        pc.Seed(source, []); pc.Seed(dest, []); pc.Seed(child, [1]); cloud.Seed(peer, [1]);
+        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(child, peer), null, null, default);
+        Boundary(pc); Boundary(cloud);
+        var result = await new FolderMerge().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, source, dest, Side.Local, pc, cloud, store,
+            _ => [], static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default, coversThrough: _ => true);
+        Check.Require(pc.Items.TryGetValue("new/free", out var moved) && moved.Entry.Id == "file", "Move or merge did not move the child by identity");
+        Exact(pc.Requests[nameof(ISide.MoveAsync)], 1, "merge destination child move");
+        Exact(pc.Requests[nameof(ISide.DeleteAsync)], 1, "merge source folder delete");
+        Exact(ContentTransfer(pc) + ContentTransfer(cloud), 0, "merge content transfer");
+        Check.Require(!pc.Items.ContainsKey("old") && result.Outcome == RemovalOutcome.Removed, "Merge did not settle the source");
+    }
     // R94-PENDING: the refused-move child fan-out reaches the same FolderMerge source cleanup as above (R94(b)).
     public static Task MoveRefusalSubdivideAsync(int size) => throw new NotImplementedException();
     // R94-PENDING: the mapped-range compare precedes a folder repath whose source cleanup is the same held removal
     // under standalone Repair (R94(b)); the compare itself is read-only but the enclosing Repair cannot settle.
     public static Task MappedRangeBeforeRepathAsync(int size) => throw new NotImplementedException();
-    // R94-PENDING: source cleanup is FolderDelete's post-merge step, the same held removal that R94(b) lets complete.
-    public static Task SourceCleanupAsync(int size) => throw new NotImplementedException();
+    // Source cleanup after a merge is one folder delete on the source side, not one delete per moved child; the
+    // destination moves are counted separately and are fixed by the fixture, so none grows with `size`.
+    public static async Task SourceCleanupAsync(int size)
+    {
+        var pair = ItemChecks.Pair(); var paths = Paths(pair);
+        var (store, pc, cloud, _) = await SteadyAsync(pair, size);
+        var source = ItemChecks.File(Side.Local, "old", 0, "source", folder: true);
+        var dest = source with { Path = "new", Id = "dest" };
+        pc.Seed(source, []); pc.Seed(dest, []);
+        var names = new[] { "a", "b" };
+        foreach (var name in names)
+        {
+            var child = ItemChecks.File(Side.Local, $"old/{name}", 1, $"file-{name}");
+            var peer = ItemChecks.File(Side.Dropbox, $"old/{name}", 1, $"peer-{name}");
+            pc.Seed(child, [1]); cloud.Seed(peer, [1]);
+            await store.CommitAsync(pair.PairId, null, SyncedEntries.From(child, peer), null, null, default);
+        }
+        Boundary(pc); Boundary(cloud);
+        var result = await new FolderMerge().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, source, dest, Side.Local, pc, cloud, store,
+            _ => [], static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default, coversThrough: _ => true);
+        foreach (var name in names) Check.Require(pc.Items.ContainsKey($"new/{name}"), $"Source cleanup lost moved child {name}");
+        Exact(pc.Requests[nameof(ISide.DeleteAsync)], 1, "source cleanup folder deletes");
+        Exact(pc.Requests[nameof(ISide.MoveAsync)], names.Length, "source cleanup destination moves");
+        Exact(ContentTransfer(pc) + ContentTransfer(cloud), 0, "source cleanup content transfer");
+        Check.Require(!pc.Items.ContainsKey("old") && result.Outcome == RemovalOutcome.Removed, "Source cleanup left the source folder");
+    }
 
     // ---- Folder-job checks --------------------------------------------------------------------------------
     // One scripted delete job settles on its first check; each check is one read of the returned job.

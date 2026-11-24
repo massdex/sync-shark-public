@@ -24,7 +24,8 @@ public static class PairRunnerChecks
         using var db=new InMemoryStateStore(); var calls=new List<PairConfig>();
         var local=new FakeSide(Side.Local){Root=(roots.Local,null,pair.Drive,DriveType.Fixed)};
         var remote=new FakeSide(Side.Dropbox){Root=(null,roots.Dropbox,null,null)};
-        var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(p,_,_,_)=>{calls.Add(p);return(local,remote);},
+        var ledger=System.Reflection.DispatchProxy.Create<IStore,HostChecks.PublicationStore>(); var tap=(HostChecks.PublicationStore)(object)ledger;tap.Store=db;
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(ledger),(p,_,_,_)=>{calls.Add(p);return(local,remote);},
             ItemChecks.Settings,new HostChecks.MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
         await host.AddPairAsync(pair with {Enabled=false,Roots=null},default);
         if(calls.Count<2 || calls[^1].Roots!=roots) wrong.Add("first add retained its unbound adapters");
@@ -32,8 +33,9 @@ public static class PairRunnerChecks
         catch(EngineRequestException e) when(e.Key==TextKey.PairDisabled) { }
         catch(NotImplementedException) {wrong.Add("disabled pair reached Repair");}
         var configured=await db.PairAsync(pair.PairId,default); await db.SavePairAsync(configured! with {Enabled=true},default);
-        try {await host.RepairAsync(pair.PairId,default);} catch(NotImplementedException) { /* The request must already be durable before execution. */ }
-        if((await db.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason==null) wrong.Add("requested Repair not durable");
+        bool read=false; tap.ReadDropboxDebt=reason=>{if(!read){read=true;Check.Require(reason=="requested","requested Repair not durable at execution entry");}};
+        await host.RepairAsync(pair.PairId,default);
+        Check.Require(read && (await db.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason==null,"Completed Repair did not retire the requested debt");
         var cloudFailure=System.Reflection.DispatchProxy.Create<ISide,HostChecks.JournalProbe>(); var probe=(HostChecks.JournalProbe)(object)cloudFailure;
         probe.Local=remote; probe.FailRoot=true; local.Root=(roots.Local,null,new(2,5,9),DriveType.Fixed);
         var gated=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_)=>(local,cloudFailure),ItemChecks.Settings,new HostChecks.MemoryLogs(),TimeProvider.System,
