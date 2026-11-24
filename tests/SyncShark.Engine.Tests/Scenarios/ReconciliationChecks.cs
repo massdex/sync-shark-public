@@ -165,36 +165,73 @@ public static class ReconciliationChecks
         [new(Original,2), new(Label(Original,Side.Dropbox,At(3)),3)],
         [new(Original,3), new(Label(Original,Side.Local,At(2)),2)],
         2, [TextKey.InfoKeptBoth], pastFirstSync:true);
-    // A Tie resolution commits the chosen side's current version to both endpoints and preserves the displaced
-    // version (mirrors Executor/ResolveChecks RemovalProof through the reviewed subject).
-    private static async Task ResolveTieAsync(ResolutionChoice choice)
+    // A03: a kept-both notice names all four endpoints (both originals and each side's labelled copy). Resolving by a
+    // side must keep the chosen bytes at both originals, retire both labelled copies, retain them, keep one surviving
+    // binding and close the notice (mirrors Executor/ResolveChecks ReviewedEndpoints' four-endpoint fixture).
+    private static async Task ResolveKeptBothAsync(ResolutionChoice choice)
     {
         var pair = ItemChecks.Pair();
+        var scope = new PathScope(pair, [pair], DriveType.Fixed);
         using var store = new InMemoryStateStore();
         var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
+        var queue = new WorkQueue();
         var pc = ItemChecks.File(Side.Local, "item", 1, "pc");
         var db = ItemChecks.File(Side.Dropbox, "item", 2, "db");
-        local.Seed(pc, [1]); remote.Seed(db, [2]);
-        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(pc, db), null, null, default);
-        await store.SaveNoticeAsync(pair.PairId, new(0, NoticeKind.Tie, TextKey.TieEqualTimes, "item",
-            new([new(Side.Local, pc.Path, pc.Id), new(Side.Dropbox, db.Path, db.Id)], null), DateTimeOffset.UnixEpoch, false), default);
-        var reviewed = store.OpenNotices.Single();
-        var source = choice == ResolutionChoice.UseLocal ? local : remote;
-        var target = choice == ResolutionChoice.UseLocal ? remote : local;
-        source.Items["item"] = (ItemChecks.File(source.Side, "item", 3, source.Items["item"].Entry.Id), [3]);
-        var displaced = ItemChecks.File(target.Side, "item", 4, target.Items["item"].Entry.Id);
-        target.Items["item"] = (displaced, [4]);
-        var outcome = await new Resolve().ApplyAsync(pair, ItemChecks.Settings, _ => { },
-            new PathScope(pair, [pair], DriveType.Fixed), reviewed, choice, null, local, remote, store, null!, null!, default);
-        Check.Require(outcome == EffectOutcome.Applied && store.OpenNotices.Count == 0 &&
-            local.Items["item"].Bytes.SequenceEqual(new byte[]{3}) && remote.Items["item"].Bytes.SequenceEqual(new byte[]{3}) &&
-            target.History.Any(v => v.Entry == displaced && v.Bytes.SequenceEqual(new byte[]{4})) &&
-            store.Records.Values.Single() == SyncedEntries.From(local.Items["item"].Entry, remote.Items["item"].Entry),
-            $"{choice} did not commit the selected version to both endpoints and preserve the displaced content");
+        var dbLabel = ItemChecks.File(Side.Dropbox, "pc-label", 1, "db-label");
+        var pcLabel = ItemChecks.File(Side.Local, "db-label", 2, "pc-label");
+        local.Seed(pc, [1]); remote.Seed(db, [2]); remote.Seed(dbLabel, [1]); local.Seed(pcLabel, [2]);
+        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(pc, dbLabel), null, null, default);
+        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(pcLabel, db), null, null, default);
+        var items = new List<NoticeItem> { new(Side.Local, pc.Path, pc.Id), new(Side.Dropbox, db.Path, db.Id),
+            new(Side.Dropbox, dbLabel.Path, dbLabel.Id), new(Side.Local, pcLabel.Path, pcLabel.Id) };
+        await store.SaveNoticeAsync(pair.PairId, new(0, NoticeKind.Info, TextKey.InfoKeptBoth, "item", new(items, null), DateTimeOffset.UnixEpoch, false), default);
+        var outcome = await new Resolve().ApplyAsync(pair, ItemChecks.Settings, _ => { }, scope, store.OpenNotices.Single(),
+            choice, null, local, remote, store, ItemChecks.Population(pair, scope, local, remote, store),
+            ItemChecks.Hop(pair, scope, queue, local, remote, store), default, queue.Held);
+        var chosen = choice == ResolutionChoice.UseLocal ? (byte)1 : (byte)2;
+        Check.Require(outcome == EffectOutcome.Applied, $"{choice} did not settle the kept-both notice");
+        Check.Require(local.Items.Count == 1 && remote.Items.Count == 1 &&
+            local.Items["item"].Bytes.SequenceEqual(new[]{chosen}) && remote.Items["item"].Bytes.SequenceEqual(new[]{chosen}),
+            $"{choice} did not keep the chosen bytes at both originals");
+        Check.Require(!local.Items.ContainsKey("db-label") && !remote.Items.ContainsKey("pc-label"),
+            $"{choice} left a labelled copy in place");
+        Check.Require(local.History.Any(v => v.Entry.Id == pcLabel.Id) && remote.History.Any(v => v.Entry.Id == dbLabel.Id),
+            $"{choice} did not retain the displaced labelled copies");
+        Check.Require(store.Records.Values.Single() == SyncedEntries.From(local.Items["item"].Entry, remote.Items["item"].Entry),
+            $"{choice} did not keep exactly one surviving binding");
+        Check.Require(store.OpenNotices.Count == 0, $"{choice} left the notice open");
     }
-    public static Task A03ResolveUsePcAsync() => ResolveTieAsync(ResolutionChoice.UseLocal);
-    public static Task A03ResolveUseDropboxAsync() => ResolveTieAsync(ResolutionChoice.UseDropbox);
-    public static Task A03ResolveKeepBothAsync() => throw new NotImplementedException();
+    public static Task A03ResolveUsePcAsync() => ResolveKeptBothAsync(ResolutionChoice.UseLocal);
+    public static Task A03ResolveUseDropboxAsync() => ResolveKeptBothAsync(ResolutionChoice.UseDropbox);
+    // A03: keep-both acknowledges the kept-both notice without moving or removing any of the four endpoints
+    // (Planner.Resolutions.For returns no actions for InfoKeptBoth + KeepBoth).
+    public static async Task A03ResolveKeepBothAsync()
+    {
+        var pair = ItemChecks.Pair();
+        var scope = new PathScope(pair, [pair], DriveType.Fixed);
+        using var store = new InMemoryStateStore();
+        var local = new FakeSide(Side.Local); var remote = new FakeSide(Side.Dropbox);
+        var queue = new WorkQueue();
+        var pc = ItemChecks.File(Side.Local, "item", 1, "pc");
+        var db = ItemChecks.File(Side.Dropbox, "item", 2, "db");
+        var dbLabel = ItemChecks.File(Side.Dropbox, "pc-label", 1, "db-label");
+        var pcLabel = ItemChecks.File(Side.Local, "db-label", 2, "pc-label");
+        local.Seed(pc, [1]); remote.Seed(db, [2]); remote.Seed(dbLabel, [1]); local.Seed(pcLabel, [2]);
+        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(pc, dbLabel), null, null, default);
+        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(pcLabel, db), null, null, default);
+        var items = new List<NoticeItem> { new(Side.Local, pc.Path, pc.Id), new(Side.Dropbox, db.Path, db.Id),
+            new(Side.Dropbox, dbLabel.Path, dbLabel.Id), new(Side.Local, pcLabel.Path, pcLabel.Id) };
+        await store.SaveNoticeAsync(pair.PairId, new(0, NoticeKind.Info, TextKey.InfoKeptBoth, "item", new(items, null), DateTimeOffset.UnixEpoch, false), default);
+        var outcome = await new Resolve().ApplyAsync(pair, ItemChecks.Settings, _ => { }, scope, store.OpenNotices.Single(),
+            ResolutionChoice.KeepBoth, null, local, remote, store, ItemChecks.Population(pair, scope, local, remote, store),
+            ItemChecks.Hop(pair, scope, queue, local, remote, store), default, queue.Held);
+        Check.Require(outcome == EffectOutcome.Applied && store.OpenNotices.Count == 0, "Resolving keep-both did not acknowledge the notice");
+        Check.Require(local.Items.Count == 2 && remote.Items.Count == 2 &&
+            local.Items["item"].Bytes.SequenceEqual(new byte[]{1}) && local.Items["db-label"].Bytes.SequenceEqual(new byte[]{2}) &&
+            remote.Items["item"].Bytes.SequenceEqual(new byte[]{2}) && remote.Items["pc-label"].Bytes.SequenceEqual(new byte[]{1}),
+            "Resolving keep-both moved or removed an original or a labelled copy");
+        Check.Require(store.Records.Count == 2, "Resolving keep-both changed the surviving bindings");
+    }
     public static Task A03ResolveRenamePcAsync() => throw new NotImplementedException();
     public static Task A03ResolveRenameDropboxAsync() => throw new NotImplementedException();
     // One kept-both notice names all four endpoints: both originals and each side's labelled copy (PLAN A03).
@@ -306,18 +343,51 @@ public static class ReconciliationChecks
             !side.Items.ContainsKey(goal.DropboxPath) && !side.Items.ContainsKey(folder.Path),
             "Receipt did not match the actual physical temporary entry");
     }
-    // No physical case hop may compare or commit a temporary spelling as the binding; the logical binding is unchanged.
+    // A case-only rename is one logical binding move over two physical hops. Driving it through Effects (the executor
+    // that persists bindings) proves the store never commits the temporary spelling and the surviving binding uses the
+    // requested spelling (PLAN A27).
     public static async Task A27NoTemporaryBindingAsync()
     {
-        var side = new FakeSide(Side.Dropbox);
-        var folder = ItemChecks.File(Side.Dropbox, "old", 0, "folder", true);
-        side.Seed(folder, []);
-        var binding = SyncedEntries.From(folder with { Id = "pc" }, folder);
-        var start = new Scope("OLD", folder.Path); var goal = new Scope("OLD", "OLD");
-        var seen = new List<SyncedEntry>();
-        await new CaseRename().MoveAsync(side, folder, goal.DropboxPath, ItemChecks.Settings.CaseRenameSuffix, binding, start,
-            (saved, _, _, _) => { seen.Add(saved); return Task.CompletedTask; }, default);
-        Check.Require(seen.Count == 2 && seen.All(s => s == binding), "A physical case hop compared or committed a temporary binding");
+        var pair = ItemChecks.Pair();
+        var pc = new FakeSide(Side.Local); var side = new FakeSide(Side.Dropbox);
+        var pcFolder = ItemChecks.File(Side.Local, "item", 0, "pc-folder", true);
+        var folder = ItemChecks.File(Side.Dropbox, "item", 0, "folder", true);
+        pc.Seed(pcFolder, []); side.Seed(folder, []);
+        using var store = new InMemoryStateStore();
+        var saved = SyncedEntries.From(pcFolder, folder);
+        await store.CommitAsync(pair.PairId, null, saved, null, null, default);
+        var commits = new List<SyncedEntry?>();
+        var recording = CommitRecorder.On(store, commits.Add);
+        var row = new Row(saved.LocalKey, pcFolder, folder, saved, [], null, RowContext.Neutral);
+        var outcome = await new Effects().ApplyAsync(pair, ItemChecks.Settings, _ => { }, new PathScope(pair, [pair], DriveType.Fixed),
+            new global::Massdex.SyncShark.Engine.Planner.SyncAction(ActionKind.MoveDropbox, row, Target: "ITEM"),
+            pc, side, recording, (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, default);
+        var temporary = PathNames.CaseRenamePath("ITEM", ItemChecks.Settings.CaseRenameSuffix);
+        Check.Require(outcome == EffectOutcome.Applied, "A bound case-only rename did not apply");
+        Check.Require(side.Items.Values.Single().Entry.Path == "ITEM", "The physical folder did not land on the requested spelling");
+        var final = store.Records.Values.Single();
+        Check.Require(final.DropboxPath == "ITEM" && final.DropboxId == folder.Id, "The persisted binding did not use the requested spelling and identity");
+        Check.Require(commits.All(c => c is null || c.DropboxPath != temporary), "A temporary spelling was persisted as a binding");
+        Check.Require(commits.Any(c => c is { } done && done.DropboxPath == "ITEM"), "No store binding write named the final spelling");
+    }
+    // Records every committed binding so a temporary case-rename spelling would surface if the store ever saw it.
+    public class CommitRecorder : System.Reflection.DispatchProxy
+    {
+        private IStore target = null!;
+        private Action<SyncedEntry?> capture = null!;
+        internal static IStore On(IStore target, Action<SyncedEntry?> capture)
+        {
+            var proxy = Create<IStore, CommitRecorder>();
+            ((CommitRecorder)(object)proxy).target = target;
+            ((CommitRecorder)(object)proxy).capture = capture;
+            return proxy;
+        }
+        protected override object? Invoke(System.Reflection.MethodInfo? method, object?[]? args)
+        {
+            if (method!.Name == nameof(IStore.CommitAsync)) capture((SyncedEntry?)args![2]);
+            try { return method.Invoke(target, args); }
+            catch (System.Reflection.TargetInvocationException ex) when (ex.InnerException != null) { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
+        }
     }
     public static Task A28ExcludeKeepPcAsync() => throw new NotImplementedException();
     public static Task A28ExcludeKeepCloudAsync() => throw new NotImplementedException();
@@ -373,47 +443,58 @@ public static class ReconciliationChecks
     public static Task A29OtherMatchingRuleRemainsAsync() => throw new NotImplementedException();
     public static Task A29IgnoredChildTravelsWithFolderAsync() => throw new NotImplementedException();
     public static Task A32ValidRenameClosesNoticeAsync() => throw new NotImplementedException();
-    // A33 (ordering pinned by Run/WorkQueueChecks.RunAsync): a departure must run before the arrival that
-    // reuses its path, and an earlier prerequisite before both, so the queue never creates then re-moves.
+    // A33 (ordering pinned by Run/WorkQueueChecks.RunAsync): a departure must run before the arrival that reuses its
+    // path, and an earlier prerequisite before both. Each case holds a change behind a gate and requires the exact
+    // receipt order, so a missing departure cannot pass as "nothing before the arrival" (myIndex test).
+    private static (WorkQueue Queue, PairConfig Pair, Change Arrival, Change Prerequisite, Change Departure) A33()
+    {
+        var pair = ItemChecks.Pair();
+        var version = ItemChecks.File(Side.Dropbox, "remote/item", 1, "child");
+        var first = new Change(Side.Dropbox, ChangeKind.Changed, "remote/item", null, version.Id, version, false, false);
+        return (new WorkQueue(), pair,
+            first with { Kind = ChangeKind.Renamed, OldPath = "a", Path = "b" },
+            first with { Path = "b/child" },
+            first with { Kind = ChangeKind.Renamed, OldPath = "b", Path = "c" });
+    }
+    private static bool Taken(List<string> applied, string path) { lock (applied) return applied.Contains(path); }
     public static Task A33DepartureBeforeArrivalAsync() =>
         global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
         {
-            var queue = new WorkQueue(); var pair = ItemChecks.Pair();
-            var version = ItemChecks.File(Side.Dropbox, "remote/item", 1, "child");
-            var first = new Change(Side.Dropbox, ChangeKind.Changed, "remote/item", null, version.Id, version, false, false);
-            var arrival = first with { Kind = ChangeKind.Renamed, OldPath = "a", Path = "b" };
-            var departure = first with { Kind = ChangeKind.Renamed, OldPath = "b", Path = "c" };
+            var (queue, pair, arrival, _, departure) = A33();
             var applied = new List<string>();
-            await queue.AdmitAsync(pair, new([arrival, departure], "moved", null),
-                (change, _) => { lock (applied) applied.Add(change.Path!); return Task.CompletedTask; }, null, deadline);
-            Check.Require(applied.IndexOf("c") < applied.IndexOf("b"), "The departure ran after the arrival that reuses its path (A33)");
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var page = queue.AdmitAsync(pair, new([arrival, departure], "moved", null),
+                async (change, ct) => { if (change.Path == "c") await gate.Task.WaitAsync(ct); lock (applied) applied.Add(change.Path!); }, null, deadline);
+            Check.Require(!page.IsCompleted && !Taken(applied, "b"), "The arrival ran before the departure it reuses a path from (A33)");
+            gate.SetResult();
+            await page;
+            Check.Require(applied.SequenceEqual(new[] { "c", "b" }), "The departure did not run before the arrival that reuses its path (A33)");
         });
     public static Task A33EarlierPrerequisiteBeforeDepartureAsync() =>
         global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
         {
-            var queue = new WorkQueue(); var pair = ItemChecks.Pair();
-            var version = ItemChecks.File(Side.Dropbox, "remote/item", 1, "child");
-            var first = new Change(Side.Dropbox, ChangeKind.Changed, "remote/item", null, version.Id, version, false, false);
-            var arrival = first with { Kind = ChangeKind.Renamed, OldPath = "a", Path = "b" };
-            var prerequisite = first with { Path = "b/child" };
-            var departure = first with { Kind = ChangeKind.Renamed, OldPath = "b", Path = "c" };
+            var (queue, pair, arrival, prerequisite, departure) = A33();
             var applied = new List<string>();
-            await queue.AdmitAsync(pair, new([arrival, prerequisite, departure], "moved", null),
-                (change, _) => { lock (applied) applied.Add(change.Path!); return Task.CompletedTask; }, null, deadline);
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var page = queue.AdmitAsync(pair, new([arrival, prerequisite, departure], "moved", null),
+                async (change, ct) => { if (change.Path == "b/child") await gate.Task.WaitAsync(ct); lock (applied) applied.Add(change.Path!); }, null, deadline);
+            Check.Require(!page.IsCompleted && !Taken(applied, "c") && !Taken(applied, "b"), "The prerequisite did not hold its departure and arrival (A33)");
+            gate.SetResult();
+            await page;
             Check.Require(applied.SequenceEqual(new[] { "b/child", "c", "b" }), "An earlier prerequisite did not precede its departure and arrival (A33)");
         });
     public static Task A33NoReciprocalWaitAsync() =>
         global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
         {
-            var queue = new WorkQueue(); var pair = ItemChecks.Pair();
-            var version = ItemChecks.File(Side.Dropbox, "remote/item", 1, "child");
-            var first = new Change(Side.Dropbox, ChangeKind.Changed, "remote/item", null, version.Id, version, false, false);
-            var arrival = first with { Kind = ChangeKind.Renamed, OldPath = "a", Path = "b" };
-            var departure = first with { Kind = ChangeKind.Renamed, OldPath = "b", Path = "c" };
+            var (queue, pair, arrival, _, departure) = A33();
             var applied = new List<string>();
-            await queue.AdmitAsync(pair, new([arrival, departure], "moved", null),
-                (change, _) => { lock (applied) applied.Add(change.Path!); return Task.CompletedTask; }, null, deadline);
-            Check.Require(applied.Count == 2, "Departure and arrival waited on each other instead of settling (A33)");
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var page = queue.AdmitAsync(pair, new([arrival, departure], "moved", null),
+                async (change, ct) => { if (change.Path == "c") await gate.Task.WaitAsync(ct); lock (applied) applied.Add(change.Path!); }, null, deadline);
+            Check.Require(!page.IsCompleted && !Taken(applied, "b"), "The arrival proceeded while the departure was still unsettled (A33)");
+            gate.SetResult();
+            await page;
+            Check.Require(applied.SequenceEqual(new[] { "c", "b" }), "Departure and arrival waited on each other instead of settling (A33)");
         });
     public static Task A34SameSizeSameSecondAsync()
     {
