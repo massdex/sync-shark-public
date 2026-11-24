@@ -249,7 +249,7 @@ public sealed class Dispatcher
             {
                 var entry = receipt.Entry;
                 if (route == DropboxProtocol.Upload && entry is not null)
-                    DropboxReply.ValidateUploadResult(entry, item.Member.Path, item.Upload!.Total, item.Digest ?? item.Upload.ContentHash!);
+                    DropboxEntries.ValidateUploadResult(entry, item.Member.Path, item.Upload!.Total, item.Digest ?? item.Upload.ContentHash!);
                 bool proven = entry is not null && !string.IsNullOrEmpty(entry.Id) && (route switch
                 {
                     DropboxProtocol.Delete => entry.Id == item.Member.Id,

@@ -450,7 +450,7 @@ public sealed partial class DropboxEntries
     internal static partial Entry RequireLive(JsonElement metadata, PairConfig pair,
         string? untaggedKind, string acceptedFileTag);
 
-    internal static partial void ValidateUploadResult(Entry returned, string requestedPath,
+    public static partial void ValidateUploadResult(Entry returned, string requestedPath,
         long uploadedBytes, string uploadedHash);
 
     /// <summary>Retains only winning metadata fields until one complete item can reach Parse or RequireLive.</summary>
@@ -636,14 +636,14 @@ public sealed partial class DropboxEntries
 
     /// <summary>The live entry a write reply must carry; a tombstone is a decode failure.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static Entry RequireLive(JsonElement metadata, PairConfig pair, string? untaggedKind) =>
+    public static Entry RequireLive(JsonElement metadata, PairConfig pair, string? untaggedKind) =>
         RequireLive(metadata, pair, untaggedKind, "file");
 
     internal static partial Entry RequireLive(JsonElement metadata, PairConfig pair,
         string? untaggedKind, string acceptedFileTag) =>
         Parse(metadata, pair, untaggedKind, acceptedFileTag).Entry ?? throw new JsonException();
 
-    internal static partial void ValidateUploadResult(Entry returned, string requestedPath,
+    public static partial void ValidateUploadResult(Entry returned, string requestedPath,
         long uploadedBytes, string uploadedHash)
     {
         if (returned.IsFolder || string.IsNullOrEmpty(returned.Path) ||

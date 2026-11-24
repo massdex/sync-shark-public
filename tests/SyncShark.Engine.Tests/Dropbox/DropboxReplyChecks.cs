@@ -41,9 +41,9 @@ public static class DropboxReplyChecks
         try { await DropboxReply.ReadAsync(bad, DropboxReplyShapes.Page(pair), default); throw new InvalidDataException("Published before EOF"); }
         catch (JsonException) { /* Trailing content invalidated the complete page. */ }
         using var untagged = JsonDocument.Parse("""{"path_display":"/Parent/Child","size":2,"client_modified":"2020-01-01T00:00:00Z","id":"one","rev":"rev"}""");
-        var live = DropboxReply.Metadata(untagged.RootElement, pair, "file") with { ContentHash = new string('a', 64) };
-        DropboxReply.ValidateUploadResult(live, "child", 2, live.ContentHash);
-        try { DropboxReply.ValidateUploadResult(live, "Other", 2, live.ContentHash); }
+        var live = DropboxEntries.RequireLive(untagged.RootElement, pair, "file") with { ContentHash = new string('a', 64) };
+        DropboxEntries.ValidateUploadResult(live, "child", 2, live.ContentHash);
+        try { DropboxEntries.ValidateUploadResult(live, "Other", 2, live.ContentHash); }
         catch (ItemFailedException) { return; }
         throw new InvalidDataException("Unrelated upload receipt accepted");
     }

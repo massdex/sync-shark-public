@@ -267,14 +267,6 @@ public sealed partial class DropboxReply<T>
 /// <summary>Consumes the complete response before publishing a typed result.</summary>
 public static class DropboxReply
 {
-    /// <summary>Read returned live metadata using the endpoint's optional implicit kind.</summary>
-    public static Entry Metadata(JsonElement response, PairConfig pair, string? untaggedKind = null) =>
-        DropboxEntries.RequireLive(response, pair, untaggedKind);
-
-    /// <summary>Reject a receipt that does not identify the bytes and target supplied.</summary>
-    public static void ValidateUploadResult(Entry returned, string requestedPath, long uploadedBytes, string uploadedHash) =>
-        DropboxEntries.ValidateUploadResult(returned, requestedPath, uploadedBytes, uploadedHash);
-
     // Transfer chunk, not a receive-size limit; the 0.3.95 streaming chunk SyncContentIdentity.DefaultReadBufferBytes retains.
     internal const int ChunkBytes = 128 * 1024;
 
