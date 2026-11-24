@@ -20,7 +20,7 @@ public sealed class DeletedNames
         using var cmd=StorageCommand.Create(db,tx,sql,"$p",pair);using var row=cmd.ExecuteReader();
         if(!row.Read())throw new InvalidOperationException(Text.Get(TextKey.PairUnknown,(TextArg.Pair,pair)));
         int origin=row.GetOrdinal("origin"), cursor=row.GetOrdinal("cursor"), owed=row.GetOrdinal("owed");
-        return(row.GetString(origin),row.IsDBNull(cursor)?null:row.GetString(cursor),row.GetBoolean(owed));
+        return(row.GetString(0),row.IsDBNull(cursor)?null:row.GetString(cursor),row.GetBoolean(owed));
     }
     internal void Forget(string pair, Guid scan) => cursors.TryRemove((pair, scan), out _);
     internal static byte[] Token(string pair, Guid scan) => [..scan.ToByteArray(), ..System.Text.Encoding.UTF8.GetBytes(pair)];
