@@ -44,13 +44,11 @@ public static class StoreChecks
             var fixture=CSharpSyntaxTree.ParseText(string.Join(Environment.NewLine,"class Probe {",example,"public void Run() {} }"),options).GetRoot().DescendantNodes().OfType<MethodDeclarationSyntax>().Single();
             if (Summary(fixture)!=null) violations.Add("#6 rejected-documentation fixture accepted");
         }
-        if(source.Contains("ForeignKeys = true",StringComparison.Ordinal)) violations.Add("#5 mutable connection configuration before version acceptance");
+        if(new[]{source, File.ReadAllText(Path.Combine(storage,"ScanScratch.cs"))}.Any(text => text.Contains("ForeignKeys = true",StringComparison.Ordinal))) violations.Add("#5 mutable connection configuration before version acceptance");
         var ingest=methods.OfType<MethodDeclarationSyntax>().Single(m=>m.Identifier.ValueText=="IngestAsync");
         var add=ingest.DescendantNodes().OfType<InvocationExpressionSyntax>().Single(x=>x.Expression.ToString()=="scan.AddScanAsync");
         if(!add.ArgumentList.Arguments.Any(a=>a.Expression.ToString()=="gate")) violations.Add("#2 no shared writer admission for scan batches");
         var reset = methods.OfType<MethodDeclarationSyntax>().Single(m=>m.Identifier.ValueText==nameof(IStore.ResetJournalAsync));
-        if(reset.DescendantNodes().OfType<IdentifierNameSyntax>().Any(n=>n.Identifier.ValueText=="affectedPairs"))
-            violations.Add("Journal reset used a caller snapshot instead of transaction-time durable membership");
         var visibility=methods.OfType<MethodDeclarationSyntax>().SingleOrDefault(m=>m.Identifier.ValueText==nameof(IStore.UpdateNoticeVisibilityAsync));
         if(visibility==null || !visibility.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(call=>call.Expression.ToString()=="notices.UpdateNoticeVisibilityAsync" &&
             call.Ancestors().OfType<InvocationExpressionSyntax>().Any(outer=>outer.Expression.ToString()=="Locked")))
@@ -97,7 +95,7 @@ public static class StoreChecks
         {
             using var stop=new CancellationTokenSource(); stop.Cancel();
             var notice=new Notice(1,NoticeKind.Info,TextKey.InfoMovedEdited,"x",new([],null),DateTimeOffset.UnixEpoch,false);
-            foreach(var call in new Func<Task>[] { ()=>store.ResetJournalAsync("42",new(1,2),[],"gap",stop.Token),
+            foreach(var call in new Func<Task>[] { ()=>store.ResetJournalAsync("42",new(1,2),"gap",stop.Token),
                 ()=>store.UpdateNoticeVisibilityAsync("p",notice,true,stop.Token) })
             {
                 try { await call(); violations.Add("Cancelled writer admission returned success"); }
@@ -150,6 +148,7 @@ public static class StoreChecks
             if ((long)count.ExecuteScalar()! != 2) throw new InvalidDataException("Concurrent acknowledgements lost.");
         }
         finally { directory.Delete(recursive:true); }
+        await MalformedPairIsolatedAsync();
     }
     // Only members without a documented interface rule need a local behavior phrase.
     private static string? MemberRule(string owner,string member) => (owner,member) switch
@@ -219,8 +218,14 @@ public static class StoreChecks
         await CheckMove(replaced,null,true,true);
     });
 
-    /// <summary>Applied notice writes mark replaced and new members, never stale or unrelated slots.</summary>
-    public static Task NoticeFreshnessAsync() => WithImage(async (store,sql) =>
+    /// <summary>Applied notice writes mark replaced and new members, never stale or unrelated slots; a paused notice reader does not block a checkpoint.</summary>
+    public static async Task NoticeFreshnessAsync()
+    {
+        await NoticeWritesAsync();
+        await PausedNoticeReaderAllowsCheckpointAsync();
+    }
+
+    private static Task NoticeWritesAsync() => WithImage(async (store,sql) =>
     {
         Notice At(NoticeKind kind,TextKey cause,string member,int tick,string path="file") => new(0,kind,cause,path,
             new([new(Side.Local,member,member)],null),DateTimeOffset.UnixEpoch.AddTicks(tick),false);
@@ -342,11 +347,11 @@ public static class StoreChecks
             UPDATE pair SET def_json='{"Roots":{"Local":{"VolumeSerialNumber":42}}}' WHERE pair_id='p';
             INSERT INTO pair(pair_id,def_json) VALUES('late','{"Roots":{"Local":{"VolumeSerialNumber":42}}}'),('outside','{"Roots":{"Local":{"VolumeSerialNumber":7}}}');
             """; sql.ExecuteNonQuery();
-        var pos=new JournalPosition(3,7); await store.ResetJournalAsync("42",pos,["p","outside"],"gap",default);
+        var pos=new JournalPosition(3,7); await store.ResetJournalAsync("42",pos,"gap",default);
         Check.Require(await store.PositionAsync("42",default)==pos && await store.ReadRepairAsync("p",Side.Local,default)==(1L,"gap") &&
             await store.ReadRepairAsync("late",Side.Local,default)==(1L,"gap") && await store.ReadRepairAsync("outside",Side.Local,default)==(0L,null),"Cursor and durable debts did not commit together");
         sql.CommandText="CREATE TRIGGER fail_gap BEFORE UPDATE ON source_state BEGIN SELECT RAISE(ABORT,'synthetic gap failure'); END;"; sql.ExecuteNonQuery();
-        try { await store.ResetJournalAsync("42",new(8,9),[],"next",default); throw new InvalidDataException("Reset did not propagate debt failure"); }
+        try { await store.ResetJournalAsync("42",new(8,9),"next",default); throw new InvalidDataException("Reset did not propagate debt failure"); }
         catch(SqliteException e) when (e.SqliteErrorCode==19) { }
         Check.Require(await store.PositionAsync("42",default)==pos && await store.ReadRepairAsync("p",Side.Local,default)==(1L,"gap") && await store.ReadRepairAsync("late",Side.Local,default)==(1L,"gap"),"Failed reset leaked cursor or debt");
         var notice=new Notice(0,NoticeKind.Info,TextKey.InfoMovedEdited,"file",new([new(Side.Local,"member","id")],null),DateTimeOffset.UnixEpoch,false);
@@ -358,6 +363,40 @@ public static class StoreChecks
         Check.Require(await store.UpdateNoticeVisibilityAsync("p",saved,true,default) && store.ScanTouched("p",id,Side.Local,"member",false) && (await store.NoticeAsync("p",saved.Id,default))?.Ignored==true,"Matched visibility lost its result, write or touch");
         id=Guid.NewGuid(); store.BeginScan("p",id);
         Check.Require(await store.UpdateNoticeVisibilityAsync("p",saved,false,default) && store.ScanTouched("p",id,Side.Local,"member",false) && (await store.NoticeAsync("p",saved.Id,default))?.Ignored==false,"Unignore did not restore visibility and publish its mark");
+    });
+
+    private static Task MalformedPairIsolatedAsync() => WithImage(async (store, sql) =>
+    {
+        var valid = new PairConfig("healthy", "Example", "left", "/right", "connection", [], [], FirstRunPolicy.NewestWins, true, null);
+        await store.SavePairAsync(valid, default);
+        sql.CommandText = """UPDATE pair SET def_json='{"x":1}' WHERE pair_id='p'""";
+        sql.ExecuteNonQuery();
+        for (var pass = 0; pass < 2; pass++)
+        {
+            var ids = new List<string>();
+            await foreach (var pair in store.PairsAsync(default)) ids.Add(pair.PairId);
+            Check.Require(ids.SequenceEqual([valid.PairId]), "Malformed pair prevented healthy pair enumeration");
+            var failures = new List<Notice>();
+            await foreach (var notice in store.NoticesAsync("p", default)) failures.Add(notice);
+            Check.Require(failures is [{ Kind: NoticeKind.Failure, Cause: TextKey.StateRootBindingInvalid }], "Malformed pair needs exactly one failure notice");
+        }
+        Check.Require(await store.RemovePairAsync("p", default) == null, "Malformed pair could not be removed");
+        sql.CommandText = "SELECT count(*) FROM pair WHERE pair_id='p'";
+        Check.Require((long)sql.ExecuteScalar()! == 0, "Malformed pair row survived removal");
+    });
+
+    private static Task PausedNoticeReaderAllowsCheckpointAsync() => WithImage(async (store, sql) =>
+    {
+        foreach (var path in new[] { "first", "second" })
+            await store.SaveNoticeAsync("p", new(0, NoticeKind.Info, TextKey.InfoMovedEdited, path, new([], null), DateTimeOffset.UnixEpoch, false), default);
+        await using var notices = store.NoticesAsync("p", default).GetAsyncEnumerator();
+        Check.Require(await notices.MoveNextAsync() && notices.Current.Path == "first", "Expected first notice before checkpoint");
+        var entry = new SyncedEntry("A", "a", "A", "a", false, "42", 0, 0, "remote", "opaque");
+        await store.CommitAsync("p", null, entry, null, null, default);
+        sql.CommandText = "PRAGMA wal_checkpoint(PASSIVE)";
+        using (var result = sql.ExecuteReader())
+            Check.Require(result.Read() && result.GetInt32(1) > 0 && result.GetInt32(1) == result.GetInt32(2), "Paused notice reader pinned committed WAL frames");
+        Check.Require(await notices.MoveNextAsync() && notices.Current.Path == "second" && !await notices.MoveNextAsync(), "Paused notice reader lost or repeated its remaining row");
     });
 
     private static async Task WithImage(Func<IStore,SqliteCommand,Task> run)

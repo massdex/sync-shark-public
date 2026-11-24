@@ -8,9 +8,7 @@ public sealed class Store : IStore
 {
     private SqliteConnection Connection { get; }
     private readonly SemaphoreSlim gate = new(1);
-    private readonly string connectionString;
-    private readonly string scratch;
-    private bool attached;
+    private readonly ScanScratch scratch;
     private readonly Committer committer=new();
     private readonly PairTable pairs = new();
     private readonly RecordTable records = new();
@@ -18,7 +16,13 @@ public sealed class Store : IStore
     private readonly ScanTable scan = new();
     private readonly EngineSettings settings;
     /// <summary>Stream configured pairs.</summary>
-    public IAsyncEnumerable<PairConfig> PairsAsync(CancellationToken ct) => Stream(db => pairs.PairsAsync(db, settings.StoragePageSize, ct), false, ct);
+    public async IAsyncEnumerable<PairConfig> PairsAsync([EnumeratorCancellation] CancellationToken ct)
+    {
+        var malformed = new List<string>();
+        await foreach (var pair in scratch.Stream(db => pairs.PairsAsync(db, settings.StoragePageSize, malformed, ct), false, ct)) yield return pair;
+        foreach (var id in malformed)
+            await SaveNoticeAsync(id, new(0, NoticeKind.Failure, TextKey.StateRootBindingInvalid, string.Empty, new([], null), DateTimeOffset.UtcNow, false), ct);
+    }
     /// <summary>Read one pair by identifier.</summary>
     public Task<PairConfig?> PairAsync(string pairId, CancellationToken ct) => Locked(() => pairs.ReadAsync(Connection, pairId, ct), ct);
     /// <summary>Publishes configuration and each distinct returned footprint at its owner in one transaction, advancing the existing Repair revision even if the same scope was already owed.</summary>
@@ -40,14 +44,14 @@ public sealed class Store : IStore
     /// <summary>Binding projections include the saved PC publication journal and boundary; only the dirty owner compares them.</summary>
     public Task<SyncedEntry?> FindAsync(string pairId, Side side, string key, CancellationToken ct) => Locked(() => records.FindAsync(Connection, pairId, side, key, ct), ct);
     /// <summary>Stream bindings sharing an endpoint identity.</summary>
-    public IAsyncEnumerable<SyncedEntry> ByIdAsync(string pairId, Side side, string id, CancellationToken ct) => Stream(db => records.ByIdAsync(db, pairId, side, id, settings.StoragePageSize, ct), false, ct);
+    public IAsyncEnumerable<SyncedEntry> ByIdAsync(string pairId, Side side, string id, CancellationToken ct) => scratch.Stream(db => records.ByIdAsync(db, pairId, side, id, settings.StoragePageSize, ct), false, ct);
     /// <summary>Stream recorded descendants.</summary>
-    public IAsyncEnumerable<SyncedEntry> DescendantsAsync(string pairId, Side side, string key, CancellationToken ct) => Stream(db => records.DescendantsAsync(db, pairId, side, key, settings.StoragePageSize, ct), false, ct);
+    public IAsyncEnumerable<SyncedEntry> DescendantsAsync(string pairId, Side side, string key, CancellationToken ct) => scratch.Stream(db => records.DescendantsAsync(db, pairId, side, key, settings.StoragePageSize, ct), false, ct);
     /// <summary>Commit the record change and spend the exact acknowledged historical deletion key atomically, even when neither side has a previous binding. Without a new publication keep the carried boundary only on a same-PC-identity relink.</summary>
     /// <remarks>Producers await admission and durable settlement before submitting more work.</remarks>
     public Task CommitAsync(string pairId, SyncedEntry? before, SyncedEntry? after, JournalPosition? publication, string? spentDeletedKey, CancellationToken ct) => committer.QueueAsync(Connection, gate, settings.StoreBatchRows, pairId, before, after, publication, spentDeletedKey, () => TouchChange(pairId, before, after), ct);
     /// <summary>Stream notices for a pair.</summary>
-    public IAsyncEnumerable<Notice> NoticesAsync(string pairId, CancellationToken ct) => Stream(db => notices.ListAsync(db, pairId, settings.StoragePageSize, ct), false, ct);
+    public IAsyncEnumerable<Notice> NoticesAsync(string pairId, CancellationToken ct) => scratch.Stream(db => notices.ListAsync(db, pairId, settings.StoragePageSize, ct), false, ct);
     /// <summary>Save by pair, path and kind with the members. An unrelated Failure cannot replace a PutBack notice. Within the same PutBack slot, the newest put-back failure at that path replaces its predecessor.</summary>
     /// <remarks>Store publishes only the committed write and its actual displaced footprint.</remarks>
     public Task SaveNoticeAsync(string pairId, Notice notice, CancellationToken ct) => Locked(async () =>
@@ -101,7 +105,7 @@ public sealed class Store : IStore
     /// <summary>Persist the accepted job.</summary>
     public Task SaveJobAsync(AcceptedJob job, CancellationToken ct) => Locked(() => pairs.SaveJobAsync(Connection, job, ct), ct);
     /// <summary>Read unsettled jobs.</summary>
-    public IAsyncEnumerable<AcceptedJob> JobsAsync(string pairId, CancellationToken ct) => Stream(db => pairs.JobsAsync(db, pairId, ct), false, ct);
+    public IAsyncEnumerable<AcceptedJob> JobsAsync(string pairId, CancellationToken ct) => scratch.Stream(db => pairs.JobsAsync(db, pairId, ct), false, ct);
     /// <summary>Retire a settled job.</summary>
     public Task SettleJobAsync(AcceptedJob job, CancellationToken ct) => Locked(() => pairs.SettleJobAsync(Connection, job, ct), ct);
     /// <summary>Persist the selected victim and stage proof.</summary>
@@ -114,13 +118,9 @@ public sealed class Store : IStore
     public Task AddScanAsync(string pairId, Guid scanId, Side side, IAsyncEnumerable<Listed> rows, Func<string>? terminalHistoryCursor, CancellationToken ct) => IngestAsync(pairId, scanId, side, rows, terminalHistoryCursor, ct);
     /// <summary>Project the notice and cause for each kind at the path. No compare outcome settles PutBack: only its own Retry or a later change of that same item can.</summary>
     /// <remarks>The stream does not hold the writer.</remarks>
-    public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct) => Stream(db => scan.CompareAsync(db, pairId, scanId, scope, evidence, settings.StoragePageSize, ct), true, ct);
+    public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct) => scratch.Stream(db => scan.CompareAsync(db, pairId, scanId, scope, evidence, settings.StoragePageSize, ct), true, ct);
     /// <summary>Discard the scan and its unpublished cursor.</summary>
-    public Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct) => Locked(async () =>
-    {
-        EnsureScratch();
-        await scan.ClearScanAsync(Connection, pairId, scanId, ct);
-    }, ct);
+    public Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct) => Locked(() => scan.ClearScanAsync(scratch.Ensure(Connection), pairId, scanId, ct), ct);
     /// <summary>Close the store connection.</summary>
     public void Dispose() => Connection.Dispose();
 
@@ -128,25 +128,9 @@ public sealed class Store : IStore
     public Store(string path, bool readOnly, EngineSettings settings)
     {
         this.settings=settings;
-        scratch = Path.GetFullPath(path) + ".scan";
-        connectionString = new SqliteConnectionStringBuilder { DataSource = Path.GetFullPath(path), Pooling = false,
-            Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite }.ToString();
-        Connection = OpenConnection();
-        try
-        {
-            using var version = StorageCommand.Create(Connection, null, "PRAGMA user_version");
-            var actual = Convert.ToInt64(version.ExecuteScalar());
-            if (actual != Schema.Version) throw new InvalidDataException(Text.Get(
-                actual > Schema.Version ? TextKey.StateSchemaTooNew : TextKey.StateSchemaTooOld, (TextArg.Path,path)));
-            if (!readOnly)
-            {
-                using var pragmas = StorageCommand.Create(Connection, null, Schema.Pragmas);
-                pragmas.ExecuteNonQuery();
-            }
-        }
-        catch { Connection.Dispose(); throw; }
+        scratch = new ScanScratch(path, readOnly);
+        Connection = scratch.OpenWriter();
     }
-
 
     /// <summary>Read the persisted full-first-Repair bit and last summary without inferring them from record count.</summary>
     public Task<(bool FirstRepairDone, string? LastRepairJson)> RepairStateAsync(string pairId, CancellationToken ct) => Locked(() => pairs.RepairStateAsync(Connection, pairId, ct), ct);
@@ -155,32 +139,18 @@ public sealed class Store : IStore
     public Task<(string? Cursor, bool Owed)> DeletedHistoryAsync(string pairId, CancellationToken ct) => Locked(() => scan.History.ReadStateAsync(Connection, pairId, ct), ct);
 
     /// <summary>Read history state for the active scan after verifying the saved history.</summary>
-    public Task<(string? Cursor, bool Owed)> DeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct) => Locked(() =>
-    {
-        EnsureScratch();
-        return scan.History.ReadStateAsync(Connection,pairId,scanId,ct);
-    }, ct);
+    public Task<(string? Cursor, bool Owed)> DeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct) => Locked(() => scan.History.ReadStateAsync(scratch.Ensure(Connection),pairId,scanId,ct), ct);
 
     /// <summary>Fold only this completed history acquisition and publish its own terminal cursor with it. An ordinary or incomplete scan cannot publish history.</summary>
-    public Task PublishDeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct) => Locked(async () =>
-    {
-        EnsureScratch();
-        await scan.History.PublishAsync(Connection, pairId, scanId, ct);
-    }, ct);
+    public Task PublishDeletedHistoryAsync(string pairId, Guid scanId, CancellationToken ct) => Locked(() => scan.History.PublishAsync(scratch.Ensure(Connection), pairId, scanId, ct), ct);
 
     /// <summary>A spent delta masks the name in both the current acquisition and published history.</summary>
     public Task<bool> DeletedNameAsync(string pairId, Guid? scanId, string key, CancellationToken ct) => Locked(() =>
-    {
-        if (scanId.HasValue) EnsureScratch();
-        return scan.History.ContainsAsync(Connection, pairId, scanId, key, ct);
-    }, ct);
+        scan.History.ContainsAsync(scanId.HasValue ? scratch.Ensure(Connection) : Connection, pairId, scanId, key, ct), ct);
 
     /// <summary>Read unspent history for a file or folder candidate.</summary>
     public Task<bool> DeletedNameAsync(string pairId, Guid? scanId, string key, bool isFolder, CancellationToken ct) => Locked(() =>
-    {
-        if (scanId.HasValue) EnsureScratch();
-        return scan.History.ContainsAsync(Connection, pairId, scanId, key, isFolder, ct);
-    }, ct);
+        scan.History.ContainsAsync(scanId.HasValue ? scratch.Ensure(Connection) : Connection, pairId, scanId, key, isFolder, ct), ct);
 
     /// <summary>Publish the single receiving-side keep-both link and its notice atomically.</summary>
     public Task CommitKeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, Notice notice, CancellationToken ct) =>
@@ -204,12 +174,12 @@ public sealed class Store : IStore
     }, ct);
 
     /// <summary>Indexed exact-path notice lookup; no whole-pair notice scan on the item path.</summary>
-    public IAsyncEnumerable<Notice> NoticesAtAsync(string pairId, string pathKey, CancellationToken ct) => Stream(db => notices.NoticesAtAsync(db, pairId, pathKey, ct), false, ct);
+    public IAsyncEnumerable<Notice> NoticesAtAsync(string pairId, string pathKey, CancellationToken ct) => scratch.Stream(db => notices.NoticesAtAsync(db, pairId, pathKey, ct), false, ct);
     /// <summary>On lost journal continuity only, install the fresh volume boundary and increment the Local Repair revision/reason of every durably bound member of that volume in one transaction; select members at commit, not from the caller snapshot.</summary>
-    public Task ResetJournalAsync(string volume, JournalPosition fresh, IReadOnlyList<string> affectedPairs, string reason, CancellationToken ct) => Locked(async () =>
+    public Task ResetJournalAsync(string volume, JournalPosition fresh, string reason, CancellationToken ct) => Locked(async () =>
     {
         using var tx=Connection.BeginTransaction(deferred:false);
-        await pairs.ResetJournalAsync(tx, volume, fresh, [], reason, ct);
+        await pairs.ResetJournalAsync(tx, volume, fresh, reason, ct);
         tx.Commit();
     }, ct);
     /// <summary>On Dropbox reset only, install its fresh cursor and increment that pair’s Dropbox Repair revision/reason in one transaction.</summary>
@@ -220,13 +190,13 @@ public sealed class Store : IStore
         tx.Commit();
     }, ct);
     /// <summary>Stream the existing scan’s move candidates before ordinary differences, ordered by shallowest candidate of the binding then by binding so all its observed sides are adjacent.</summary>
-    public IAsyncEnumerable<RenameCandidate> RenamesAsync(string pairId, Guid scanId, Scope? scope, CancellationToken ct) => Stream(db => scan.RenamesAsync(db, pairId, scanId, scope, settings.StoragePageSize, ct), true, ct);
+    public IAsyncEnumerable<RenameCandidate> RenamesAsync(string pairId, Guid scanId, Scope? scope, CancellationToken ct) => scratch.Stream(db => scan.RenamesAsync(db, pairId, scanId, scope, settings.StoragePageSize, ct), true, ct);
     /// <summary>Replace the old link with both new links and their notice in one transaction.</summary>
     public Task CommitKeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry second, Notice notice, CancellationToken ct) => KeepBothAsync(pairId, before, first, second, notice, ct);
     /// <summary>In one transaction match the reviewed drive notice and publish the chosen pair; only FirstSync resets bindings and first Repair.</summary>
     public Task<bool> ResolveDriveAsync(PairConfig pair, Notice reviewed, ResolutionChoice choice, CancellationToken ct) => Locked(() => pairs.ResolveDriveAsync(Connection, pair, reviewed, choice, ct), ct);
     /// <summary>Stream notices whose members overlap the mapped footprint on their own side, including covering ancestors.</summary>
-    public IAsyncEnumerable<Notice> NoticesUnderAsync(string pairId, Scope footprint, CancellationToken ct) => Stream(db => notices.NoticesUnderAsync(db, pairId, footprint, settings.StoragePageSize, ct), false, ct);
+    public IAsyncEnumerable<Notice> NoticesUnderAsync(string pairId, Scope footprint, CancellationToken ct) => scratch.Stream(db => notices.NoticesUnderAsync(db, pairId, footprint, settings.StoragePageSize, ct), false, ct);
     /// <summary>Add or retire only this observed link member; close the pair-wide link notice only when no members remain.</summary>
     public Task UpdateLinkMemberAsync(string pairId, NoticeItem member, bool present, CancellationToken ct) => Locked(async () =>
     {
@@ -296,50 +266,11 @@ public sealed class Store : IStore
         scan.Touch(pairId, Side.Dropbox, PathNames.DropboxKey(path), false);
     }
 
-    private SqliteConnection OpenConnection()
-    {
-        var db = new SqliteConnection(connectionString);
-        try
-        {
-            db.Open();
-            db.CreateFunction("pathkey", (string path) => PathNames.Key(path), isDeterministic: true);
-            return db;
-        }
-        catch { db.Dispose(); throw; }
-    }
-
-    private void EnsureScratch()
-    {
-        if (attached) return;
-        // ATTACH inherits the open-existing flags of main. Create only the disposable scan image first.
-        using (var scratchDb = new SqliteConnection(new SqliteConnectionStringBuilder {
-            DataSource = scratch, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString())) scratchDb.Open();
-        AttachScratch(Connection);
-        try
-        {
-            using var sql = StorageCommand.Create(Connection, null, "PRAGMA scan_state.journal_mode=WAL;" + Schema.CreateScan);
-            sql.ExecuteNonQuery();
-            attached = true;
-        }
-        catch
-        {
-            using var detach = StorageCommand.Create(Connection, null, "DETACH scan_state");
-            detach.ExecuteNonQuery();
-            throw;
-        }
-    }
-
-    private void AttachScratch(SqliteConnection db)
-    {
-        using var attach = StorageCommand.Create(db, null, "ATTACH DATABASE $path AS scan_state", "$path", scratch);
-        attach.ExecuteNonQuery();
-    }
-
     private async Task IngestAsync(string pairId, Guid id, Side side, IAsyncEnumerable<Listed> rows, Func<string>? cursor, CancellationToken ct)
     {
-        await Locked(() => { EnsureScratch(); return Task.CompletedTask; }, ct);
-        using var db = OpenConnection();
-        AttachScratch(db);
+        await Locked(() => { scratch.Ensure(Connection); return Task.CompletedTask; }, ct);
+        using var db = scratch.OpenConnection();
+        scratch.Attach(db);
         await scan.AddScanAsync(db, pairId, id, side, rows, cursor, settings.StoreBatchRows, gate, ct);
     }
 
@@ -357,14 +288,5 @@ public sealed class Store : IStore
         try { return await run(); }
         catch (SqliteException e) when (e.SqliteErrorCode == SQLitePCL.raw.SQLITE_FULL) { throw SqliteFull.Normalize(e); }
         finally { gate.Release(); }
-    }
-
-    // Readers may commit while visiting a row: never lend them the writer or hold its gate across yield.
-    private async IAsyncEnumerable<T> Stream<T>(Func<SqliteConnection,IAsyncEnumerable<T>> read, bool scanRows,
-        [EnumeratorCancellation] CancellationToken ct)
-    {
-        using var db = OpenConnection();
-        if (scanRows) AttachScratch(db);
-        await foreach (var row in read(db).WithCancellation(ct)) yield return row;
     }
 }

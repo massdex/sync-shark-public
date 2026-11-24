@@ -39,56 +39,56 @@ public sealed class Committer
                 start = !draining;
                 draining = true;
             }
-            if (start) _ = Task.Run(DrainAsync);
+            if (start) _ = Task.Run(() => DrainAsync(db, gate));
             await done.Task;
         }
         finally { slots.Release(); }
+    }
 
-        async Task DrainAsync()
+    private async Task DrainAsync(SqliteConnection db, SemaphoreSlim gate)
+    {
+        while (true)
         {
-            while (true)
-            {
-                await gate.WaitAsync();
-                try
-                {
-                    List<(Func<SqliteTransaction,Task> Apply, Action Published, TaskCompletionSource Done)> group;
-                    lock (pending)
-                    {
-                        if (pending.Count == 0) { draining=false; return; }
-                        group = [..pending];
-                        pending.Clear();
-                    }
-                    await FlushAsync(group);
-                }
-                finally { gate.Release(); }
-            }
-        }
-
-        async Task FlushAsync(List<(Func<SqliteTransaction,Task> Apply, Action Published, TaskCompletionSource Done)> group)
-        {
+            await gate.WaitAsync();
             try
             {
-                using var tx=db.BeginTransaction(deferred:false);
-                try { foreach (var item in group) await item.Apply(tx); }
-                catch (Exception e) when (group.Count>1 && e is OperationCanceledException or ChangedUnderneathException or InvalidDataException or SqliteException { SqliteErrorCode: SQLitePCL.raw.SQLITE_CONSTRAINT })
+                List<(Func<SqliteTransaction,Task> Apply, Action Published, TaskCompletionSource Done)> group;
+                lock (pending)
                 {
-                    // Retry independent items only after a confirmed rollback, never after COMMIT or callback failure.
-                    tx.Rollback();
-                    foreach(var item in group) await FlushAsync([item]);
-                    return;
+                    if (pending.Count == 0) { draining=false; return; }
+                    group = [..pending];
+                    pending.Clear();
                 }
-                tx.Commit();
+                await FlushAsync(db, group);
             }
-            catch (Exception e)
+            finally { gate.Release(); }
+        }
+    }
+
+    private static async Task FlushAsync(SqliteConnection db, List<(Func<SqliteTransaction,Task> Apply, Action Published, TaskCompletionSource Done)> group)
+    {
+        try
+        {
+            using var tx=db.BeginTransaction(deferred:false);
+            try { foreach (var item in group) await item.Apply(tx); }
+            catch (Exception e) when (group.Count>1 && e is OperationCanceledException or ChangedUnderneathException or InvalidDataException or SqliteException { SqliteErrorCode: SQLitePCL.raw.SQLITE_CONSTRAINT })
             {
-                foreach(var item in group) item.Done.TrySetException(SqliteFull.Normalize(e));
+                // Retry independent items only after a confirmed rollback, never after COMMIT or callback failure.
+                tx.Rollback();
+                foreach(var item in group) await FlushAsync(db, [item]);
                 return;
             }
-            foreach(var item in group)
-            {
-                try { item.Published(); item.Done.TrySetResult(); }
-                catch(Exception e) { item.Done.TrySetException(e); }
-            }
+            tx.Commit();
+        }
+        catch (Exception e)
+        {
+            foreach(var item in group) item.Done.TrySetException(SqliteFull.Normalize(e));
+            return;
+        }
+        foreach(var item in group)
+        {
+            try { item.Published(); item.Done.TrySetResult(); }
+            catch(Exception e) { item.Done.TrySetException(e); }
         }
     }
 

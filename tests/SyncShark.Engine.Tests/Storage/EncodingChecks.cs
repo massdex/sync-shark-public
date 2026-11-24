@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Data.Sqlite;
 using Codec = Massdex.SyncShark.Engine.Storage.Encoding;
 
@@ -77,7 +79,28 @@ public static class EncodingChecks
             throw new InvalidDataException("Deleted names changed in the stored block.");
         block[^1] ^= 1;
         Reject(() => Codec.DecodeDeletedNames(new MemoryStream(block), names.Length, names[^1], null).ToArray());
+        PersistedEnumNumbersFrozen();
         return Task.CompletedTask;
+    }
+
+    private static void PersistedEnumNumbersFrozen()
+    {
+        var engine = Path.Combine(Environment.GetEnvironmentVariable("GITHUB_WORKSPACE") ?? Environment.CurrentDirectory, "src", "SyncShark.Engine");
+        Verify<Side>(["Local", "Dropbox"]);
+        Verify<NoticeKind>(["Failure", "Tie", "NameClash", "Info", "Skipped", "DriveChange", "RootIdentity", "PutBack"]);
+        Verify<IssueSubject.FirstRunDeletionKind>(["None", "Item", "UnscannedSubtree", "PreserveWithHistoryNotice"]);
+
+        void Verify<T>(string[] wireOrder) where T : struct, Enum
+        {
+            var type = typeof(T);
+            var name = type.Name;
+            var file = Path.Combine(engine, (type.DeclaringType?.Name ?? name) + ".cs");
+            if (type.DeclaringType == typeof(IssueSubject) && !File.Exists(file)) file = Path.Combine(engine, "Notice.cs");
+            var declaration = CSharpSyntaxTree.ParseText(File.ReadAllText(file)).GetRoot().DescendantNodes()
+                .OfType<EnumDeclarationSyntax>().Single(e => e.Identifier.ValueText == name);
+            Check.Require(Enum.GetNames<T>().SequenceEqual(wireOrder) && Enum.GetValues<T>().Select(v => Convert.ToInt32(v)).SequenceEqual(Enumerable.Range(0, wireOrder.Length)) &&
+                declaration.Members.All(m => m.EqualsValue is not null), "Persisted enum numbers must remain explicit and unchanged: " + name);
+        }
     }
 
     private static void Reject(Action read)
