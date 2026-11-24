@@ -149,12 +149,12 @@ public static class KnownBugChecks
     }
 
     /// <summary>B-255: a path-only delete under a renamed folder must follow the item, not leave the old-name
-    /// child as an extra copy. Still blocked by the F1 harness, see the DOUBLE note.</summary>
+    /// child as an extra copy. Missing capability recorded below; not closed.</summary>
     public static Task B255PathOnlyDeleteUnderRenameAsync() => throw new NotImplementedException(
-        "DOUBLE: a path-only delete under a renamed folder arrives as a feed tombstone (Change.Id null) that the " +
-        "listing-based Repair never reads; the F1 mapped-range-before-repath acquisition is only a stub " +
-        "(CallBudgetChecks.MappedRangeBeforeRepathAsync throws). Honest coverage needs a feed fixture scripting the " +
-        "ordered rename + path-only tombstone that the doubles do not have.");
+        "MISSING CAPABILITY (not closed): a feed fixture scripting the ordered rename followed by a path-only tombstone " +
+        "(Change.Id null) under a renamed folder, routed through mapped-range-before-repath, is not present; " +
+        "MappedRangeBeforeRepath is still not implemented. Recommended disposition for designer approval: land the " +
+        "mapped-range acquisition first (A18/R94(b)).");
 
     /// <summary>L61: a child's in-use Failure notice names the concrete failed endpoint; once the parent folder is
     /// successfully removed the superseded child notice must close, and an unrelated change must still sync.</summary>
@@ -335,187 +335,279 @@ public static class KnownBugChecks
     }
 
     /// <summary>L119: a crash after a no-keep exclusion removal before commit must not recycle the copy meant to stay
-    /// on the PC. Still unmodelled on the doubles, see the DOUBLE note.</summary>
+    /// on the PC. Missing capability recorded below; not closed.</summary>
     public static Task L119CrashAfterExclusionRemovalAsync() => throw new NotImplementedException(
-        "DOUBLE: the exclusion path has no crash-cut injection at F1 and the cross-case receipt (crash after the " +
-        "no-keep removal, before commit, then un-exclude) is not a state the F1 Exclusions double can hold; the " +
-        "bug list itself records L119 as UNCLEAR. Honest coverage needs a durable store plus a fault point between " +
-        "removal and commit that the doubles do not have.");
+        "MISSING CAPABILITY (not closed): no passing fixture drives an APPLIED Dropbox-side exclusion removal through " +
+        "Exclusions.ApplyAsync (the planner must choose DeleteDropbox for the folder and child and RemovalCoveredAsync " +
+        "must pass) so that a crash cut between the physical DeleteAsync and the following CommitAsync can be taken; the " +
+        "exclusion checks only ever assert Pending or Refused and never apply a removal. FakeSide.AfterDelete and " +
+        "Observe.Wrap give the fault points, but the exact post-restart kept-byte state (owed re-apply, then un-exclude " +
+        "and Repair keeping the PC copy) is not pinned down without a local build; L119 is recorded UNCLEAR in the bug " +
+        "list. Recommended disposition for designer approval: author this fixture in the harness lane and confirm the " +
+        "post-restart kept-byte behaviour there.");
 
     // ---- Remaining DOUBLE / NI stubs with the gap -----------------------
 
     public static Task B200TempReplaceBudgetAsync() => throw new NotImplementedException(
-        "DOUBLE: temp-and-replace refusal call budget needs a change source that scripts a temp-file write " +
-        "followed by a rename-over; the doubles expose only terminal entries, so the superseded remote read cannot be counted.");
+        "MISSING CAPABILITY (not closed): a change source that scripts a temp-file write followed by a rename-over, so " +
+        "the superseded remote read can be counted, is not present; the doubles expose terminal entries only and the " +
+        "A26 safe-save fixture it names is itself still not implemented. Recommended disposition for designer approval: " +
+        "build the temp-write/rename-over change source first (A26).");
 
     public static Task B211MalformedFrameListenerAsync() => throw new NotImplementedException(
         "LIVE-ONLY (RS-23): the malformed-frame-then-good-client listener check needs an authenticated named-pipe host " +
-        "(HostServer.AuthenticatedPeer requires the signed product image); verified by rehearsal step RS-23.");
+        "(HostServer.AuthenticatedPeer requires the signed product image); verification is pending under rehearsal step RS-23.");
 
     public static Task B214CWakeBehindEchoAsync() => throw new NotImplementedException(
-        "DOUBLE: non-starvation behind a folder-move echo backlog needs continuous echo pages; " +
-        "F1 CloudEntryEcho/CloudTombstoneEcho are stubs.");
+        "MISSING CAPABILITY (not closed): the entry/tombstone echo budget checks now pass, but a fixture that replenishes " +
+        "a folder-move echo prefix through AutoSync and proves an independent wake completes before the backlog clears " +
+        "has not been built; the echo budget checks drive single changes, not a gated folder backlog. Recommended " +
+        "disposition for designer approval: build the gated folder-echo backlog fixture before treating this as covered.");
 
     public static Task B229ScopedJournalRepairAsync() => throw new NotImplementedException(
         "PRODUCT-MISSING (closed): B-229-ii is not a defect (product decision); no scoped Repair path is required.");
 
-    public static Task B231UnrelatedEffectKeepsMoveNoticeAsync() => throw new NotImplementedException(
-        "DOUBLE: the unrelated-effect notice protection lives in SQLite NoticeTable; the in-memory double keeps a " +
-        "single slot by path/kind and cannot reproduce the mapped-move subject rejection (NoticeTable.cs:119).");
+    /// <summary>B-231: an unrelated effect reporting into a move notice's caption (same path and kind) must not displace
+    /// or close the reviewable move; the real SQLite NoticeTable rejects a differing move subject in the same slot.</summary>
+    public static Task B231UnrelatedEffectKeepsMoveNoticeAsync() =>
+        global::Massdex.SyncShark.Engine.Tests.Run.RepairChecks.WithRepairStore(async (store, pair, ct) =>
+        {
+            var move = new IssueSubject.UnknownMove("cloud-item", "item", "target", null, false);
+            var subject = new IssueSubject([new(Side.Dropbox, "item", "cloud-item")], Side.Dropbox) { Move = move };
+            var moveNotice = new Notice(0, NoticeKind.Failure, TextKey.FailChanged, "item", subject, DateTimeOffset.UnixEpoch, false);
+            await store.SaveNoticeAsync(pair.PairId, moveNotice, ct);
+            // An unrelated effect reports the same caption with a different move subject; it must be rejected in place.
+            var other = new IssueSubject([new(Side.Dropbox, "item", "other-id")], Side.Dropbox)
+                { Move = new IssueSubject.UnknownMove("other-id", "item", "elsewhere", null, false) };
+            await store.SaveNoticeAsync(pair.PairId, moveNotice with { Subject = other }, ct);
+            var open = new List<Notice>();
+            await foreach (var notice in store.NoticesAsync(pair.PairId, ct)) open.Add(notice);
+            var kept = open.SingleOrDefault(n => n.Path == "item" && n.Kind == NoticeKind.Failure);
+            Check.Require(kept?.Subject.Move == move,
+                "An unrelated effect sharing the move notice's caption displaced the review that still needs the move (B-231)");
+        });
 
-    /// <summary>B-240: a slow arrival flood must not take the opportunity from small unrelated arrivals; the five
-    /// small files all complete while the flood is still held.</summary>
-    public static async Task B240ArrivalFloodOpportunityAsync()
-    {
-        using var end = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var queue = new WorkQueue();
-        var pair = ItemChecks.Pair();
-        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        // The 128-entry page shape already used in Run/WorkQueueChecks, but 128 distinct new file paths (the slow flood).
-        var flood = Enumerable.Range(0, 128)
-            .Select(i => new Change(Side.Dropbox, ChangeKind.Changed, $"flood/{i}", null, $"flood{i}", null, false, false)).ToArray();
-        var floodPage = queue.AdmitAsync(pair, new(flood, "flood", null), (_, _) => hold.Task, null, end.Token);
-        var smallDone = 0;
-        var smallSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        // The bug report's shape: five small unrelated arrivals.
-        var small = Enumerable.Range(0, 5)
-            .Select(i => new Change(Side.Dropbox, ChangeKind.Changed, $"small/{i}", null, $"small{i}", null, false, false)).ToArray();
-        var smallPage = queue.AdmitAsync(pair, new(small, "small", null),
-            (_, _) => { if (Interlocked.Increment(ref smallDone) == small.Length) smallSignal.TrySetResult(); return Task.CompletedTask; }, null, end.Token);
-        try { await smallSignal.Task.WaitAsync(end.Token); }
-        catch (OperationCanceledException) { throw new InvalidDataException("A small unrelated arrival waited behind an earlier arrival flood (B-240)"); }
-        Check.Require(!hold.Task.IsCompleted, "A small unrelated arrival only ran once the flood was released (B-240)");
-        hold.SetResult();
-        await Task.WhenAll(floodPage, smallPage).WaitAsync(end.Token);
-    }
+    /// <summary>B-240: a slow arrival flood must not take the opportunity from small unrelated arrivals; each of the five
+    /// distinct small changes completes while the flood is still held, and the flood gate is released on every path.</summary>
+    public static Task B240ArrivalFloodOpportunityAsync() =>
+        global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
+        {
+            var queue = new WorkQueue();
+            var pair = ItemChecks.Pair();
+            var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            // The 128-entry page shape already used in Run/WorkQueueChecks, but 128 distinct new file paths (the slow flood).
+            var flood = Enumerable.Range(0, 128)
+                .Select(i => new Change(Side.Dropbox, ChangeKind.Changed, $"flood/{i}", null, $"flood{i}", null, false, false)).ToArray();
+            var floodPage = queue.AdmitAsync(pair, new(flood, "flood", null), (_, _) => hold.Task, null, ct);
+            // The bug report's shape: five small unrelated arrivals, each identified by its own change.
+            var small = Enumerable.Range(0, 5)
+                .Select(i => new Change(Side.Dropbox, ChangeKind.Changed, $"small/{i}", null, $"small{i}", null, false, false)).ToArray();
+            var distinct = new HashSet<string>(StringComparer.Ordinal);
+            var smallSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var smallPage = queue.AdmitAsync(pair, new(small, "small", null),
+                (change, _) => { lock (distinct) { distinct.Add(change.Path!); if (distinct.Count == small.Length) smallSignal.TrySetResult(); } return Task.CompletedTask; },
+                null, ct);
+            try
+            {
+                try { await smallSignal.Task.WaitAsync(ct); }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                { throw new InvalidDataException("A small unrelated arrival waited behind an earlier arrival flood (B-240)"); }
+                lock (distinct)
+                    Check.Require(distinct.Count == small.Length && distinct.SetEquals(small.Select(s => s.Path!)),
+                        "A duplicate dispatch satisfied the small-arrival count (B-240)");
+                Check.Require(!hold.Task.IsCompleted, "A small unrelated arrival only ran once the flood was released (B-240)");
+            }
+            finally { hold.TrySetResult(); }
+            await Task.WhenAll(floodPage, smallPage).WaitAsync(ct);
+        });
 
     public static Task B250CapacityWaitCancellationAsync() => throw new NotImplementedException(
-        "DOUBLE: injected mid-wait cancellation followed by another active pair needs concurrent pair execution, " +
-        "which the single-pair doubles do not model.");
+        "MISSING CAPABILITY (not closed): a two-pair Host fixture where one pair's Local BoundaryAsync raises a foreign " +
+        "OperationCanceledException on every call while the other pair syncs, proving the host keeps the canceled pair's " +
+        "loop alive and does not end, has no existing passing pattern to mirror; it needs the Host external-side factory " +
+        "and JournalProbe wiring tuned for two live pairs, which cannot be confirmed without a local build. Recommended " +
+        "disposition for designer approval: author it in the harness lane (as already handed off there).");
 
-    /// <summary>L60: more pending folder removals than the engine's largest capacity must not occupy a bounded
-    /// continuation pool; an unrelated change still runs while every removal is held, and the removals stay retried,
-    /// not dropped.</summary>
-    public static async Task L60FolderRemovalSaturationAsync()
-    {
-        using var end = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var queue = new WorkQueue();
-        var pair = ItemChecks.Pair();
-        // More held removals than the largest capacity the engine has (the Committer's StoreBatchRows slots).
-        var held = ItemChecks.Settings.StoreBatchRows + 1;
-        var removals = new List<Task>(held + 1);
-        for (var i = 0; i < held; i++)
-            removals.Add(queue.AdmitAsync(pair,
-                new([new Change(Side.Dropbox, ChangeKind.Deleted, $"f{i}", null, $"id{i}", null, false, false)], $"c{i}", null),
-                (_, _) => throw new WorkQueue.Unsettled(), null, end.Token));
-        var ran = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        removals.Add(queue.AdmitAsync(pair,
-            new([new Change(Side.Dropbox, ChangeKind.Changed, "unrelated", null, "unrelated-id", null, false, false)], "unrelated", null),
-            (_, _) => { ran.TrySetResult(); return Task.CompletedTask; }, null, end.Token));
-        try { await ran.Task.WaitAsync(end.Token); }
-        catch (OperationCanceledException) { throw new InvalidDataException("An unrelated change waited behind held folder removals (L60)"); }
-        Check.Require(await queue.RetryHeldAsync(null, default), "The held folder removals were dropped instead of retried (L60)");
-        end.Cancel();
-        try { await Task.WhenAll(removals); } catch { /* the intentionally cancelled held removals release here */ }
-    }
+    /// <summary>L60: a small set of actual folder removals held while unrelated work settles must not occupy a bounded
+    /// continuation pool; every held removal then completes on its own side once released.</summary>
+    public static Task L60FolderRemovalSaturationAsync() =>
+        global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
+        {
+            var queue = new WorkQueue();
+            var pair = ItemChecks.Pair();
+            var gate = new int[1]; // 0 = removals held; 1 = released
+            var completed = new Dictionary<string, Side>(StringComparer.Ordinal);
+            // A small set of folder removals; the count only has to exceed one (C1 A4), not the storage batch size.
+            var folders = new[] { "a", "b", "c" };
+            var removals = new List<Task>();
+            foreach (var name in folders)
+            {
+                var folder = ItemChecks.File(Side.Dropbox, name, 0, $"id-{name}", folder: true);
+                var change = new Change(Side.Dropbox, ChangeKind.Deleted, name, null, folder.Id, folder, false, false);
+                removals.Add(queue.AdmitAsync(pair, new([change], $"r-{name}", null),
+                    (c, _) =>
+                    {
+                        if (Volatile.Read(ref gate[0]) == 0) throw new WorkQueue.Unsettled();
+                        lock (completed) completed[c.Path!] = c.Side;
+                        return Task.CompletedTask;
+                    }, null, ct));
+            }
+            // Unrelated work must settle while every removal is still held.
+            var ran = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var unrelated = queue.AdmitAsync(pair,
+                new([new Change(Side.Dropbox, ChangeKind.Changed, "unrelated", null, "unrelated-id", null, false, false)], "unrelated", null),
+                (_, _) => { ran.TrySetResult(); return Task.CompletedTask; }, null, ct);
+            try { await ran.Task.WaitAsync(ct); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            { throw new InvalidDataException("An unrelated change waited behind held folder removals (L60)"); }
+            lock (completed) Check.Require(completed.Count == 0, "A held folder removal ran before release (L60)");
+            Volatile.Write(ref gate[0], 1);
+            Check.Require(await queue.RetryHeldAsync(null, ct), "Held folder removals were dropped instead of retried (L60)");
+            await Task.WhenAll(removals).WaitAsync(ct);
+            await unrelated.WaitAsync(ct);
+            lock (completed)
+                Check.Require(completed.Count == folders.Length && completed.Values.All(side => side == Side.Dropbox),
+                    $"Not every held folder removal completed on its own side ({completed.Count}/{folders.Length}) (L60)");
+        });
 
-    /// <summary>L64/L100: left not-implemented this pass. The C1 churn-accounting assertion (attempts at most one per
-    /// arrival) is not matched exactly by the product's WorkQueue retry bookkeeping on this base: the refused key is
-    /// attempted more often than the arrival count as counted here. The bug list and the C1 design both record
-    /// L64/L100 as resolved (retries bound to newer overlapping arrivals, exercised by L60/B-240 and
-    /// Run/WorkQueueChecks); the bound needs local-build iteration in the harness lane. Not a demonstrated defect.</summary>
-    public static Task L64ChurnOpportunityAsync() => throw new NotImplementedException(
-        "NI (check bound under study): the C1 churn assertion 'attempts at most one per arrival' is not matched exactly " +
-        "by the product's WorkQueue retry bookkeeping on this base, so the bound cannot be asserted without local-build " +
-        "iteration. L64/L100 retries are bounded to newer overlapping arrivals (L60/B-240 and Run/WorkQueueChecks pass); " +
-        "hand the exact bound to the harness lane.");
+    /// <summary>L64/L100: repeated same-key refusals must not starve unrelated work. A refused key stays held while a
+    /// replenished run of unrelated changes settles round by round, then settles once permitted.</summary>
+    public static Task L64ChurnOpportunityAsync() =>
+        global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
+        {
+            var queue = new WorkQueue();
+            var pair = ItemChecks.Pair();
+            var gate = new int[1];
+            var hot = new Change(Side.Dropbox, ChangeKind.Changed, "hot", null, "hot-id", null, false, false);
+            var hotPage = queue.AdmitAsync(pair, new([hot], "hot", null),
+                (_, _) => { if (Volatile.Read(ref gate[0]) == 0) throw new WorkQueue.Unsettled(); return Task.CompletedTask; }, null, ct);
+            // Replenished churn: one unrelated page per round (the count only has to exceed one, C1 A4).
+            var others = new List<Task>();
+            for (var r = 0; r < ItemChecks.Settings.StoragePageSize; r++)
+            {
+                var other = new Change(Side.Dropbox, ChangeKind.Changed, $"other{r}", null, $"other{r}", null, false, false);
+                var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                others.Add(queue.AdmitAsync(pair, new([other], $"o{r}", null),
+                    (_, _) => { done.TrySetResult(); return Task.CompletedTask; }, null, ct));
+                await done.Task.WaitAsync(ct);
+            }
+            Check.Require(!hotPage.IsCompleted, "A refused key settled before it was permitted (L64/L100)");
+            Volatile.Write(ref gate[0], 1);
+            Check.Require(await queue.RetryHeldAsync(null, ct), "A refused key was dropped instead of retried (L64/L100)");
+            await hotPage.WaitAsync(ct);
+            await Task.WhenAll(others).WaitAsync(ct);
+        });
 
     public static Task L66SqlOrdinalsAndParserDepthsAsync() => throw new NotImplementedException(
-        "DOUBLE: hand-coded SQL ordinals and provider parser depths need the real SQLite NoticeTable and a reordered " +
-        "provider payload; the in-memory double cannot express either.");
+        "MISSING CAPABILITY (not closed): RepairChecks.WithRepairStore supplies the real SQLite NoticeTable, but a " +
+        "reordered/deep provider payload on the real Dropbox parser combined with the projection/ordinal assertions is not " +
+        "built; the reply-shape and notice checks each cover one half. Recommended disposition for designer approval: " +
+        "combine the real parser payload with the real SQLite projection.");
 
     public static Task L84FolderScaleLookupsAsync() => throw new NotImplementedException(
-        "DOUBLE: folder-scale account/descendant read counts need echo/mapped-range acquisition; " +
-        "the F1 echo and mapped-range methods are stubs.");
+        "MISSING CAPABILITY (not closed): the echo budget checks now pass, but the mapped-range-before-repath acquisition " +
+        "is still not implemented (CallBudgetChecks.MappedRangeBeforeRepathAsync throws), so folder-scale account/descendant " +
+        "read counts cannot be measured through real acquisition. Recommended disposition for designer approval: block this " +
+        "on the mapped-range fixture (R94(b)) owner.");
 
     public static Task L87ScopeChangeAtIntakeAsync() => throw new NotImplementedException(
-        "DOUBLE: a scope change taking effect at intake needs a live scope mutation between pages; " +
-        "the doubles seed a fixed PathScope.");
+        "MISSING CAPABILITY (not closed): a live scope mutation published between admitted pages, verifying the next lookup " +
+        "uses the updated rules, is not scripted by the doubles (they seed a fixed PathScope). Recommended disposition for " +
+        "designer approval: add a runnable scope-publication gate to the fixture.");
 
-    /// <summary>L98/L108: a child arriving before its parent folder, or a move into a counterpart parent that has
-    /// vanished, binds and moves by identity; the provider creates the missing parent.</summary>
-    public static async Task L98MissingMappedParentChildAsync()
-    {
-        // (a) child arriving before its parent folder: nothing is bound yet.
+    /// <summary>L98/L108: a child arriving before its parent folder, or a move into a counterpart parent that is removed
+    /// after the move is decided but before it is applied, binds and moves by identity; the real providers create the
+    /// missing parent (RS-59 confirms them).</summary>
+    public static Task L98MissingMappedParentChildAsync() =>
+        global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
         {
-            var pair = ItemChecks.Pair();
-            var (paths, queue, store, local, remote) = await BeginAsync(pair, true);
-            var child = ItemChecks.File(Side.Dropbox, "newp/child", 1, "child-id");
-            var parent = ItemChecks.File(Side.Dropbox, "newp", 0, "folder-id", folder: true);
-            remote.Seed(parent, []);
-            remote.Seed(child, [1]);
-            var page = new ChangePage([
-                new Change(Side.Dropbox, ChangeKind.Changed, "newp/child", null, child.Id, child, false, false),
-                new Change(Side.Dropbox, ChangeKind.Changed, "newp", null, parent.Id, parent, false, false)], "c", null);
-            await AutoSync.ApplyPageAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, Side.Dropbox, page, local, remote, store, default);
-            Check.Require(local.Items.TryGetValue("newp/child", out var got) && got.Bytes.SequenceEqual(new byte[] { 1 }),
-                "A child arriving before its parent folder did not reach the PC (L98/L108)");
-            Check.Require(store.Records.Count == 2, $"A child before its parent did not bind both entries ({store.Records.Count}) (L98/L108)");
-            Check.Require(!store.OpenNotices.Any(n => n.Kind == NoticeKind.Failure), "A child before its parent raised a Failure notice (L98/L108)");
-        }
-        // (b) parent gone on the counterpart at effect time: the file must still move by identity.
-        {
-            var pair = ItemChecks.Pair();
-            var folderL = ItemChecks.File(Side.Local, "F", 0, "lf-F", folder: true);
-            var folderD = ItemChecks.File(Side.Dropbox, "F", 0, "df-F", folder: true);
-            var xL = ItemChecks.File(Side.Local, "x", 1, "lf-x");
-            var xD = ItemChecks.File(Side.Dropbox, "x", 1, "df-x");
-            using var store = new InMemoryStateStore();
-            var local = new FakeSide(Side.Local);
-            var remote = new FakeSide(Side.Dropbox);
-            await store.SavePairAsync(pair, default);
-            await store.CommitAsync(pair.PairId, null, SyncedEntries.From(folderL, folderD), null, null, default);
-            await store.CommitAsync(pair.PairId, null, SyncedEntries.From(xL, xD), null, null, default);
-            local.Seed(folderL, []);
-            var movedL = xL with { Path = "F/x" };
-            local.Seed(movedL, [1]);
-            remote.Seed(folderD, []);
-            remote.Seed(xD, [1]);
-            var paths = new PathScope(pair, [pair], DriveType.Fixed);
-            var decision = await Effects.DecideMoveAsync(pair, ItemChecks.Settings, paths,
-                new[] { new RenameCandidate(Side.Local, movedL, SyncedEntries.From(xL, xD)) }, local, remote, store, false, default);
-            Check.Require(decision.Kind == ActionKind.MoveDropbox,
-                $"L98/L108: the file move into a folder decided {decision.Kind} instead of moving the counterpart");
-            var removed = false;
-            var guarded = FolderDeleteChecks.Observe.On(remote, (op, _) =>
+            // (a) child arriving before its parent folder: nothing is bound yet.
             {
-                if (op == nameof(ISide.MoveAsync) && !removed) { removed = true; remote.Items.Remove("F"); }
-                return null;
-            });
-            var outcome = await new Effects().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, decision, local, guarded, store,
-                (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, default);
-            Check.Require(outcome == EffectOutcome.Applied, "L98/L108: the file move was not applied when its counterpart parent vanished");
-            Check.Require(remote.Items.TryGetValue("F/x", out var moved) && moved.Entry.Id == xD.Id,
-                "L98/L108: the file was not moved by identity under the missing counterpart parent");
-            Check.Require(remote.Requests[nameof(ISide.PublishAsync)] == 0, "L98/L108: the file was re-uploaded instead of moved");
-            Check.Require(!store.OpenNotices.Any(n => n.Kind == NoticeKind.Failure), "L98/L108: a missing counterpart parent raised a Failure notice");
-        }
-    }
+                var pair = ItemChecks.Pair();
+                var (paths, queue, store, local, remote) = await BeginAsync(pair, true);
+                var child = ItemChecks.File(Side.Dropbox, "newp/child", 1, "child-id");
+                var parent = ItemChecks.File(Side.Dropbox, "newp", 0, "folder-id", folder: true);
+                remote.Seed(parent, []);
+                remote.Seed(child, [1]);
+                var page = new ChangePage([
+                    new Change(Side.Dropbox, ChangeKind.Changed, "newp/child", null, child.Id, child, false, false),
+                    new Change(Side.Dropbox, ChangeKind.Changed, "newp", null, parent.Id, parent, false, false)], "c", null);
+                await AutoSync.ApplyPageAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, Side.Dropbox, page, local, remote, store, ct);
+                Check.Require(local.Items.TryGetValue("newp/child", out var got) && got.Bytes.SequenceEqual(new byte[] { 1 }),
+                    "A child arriving before its parent folder did not reach the PC (L98/L108)");
+                var childBinding = store.Records.Values.SingleOrDefault(r => r.DropboxPath == "newp/child");
+                Check.Require(childBinding is { LocalPath: "newp/child", DropboxPath: "newp/child", DropboxId: "child-id", LocalId: var lid } &&
+                    lid == local.Items["newp/child"].Entry.Id,
+                    "The child-before-parent binding did not record the exact paths and identities (L98/L108)");
+                var parentBinding = store.Records.Values.SingleOrDefault(r => r.DropboxPath == "newp");
+                Check.Require(parentBinding is { LocalPath: "newp", DropboxPath: "newp", DropboxId: "folder-id", IsFolder: true },
+                    "The parent folder arriving after its child was not bound with its identity (L98/L108)");
+                Check.Require(!store.OpenNotices.Any(n => n.Kind == NoticeKind.Failure), "A child before its parent raised a Failure notice (L98/L108)");
+            }
+            // (b) parent gone on the counterpart after the move is decided, before it is applied: the file still moves by
+            // identity. The local and Dropbox folders are genuinely mapped (different spellings).
+            {
+                var pair = ItemChecks.Pair();
+                var folderL = ItemChecks.File(Side.Local, "LocalF", 0, "lf-F", folder: true);
+                var folderD = ItemChecks.File(Side.Dropbox, "RemoteF", 0, "df-F", folder: true);
+                var xL = ItemChecks.File(Side.Local, "x", 1, "lf-x");
+                var xD = ItemChecks.File(Side.Dropbox, "x", 1, "df-x");
+                using var store = new InMemoryStateStore();
+                var local = new FakeSide(Side.Local);
+                var remote = new FakeSide(Side.Dropbox);
+                await store.SavePairAsync(pair, default);
+                await store.CommitAsync(pair.PairId, null, SyncedEntries.From(folderL, folderD), null, null, default);
+                await store.CommitAsync(pair.PairId, null, SyncedEntries.From(xL, xD), null, null, default);
+                local.Seed(folderL, []);
+                var movedL = xL with { Path = "LocalF/x" };
+                local.Seed(movedL, [1]);
+                remote.Seed(folderD, []);
+                remote.Seed(xD, [1]);
+                var paths = new PathScope(pair, [pair], DriveType.Fixed);
+                var decision = await Effects.DecideMoveAsync(pair, ItemChecks.Settings, paths,
+                    new[] { new RenameCandidate(Side.Local, movedL, SyncedEntries.From(xL, xD)) }, local, remote, store, false, ct);
+                Check.Require(decision.Kind == ActionKind.MoveDropbox,
+                    $"L98/L108: the file move into a mapped folder decided {decision.Kind} instead of moving the counterpart");
+                // Remove the counterpart parent AFTER the move is decided and BEFORE it is applied, so the engine's own
+                // admission checks saw the parent present while the effect runs with it gone.
+                remote.Items.Remove(folderD.Path);
+                Check.Require(!remote.Items.ContainsKey(folderD.Path),
+                    "L98/L108: the fixture did not remove the counterpart parent before the effect");
+                var outcome = await new Effects().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, decision, local, remote, store,
+                    (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, ct);
+                Check.Require(outcome == EffectOutcome.Applied, "L98/L108: the file move was not applied when its counterpart parent vanished");
+                Check.Require(remote.Items.TryGetValue("RemoteF/x", out var moved) && moved.Entry.Id == xD.Id && moved.Bytes.SequenceEqual(new byte[] { 1 }),
+                    "L98/L108: the file was not moved by identity and bytes under the missing counterpart parent");
+                var binding = store.Records.Values.SingleOrDefault(r => r.LocalPath == "LocalF/x");
+                Check.Require(binding is { DropboxPath: "RemoteF/x", LocalId: "lf-x", DropboxId: "df-x" },
+                    "L98/L108: the moved binding did not record the mapped destinations or identities");
+                Check.Require(remote.Requests[nameof(ISide.PublishAsync)] == 0, "L98/L108: the file was re-uploaded instead of moved");
+                Check.Require(!store.OpenNotices.Any(n => n.Kind == NoticeKind.Failure), "L98/L108: a missing counterpart parent raised a Failure notice");
+            }
+        });
 
     public static Task L101ExcludedDescendantFloodAsync() => throw new NotImplementedException(
-        "DOUBLE: the excluded-descendant read flood after a folder move needs tombstone routing under exclusion; " +
-        "the doubles do not script tombstones for excluded ranges.");
+        "MISSING CAPABILITY (not closed): the tombstone echo now passes, but a fixture that scripts excluded null-Id " +
+        "tombstones for an excluded range after a folder move, while checking bounded reads and unrelated convergence, is " +
+        "not built; the echo budget checks do not script exclusion-scoped tombstones. Recommended disposition for designer " +
+        "approval: author the exclusion-scoped tombstone fixture.");
 
     public static Task L102MissingRootPointerAsync() => throw new NotImplementedException(
-        "PRODUCT-MISSING (closed): L102 needs no code (product design); the missing product-root pointer is not a defect.");
+        "PRODUCT-MISSING (closed): L102 needs no code (product design; bugfix-b). A missing product-root pointer is not a " +
+        "defect: StoreMove follows the external predecessor only through the pointer, and fixed-root image/backup recovery " +
+        "is not required to discover a detached predecessor. The F47 deploy guard covers the deploy-time pointer check " +
+        "(this lane CI run executed fixture 49, not F47); verification is pending under the deploy-test owner.");
 
     public static Task L107AcceptedJobPollingAsync() => throw new NotImplementedException(
-        "DOUBLE: evidence-based accepted-job checking without fixed polling needs a live job feed; " +
-        "the doubles script discrete job replies.");
+        "MISSING CAPABILITY (not closed): evidence-based accepted-job checking without fixed polling needs a live job " +
+        "opportunity gate plus Running/Terminal replies; the doubles script discrete JobReplies without a runnable " +
+        "opportunity gate. Recommended disposition for designer approval: add the job-opportunity gate.");
 
     public static Task L112HighChurnTreeAsync() => throw new NotImplementedException(
-        "DOUBLE: a selected high-churn nested tree syncing without persistent refusals needs sustained churn; " +
-        "the doubles are finite.");
+        "MISSING CAPABILITY (not closed): a selected high-churn nested tree syncing without persistent refusals needs " +
+        "sustained replenished churn, which the finite doubles cannot drive. L64 now proves the bounded-churn property at " +
+        "the queue level, so this live-shape check is best proven by rehearsal step RS-53. Recommended disposition for " +
+        "designer approval: rely on RS-53 for the live shape.");
 
     // ---- Shared scenario helpers ---------------------------------------
 
