@@ -243,7 +243,7 @@ public sealed class Unfinished
         if(didSplit && await call.Dropbox.ReadByIdAsync(member.Id!,call.Ct) is {} back)
         {
             if(!covered) return false;
-            await CompareReturnedAsync(call,binding,scope,back);return true;
+            await CompareReturnedAsync(call,binding,scope,back);return false;
         }
         if(!absent && !success)
         {
