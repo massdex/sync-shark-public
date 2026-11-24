@@ -500,6 +500,7 @@ public static class KnownBugChecks
             await store.FinishRepairAsync(pairA.PairId, (0, 0), "{}", ct);
             await store.FinishRepairAsync(pairB.PairId, (0, 0), "{}", ct);
             var aBoundaries = new int[1];
+            var aRetried = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var bArrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var bFile = ItemChecks.File(Side.Dropbox, "b", 7, "b-id");
             var sides = new Dictionary<string, (ISide Local, ISide Dropbox)>(StringComparer.Ordinal);
@@ -510,7 +511,8 @@ public static class KnownBugChecks
                 var localSide = new FakeSide(Side.Local) { Root = (pairA.Roots!.Local, null, null, DriveType.Fixed) };
                 var local = System.Reflection.DispatchProxy.Create<ISide, global::Massdex.SyncShark.Engine.Tests.Run.HostChecks.JournalProbe>();
                 var lp = Probe(local); lp.Quiet = true; lp.Local = localSide;
-                lp.Boundary = _ => { Interlocked.Increment(ref aBoundaries[0]);
+                lp.Boundary = _ => {
+                    if (Interlocked.Increment(ref aBoundaries[0]) >= 2) aRetried.TrySetResult();
                     return Task.FromException<(string? Cursor, JournalPosition? Position)>(new OperationCanceledException()); };
                 var remoteSide = new FakeSide(Side.Dropbox) { Root = (null, pairA.Roots.Dropbox, null, null) };
                 var remote = System.Reflection.DispatchProxy.Create<ISide, global::Massdex.SyncShark.Engine.Tests.Run.HostChecks.JournalProbe>();
@@ -550,6 +552,9 @@ public static class KnownBugChecks
                     "B-250: another pair stopped making progress while one pair's wait was canceled");
                 var status = await host.StatusAsync(null, ct);
                 Check.Require(status is not null, "B-250: the host stopped answering status while one pair's wait was canceled");
+                // The affected pair's loop must retry past the foreign cancellation (its own retry delay is 1s) rather
+                // than ending. Under the regression the loop faults after one boundary, so this wait never completes.
+                await aRetried.Task.WaitAsync(ct);
                 Check.Require(Volatile.Read(ref aBoundaries[0]) >= 2,
                     "B-250: a foreign cancellation inside one pair's wait ended that pair instead of retrying it (B-250)");
             }
