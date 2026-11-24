@@ -249,8 +249,6 @@ public sealed class Unfinished
         {
             if(member.Id==null || await call.Dropbox.ReadByIdAsync(member.Id,call.Ct) is not null)
             {
-                if(failure!=FailureDisposition.TemporaryNoEffect)
-                    await new Notices().RaiseAsync(call.Store,call.Pair.PairId,new(0,NoticeKind.Failure,cause??TextKey.FailDropboxOutcomeUnknown,member.Path,new([new(Side.Dropbox,member.Path,member.Id??string.Empty)],Side.Dropbox),DateTimeOffset.UtcNow,false),call.Ct);
                 return true;
             }
         }
