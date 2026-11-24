@@ -393,49 +393,73 @@ public static class RecoveryChecks
         var scope=new PathScope(pair,[pair],DriveType.Fixed);
         using var store=new InMemoryStateStore();await store.SavePairAsync(pair,default);
         int reads=0;
-        var source=new JournalSource();
+        var boundary=new JournalPosition(1,20);JournalPosition? restartFrom=null;
+        // The source respects the requested [from,end) interval: the one record lives at usn 11 and is surfaced only when
+        // the interval covers it. The first process sees it as an irrelevant reason; a rewinding restart would see it as
+        // work that must not be replayed, so a reader that begins before the stored boundary is caught by both asserts.
+        var source=new JournalSource{Tail=new JournalPosition(1,100)};
         source.Page=(from,end,ct)=>{
-            ulong consumed=end is {} e ? e.NextUsn : from.NextUsn+10;
-            UsnRecord[] records=Interlocked.Increment(ref reads)==1?new[]{new UsnRecord(12,11,11,0x8C00,FileAttributes.Normal,"item")}:Array.Empty<UsnRecord>();
-            return Task.FromResult(new NtfsUsnPage(NtfsUsnPageStatus.Complete,consumed,null,records));};
+            bool first=Interlocked.Increment(ref reads)==1;
+            ulong limit=end?.NextUsn ?? from.NextUsn+1;
+            UsnRecord[] records;
+            if(11UL>=from.NextUsn && 11UL<limit)
+                records=first ? new[]{new UsnRecord(12,11,11,0x8C00,FileAttributes.Normal,"item")}
+                    : from.NextUsn<boundary.NextUsn ? new[]{new UsnRecord(14,11,11,0x100,FileAttributes.Normal,"earlier")}
+                    : Array.Empty<UsnRecord>();
+            else records=Array.Empty<UsnRecord>();
+            if(!first) restartFrom??=from;
+            return Task.FromResult(new NtfsUsnPage(NtfsUsnPageStatus.Complete,limit,null,records));};
+        var start=new JournalPosition(1,10);
         var reader=new JournalReader(source);
         reader.Attach(pair,store,()=>scope,(_,_,_)=>((string?)null,(IReadOnlyList<string>?)null),_=>(Entry?)null);
-        var start=new JournalPosition(1,10);var end=new JournalPosition(1,20);
-        var page=await reader.ReadPageAsync(pair,start,end,ItemChecks.Settings,default);
-        Check.Require(page.Changes.Count==0 && !page.ContinuityLost && page.Position==end,"An irrelevant journal reason produced sync work or blocked its position");
+        var page=await reader.ReadPageAsync(pair,start,boundary,ItemChecks.Settings,default);
+        Check.Require(page.Changes.Count==0 && !page.ContinuityLost && page.Position==boundary,"An irrelevant journal reason produced sync work or blocked its position");
         Check.Require((await store.ReadRepairAsync(pair.PairId,Side.Local,default)).Revision==0,"An irrelevant journal page owed a Repair");
         await reader.SettleAsync(pair,page.Position!,store,default);
-        Check.Require(await store.PositionAsync("1",default)==end,"An irrelevant journal page did not settle at the exact expected journal position");
-        var replay=await reader.ReadPageAsync(pair,end,new JournalPosition(1,21),ItemChecks.Settings,default);
-        Check.Require(replay.Changes.Count==0,"An irrelevant journal page replayed after the restart");
+        Check.Require(await store.PositionAsync("1",default)==boundary,"An irrelevant journal page did not settle at the exact expected journal position");
+        // Restart: a FRESH reader over the same store. The caller does not hand it the expected boundary; it must source
+        // its start from the persisted position, then read only the new interval and replay nothing before that boundary.
+        var restarted=new JournalReader(source);
+        restarted.Attach(pair,store,()=>scope,(_,_,_)=>((string?)null,(IReadOnlyList<string>?)null),_=>(Entry?)null);
+        var replay=await restarted.ReadPageAsync(pair,start,new JournalPosition(1,21),ItemChecks.Settings,default);
+        Check.Require(restartFrom==boundary,"A restarted reader did not start at the stored journal boundary");
+        Check.Require(replay.Changes.Count==0 && !replay.ContinuityLost,"A restarted reader replayed work from before the stored boundary");
     }
     public static async Task A38RestartAfterEmptyPageAsync()
     {
         var pair=ItemChecks.Pair();
         var paths=new PathScope(pair,[pair],DriveType.Fixed);
-        // First process: an empty Dropbox page with a new cursor is applied once and its cursor persists.
-        string? saved;
-        {
-            using var store=new InMemoryStateStore();await store.SavePairAsync(pair,default);
-            await AutoSync.ApplyPageAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),Side.Dropbox,new([],"settled",null),new FakeSide(Side.Local),new FakeSide(Side.Dropbox),store,default);
-            saved=await store.CursorAsync(pair.PairId,default);
-        }
-        Check.Require(saved=="settled","An empty page did not persist its cursor");
-        // Reopen a fresh store that carries only the persisted cursor. The restarted reader must request exactly it,
-        // then advance to the finite boundary, and replay none of the earlier work.
-        using var reopened=new InMemoryStateStore();await reopened.SavePairAsync(pair,default);await reopened.SaveCursorAsync(pair.PairId,saved!,default);
         var steady=ItemChecks.File(Side.Local,"steady",1,"pc-steady");var peer=ItemChecks.File(Side.Dropbox,"steady",1,"db-steady");
-        var pc=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox);pc.Seed(steady,[1]);cloud.Seed(peer,[1]);
-        await reopened.CommitAsync(pair.PairId,null,SyncedEntries.From(steady,peer),null,null,default);
-        cloud.Pages.Enqueue(new([],"done",null));
-        string? requested=null;bool first=true;
-        var observed=global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>{
-            if(first && m.Name==nameof(ISide.ReadChangesAsync)){first=false;requested=(string?)args[0];}
-            return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.Observation.Forward(cloud,m,args);});
-        await AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),pc,observed,reopened,(null,"done"),()=>{},default);
-        Check.Require(requested=="settled","The restarted reader did not request the exact saved cursor");
-        Check.Require(cloud.Requests[nameof(ISide.ReadOneAsync)]==0 && cloud.Requests[nameof(ISide.PublishAsync)]==0 && pc.Requests[nameof(ISide.PublishAsync)]==0,"An empty page replayed work after the restart");
-        Check.Require(reopened.Records.Count==1 && reopened.OpenNotices.Count==0 && (await reopened.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason==null,"An empty page changed data or owed a Repair after the restart");
+        var directory=Directory.CreateTempSubdirectory("a38-empty-");
+        try
+        {
+            // First process: the product Store saves the binding and an empty Dropbox page with a new cursor, then closes.
+            string? saved;
+            {
+                using var store=await global::Massdex.SyncShark.Engine.Storage.Store.OpenAsync(directory.FullName,true,ItemChecks.Settings,default) ?? throw new InvalidDataException("Could not open the disposable Store");
+                await store.SavePairAsync(pair,default);
+                await store.CommitAsync(pair.PairId,null,SyncedEntries.From(steady,peer),null,null,default);
+                await AutoSync.ApplyPageAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),Side.Dropbox,new([],"settled",null),new FakeSide(Side.Local),new FakeSide(Side.Dropbox),store,default);
+                saved=await store.CursorAsync(pair.PairId,default);
+            }
+            Check.Require(saved=="settled","An empty page did not persist its cursor");
+            // Reopen the SAME product Store image; the test never saves the cursor again. The restarted reader must read
+            // the persisted cursor, request exactly it, advance to the finite boundary, and replay none of the earlier work.
+            using var reopened=await global::Massdex.SyncShark.Engine.Storage.Store.OpenAsync(directory.FullName,false,ItemChecks.Settings,default) ?? throw new InvalidDataException("Could not reopen the disposable Store");
+            Check.Require(await reopened.CursorAsync(pair.PairId,default)=="settled","Reopening the product Store lost the persisted cursor");
+            var pc=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox);pc.Seed(steady,[1]);cloud.Seed(peer,[1]);
+            cloud.Pages.Enqueue(new([],"done",null));
+            string? requested=null;bool first=true;
+            var observed=global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>{
+                if(first && m.Name==nameof(ISide.ReadChangesAsync)){first=false;requested=(string?)args[0];}
+                return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.Observation.Forward(cloud,m,args);});
+            await AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),pc,observed,reopened,(null,"done"),()=>{},default);
+            Check.Require(requested=="settled","The restarted reader did not request the exact saved cursor");
+            Check.Require(cloud.Requests[nameof(ISide.ReadOneAsync)]==0 && cloud.Requests[nameof(ISide.PublishAsync)]==0 && pc.Requests[nameof(ISide.PublishAsync)]==0,"An empty page replayed work after the restart");
+            var reopenedNotices=new List<Notice>();await foreach(var notice in reopened.NoticesAsync(pair.PairId,default)) reopenedNotices.Add(notice);
+            Check.Require((await reopened.FindAsync(pair.PairId,Side.Local,SyncedEntries.From(steady,peer).LocalKey,default)) is not null && reopenedNotices.Count==0 && (await reopened.ReadRepairAsync(pair.PairId,Side.Dropbox,default)).Reason==null,"An empty page changed data or owed a Repair after the reopening");
+        }
+        finally { try { Directory.Delete(directory.FullName,true); } catch(IOException) { } }
     }
     public static Task A38OneFailedReadThenSuccessNoRepairAsync() => throw new NotImplementedException();
     public static async Task A39InUseHolderNameAsync()
