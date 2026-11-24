@@ -100,7 +100,7 @@ public static class Moves
         if (member.Cause is { } cause && member.Failure != FailureDisposition.UnknownEffect) return (Failure(destination, cause), null);
         if (member.Entry is { } result && member.Failure is null && member.Cause is null)
         {
-            if (result.Id != selected.Id || !SameLanding(result.Path, selected.Destination))
+            if (result.Id != selected.Id || !SameLanding(result.Path, selected.Destination!))
                 return (Failure(destination, TextKey.FailDropboxOutcomeUnknown), null);
             if (candidate.Side != Side.Local || candidate.Moved.Id != candidate.Synced.LocalId || result.IsFolder != candidate.Synced.IsFolder)
                 return (Failure(destination, TextKey.FailChanged), null);
