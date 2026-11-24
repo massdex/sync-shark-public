@@ -22,17 +22,21 @@ public static class ResourceNames
     public static string DatabasePath(string localAppData) => Path.Combine(localAppData,ProductFolder,EngineFolder,DatabaseFile);
     /// <summary>Absolute log directory under the same product root.</summary>
     public static string LogDirectory(string localAppData) => Path.Combine(localAppData,ProductFolder,LogsFolder);
+    /// <summary>Host assembly name, the stem of the host's installed files.</summary>
+    public const string HostAssembly = "Sync Shark";
     /// <summary>Host executable filename.</summary>
-    public const string HostExecutable = "Sync Shark.exe";
+    public const string HostExecutable = HostAssembly + ".exe";
+    /// <summary>Launch argument asking the host to report readiness to its starter.</summary>
+    public const string HostReadyArgument = "--notify-ready";
     public const string CliExecutable = "syncshark.exe";
 
     /// <summary>Exact version-relative files shared by packaging, setup and uninstall.</summary>
     public static IReadOnlyList<string> InstalledFiles { get; } = Array.AsReadOnly(new string[]
     {
         HostExecutable,
-        "Sync Shark.dll",
-        "Sync Shark.deps.json",
-        "Sync Shark.runtimeconfig.json",
+        HostAssembly + ".dll",
+        HostAssembly + ".deps.json",
+        HostAssembly + ".runtimeconfig.json",
         CliExecutable,
         "syncshark.dll",
         "syncshark.deps.json",

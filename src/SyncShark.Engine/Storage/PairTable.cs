@@ -125,9 +125,9 @@ public sealed class PairTable
     }
     private static string Note(RemovalSelection victim,StageProof? stage) => JsonSerializer.Serialize(new { Victim=victim, Stage=stage });
     /// <summary>Arm one exact victim before removal without replacing another armed operation.</summary>
-    public async Task ArmAsync(SqliteConnection db,string pairId,RemovalSelection victim,StageProof? stage,CancellationToken ct)
+    public async Task<bool> ArmAsync(SqliteConnection db,string pairId,RemovalSelection victim,StageProof? stage,CancellationToken ct)
     {
-        if(await Write(db,null,"UPDATE pair SET pending_json=$note WHERE pair_id=$p AND (pending_json IS NULL OR pending_json=$note)",ct,("$p",pairId),("$note",Note(victim,stage)))!=1) throw new InvalidOperationException();
+        return await Write(db,null,"UPDATE pair SET pending_json=$note WHERE pair_id=$p AND (pending_json IS NULL OR pending_json=$note)",ct,("$p",pairId),("$note",Note(victim,stage)))==1;
     }
     /// <summary>Read the exact victim and optional replacement stage.</summary>
     public async Task<(RemovalSelection Victim,StageProof? Stage)?> ArmedAsync(SqliteConnection db,string pairId,CancellationToken ct)

@@ -7,7 +7,7 @@ public static class Moves
     public sealed record DestinationFacts(SyncedEntry Binding, Side Side, DestinationIdentity Identity);
     public sealed record Observations(Entry? LocalAtSynced, Entry? DropboxAtSynced, bool OldOrNewSkipped,
         bool OldOrNewHeld, bool NewOutOfScope, bool CarriesOtherPair, string? LocalHash,
-        string? LocalDestination, string? DropboxDestination, DestinationFacts? Destination = null);
+        string? LocalDestination, string? DropboxDestination, DestinationFacts? Destination = null, bool LeavesScope = false);
 
     /// <summary>Adopt equal destinations; for different capitals keep both spellings in one binding. Split other bilateral moves.</summary>
     public static SyncAction For(IReadOnlyList<RenameCandidate> bindingCandidates, Row? destination,
@@ -21,6 +21,8 @@ public static class Moves
         var row = new Row(saved.KeyOn(moved.Side), pc?.Moved ?? observations.LocalAtSynced,
             cloud?.Moved ?? observations.DropboxAtSynced, saved, [], observations.LocalHash, RowContext.Neutral);
         if (Ineligible(row, pc, observations) is { } stop) return stop;
+        // A one-sided move out of scope takes the ordinary decision with the moved side absent.
+        if (observations.LeavesScope) return Decide.For(moved.Side == Side.Local ? row with { Local = null } : row with { Dropbox = null }, FirstRunPolicy.NewestWins, DateTimeOffset.MinValue, localContentDirty);
         if (pc != null && cloud != null)
         {
             var path = observations.DropboxDestination ?? PathNames.SpellingOn(Side.Dropbox, pc.Moved.Path);
@@ -55,6 +57,9 @@ public static class Moves
             alias.Id == pc.Moved.Id && alias.Path != pc.Moved.Path) return new(ActionKind.None, row, NoneReason.OutOfScope);
         return null;
     }
+
+    /// <summary>Identify a file move whose surviving endpoints need separate bindings.</summary>
+    public static bool IsFileSplit(SyncAction action) => action is {Kind:ActionKind.ForgetOnly, Row.Synced.IsFolder:false, InfoAfter:TextKey.InfoMovedEdited or TextKey.InfoMovedDeleted or TextKey.InfoMovedTwice};
 
     private static SyncAction Split(Row row, TextKey info) => new(ActionKind.ForgetOnly, row, InfoAfter: info);
     private static SyncAction Failure(Row row, TextKey cause) => new(ActionKind.Notice, row, NoticeKind: NoticeKind.Failure, Cause: cause);

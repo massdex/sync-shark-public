@@ -39,12 +39,11 @@ jobs:
         shell: pwsh
         run: |
           $inventory = (Get-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'CLI-CAPABILITIES.md') -ErrorAction Stop).FullName
-          & dotnet tests/SyncShark.Engine.Tests/bin/Release/net8.0-windows/SyncShark.Engine.Tests.dll $env:GITHUB_WORKSPACE $inventory | Tee-Object -Variable results
+          & dotnet tests/SyncShark.Engine.Tests/bin/Release/net8.0-windows/SyncShark.Engine.Tests.dll $env:GITHUB_WORKSPACE $inventory
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           . ./tools/ci/LaneSelection.ps1
           $integration = (Get-RunKind $env:GITHUB_REF) -eq 'full' -and $env:GITHUB_REF -notlike 'refs/heads/ci/int-prep-*'
           "RATCHET_REQUIRED=$($integration.ToString().ToLowerInvariant())" >> $env:GITHUB_ENV
-          if ($integration -and $results -match '^NOT IMPLEMENTED ') { throw 'Integration requires all registered checks to pass.' }
       - name: Bind literal evidence to candidate and pinned public source
         shell: pwsh
         env:

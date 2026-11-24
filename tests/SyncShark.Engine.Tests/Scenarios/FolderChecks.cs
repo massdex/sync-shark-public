@@ -1,3 +1,7 @@
+using System.Globalization;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.Data.Sqlite;
 using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Run;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
@@ -66,7 +70,7 @@ public static class FolderChecks
             await store.CommitAsync(pair.PairId,null,SyncedEntries.From(sibling,ItemChecks.File(Side.Dropbox,"folder/free",2,"free-b")),null,null,default);
         }
         if(unreadable) pc.ReadFailures[child]=new ItemFailedException(child,TextKey.ReadLocalFailed,null);
-        if(edited)
+        if(edited && !excluded && !nested && !ignored)
         {
             // The parent owns the footprint before the local edit is read; recovery must consume the held child.
             var edit = new Change(Side.Local,ChangeKind.Changed,child,null,live.Id,live,true,false,10,JournalId:1);
@@ -110,7 +114,7 @@ public static class FolderChecks
             Check.Require(pc.Items.Count==0 && cloud.Items.Count==0 && pc.History.Any(x=>x.Entry.Path==child && x.Bytes.SequenceEqual(new byte[]{1})),"Ignored child did not accompany recycled parent");
             Check.Require(store.Records.Count==0 && store.OpenNotices.Count==0,"Spurious kept-folder notice or binding");
         }
-        else if(edited)
+        else if(edited && !excluded && !nested && !ignored)
         {
             Check.Require(pc.Items[child].Bytes.SequenceEqual(new byte[]{3}) && cloud.Items[child].Bytes.SequenceEqual(new byte[]{3}),"Latest attributable edit lost");
             Check.Require(store.Records.Values.Any(row=>row.LocalPath==child && row.DropboxPath==child) && store.OpenNotices.Count(n=>n.Cause==TextKey.InfoEditBeatsDelete)==1,"Lost linkage or edit notice");
@@ -212,6 +216,30 @@ public static class FolderChecks
     private static Task RepairAsync(PairRun run, EngineSettings? settings = null) =>
         Repair.RunAsync(run.Pair, settings ?? ItemChecks.Settings, _ => { }, run.Paths, run.Queue, run.Pc, run.Db, run.Store, null, null, default);
 
+    /// <summary>Supply a full Repair the live proof interval a reader would: real boundary pages on both fakes plus an
+    /// admitted fence, so its destructive legs may run instead of being withheld. ProofNow is internal and the test
+    /// assembly has no InternalsVisibleTo, so the one seam is set here with real boundary facts, not fabricated ones.</summary>
+    internal static void AdmitFullRepair(WorkQueue queue, FakeSide pc, FakeSide db)
+    {
+        var end = new JournalPosition(1, 42);
+        ItemChecks.Script(pc, new ChangePage([], null, end) { ProjectedThrough = end });
+        ItemChecks.Script(db, new ChangePage([], "complete", null));
+        Func<(JournalPosition? Local, string? Dropbox), bool> fence = f => f.Local is { } at && at == end && f.Dropbox == "complete";
+        Func<Func<(JournalPosition? Local, string? Dropbox), bool>?> proof = () => fence;
+        var property = typeof(WorkQueue).GetProperty("ProofNow", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("WorkQueue.ProofNow seam missing");
+        property.SetValue(queue, proof);
+    }
+
+    // Repair a full scan under an admitted-proven interval and a real cancellation token, so a withheld destructive
+    // leg becomes a bounded result rather than a leaked follower wait.
+    private static async Task RepairWithProofAsync(PairRun run, EngineSettings? settings = null)
+    {
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        AdmitFullRepair(run.Queue, run.Pc, run.Db);
+        await Repair.RunAsync(run.Pair, settings ?? ItemChecks.Settings, _ => { }, run.Paths, run.Queue, run.Pc, run.Db, run.Store, null, null, budget.Token);
+    }
+
     private static Entry Seed(FakeSide side, string path, byte value = 0, bool folder = false, string? skip = null)
     {
         var entry = ItemChecks.File(side.Side, path, value, $"{side.Side}:{path}", folder);
@@ -310,7 +338,7 @@ public static class FolderChecks
         var dbFolder = Seed(run.Db, "item", 0, folder: true) with { Id = "cloud-folder" };
         run.Db.Items["item"] = (dbFolder, []);
         Seed(run.Db, "item/child", 2);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Pc, "item", true) && Is(run.Pc, "item/child", false, 2), "PC did not adopt the replacement folder with its child");
         Check.Require(Is(run.Db, "item", true), "The cloud replacement folder changed");
         Check.Require(run.Pc.History.Any(v => v.Entry.Id == oldPc.Id && v.Bytes.SequenceEqual(new byte[] { 1 })), "The displaced PC file was not kept recoverable");
@@ -329,7 +357,7 @@ public static class FolderChecks
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(oldPc, oldDb), null, null, default);
         var pcFile = Seed(run.Pc, "item", 3) with { Id = "pc-file" };
         run.Pc.Items["item"] = (pcFile, [3]);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Db, "item", false, 3) && Is(run.Pc, "item", false, 3), "The replacement file did not reach both sides");
         Check.Require(run.Db.History.Any(v => v.Entry.Id == oldDb.Id) && run.Db.History.Any(v => v.Entry.Id == dbChild.Id), "The replaced cloud folder or its child was not kept recoverable");
         Check.Require(run.Store.Records.Count == 1 && run.Store.Records.Values.Single().LocalPath == "item" && run.Store.Records.Values.Single().DropboxPath == "item", "Wrong link after the folder-to-file replacement");
@@ -346,7 +374,7 @@ public static class FolderChecks
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(oldPc, oldDb), null, null, default);
         var dbFile = Seed(run.Db, "item", 3) with { Id = "cloud-file" };
         run.Db.Items["item"] = (dbFile, [3]);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Pc, "item", false, 3) && Is(run.Db, "item", false, 3), "The replacement file did not reach both sides");
         Check.Require(run.Pc.History.Any(v => v.Entry.Id == oldPc.Id) && run.Pc.History.Any(v => v.Entry.Id == pcChild.Id), "The replaced PC folder or its child was not kept recoverable");
         Check.Require(run.Store.Records.Count == 1 && run.Store.Records.Values.Single().LocalPath == "item", "Wrong link after the folder-to-file replacement");
@@ -368,7 +396,7 @@ public static class FolderChecks
         run.Db.Items.Remove("item/c1");
         run.Db.Items.Remove("item/c2");
         run.Db.Seed(ItemChecks.File(Side.Dropbox, "item", 3, "cloud-file"), [3]);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Pc, "item", false, 3) && Is(run.Db, "item", false, 3), "The parent replacement did not settle on both sides");
         Check.Require(run.Pc.History.Any(v => v.Entry.Id == oldPc.Id) && run.Pc.History.Any(v => v.Entry.Id == c1.Id) && run.Pc.History.Any(v => v.Entry.Id == c2.Id),
             "The children were not displaced together with their folder");
@@ -417,7 +445,18 @@ public static class FolderChecks
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(localEntry, dropboxEntry), null, null, default);
         // The other side becomes a file, flipping the kind against the folder record.
         otherAdapter.Items["item"] = (ItemChecks.File(otherAdapter.Side, "item", 9, "incoming-file"), [9]);
-        await RepairAsync(run);
+        if (childSkip == nameof(TextKey.SkipUnreadable))
+        {
+            // An unreadable inventory must surface the existing incomplete-inventory error, never finish as complete (Repair.cs:182).
+            bool threw = false;
+            using (var budget = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+            {
+                try { await Repair.RunAsync(run.Pair, ItemChecks.Settings, _ => { }, run.Paths, run.Queue, run.Pc, run.Db, run.Store, null, null, budget.Token); }
+                catch (InventoryIncompleteException) { threw = true; }
+            }
+            Check.Require(threw, "An unreadable inventory finished as complete");
+        }
+        else await RepairAsync(run);
         Check.Require(folderAdapter.Items["item"].Entry.IsFolder && folderAdapter.Items.ContainsKey("item/child"), "The protected target folder or its child was replaced");
         Check.Require(folderAdapter.History.Count == 0, "Protected descendants were removed");
         Check.Require(run.Store.Records.Values.Single().IsFolder, "The folder binding was replaced");
@@ -442,7 +481,7 @@ public static class FolderChecks
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(oldPc, oldDb), null, null, default);
         run.Pc.Items["item"] = (ItemChecks.File(Side.Local, "item", 3, "pc-file"), [3]);
         run.Db.PublishFailures["item"] = new ItemFailedException("item", TextKey.PublishFailed, null);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(run.Db.History.Any(v => v.Entry.Id == oldDb.Id), "The removed cloud folder did not reach history");
         Check.Require(!run.Db.Items.ContainsKey("item"), "A refused finish still published the file");
         Check.Require(run.Pc.Items.TryGetValue("item", out var kept) && kept.Bytes.SequenceEqual(new byte[] { 3 }), "The pending incoming file left its own side");
@@ -472,8 +511,10 @@ public static class FolderChecks
         var oldDb = Seed(run.Db, "item", 0, folder: true);
         await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(oldPc, oldDb), null, null, default);
         run.Pc.Items["item"] = (ItemChecks.File(Side.Local, "item", 3, "pc-file"), [3]);
-        run.Db.AfterDelete = entry => { if (entry.Path == "item") run.Db.Seed(ItemChecks.File(Side.Dropbox, "item", 0, "recovered-folder", folder: true), []); };
-        await RepairAsync(run);
+        int recovered = 0;
+        run.Db.AfterDelete = entry => { if (entry.Path == "item") { recovered++; run.Db.Seed(ItemChecks.File(Side.Dropbox, "item", 0, "recovered-folder", folder: true), []); } };
+        await RepairWithProofAsync(run);
+        Check.Require(recovered == 1, "The recovered-folder window was never reached");
         Check.Require(run.Db.Items.TryGetValue("item", out var dbAt) && dbAt.Entry.IsFolder, "The stale staged finish displaced the recovered folder");
         Check.Require(run.Pc.Items.TryGetValue("item", out var pcAt) && !pcAt.Entry.IsFolder && pcAt.Bytes.SequenceEqual(new byte[] { 3 }), "The PC file was overwritten instead of kept");
         Check.Require(run.Store.OpenNotices.Any(n => n.Kind == NoticeKind.Info && n.Cause == TextKey.InfoKeptBoth), "The competing folder did not take keep-both");
@@ -542,6 +583,7 @@ public static class FolderChecks
     /// <summary>A delete over a known-unreadable PC descendant waits with a failure notice; an independent folder still goes.</summary>
     public static async Task A16IndependentFolderContinuesAsync()
     {
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(30)); var ct = budget.Token;
         var pair = ItemChecks.Pair();
         var run = await StartAsync(pair: pair, baseline: true);
         var pcA = Seed(run.Pc, "a", 0, folder: true); var dbA = Seed(run.Db, "a", 0, folder: true);
@@ -554,13 +596,16 @@ public static class FolderChecks
         await run.Store.CommitAsync(pair.PairId, null, savedB, null, null, default);
         var retained = await new FolderDelete().ApplyAsync(pair, ItemChecks.Settings, _ => { }, run.Paths, pcA, savedA, Side.Local,
             ActionKind.DeleteLocal, run.Pc, run.Db, run.Store, _ => [], ItemChecks.Population(pair, run.Paths, run.Pc, run.Db, run.Store),
-            ItemChecks.Hop(pair, run.Paths, run.Queue, run.Pc, run.Db, run.Store), default, userSelected: true);
+            ItemChecks.Hop(pair, run.Paths, run.Queue, run.Pc, run.Db, run.Store), ct, userSelected: true);
         Check.Require(retained.Outcome == RemovalOutcome.Retained && run.Pc.Items.ContainsKey("a") && run.Pc.Items.ContainsKey("a/child"),
             "The folder with a known-unreadable descendant was removed");
         Check.Require(run.Store.OpenNotices.Any(n => n.Kind == NoticeKind.Failure), "The retained unreadable delete raised no failure notice");
+        // The independent folder is removed bilaterally: its Dropbox peer is a real departure, so the scoped settlement
+        // never treats a live identity as absent. Live-identity validation stays intact.
+        run.Db.Items.Remove("b");
         var removed = await new FolderDelete().ApplyAsync(pair, ItemChecks.Settings, _ => { }, run.Paths, pcB, savedB, Side.Local,
             ActionKind.DeleteLocal, run.Pc, run.Db, run.Store, _ => [], ItemChecks.Population(pair, run.Paths, run.Pc, run.Db, run.Store),
-            ItemChecks.Hop(pair, run.Paths, run.Queue, run.Pc, run.Db, run.Store), default, userSelected: true);
+            ItemChecks.Hop(pair, run.Paths, run.Queue, run.Pc, run.Db, run.Store), ct, userSelected: true);
         Check.Require(removed.Outcome == RemovalOutcome.Removed && !run.Pc.Items.ContainsKey("b"), "An independent folder did not continue after the retained delete");
     }
     private static async Task<(Entry Folder, Entry Child)> FolderWithChildAsync(PairRun run, string path = "Old", byte value = 1)
@@ -592,7 +637,7 @@ public static class FolderChecks
         var (folder, _) = await FolderWithChildAsync(run);
         await run.Pc.MoveAsync(folder, "New", default);
         run.Db.Items.Remove("Old/Child");
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(Is(run.Pc, "New", true) && Is(run.Db, "New", true), "The folder move did not settle at the new spelling");
         Check.Require(!run.Pc.Items.ContainsKey("New/Child") && run.Store.Records.Values.All(r => r.LocalPath != "New/Child"), "The queued tombstone did not follow the child to its real endpoint");
     }
@@ -608,17 +653,66 @@ public static class FolderChecks
         Check.Require(run.Store.Records.Values.Any(r => r.LocalPath == "New/Child" && r.DropboxPath == "New/Child"), "The child binding did not follow the move");
     }
 
-    /// <summary>A capitals-only folder rename with a queued child tombstone settles the exact spelling and the delete.</summary>
-    public static async Task A18TombstoneQueuedAtCaseHopAsync()
+    /// <summary>A capitals-only folder rename with a real child tombstone queued at the first case leg settles the
+    /// exact casing, the delete at the projected endpoint and the temporary name without a mutation.</summary>
+    public static Task A18TombstoneQueuedAtCaseHopAsync() => global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async ct =>
     {
         var run = await StartAsync(baseline: true);
-        var (folder, _) = await FolderWithChildAsync(run);
-        await run.Pc.MoveAsync(folder, "OLD", default);
+        var (folder, child) = await FolderWithChildAsync(run);
+        var dbChild = run.Db.Items["Old/Child"].Entry;
+        await run.Pc.MoveAsync(folder, "OLD", ct);
+        var renamed = run.Pc.Items["OLD"].Entry;
+        // The provider reports a path-only delete for the old child name; the endpoint no longer holds it.
         run.Db.Items.Remove("Old/Child");
-        await RepairAsync(run);
-        Check.Require(Is(run.Pc, "OLD", true) && Is(run.Db, "OLD", true), "The capitals rename did not settle the exact spelling on both sides");
-        Check.Require(!run.Pc.Items.ContainsKey("OLD/Child") && run.Store.Records.Values.All(r => r.LocalPath != "OLD/Child"), "The queued tombstone did not follow the child through the capitals hop");
-    }
+        var tombstone = new Change(Side.Dropbox, ChangeKind.Deleted, "Old/Child", null, dbChild.Id, null, false, false);
+        var childPage = new ChangePage([tombstone], "tombstone", null);
+        var paths = new PathScope(run.Pair, [run.Pair], DriveType.Fixed);
+        // Real boundary facts for the tombstone's own removal receipt; no live proof is handed to the case hop.
+        run.Pc.IdleBoundary = new ChangePage([], null, new(1, 42)) { ProjectedThrough = new(1, 42) };
+        run.Db.IdleBoundary = new ChangePage([], "complete", null);
+        var order = new List<string>();
+        var admitted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? queued = null;
+        async Task AdmitChild()
+        {
+            try
+            {
+                await run.Queue.AdmitAsync(run.Pair, childPage, async (change, token) =>
+                {
+                    order.Add("child");
+                    await ItemSync.ApplyAsync(run.Pair, ItemChecks.Settings, _ => { }, paths, change, run.Pc, run.Db, run.Store,
+                        ItemChecks.Population(run.Pair, paths, run.Pc, run.Db, run.Store), ItemChecks.Hop(run.Pair, paths, run.Queue, run.Pc, run.Db, run.Store),
+                        token, run.Queue.Held, (_, _) => throw new WorkQueue.Unsettled(), coversThrough: _ => true);
+                }, null, (cursor, token) => run.Store.SaveCursorAsync(run.Pair.PairId, cursor, token), null, ct);
+                admitted.TrySetResult();
+            }
+            catch (Exception error) { admitted.TrySetException(error); }
+        }
+        // Admit the tombstone while the first case leg moves the folder; the queue keeps it behind the parent input.
+        var firstLeg = true;
+        run.Db.AfterMove = (_, _) =>
+        {
+            if (!firstLeg) return;
+            firstLeg = false; queued = AdmitChild();
+        };
+        var parent = new Change(Side.Local, ChangeKind.Renamed, "OLD", "Old", folder.Id, renamed, true, false, 5, JournalId: 1);
+        await run.Queue.AdmitAsync(run.Pair, ItemChecks.Journal([parent], 6), async (change, token) =>
+        {
+            order.Add("parent");
+            await ItemSync.ApplyAsync(run.Pair, ItemChecks.Settings, _ => { }, paths, change, run.Pc, run.Db, run.Store,
+                ItemChecks.Population(run.Pair, paths, run.Pc, run.Db, run.Store), ItemChecks.Hop(run.Pair, paths, run.Queue, run.Pc, run.Db, run.Store), token);
+        }, run.Pc.SettleJournalAsync, ct);
+        Check.Require(queued != null, "The first case leg never admitted the queued tombstone");
+        await admitted.Task; await queued!;
+        Check.Require(order.SequenceEqual(new[] { "parent", "child" }), "The queued tombstone ran before its parent case hop");
+        Check.Require(await run.Store.CursorAsync(run.Pair.PairId, ct) == "tombstone", "The queued tombstone did not settle its cursor");
+        Check.Require(run.Pc.Items.TryGetValue("OLD", out var pcFolder) && pcFolder.Entry.Path == "OLD" &&
+            run.Db.Items.TryGetValue("OLD", out var dbFolder) && dbFolder.Entry.Path == "OLD", "The capitals rename did not settle the exact casing on both sides");
+        Check.Require(run.Store.Records.Values.Any(r => r.LocalPath == "OLD" && r.DropboxPath == "OLD"), "The parent binding did not follow the case hop");
+        Check.Require(!run.Pc.Items.ContainsKey("OLD/Child") && run.Pc.History.Any(x => x.Entry.Id == child.Id), "The queued tombstone did not recycle the child at its real endpoint");
+        Check.Require(run.Store.Records.Values.All(r => r.LocalPath != "OLD/Child" && r.DropboxPath != "OLD/Child"), "The deleted child binding survived the case hop");
+        Check.Require(!run.Pc.Items.Keys.Concat(run.Db.Items.Keys).Any(p => p.Contains(ItemChecks.Settings.CaseRenameSuffix, StringComparison.Ordinal)), "A mutation landed at the case temporary name");
+    });
 
     /// <summary>A capitals-only folder rename with an unread child keeps the child and the exact spelling.</summary>
     public static async Task A18TombstoneUnreadAtCaseHopAsync()
@@ -654,7 +748,7 @@ public static class FolderChecks
         await RepairAsync(run);
         Check.Require(run.Store.Records.Values.Any(r => r.LocalPath == "New" && r.DropboxPath == "New"), "The parent move was not recorded before the restart");
         run.Db.Items.Remove("New/Child");
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("New/Child") && run.Store.Records.Values.All(r => r.LocalPath != "New/Child"), "The resumed Repair did not settle the held child delete");
     }
 
@@ -704,10 +798,11 @@ public static class FolderChecks
         await run.Pc.MoveAsync(folder, "New", default);
         run.Db.Items.Remove("Old/Child");
         run.Db.Seed(ItemChecks.File(Side.Dropbox, "Old/Child", 9, "new-occupant"), [9]);
-        await RepairAsync(run);
-        Check.Require(!run.Pc.Items.ContainsKey("New/Child"), "The tombstone did not follow the real child to the moved endpoint");
-        Check.Require(run.Store.Records.Values.All(r => r.LocalPath != "New/Child"), "The deleted child's binding survived at the moved endpoint");
-        Check.Require(run.Db.Items.TryGetValue("Old/Child", out var occupant) && occupant.Entry.Id == "new-occupant", "The new occupant at the old path was removed by the queued delete");
+        await RepairWithProofAsync(run);
+        Check.Require(run.Db.Items.TryGetValue("New/Child", out var moved) && moved.Entry.Id == "new-occupant" && moved.Bytes.SequenceEqual(new byte[]{9}) && !run.Db.Items.ContainsKey("Old/Child"), "The occupant did not travel with the moved Dropbox folder");
+        await ItemSync.ApplyAsync(run.Pair, ItemChecks.Settings, _ => { }, run.Paths, new Change(Side.Dropbox, ChangeKind.Changed, "New/Child", null, "new-occupant", moved.Entry, false, false), run.Pc, run.Db, run.Store,
+            ItemChecks.Population(run.Pair, run.Paths, run.Pc, run.Db, run.Store), ItemChecks.Hop(run.Pair, run.Paths, run.Queue, run.Pc, run.Db, run.Store), default, run.Queue.Held, coversThrough: _ => true);
+        Check.Require(run.Pc.Items.TryGetValue("New/Child", out var local) && local.Bytes.SequenceEqual(new byte[]{9}) && run.Store.Records.Values.Any(r => r.LocalPath == "New/Child" && r.DropboxId == "new-occupant"), "The moved occupant was not synced at its real endpoint");
     }
     private static Task<RemovalResult> MergeAsync(PairRun run, Entry source, Entry dest,
         Func<Entry, Entry, Entry?, SyncedEntry?, CancellationToken, Task<EffectOutcome>>? collide = null) =>
@@ -858,7 +953,7 @@ public static class FolderChecks
         var run = await DeletedFolderRunAsync(ItemChecks.Pair() with { IgnoreRules = ["FileName:draft.tmp"] }, null, "item");
         Seed(run.Pc, "item", 0, folder: true);
         Seed(run.Pc, "item/draft.tmp", 1);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("item") && run.Pc.History.Any(v => v.Entry.Path == "item/draft.tmp"), "The ignored-only folder was not recycled with its ignored content");
         Check.Require(run.Db.Items.Count == 0 && run.Store.Records.Count == 0, "The ignored-only folder was created on Dropbox or bound");
         NoKeptFolderNotice(run);
@@ -871,7 +966,7 @@ public static class FolderChecks
         Seed(run.Pc, "item", 0, folder: true);
         Seed(run.Pc, "item/cache", 0, folder: true);
         Seed(run.Pc, "item/cache/x.txt", 2);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("item") && run.Pc.History.Any(v => v.Entry.Path == "item/cache/x.txt"), "The ignored folder and its content were not recycled together");
         Check.Require(run.Db.Items.Count == 0 && run.Store.Records.Count == 0, "The ignored folder was created on Dropbox");
         NoKeptFolderNotice(run);
@@ -929,7 +1024,7 @@ public static class FolderChecks
         var run = await DeletedFolderRunAsync(ItemChecks.Pair(), null, "item");
         Seed(run.Pc, "item", 0, folder: true);
         Seed(run.Pc, "item/sub", 0, folder: true);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("item") && run.Pc.History.Any(v => v.Entry.Path == "item/sub"), "The nested empty folders were not recycled together");
         Check.Require(run.Db.Items.Count == 0, "The empty folder was created on Dropbox first");
     }
@@ -940,7 +1035,7 @@ public static class FolderChecks
         var run = await DeletedFolderRunAsync(ItemChecks.Pair(), null, "item");
         Seed(run.Pc, "item", 0, folder: true);
         Seed(run.Pc, "item/sub", 0, folder: true);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("item") && !run.Pc.Items.ContainsKey("item/sub") && run.Db.Items.Count == 0, "An empty child without its own deletion record defeated the parent recycle");
     }
 
@@ -952,14 +1047,99 @@ public static class FolderChecks
         Seed(run.Pc, "A/~draft", 1);
         Seed(run.Pc, "A!", 0, folder: true);
         Seed(run.Pc, "A!/z", 2);
-        await RepairAsync(run);
+        await RepairWithProofAsync(run);
         Check.Require(!run.Pc.Items.ContainsKey("A") && run.Pc.History.Any(v => v.Entry.Path == "A/~draft"), "The empty-ish A folder was not recycled");
         Check.Require(run.Db.Items.ContainsKey("A!") && run.Db.Items.ContainsKey("A!/z") && run.Pc.Items.ContainsKey("A!"), "A!'s contents were swallowed by A's ordinal interval");
     }
-    public static Task A46CrashStageWrittenAsync() => throw new NotImplementedException();
-    public static Task A46CrashV16PutAsideAsync() => throw new NotImplementedException();
-    public static Task A46CrashAfterSwitchAsync() => throw new NotImplementedException();
-    public static Task A46SwitchFailedAsync() => throw new NotImplementedException();
+    public static async Task A46CrashStageWrittenAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var target = await WriteReleaseAsync(root, ResourceNames.DatabaseFile, SimpleFacts);
+            var orphan = OrphanStage(target); var abandoned = await WriteClosedStageAsync(orphan);
+            await NextStartAsync(root);
+            Check.Require(ReleaseVersion(target) == SchemaVersion && ReleaseScalar(target, SimpleFactsQuery) == 1,
+                "A crash after the stage was written lost the authoritative facts");
+            Check.Require(File.Exists(orphan) && File.ReadAllBytes(orphan).SequenceEqual(abandoned) &&
+                File.Exists(ReleaseBackup(root)) && ReleaseVersion(ReleaseBackup(root)) == 16,
+                "The crashed stage image or its predecessor was consumed or rewritten");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A46CrashV16PutAsideAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var backup = await WriteReleaseAsync(root, "state.v16.db", SimpleFacts);
+            var target = ReleaseTarget(root); var orphan = OrphanStage(target); var abandoned = await WriteClosedStageAsync(orphan);
+            await NextStartAsync(root);
+            Check.Require(ReleaseVersion(target) == SchemaVersion && ReleaseScalar(target, SimpleFactsQuery) == 1 && File.Exists(backup) && ReleaseVersion(backup) == 16 && File.ReadAllBytes(orphan).SequenceEqual(abandoned),
+                "A crash after putting v16 aside lost the backup, mispublished the target, or rewrote the stage image");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A46CrashAfterSwitchAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var backup = await WriteReleaseAsync(root, "state.v16.db", SimpleFacts);
+            await NextStartAsync(root);
+            var target = ReleaseTarget(root);
+            // Seed a fact into the just-published v17 image that the v16 backup does not hold, so a restart that
+            // wrongly rebuilds the published store from v16 before removing the pointer is caught by its absence.
+            using (var published = ReleaseDb(target, SqliteOpenMode.ReadWrite))
+            {
+                using var add = published.CreateCommand(); add.CommandText = V17OnlyFact; add.ExecuteNonQuery();
+            }
+            var pointer = Path.Combine(root, "product-root.txt");
+            await File.WriteAllTextAsync(pointer, root);
+            var warning = await NextStartAsync(root);
+            Check.Require(warning == null && !File.Exists(pointer) && ReleaseVersion(target) == SchemaVersion && ReleaseScalar(target, SimpleFactsQuery) == 1 && File.Exists(backup) && ReleaseVersion(backup) == 16,
+                "A crash after the switch before pointer removal changed the authoritative image");
+            Check.Require(ReleaseScalar(target, "SELECT EXISTS(SELECT 1 FROM pair WHERE pair_id='v17-only')") == 1,
+                "The restart rebuilt the published store from the v16 predecessor and lost a v17-only fact");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A46SwitchFailedAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var target = await WriteReleaseAsync(root, ResourceNames.DatabaseFile, SimpleFacts);
+            var before = await File.ReadAllBytesAsync(target);
+            bool threw = false, reached = false; FileStream? blocker = null;
+            try
+            {
+                try
+                {
+                    await new global::Massdex.SyncShark.Engine.Storage.StoreMove().MoveWithOutcomeAsync(root, root, (_, _, _) =>
+                    {
+                        // Runs after the closed stage is built and before the switch. Deny the replacement here so the
+                        // failure is provably at the publication boundary rather than an earlier open of the source.
+                        reached = true;
+                        blocker = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.Read);
+                        return null;
+                    }, default);
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { threw = true; }
+                // The source bytes must be unchanged while the share-denying handle is still held.
+                Check.Require(threw && reached && (await File.ReadAllBytesAsync(target)).SequenceEqual(before),
+                    "A failed switch damaged the source image or never reached the publication boundary");
+            }
+            finally { blocker?.Dispose(); }
+            // With the handle released, the source is still the untouched v16 image with no backup.
+            Check.Require(ReleaseVersion(target) == 16 && ReleaseScalar(target, SimpleFactsQuery) == 1 && !File.Exists(ReleaseBackup(root)),
+                "A failed switch published a migrated image or left a backup");
+            await NextStartAsync(root);
+            Check.Require(ReleaseVersion(target) == SchemaVersion && ReleaseScalar(target, SimpleFactsQuery) == 1 && File.Exists(ReleaseBackup(root)),
+                "The retry after a released switch did not publish the migrated image");
+        }
+        finally { Directory.Delete(root, true); }
+    }
     private static string StoreFileAt(string root) => Path.Combine(root, ResourceNames.EngineFolder, ResourceNames.DatabaseFile);
 
     /// <summary>A pointer-cleanup failure after publication is a warning; pairs keep running and the next start retries.</summary>
@@ -979,7 +1159,7 @@ public static class FolderChecks
             var retry = await move.MoveWithOutcomeAsync(root, root, (_, _, _) => null, default);
             Check.Require(retry == null && !File.Exists(pointer) && File.Exists(path), "The next start did not retry the pointer removal");
         }
-        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+        finally { Directory.Delete(root, true); }
     }
 
     /// <summary>A stage left by an earlier attempt is never adopted or disturbed by the next start.</summary>
@@ -995,7 +1175,7 @@ public static class FolderChecks
             var warning = await move.MoveWithOutcomeAsync(root, root, (_, _, _) => null, default);
             Check.Require(warning == null && File.Exists(path) && await File.ReadAllTextAsync(stage) == "abandoned stage", "The next start consumed or disturbed another attempt's stage");
         }
-        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+        finally { Directory.Delete(root, true); }
     }
 
     /// <summary>A pointer to the fixed folder is one source, not an external lineage claim.</summary>
@@ -1011,13 +1191,83 @@ public static class FolderChecks
             var warning = await move.MoveWithOutcomeAsync(root, root, (_, _, _) => null, default);
             Check.Require(warning == null && !File.Exists(pointer) && File.Exists(StoreFileAt(root)), "A pointer to the fixed folder was not treated as one source");
         }
-        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+        finally { Directory.Delete(root, true); }
     }
-    public static Task A46FixedPointerWithOnlyV16BackupAsync() => throw new NotImplementedException();
-    public static Task A46TwoLinkNoticesFoldedAsync() => throw new NotImplementedException();
-    public static Task A46MixedLinkAndNonlinkMembersAsync() => throw new NotImplementedException();
-    public static Task A46UnchangedNoticesPreservedAsync() => throw new NotImplementedException();
-    public static Task A46CrashDuringConnectionListCopyAsync() => throw new NotImplementedException();
+    public static async Task A46FixedPointerWithOnlyV16BackupAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var backup = await WriteReleaseAsync(root, "state.v16.db", SimpleFacts);
+            var pointer = Path.Combine(root, "product-root.txt"); await File.WriteAllTextAsync(pointer, root);
+            var warning = await NextStartAsync(root);
+            Check.Require(warning == null && !File.Exists(pointer) && ReleaseVersion(ReleaseTarget(root)) == SchemaVersion && ReleaseScalar(ReleaseTarget(root), SimpleFactsQuery) == 1 && File.Exists(backup) && ReleaseVersion(backup) == 16,
+                "A fixed self-pointer with only a v16 backup was not migrated from that backup");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A46TwoLinkNoticesFoldedAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var target = await WriteReleaseAsync(root, ResourceNames.DatabaseFile, TwoLinkFacts);
+            await NextStartAsync(root);
+            Check.Require(ReleaseScalar(target, "SELECT (SELECT count(*) FROM issue WHERE pair_id=1 AND kind=3 AND cause='InfoLinks')=1 AND (SELECT count(*) FROM issue_member m JOIN issue i USING(issue_id) WHERE m.member_id IN(1,4) AND i.cause='InfoLinks')=2 AND NOT EXISTS(SELECT 1 FROM issue WHERE issue_id IN(8,10))") == 1,
+                "Two pure link notices were not folded into one InfoLinks notice");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A46MixedLinkAndNonlinkMembersAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var target = await WriteReleaseAsync(root, ResourceNames.DatabaseFile, LinkPairFacts);
+            await NextStartAsync(root);
+            Check.Require(ReleaseScalar(target, "SELECT (SELECT count(*) FROM issue WHERE issue_id=9 AND cause='SkipSpecial')=1 AND (SELECT count(*) FROM issue_member WHERE issue_id=9)=1 AND EXISTS(SELECT 1 FROM issue_member WHERE member_id=3 AND issue_id=9 AND skip_cause='SkipSpecial') AND EXISTS(SELECT 1 FROM issue_member m JOIN issue i USING(issue_id) WHERE m.member_id=2 AND i.cause='InfoLinks')") == 1,
+                "A mixed link/nonlink notice did not keep its nonlink member and move the link member");
+            // The retained notice must expose the nonlink member through the public reader, not only in raw rows.
+            var mixed = await ReadNoticeAsync(target, "p", 9);
+            Check.Require(mixed is { Cause: TextKey.SkipSpecial } m && m.Subject.Items.SequenceEqual(new[] { new NoticeItem(Side.Dropbox, "b", "still-skipped") }),
+                "The migrated mixed notice did not expose the retained nonlink member to the caller");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A46UnchangedNoticesPreservedAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var target = await WriteReleaseAsync(root, ResourceNames.DatabaseFile, UnchangedFacts);
+            await NextStartAsync(root);
+            Check.Require(ReleaseScalar(target, "SELECT (SELECT count(*) FROM issue WHERE issue_id=30 AND kind=0 AND cause='FailChanged' AND path='keep' AND at_ticks=5 AND dismissed=1)=1 AND EXISTS(SELECT 1 FROM issue_member WHERE member_id=30 AND issue_id=30 AND side=0 AND skip_cause='SkipSpecial')") == 1,
+                "Migration changed a notice unrelated to the link fold");
+            // The unrelated notice must decode to its seeded subject unchanged through the public reader.
+            var untouched = await ReadNoticeAsync(target, "p", 30);
+            Check.Require(untouched is { Cause: TextKey.FailChanged } u && u.Subject.Items.SequenceEqual(new[] { new NoticeItem(Side.Local, "keep", "k") }),
+                "Migration changed the caller-visible decoded notice unrelated to the link fold");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A46CrashDuringConnectionListCopyAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var target = await WriteReleaseAsync(root, ResourceNames.DatabaseFile, SimpleFacts);
+            var orphan = OrphanStage(target); var abandoned = await WriteClosedStageAsync(orphan);
+            bool threw = false;
+            try { await new global::Massdex.SyncShark.Engine.Storage.StoreMove().MoveWithOutcomeAsync(root, root, (_, _, _) => throw new IOException("crash"), default); }
+            catch (IOException) { threw = true; }
+            Check.Require(threw && ReleaseVersion(target) == 16 && ReleaseScalar(target, SimpleFactsQuery) == 1 && File.ReadAllBytes(orphan).SequenceEqual(abandoned) && !File.Exists(ReleaseBackup(root)),
+                "A connection-list failure published, damaged, or rewrote the source image or its stage");
+            await NextStartAsync(root);
+            Check.Require(ReleaseVersion(target) == SchemaVersion && ReleaseScalar(target, SimpleFactsQuery) == 1,
+                "The retry after a connection-list failure did not publish");
+        }
+        finally { Directory.Delete(root, true); }
+    }
     /// <summary>Restart after the first add stops before publication; neither restart nor retry may adopt its stage.</summary>
     public static Task A46CrashDuringFirstPairAddAsync() => FirstAddAsync(true);
     public static Task A46FreshReadCreatesNoStoreAsync() => FreshStartAsync();
@@ -1036,7 +1286,7 @@ public static class FolderChecks
             using var cmd = db.CreateCommand(); cmd.CommandText = "PRAGMA user_version";
             Check.Require(Convert.ToInt32(await cmd.ExecuteScalarAsync()) == global::Massdex.SyncShark.Engine.Storage.Schema.Version, "The published image has the wrong version");
         }
-        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+        finally { Directory.Delete(root, true); }
     }
 
     /// <summary>Two independently occupied stores never prove provenance: the move refuses without overwriting either.</summary>
@@ -1055,7 +1305,7 @@ public static class FolderChecks
             Check.Require(refused && File.ReadAllText(pointer) == first && (await File.ReadAllBytesAsync(StoreFileAt(first))).SequenceEqual(firstBefore) &&
                 (await File.ReadAllBytesAsync(StoreFileAt(second))).SequenceEqual(secondBefore), "An ambiguous independent store was overwritten or consumed");
         }
-        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(first, true); Directory.Delete(second, true); }
+        finally { Directory.Delete(first, true); Directory.Delete(second, true); }
     }
 
     /// <summary>A pointer to a directory that holds no release image is refused, leaving source and pointer intact.</summary>
@@ -1074,7 +1324,7 @@ public static class FolderChecks
             catch (InvalidDataException) { refused = true; }
             Check.Require(refused && File.Exists(pointer) && File.ReadAllText(pointer) == other && (await File.ReadAllBytesAsync(StoreFileAt(root))).SequenceEqual(before), "An invalid source was accepted or the store changed");
         }
-        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+        finally { Directory.Delete(root, true); }
     }
 
     /// <summary>A dangling pointer to a missing predecessor is refused without creating or changing a store.</summary>
@@ -1093,7 +1343,7 @@ public static class FolderChecks
             catch (InvalidDataException) { refused = true; }
             Check.Require(refused && File.ReadAllText(pointer) == missing && (await File.ReadAllBytesAsync(StoreFileAt(root))).SequenceEqual(before), "A dangling external pointer was followed or changed the store");
         }
-        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+        finally { Directory.Delete(root, true); }
     }
 
     /// <summary>Both lists absent with no required connections is valid empty input: no store is created.</summary>
@@ -1105,25 +1355,431 @@ public static class FolderChecks
             var warning = await new global::Massdex.SyncShark.Engine.Storage.StoreMove().MoveWithOutcomeAsync(root, root, (_, _, _) => null, default);
             Check.Require(warning == null && !File.Exists(StoreFileAt(root)), "Empty input created a store instead of leaving the first add to publish");
         }
-        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(root, true); }
+        finally { Directory.Delete(root, true); }
     }
-    public static Task A46MissingRequiredConnectionAsync() => throw new NotImplementedException();
-    public static Task A46DistinctConnectionListsAsync() => throw new NotImplementedException();
-    public static Task A48SameNameRemovedTwiceAsync() => throw new NotImplementedException();
+    public static async Task A46MissingRequiredConnectionAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var target = await WriteReleaseAsync(root, ResourceNames.DatabaseFile, MissingConnectionFacts);
+            // The pair names a well-formed id that the (empty, canonical) connection list does not hold, so the same
+            // Connections.Verify boundary production startup uses must present that exact id and refuse it as a
+            // missing account (not a malformed id) before publication.
+            Directory.CreateDirectory(Path.Combine(root, "state"));
+            await File.WriteAllTextAsync(Path.Combine(root, "state", "dropbox-connection.jsonl"), "[]\n");
+            var connections = new global::Massdex.SyncShark.Engine.Dropbox.Connections();
+            IReadOnlyList<string>? seen = null; string? reason = null;
+            try { await new global::Massdex.SyncShark.Engine.Storage.StoreMove().MoveWithOutcomeAsync(root, root, (source, product, ids) => { seen = ids; return connections.Verify(source, product, ids); }, default); }
+            catch (InvalidDataException error) { reason = error.Message; }
+            Check.Require(seen is { Count: 1 } ids && ids[0] == MissingConnectionId,
+                "The migration did not present the well-formed required connection id before publication");
+            Check.Require(reason != null && reason.Contains(MissingConnectionId, StringComparison.Ordinal) && ReleaseVersion(target) == 16 && !File.Exists(ReleaseBackup(root)) &&
+                ReleaseScalar(target, "SELECT EXISTS(SELECT 1 FROM pair WHERE json_extract(def_json,'$.ConnectionId')='" + MissingConnectionId + "')") == 1,
+                "A well-formed required connection absent from the list was not refused as a missing account before publication");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A46DistinctConnectionListsAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var target = await WriteReleaseAsync(root, ResourceNames.DatabaseFile, DistinctFacts);
+            IReadOnlyList<string>? seen = null;
+            await new global::Massdex.SyncShark.Engine.Storage.StoreMove().MoveWithOutcomeAsync(root, root, (_, _, ids) => { seen = ids; return null; }, default);
+            Check.Require(seen != null && seen.Count == 2 && seen.OrderBy(x => x).SequenceEqual(new[] { "c1", "c2" }) && ReleaseVersion(target) == SchemaVersion && ReleaseScalar(target, "SELECT count(*) FROM pair WHERE json_extract(def_json,'$.ConnectionId') IN ('c1','c2')") == 2,
+                "Distinct required connections were not both presented before publication");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A48SameNameRemovedTwiceAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName; var drive = FreeDrive();
+        try
+        {
+            Subst(drive, root);
+            try
+            {
+                AssertFixtureVolume(drive, root);
+                var volume = drive + Path.DirectorySeparatorChar; var bin = Path.Combine(root, ResourceNames.RootBinFolder);
+                var full = Path.Combine(root, "x");
+                File.WriteAllBytes(full, new byte[] { 1, 2 });
+                var e1 = ManagedFile(full, "x");
+                var r1 = await ArmedBin().RemoveAsync(volume, DriveType.Removable, e1, ManagedProofFile(e1, ManagedVolume(full)), default);
+                File.WriteAllBytes(full, new byte[] { 3, 4 });
+                var e2 = ManagedFile(full, "x");
+                var r2 = await ArmedBin().RemoveAsync(volume, DriveType.Removable, e2, ManagedProofFile(e2, ManagedVolume(full)), default);
+                Check.Require(r1.Outcome == RemovalOutcome.Removed && r2.Outcome == RemovalOutcome.Removed && !File.Exists(full),
+                    "A repeated managed removal did not settle both versions");
+                Check.Require(File.Exists(Path.Combine(bin, "x")) && File.ReadAllBytes(Path.Combine(bin, "x")).SequenceEqual(new byte[] { 1, 2 }) &&
+                    File.Exists(Path.Combine(bin, "x (2)")) && File.ReadAllBytes(Path.Combine(bin, "x (2)")).SequenceEqual(new byte[] { 3, 4 }),
+                    "Two receipts for one name did not preserve both versions");
+                Check.Require(r1.RecycledVictim is { } v1 && v1.NativePath == Path.Combine(bin, "x") && v1.Entry.Id == e1.Id && v1.Entry.ContentHash == e1.ContentHash &&
+                    r2.RecycledVictim is { } v2 && v2.NativePath == Path.Combine(bin, "x (2)") && v2.Entry.Id == e2.Id && v2.Entry.ContentHash == e2.ContentHash,
+                    "The two removals did not return receipts naming their own binned versions");
+            }
+            finally { Subst(drive, "/D"); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
     public static Task A48TwoPairsOneVolumeAsync() => throw new NotImplementedException();
-    public static Task A48DriveRootScopeAsync() => throw new NotImplementedException();
-    public static Task A48RootBinJunctionRemoveRefusedAsync() => throw new NotImplementedException();
-    public static Task A48RootBinJunctionTrimRefusedAsync() => throw new NotImplementedException();
-    public static Task A48StartupTrimsOldTopLevelAsync() => throw new NotImplementedException();
-    public static Task A48ExactRetentionBoundaryAsync() => throw new NotImplementedException();
+    public static async Task A48DriveRootScopeAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName; var drive = FreeDrive(); var culture = CultureInfo.InvariantCulture;
+        try
+        {
+            Subst(drive, root);
+            try
+            {
+                AssertFixtureVolume(drive, root);
+                var volume = drive + Path.DirectorySeparatorChar; var bin = Path.Combine(root, ResourceNames.RootBinFolder);
+                var folder = Directory.CreateDirectory(Path.Combine(root, "top")).FullName;
+                Directory.CreateDirectory(Path.Combine(folder, "nested")); File.WriteAllBytes(Path.Combine(folder, "nested", "child"), new byte[] { 7, 9 });
+                var identity = Identity(folder);
+                var entry = new Entry("top", true, 0, default, unchecked((long)identity.FileId).ToString(culture), "", "", null);
+                var proof = new RemovalSelection(new RemovalProof(entry, identity.VolumeSerialNumber.ToString(culture), null), null);
+                var result = await ArmedBin().RemoveAsync(volume, DriveType.Removable, entry, proof, default);
+                Check.Require(result.Outcome == RemovalOutcome.Removed && !Directory.Exists(folder) && Directory.Exists(Path.Combine(bin, "top")) &&
+                    File.ReadAllBytes(Path.Combine(bin, "top", "nested", "child")).SequenceEqual(new byte[] { 7, 9 }),
+                    "A folder at the drive root scope was not recycled whole into the volume bin");
+            }
+            finally { Subst(drive, "/D"); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A48RootBinJunctionRemoveRefusedAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName; var drive = FreeDrive();
+        try
+        {
+            Subst(drive, root);
+            string? link = null;
+            try
+            {
+                AssertFixtureVolume(drive, root);
+                var volume = drive + Path.DirectorySeparatorChar; var path = Path.Combine(root, "source"); File.WriteAllBytes(path, new byte[] { 1, 3 });
+                var target = Directory.CreateDirectory(Path.Combine(root, "redirect")).FullName; File.WriteAllText(Path.Combine(target, "kept"), "original");
+                link = Path.Combine(root, ResourceNames.RootBinFolder); Directory.CreateSymbolicLink(link, target);
+                var entry = ManagedFile(path, "source");
+                var result = await ArmedBin().RemoveAsync(volume, DriveType.Removable, entry, ManagedProofFile(entry, ManagedVolume(path)), default);
+                Check.Require(result.Outcome == RemovalOutcome.NoEffect && result.Cause == TextKey.RecycleUnavailable &&
+                    File.Exists(path) && File.ReadAllBytes(path).SequenceEqual(new byte[] { 1, 3 }) &&
+                    Directory.GetFileSystemEntries(target).Length == 1 && File.ReadAllText(Path.Combine(target, "kept")) == "original",
+                    "A linked root bin did not refuse without changing the source or redirect target");
+            }
+            finally { if (link != null && Directory.Exists(link)) Directory.Delete(link); Subst(drive, "/D"); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A48RootBinJunctionTrimRefusedAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName; var drive = FreeDrive();
+        try
+        {
+            Subst(drive, root);
+            string? link = null;
+            try
+            {
+                AssertFixtureVolume(drive, root);
+                var volume = drive + Path.DirectorySeparatorChar;
+                var target = Directory.CreateDirectory(Path.Combine(root, "redirect")).FullName;
+                var old = Path.Combine(target, "old"); File.WriteAllText(old, "kept"); File.SetCreationTimeUtc(old, DateTime.UtcNow.AddDays(-40));
+                link = Path.Combine(root, ResourceNames.RootBinFolder); Directory.CreateSymbolicLink(link, target);
+                await new global::Massdex.SyncShark.Engine.Local.RecycleBin().TrimAsync(volume, DriveType.Removable, DateTimeOffset.UtcNow, default);
+                Check.Require(File.Exists(old) && File.ReadAllText(old) == "kept", "Trim entered a linked root bin instead of refusing");
+            }
+            finally { if (link != null && Directory.Exists(link)) Directory.Delete(link); Subst(drive, "/D"); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A48StartupTrimsOldTopLevelAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName; var drive = FreeDrive();
+        try
+        {
+            Subst(drive, root);
+            try
+            {
+                AssertFixtureVolume(drive, root);
+                var volume = drive + Path.DirectorySeparatorChar; var now = DateTimeOffset.UtcNow;
+                var bin = Directory.CreateDirectory(Path.Combine(root, ResourceNames.RootBinFolder)).FullName;
+                var old = Path.Combine(bin, "old"); File.WriteAllText(old, "gone"); File.SetCreationTimeUtc(old, now.UtcDateTime.AddDays(-40));
+                var recent = Path.Combine(bin, "recent"); File.WriteAllText(recent, "kept"); File.SetCreationTimeUtc(recent, now.UtcDateTime.AddDays(-1));
+                // Retention is decided by the top-level item's own creation; a fresh top-level folder holding an expired
+                // descendant is kept whole (the trim never descends), so an old child cannot drag its parent out.
+                var freshTop = Directory.CreateDirectory(Path.Combine(bin, "fresh-top")).FullName; Directory.SetCreationTimeUtc(freshTop, now.UtcDateTime.AddDays(-1));
+                var oldDescendant = Path.Combine(freshTop, "old-descendant"); File.WriteAllText(oldDescendant, "kept"); File.SetCreationTimeUtc(oldDescendant, now.UtcDateTime.AddDays(-40));
+                await new global::Massdex.SyncShark.Engine.Local.RecycleBin().TrimAsync(volume, DriveType.Removable, now, default);
+                Check.Require(!File.Exists(old) && File.Exists(recent) && File.Exists(oldDescendant), "Startup trim removed an expired descendant or kept only some expired top-level items");
+            }
+            finally { Subst(drive, "/D"); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A48ExactRetentionBoundaryAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName; var drive = FreeDrive();
+        try
+        {
+            Subst(drive, root);
+            try
+            {
+                AssertFixtureVolume(drive, root);
+                var volume = drive + Path.DirectorySeparatorChar;
+                // The approved retention contract is 30 days; the boundary cases are derived around it (±1s), an
+                // independent expectation rather than a mirror of the product's clock.
+                var now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero); var cutoff = now.UtcDateTime.AddDays(-30);
+                var bin = Directory.CreateDirectory(Path.Combine(root, ResourceNames.RootBinFolder)).FullName;
+                var edge = Path.Combine(bin, "edge"); File.WriteAllText(edge, "k"); File.SetCreationTimeUtc(edge, cutoff);
+                var inside = Path.Combine(bin, "inside"); File.WriteAllText(inside, "k"); File.SetCreationTimeUtc(inside, cutoff.AddSeconds(1));
+                var over = Path.Combine(bin, "over"); File.WriteAllText(over, "g"); File.SetCreationTimeUtc(over, cutoff.AddSeconds(-1));
+                await new global::Massdex.SyncShark.Engine.Local.RecycleBin().TrimAsync(volume, DriveType.Removable, now, default);
+                Check.Require(File.Exists(edge) && File.Exists(inside) && !File.Exists(over), "The retention boundary did not keep exactly-30-day items and remove older ones");
+            }
+            finally { Subst(drive, "/D"); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
     public static Task A48QuietJobBeforeTrimAsync() => throw new NotImplementedException();
     public static Task A48FailedPutBackBeforeTrimAsync() => throw new NotImplementedException();
-    public static Task A48BinOnNativeBinVolumeNotTrimmedAsync() => throw new NotImplementedException();
-    public static Task A48UnrelatedVolumeNotTrimmedAsync() => throw new NotImplementedException();
+    public static async Task A48BinOnNativeBinVolumeNotTrimmedAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName; var drive = FreeDrive();
+        try
+        {
+            Subst(drive, root);
+            try
+            {
+                AssertFixtureVolume(drive, root);
+                var volume = drive + Path.DirectorySeparatorChar;
+                var bin = Directory.CreateDirectory(Path.Combine(root, ResourceNames.RootBinFolder)).FullName;
+                var old = Path.Combine(bin, "old"); File.WriteAllText(old, "kept"); File.SetCreationTimeUtc(old, DateTime.UtcNow.AddDays(-40));
+                await new global::Massdex.SyncShark.Engine.Local.RecycleBin().TrimAsync(volume, DriveType.Fixed, DateTimeOffset.UtcNow, default);
+                Check.Require(File.Exists(old), "A fixed (native-bin) volume's managed bin was trimmed");
+            }
+            finally { Subst(drive, "/D"); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+    public static async Task A48UnrelatedVolumeNotTrimmedAsync()
+    {
+        var rootA = Directory.CreateTempSubdirectory().FullName; var rootB = Directory.CreateTempSubdirectory().FullName; var driveA = FreeDrive();
+        try
+        {
+            Subst(driveA, rootA);
+            AssertFixtureVolume(driveA, rootA);
+            var driveB = FreeDrive();
+            try
+            {
+                Subst(driveB, rootB);
+                try
+                {
+                    AssertFixtureVolume(driveB, rootB);
+                    var a = Directory.CreateDirectory(Path.Combine(rootA, ResourceNames.RootBinFolder)).FullName;
+                    var b = Directory.CreateDirectory(Path.Combine(rootB, ResourceNames.RootBinFolder)).FullName;
+                    var oldA = Path.Combine(a, "old"); File.WriteAllText(oldA, "a"); File.SetCreationTimeUtc(oldA, DateTime.UtcNow.AddDays(-40));
+                    var oldB = Path.Combine(b, "old"); File.WriteAllText(oldB, "b"); File.SetCreationTimeUtc(oldB, DateTime.UtcNow.AddDays(-40));
+                    await new global::Massdex.SyncShark.Engine.Local.RecycleBin().TrimAsync(driveA + Path.DirectorySeparatorChar, DriveType.Removable, DateTimeOffset.UtcNow, default);
+                    Check.Require(!File.Exists(oldA) && File.Exists(oldB), "Trim of one volume touched another volume's bin");
+                }
+                finally { Subst(driveB, "/D"); }
+            }
+            finally { Subst(driveA, "/D"); }
+        }
+        finally { Directory.Delete(rootA, true); Directory.Delete(rootB, true); }
+    }
     public static Task A48LongDowntimeRecoverBeforeTrimAsync() => throw new NotImplementedException();
     public static Task A48UnavailableHistoryAsync() => throw new NotImplementedException();
     public static Task A48UnknownDriveUsesShellOrAbortAsync() => throw new NotImplementedException();
-    public static Task A48StampBeforeNonreplacingMoveAsync() => throw new NotImplementedException();
+    public static async Task A48StampBeforeNonreplacingMoveAsync()
+    {
+        var root = Directory.CreateTempSubdirectory().FullName; var drive = FreeDrive();
+        try
+        {
+            Subst(drive, root);
+            try
+            {
+                AssertFixtureVolume(drive, root);
+                var volume = drive + Path.DirectorySeparatorChar; var bin = Path.Combine(root, ResourceNames.RootBinFolder);
+                var full = Path.Combine(root, "x"); File.WriteAllBytes(full, new byte[] { 5, 6 }); File.SetCreationTimeUtc(full, DateTime.UtcNow.AddDays(-40));
+                var sourceWrite = File.GetLastWriteTimeUtc(full); var sourceId = Identity(full); var removalStart = DateTime.UtcNow;
+                var entry = ManagedFile(full, "x");
+                var result = await ArmedBin().RemoveAsync(volume, DriveType.Removable, entry, ManagedProofFile(entry, ManagedVolume(full)), default);
+                var removalDone = DateTime.UtcNow;
+                Check.Require(result.Outcome == RemovalOutcome.Removed, "A managed removal of an old file did not settle");
+                var binned = Path.Combine(bin, "x");
+                // At the move boundary the binned object is the same identity with unchanged bytes and modification
+                // time, and its creation is re-stamped to the removal time so the 30-day trim keeps it. The fresh stamp
+                // is observed between the clock reads around the removal (no invented tolerance). Whether the stamp
+                // lands before or after the rename is not observable through the adapter offline and remains unproven
+                // here (designer-owned witness); only these boundary facts are claimed.
+                Check.Require(File.Exists(binned) && File.ReadAllBytes(binned).SequenceEqual(new byte[] { 5, 6 }) &&
+                    Identity(binned) == sourceId && File.GetLastWriteTimeUtc(binned) == sourceWrite &&
+                    File.GetCreationTimeUtc(binned) >= removalStart && File.GetCreationTimeUtc(binned) <= removalDone,
+                    "The moved object did not preserve identity, bytes and modification time with a fresh creation stamp");
+                await new global::Massdex.SyncShark.Engine.Local.RecycleBin().TrimAsync(volume, DriveType.Removable, DateTimeOffset.UtcNow, default);
+                Check.Require(File.Exists(binned), "A freshly binned version was trimmed: creation was not re-stamped at removal");
+            }
+            finally { Subst(drive, "/D"); }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    // ---- A46 materialized store-move preimages: rebuild the release image, run the next start, prove the image ----
+    private static int SchemaVersion => global::Massdex.SyncShark.Engine.Storage.Schema.Version;
+    private const string SimpleFacts = """
+        INSERT INTO pair(id,pair_id,def_json) VALUES(1,'p','{"ConnectionId":"c"}');
+        INSERT INTO synced_entry(pair_id,local_path,is_folder,local_id,local_size,local_mtime,dropbox_id,dropbox_hash) VALUES(1,'item',0,101,1,10,'cloud',X'01');
+        INSERT INTO journal_position VALUES('volume',3,17);
+        """;
+    private const string SimpleFactsQuery = "SELECT EXISTS(SELECT 1 FROM pair p JOIN synced_entry s ON p.id=s.pair_id JOIN journal_position j ON j.volume_key='volume' WHERE p.pair_id='p' AND s.local_id=101 AND s.dropbox_id='cloud' AND j.journal_id=3 AND j.next_usn=17)";
+    // A pair only the published v17 image holds after the first switch; the v16 predecessor seeded above does not.
+    // A restart that wrongly rebuilds the published store from v16 removes it.
+    private const string V17OnlyFact = "INSERT INTO pair(id,pair_id,def_json) VALUES(2,'v17-only','{\"ConnectionId\":\"c\"}')";
+    private const string LinkPairFacts = """
+        INSERT INTO pair(id,pair_id,def_json) VALUES(1,'p','{"ConnectionId":"c"}');
+        INSERT INTO issue(issue_id,pair_id,kind,cause,path,subject_json,at_ticks,dismissed) VALUES
+          (8,1,4,'SkipLink','a','{"Items":[],"Incoming":null}',1,0),
+          (9,1,4,'SkipLink','b','{"Items":[{"Side":0,"Path":"b","Id":"old-link"},{"Side":1,"Path":"b","Id":"still-skipped"}],"Incoming":null}',2,0);
+        INSERT INTO issue_member(member_id,issue_id,pair_id,side,path_key,subject_json,skip_cause) VALUES
+          (1,8,1,0,pathkey('a'),'{"Version":1,"Value":{"Items":[],"Incoming":null}}','SkipLink'),
+          (2,9,1,0,pathkey('b'),'{"Version":1,"Value":{"Items":[{"Side":"Local","Path":"b","Id":"old-link"}],"Incoming":null}}','SkipLink'),
+          (3,9,1,1,pathkey('b'),'{"Version":1,"Value":{"Items":[{"Side":"Dropbox","Path":"b","Id":"still-skipped"}],"Incoming":null}}','SkipSpecial');
+        """;
+    private const string TwoLinkFacts = """
+        INSERT INTO pair(id,pair_id,def_json) VALUES(1,'p','{"ConnectionId":"c"}');
+        INSERT INTO issue(issue_id,pair_id,kind,cause,path,subject_json,at_ticks,dismissed) VALUES
+          (8,1,4,'SkipLink','a','{"Items":[],"Incoming":null}',1,0),
+          (10,1,4,'SkipLink','c','{"Items":[],"Incoming":null}',3,0);
+        INSERT INTO issue_member(member_id,issue_id,pair_id,side,path_key,subject_json,skip_cause) VALUES
+          (1,8,1,0,pathkey('a'),'{"Version":1,"Value":{"Items":[],"Incoming":null}}','SkipLink'),
+          (4,10,1,0,pathkey('c'),'{"Version":1,"Value":{"Items":[],"Incoming":null}}','SkipLink');
+        """;
+    private const string UnchangedFacts = """
+        INSERT INTO pair(id,pair_id,def_json) VALUES(1,'p','{"ConnectionId":"c"}');
+        INSERT INTO issue(issue_id,pair_id,kind,cause,path,subject_json,at_ticks,dismissed) VALUES
+          (30,1,0,'FailChanged','keep','{"Items":[{"Side":0,"Path":"keep","Id":"k"}],"Incoming":null}',5,1);
+        INSERT INTO issue_member(member_id,issue_id,pair_id,side,path_key,subject_json,skip_cause) VALUES
+          (30,30,1,0,pathkey('keep'),'{"Version":1,"Value":{"Items":[{"Side":"Local","Path":"keep","Id":"k"}],"Incoming":null}}','SkipSpecial');
+        """;
+    // A well-formed connection id (connection- plus 24 lowercase hex, as 0.3.95 created it) that the seeded
+    // connection list (the empty canonical []) does not hold, so the specific missing-account refusal is exercised.
+    private static readonly string MissingConnectionId = global::Massdex.SyncShark.Engine.Dropbox.Connections.CreateConnectionId("fixture-account");
+    private static readonly string MissingConnectionFacts = $"INSERT INTO pair(id,pair_id,def_json) VALUES(1,'p','{{\"ConnectionId\":\"{MissingConnectionId}\"}}');";
+    private const string DistinctFacts = """
+        INSERT INTO pair(id,pair_id,def_json) VALUES(1,'p1','{"ConnectionId":"c1"}'),(2,'p2','{"ConnectionId":"c2"}');
+        """;
+
+    // The release DDL is the real fixture in Scenarios/StoreMoveChecks.cs (the same file Storage/StoreMoveChecks borrows).
+    // Read and parsed once per process, not once per seed.
+    private static readonly Lazy<string> ReleaseDdl = new(() =>
+    {
+        var source = File.ReadAllText(Path.Combine(CheckArguments.Parse(Environment.GetCommandLineArgs()[1..]).Root, "tests", "SyncShark.Engine.Tests", "Scenarios", "StoreMoveChecks.cs"));
+        var field = CSharpSyntaxTree.ParseText(source).GetRoot().DescendantNodes().OfType<VariableDeclaratorSyntax>().Single(n => n.Identifier.ValueText == "ReleaseSchema");
+        return ((LiteralExpressionSyntax)field.Initializer!.Value).Token.ValueText;
+    });
+    private static Task<string> WriteReleaseAsync(string root, string fileName, string seed)
+    {
+        Directory.CreateDirectory(Path.Combine(root, ResourceNames.EngineFolder));
+        var path = Path.Combine(root, ResourceNames.EngineFolder, fileName);
+        using var db = ReleaseDb(path, SqliteOpenMode.ReadWriteCreate);
+        using var cmd = db.CreateCommand(); cmd.CommandText = ReleaseDdl.Value + seed; cmd.ExecuteNonQuery();
+        return Task.FromResult(path);
+    }
+    private static SqliteConnection ReleaseDb(string path, SqliteOpenMode mode)
+    {
+        var db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = mode, Pooling = false }.ToString());
+        db.Open();
+        db.CreateFunction<string, string>("pathkey", PathNames.Key, isDeterministic: true);
+        db.CreateFunction<string, int>("plandepth", PathNames.Depth, isDeterministic: true);
+        db.CreateFunction<string, int>("localaccessretrycause", _ => 0, isDeterministic: true);
+        return db;
+    }
+    private static string ReleaseTarget(string root) => Path.Combine(root, ResourceNames.EngineFolder, ResourceNames.DatabaseFile);
+    private static string ReleaseBackup(string root) => Path.Combine(root, ResourceNames.EngineFolder, "state.v16.db");
+    private static string OrphanStage(string target) => target + "." + DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffffffZ", CultureInfo.InvariantCulture) + "." + Guid.NewGuid().ToString("N") + ".new";
+    /// <summary>A distinguishable, closed v17 image (no WAL side file) so an abandoned stage is a real store, not text;
+    /// the marker journal row would surface if it were ever adopted.</summary>
+    private static async Task<byte[]> WriteClosedStageAsync(string stage)
+    {
+        using (var db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = stage, Pooling = false }.ToString()))
+        {
+            await db.OpenAsync();
+            db.CreateFunction<string, string>("pathkey", PathNames.Key, isDeterministic: true);
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = global::Massdex.SyncShark.Engine.Storage.Schema.Create;
+            await cmd.ExecuteNonQueryAsync();
+            cmd.CommandText = $"PRAGMA user_version={SchemaVersion}; INSERT INTO journal_position VALUES('stage-marker',11,13)";
+            await cmd.ExecuteNonQueryAsync();
+        }
+        return await File.ReadAllBytesAsync(stage);
+    }
+    private static int ReleaseVersion(string path)
+    {
+        using var db = ReleaseDb(path, SqliteOpenMode.ReadOnly);
+        using var cmd = db.CreateCommand(); cmd.CommandText = "PRAGMA user_version";
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+    private static int ReleaseScalar(string path, string sql)
+    {
+        using var db = ReleaseDb(path, SqliteOpenMode.ReadOnly);
+        using var cmd = db.CreateCommand(); cmd.CommandText = sql;
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+    // The caller-visible decoded notice, through the same public reader production uses (never raw rows).
+    private static async Task<Notice?> ReadNoticeAsync(string path, string pairId, long id)
+    {
+        using var db = ReleaseDb(path, SqliteOpenMode.ReadOnly);
+        return await new global::Massdex.SyncShark.Engine.Storage.NoticeTable().NoticeAsync(db, pairId, id, default);
+    }
+    private static Task<string?> NextStartAsync(string root, Func<string, string, IReadOnlyList<string>, Action?>? verify = null)
+        => new global::Massdex.SyncShark.Engine.Storage.StoreMove().MoveWithOutcomeAsync(root, root, verify ?? ((_, _, _) => null), default);
+
+    // ---- A48 removable-volume bin fixtures: drive the real shell-bin and trim paths on marker-safe SUBST roots ----
+    // Ten candidate letters Q..Z, highest first, taking the first the OS reports free; the same range the
+    // Local/RecycleBinChecks and Local/TrimContinues fixtures use, so a synthetic SUBST alias never shadows a
+    // real in-use drive.
+    private static string FreeDrive() => Enumerable.Range('Q', 10).Reverse().Select(c => ((char)c) + ":").First(d => !Directory.Exists(d + Path.DirectorySeparatorChar));
+    private static void Subst(string drive, string argument)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "subst.exe")) { UseShellExecute = false };
+        start.ArgumentList.Add(drive); start.ArgumentList.Add(argument);
+        using var command = System.Diagnostics.Process.Start(start)!; command.WaitForExit();
+        Check.Require(command.ExitCode == 0, "could not prepare or release synthetic volume");
+    }
+    /// <summary>The ownership proof from Local/TrimContinues: a removable-bin Remove/Trim may run only once the SUBST alias
+    /// is shown to resolve to this fixture's own temporary root, so a stale or foreign mapping is never touched.</summary>
+    private static void AssertFixtureVolume(string drive, string root)
+    {
+        var marker = Guid.NewGuid().ToString("N");
+        File.WriteAllText(Path.Combine(root, marker), marker);
+        Check.Require(File.ReadAllText(Path.Combine(drive + Path.DirectorySeparatorChar, marker)) == marker, "drive is not the fixture");
+    }
+    [System.Runtime.InteropServices.DllImport("kernel32", EntryPoint = "CreateFileW", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle OpenMetadata(string path, uint access, FileShare share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [System.Runtime.InteropServices.DllImport("kernel32", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(Microsoft.Win32.SafeHandles.SafeFileHandle h, int kind, [System.Runtime.InteropServices.Out] byte[] data, uint bytes);
+    // Win32 values, by name from the Windows SDK: access FILE_READ_ATTRIBUTES=0x80; disposition OPEN_EXISTING=3;
+    // flags FILE_FLAG_BACKUP_SEMANTICS(0x02000000)|FILE_FLAG_OPEN_REPARSE_POINT(0x00200000)|FILE_FLAG_SESSION_AWARE(0x00100000)
+    // = 0x02300000; FILE_INFO_BY_HANDLE_CLASS.FileIdInfo=18 and sizeof(FILE_ID_INFO)=24. Mirrors Local/RecycleBinChecks.Identity.
+    private static DirectoryIdentity Identity(string full)
+    {
+        using var handle = OpenMetadata(full, 0x80, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, 3, 0x02300000, IntPtr.Zero);
+        var id = new byte[24]; Check.Require(!handle.IsInvalid && GetFileInformationByHandleEx(handle, 18, id, 24), "native fixture identity unavailable");
+        return new(BitConverter.ToUInt64(id), BitConverter.ToUInt64(id, 8), BitConverter.ToUInt64(id, 16));
+    }
+    private static global::Massdex.SyncShark.Engine.Local.RecycleBin ArmedBin()
+        => (global::Massdex.SyncShark.Engine.Local.RecycleBin)Activator.CreateInstance(typeof(global::Massdex.SyncShark.Engine.Local.RecycleBin),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null, [(Func<Task<bool>>)(() => Task.FromResult(true)), null], null)!;
+    private static Entry ManagedFile(string full, string rel)
+    {
+        var identity = Identity(full); var bytes = File.ReadAllBytes(full);
+        using var hash = new ContentHash(); hash.Append(bytes);
+        return new Entry(rel, false, bytes.Length, File.GetLastWriteTimeUtc(full), unchecked((long)identity.FileId).ToString(CultureInfo.InvariantCulture), "", hash.Finish(), null);
+    }
+    private static string ManagedVolume(string full) => Identity(full).VolumeSerialNumber.ToString(CultureInfo.InvariantCulture);
+    private static RemovalSelection ManagedProofFile(Entry entry, string volumeId) => new(new RemovalProof(entry, volumeId, entry.ContentHash), null);
     private static PairConfig NestedPair(PairConfig outer, string innerRoot) =>
         outer with { PairId = "inner", LocalRoot = Path.Combine(outer.LocalRoot, innerRoot), DropboxRoot = outer.DropboxRoot + "/" + innerRoot };
 
@@ -1167,13 +1823,19 @@ public static class FolderChecks
         return Task.CompletedTask;
     }
 
-    /// <summary>Both mapped endpoints of a nested root are protected from a whole or partial move.</summary>
+    /// <summary>Both mapped endpoints of a nested root are protected from a whole or partial move: the covering
+    /// path carries the root, and an endpoint inside the root is inside a protected range.</summary>
     public static Task A50MappedOtherEndpointProtectedAsync()
     {
         var pair = ItemChecks.Pair(); var inner = NestedPair(pair, "nested");
         var paths = new PathScope(pair, [pair, inner], DriveType.Fixed);
-        Check.Require(paths.HoldsNestedRoot(Side.Local, "nested/child") && paths.HoldsNestedRoot(Side.Dropbox, "nested/child"),
-            "A mapped nested endpoint was not protected before a move");
+        // HoldsNestedRoot answers "is the nested root at or under this path" - the covering path a whole/partial move starts from.
+        Check.Require(paths.HoldsNestedRoot(Side.Local, "nested") && paths.HoldsNestedRoot(Side.Dropbox, "nested"),
+            "The covering path of a mapped nested root was not protected before a whole or partial move");
+        // An endpoint inside the root is protected only by the overlap direction, on each side's own spelling.
+        Check.Require(paths.OverlapsNestedRoot(Side.Local, "nested/child", PathNames.KeyFor(Side.Local, "nested/child")) &&
+            paths.OverlapsNestedRoot(Side.Dropbox, "nested/child", PathNames.KeyFor(Side.Dropbox, "nested/child")),
+            "An endpoint inside a mapped nested root was not protected before a move");
         return Task.CompletedTask;
     }
 

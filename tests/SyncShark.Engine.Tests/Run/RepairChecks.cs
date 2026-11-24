@@ -1,3 +1,4 @@
+using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Run;
 using Massdex.SyncShark.Engine.Tests.Scenarios;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
@@ -147,7 +148,12 @@ public static class RepairChecks
                 if(m.Name==nameof(IStore.JobsAsync)) Interlocked.Increment(ref jobReads);
                 return AutoSyncChecks.Observation.Forward(store,m,args);
             });
-            try {await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,db,observed,null,null,ct);} catch(InventoryIncompleteException) when(!healthy && !interrupt) { }
+            if(!healthy && !interrupt) await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",ct);
+            try {await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,db,observed,null,null,ct);Check.Require(healthy || interrupt,"Incomplete inventory reported success");}
+            catch(InventoryIncompleteException e) when(!healthy && !interrupt)
+            {
+                Check.Require(e.Message.Contains("unread",StringComparison.OrdinalIgnoreCase) && (await store.ReadRepairAsync(pair.PairId,Side.Dropbox,ct)).Reason!=null && db.Items["unread"].Bytes.SequenceEqual(new byte[]{2}),"Incomplete inventory lost the unread path, obligation or bytes");
+            }
             catch(InvalidDataException e) when(ReferenceEquals(e,interruption))
             {
                 Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("marked/child"),ct)!=null &&
@@ -175,6 +181,8 @@ public static class RepairChecks
     {
         var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);var paths=new PathScope(pair,[pair],DriveType.Fixed);
         var queue=new WorkQueue();await new PairRunner().CatchUpAsync(pair,(null,null),ItemChecks.Settings,_=>{},paths,queue,pc,db,store,static()=>{},ct);
+        // The caller owns a real Local range folder; its Dropbox peer stays absent, the intended one-sided input.
+        var rangeFolder=ItemChecks.File(Side.Local,"range",0,"range-folder",true);pc.Seed(rangeFolder,[]);
         var folder=ItemChecks.File(Side.Local,"range/new",0,"folder",true);pc.Seed(folder,[]);
         var child=ItemChecks.File(Side.Local,"range/new/child",3,"current");pc.Seed(child,[3]);
         var binding=SyncedEntries.From(child with {Modified=DateTimeOffset.UnixEpoch},ItemChecks.File(Side.Dropbox,child.Path,3,"peer"));
@@ -188,8 +196,8 @@ public static class RepairChecks
         }
         var local=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.ContentHashAsync) && args[0] is Entry e && e.Path==child.Path ? Hash(e) : AutoSyncChecks.Observation.Forward(pc,m,args));
         // Run inline under an existing comparison grant, so population precedes the outer child row.
-        var range=new Scope("range","range");var root=SyncedEntries.From(ItemChecks.File(Side.Local,"range",1,"old"),ItemChecks.File(Side.Dropbox,"range",1,"old-peer"));
-        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,db,store,range,(root,range,range),ct);
+        var range=new Scope("range","range");var owner=SyncedEntries.From(rangeFolder,ItemChecks.File(Side.Dropbox,"range",0,"range-peer",true));
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,db,store,range,(owner,range,range),ct);
         Notice? kept=null;await foreach(var n in store.NoticesAtAsync(pair.PairId,binding.LocalKey,ct)) kept=n;
         Check.Require(kept is {Ignored:true} && await store.FindAsync(pair.PairId,Side.Local,binding.LocalKey,ct)==binding && pc.Items.ContainsKey(child.Path) && !db.Items.ContainsKey(child.Path),"Filtered add-only child lost its ignored failure without applying an effect");
     });
@@ -202,10 +210,29 @@ public static class RepairChecks
         db.DeletedHistory["a"]=new DeletionEvidence.DeletedPath("a","a");
         if(keep) pc.Seed(ItemChecks.File(Side.Local,"a/content",3,"file"),[3]);
         var queue=new WorkQueue(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
-        await new PairRunner().CatchUpAsync(pair,(null,null),ItemChecks.Settings,_=>{},paths,queue,pc,db,store,static()=>{},ct);
-        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,db,store,null,null,ct);
-        Check.Require(pc.Requests[nameof(ISide.ReadAllAsync)]==1 && db.Requests[nameof(ISide.ReadAllAsync)]==1,"Covered child population listed its range again");
-        Check.Require(db.Items.ContainsKey("a/empty")==keep && pc.Items.ContainsKey("a")==keep,"Suppressed child created under recycled parent or lost under kept parent");
+        // Count enumerations of the returned stream, not construction of the lazy listing (Effects builds unused ones).
+        int localListings=0,remoteListings=0;
+        static async IAsyncEnumerable<Listed> Started(IAsyncEnumerable<Listed> source,Action count)
+        {
+            count(); await foreach(var item in source) yield return item;
+        }
+        ISide CountStarts(FakeSide side,Action started)=>AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>{
+            if(m.Name==nameof(ISide.ReadAllAsync)) return Started((IAsyncEnumerable<Listed>)AutoSyncChecks.Observation.Forward(side,m,args)!,started);
+            return AutoSyncChecks.Observation.Forward(side,m,args);
+        });
+        var local=CountStarts(pc,()=>Interlocked.Increment(ref localListings)); var remote=CountStarts(db,()=>Interlocked.Increment(ref remoteListings));
+        await new PairRunner().CatchUpAsync(pair,(null,null),ItemChecks.Settings,_=>{},paths,queue,local,remote,store,static()=>{},ct);
+        if(!keep)
+        {
+            // The delete leg is admitted only under journal coverage (FolderDelete.cs:134,183); a real repair follows a journal pass.
+            bool covered=true;Func<Func<(JournalPosition? Local,string? Dropbox),bool>> proof=()=>_=>covered;
+            queue.GetType().GetProperty("ProofNow",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.SetValue(queue,proof);
+            pc.IdleBoundary=new ChangePage([],null,new JournalPosition(1,1)); db.IdleBoundary=new ChangePage([],"cursor",null);
+        }
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,remote,store,null,null,ct);
+        Check.Require(localListings==1 && remoteListings==1,"Covered child population listed its range again");
+        Check.Require(db.Items.ContainsKey("a/empty")==keep,$"keep={keep}: db has a/empty={db.Items.ContainsKey("a/empty")} expected {keep}; db=[{string.Join(",",db.Items.Keys)}] pc=[{string.Join(",",pc.Items.Keys)}]");
+        Check.Require(pc.Items.ContainsKey("a")==keep,$"keep={keep}: pc has a={pc.Items.ContainsKey("a")} expected {keep}; db=[{string.Join(",",db.Items.Keys)}] pc=[{string.Join(",",pc.Items.Keys)}]");
         if(keep) Check.Require(db.Items["a/content"].Bytes.SequenceEqual(new byte[]{3}),"Kept parent did not consume its acquired content");
         else Check.Require(db.Requests[nameof(ISide.EnsureFolderAsync)]==0,"Created a child before recycling the whole parent");
     });
@@ -222,7 +249,31 @@ public static class RepairChecks
     }
 
     // A real store marks the active scan when the executor raises the failure. Both the retry and the sibling must publish.
-    public static Task RetainedAttemptAsync() => WithRepairStore(async (store,pair,ct)=>
+    public static async Task RetainedAttemptAsync()
+    {
+        await ReaderCompletesRemovalAsync(true);
+        await ReaderCompletesRemovalAsync(false);
+        await RetainedNoticeAsync();
+    }
+
+    private static Task ReaderCompletesRemovalAsync(bool previouslyBound) => WithRepairStore(async (store,pair,ct)=>
+    {
+        const string path="formerly-deleted";
+        var pc=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox){ClockOffset=(TimeSpan.Zero,TimeSpan.Zero)};
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,cloud,store);
+        var entry=ItemChecks.File(Side.Local,path,1,"pc");pc.Seed(entry,[1]);
+        pc.Seed(ItemChecks.File(Side.Local,"other",1,"pc-other"),[1]);cloud.Seed(ItemChecks.File(Side.Dropbox,"other",1,"cloud-other"),[1]);
+        if(previouslyBound) await store.CommitAsync(pair.PairId,null,SyncedEntries.From(entry,ItemChecks.File(Side.Dropbox,path,1,"cloud")),null,null,ct);
+        else cloud.DeletedHistory[path]=new DeletionEvidence.DeletedFile(path,"cloud","previous","r1",entry.Modified.AddDays(1),null,entry.ContentHash,null);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,null,null,ct);
+        Check.Require(pc.Items.ContainsKey(path) && pc.History.Count==0,"Unproved Repair removal changed the selected file");
+        var end=new JournalPosition(1,2);ItemChecks.Script(pc,new([],null,end){ProjectedThrough=end});ItemChecks.Script(cloud,new([],"after",null));
+        await AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,(end,"after"),static()=>{},ct);
+        Check.Require(!pc.Items.ContainsKey(path) && pc.History.Single().Entry==entry,"Reader proof did not complete the held Repair removal");
+        Check.Require(!await queue.RetryHeldAsync(null,ct),"Completed Repair removal remained held");
+    });
+
+    private static Task RetainedNoticeAsync() => WithRepairStore(async (store,pair,ct)=>
     {
             var pc=new FakeSide(Side.Local);var dbSide=new FakeSide(Side.Dropbox);var queue=new WorkQueue();var paths=new PathScope(pair,[pair],DriveType.Fixed);
             pc.Seed(ItemChecks.File(Side.Local,"range/a",1,"11"),[1]);pc.Seed(ItemChecks.File(Side.Local,"range/b",2,"12"),[2]);
@@ -462,6 +513,19 @@ public static class RepairChecks
         Check.Require(await store.FindAsync(bound.PairId,Side.Local,PathNames.Key("m"),ct)==saved,"Meeting comparison processed the caller-owned root");
     });
 
+    public static Task NewChildOfRenamedFolderAsync() => WithRepairStore(async (s,p,ct)=>
+    {
+        var local=new FakeSide(Side.Local);var remote=new FakeSide(Side.Dropbox);var scope=new PathScope(p,[p],DriveType.Fixed);
+        var work=await ItemChecks.StartQueueAsync(p,scope,local,remote,s);
+        var folder=ItemChecks.File(Side.Local,"Old",0,"folder",true);var peer=ItemChecks.File(Side.Dropbox,"Old",0,"peer",true);
+        local.Seed(folder,[]);remote.Seed(peer,[]);await s.CommitAsync(p.PairId,null,SyncedEntries.From(folder,peer),null,null,ct);
+        await local.MoveAsync(folder,"New",ct);local.Seed(ItemChecks.File(Side.Local,"New/x",1,"child"),[1]);
+        await s.OweRepairAsync(p.PairId,Side.Local,"journal lost",ct);
+        await Repair.RunAsync(p,ItemChecks.Settings,_=>{},scope,work,local,remote,s,null,null,ct);
+        var links=0;await foreach(var b in s.ByIdAsync(p.PairId,Side.Local,"child",ct)) if(b.DropboxPath=="New/x") links++;
+        Check.Require(remote.Items.TryGetValue("New/x",out var x) && x.Bytes.SequenceEqual(new byte[]{1}) && links==1,"Full Repair missed the new child of a renamed folder");
+    });
+
     public static Task CoveredHopAsync() => WithRepairStore(async (store,pair,token)=>
     {
         var (bound,pc,db,queue)=await CoveredQueueAsync(store,pair,token);pair=bound;
@@ -478,31 +542,60 @@ public static class RepairChecks
         await CoveredMeetingAsync();
         await AutoSync.ApplyPageAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),queue,Side.Local,new([],null,new(7,32)){ContinuityLost=true},pc,db,store,token);
         Check.Require(!queue.CoversHop((new(7,31),"opaque")),"A same-journal reset kept the old bilateral coverage proof");
-        db.Pages.Enqueue(new([],"later",null));
-        var occupant=ItemChecks.File(Side.Local,"old/item",9,"new-occupant"); pc.Seed(occupant,[9]);
-        var oldDestination=ItemChecks.File(Side.Dropbox,"old/item",8,"replacement-at-destination"); db.Seed(oldDestination,[8]);
+        var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        // A real parent Record through Effects owns the hop: it projects and relinks the saved parent itself.
+        await store.CommitAsync(pair.PairId,null,binding,null,null,token);
+        pc.Seed(ItemChecks.File(Side.Local,"old",0,"pc",true),[]); db.Seed(ItemChecks.File(Side.Dropbox,"old",0,"db",true),[]);
         var child=ItemChecks.File(Side.Local,"old/item",1,"carried"); var prior=ItemChecks.File(Side.Dropbox,"old/item",1,"remote-child");
         var priorBinding=SyncedEntries.From(child,prior); await store.CommitAsync(pair.PairId,null,priorBinding,null,null,token);
-        var edited=ItemChecks.File(Side.Local,"new/item",2,child.Id); pc.Seed(edited,[2]);
-        var held=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); int attempts=0;
-        var paths=new PathScope(pair,[pair],DriveType.Fixed);
-        var move=new Change(Side.Dropbox,ChangeKind.Renamed,"new","old",binding.DropboxId,null,false,false);
-        var page=queue.AdmitAsync(pair,new([move],"after-hop",null),async (_,t)=>{
-            Interlocked.Increment(ref attempts);
-            try {await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,db,store,before,(binding,before,after),t);}
-            catch(WorkQueue.Unsettled) {held.TrySetResult(); throw;}
-        },null,(cursor,t)=>store.SaveCursorAsync(pair.PairId,cursor,t),null,token);
-        if(await Task.WhenAny(page,held.Task).WaitAsync(token)==page) {await page; throw new InvalidDataException("Changed child settled without holding its source page");}
-        Check.Require(await store.CursorAsync(pair.PairId,token)=="opaque" && !page.IsCompleted,"Uncovered changed row released its input");
-        // The remote name arrives with its old bytes. Replaying the original input must apply the local edit.
-        db.Seed(prior with {Path="new/item"},[1]);
-        try {while(!page.IsCompleted) {token.ThrowIfCancellationRequested(); await queue.RetryHeldAsync(before,token); await Task.Yield();} await page;}
-        catch(OperationCanceledException) when(token.IsCancellationRequested) {throw new InvalidDataException("Changed child stayed held instead of propagating on replay");}
-        Check.Require(attempts>=2 && await store.CursorAsync(pair.PairId,token)=="after-hop" && db.Items["new/item"].Bytes.SequenceEqual(new byte[]{2}),"Held hop failed to propagate the edit before cursor publication");
-        var final=await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(edited.Path),token);
-        Check.Require(final!=null && final.LocalId==edited.Id && final.DropboxContentHash==edited.ContentHash,"Held hop failed to record the propagated version");
-        Check.Require(pc.Items[occupant.Path].Entry==occupant && pc.Items[occupant.Path].Bytes.SequenceEqual(new byte[]{9}),"Physical difference was applied to a reused old path");
-        Check.Require(db.Items[oldDestination.Path].Entry==oldDestination && db.Items[oldDestination.Path].Bytes.SequenceEqual(new byte[]{8}) && !db.Mutations.Contains(oldDestination.Id),"Replay wrote to the old destination occupant");
-        Check.Require(pc.Requests[nameof(ISide.ReadAllAsync)]!=0 && db.Requests[nameof(ISide.ReadAllAsync)]!=0,"Unread opaque cursor treated as covered");
+        pc.Seed(child,[1]); db.Seed(prior,[1]);
+        await pc.MoveAsync(pc.Items["old"].Entry,"new",token); await db.MoveAsync(db.Items["old"].Entry,"new",token);
+        var edited=ItemChecks.File(Side.Local,"new/item",2,child.Id); pc.Items["new/item"]=(edited,new byte[]{2});
+        var occupant=ItemChecks.File(Side.Local,"old/item",9,"new-occupant"); pc.Seed(occupant,[9]);
+        var oldDestination=ItemChecks.File(Side.Dropbox,"old/item",8,"replacement-at-destination"); db.Seed(oldDestination,[8]);
+        var parentRow=new Row(binding.LocalKey,pc.Items["new"].Entry,db.Items["new"].Entry,binding,[],null,RowContext.Neutral with {CompleteInventory=true,Destination="new"});
+        var recorded=await new global::Massdex.SyncShark.Engine.Executor.Effects().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,
+            new global::Massdex.SyncShark.Engine.Planner.SyncAction(ActionKind.Record,parentRow),
+            pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),token);
+        Check.Require(recorded==global::Massdex.SyncShark.Engine.Executor.EffectOutcome.Applied && await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("new"),token) is {LocalPath:"new",DropboxPath:"new"},"The parent move did not settle at its final peer endpoints");
+        Check.Require(db.Items.TryGetValue("new/item",out var propagated) && propagated.Bytes.SequenceEqual(new byte[]{2}),"The mapped changed child did not settle at its projected path");
+        var settled=await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(edited.Path),token);
+        Check.Require(settled!=null && settled.LocalId==edited.Id && settled.DropboxPath=="new/item","The mapped child binding did not follow the hop");
+        Check.Require(pc.Items[occupant.Path].Entry==occupant && !pc.Mutations.Contains(occupant.Id) && db.Items[oldDestination.Path].Entry==oldDestination && !db.Mutations.Contains(oldDestination.Id),"A guessed write touched a reused old name");
+        Check.Require(pc.Items.Keys.Concat(db.Items.Keys).All(p=>!p.Contains(ItemChecks.Settings.CaseRenameSuffix,StringComparison.Ordinal)),"A write landed at the case temporary name");
+        Check.Require(pc.Requests[nameof(ISide.ReadAllAsync)]!=0 && db.Requests[nameof(ISide.ReadAllAsync)]!=0,"An uncovered hop was treated as covered");
+        // Unproved child: no live proof covers the hop, so no destructive leg may be guessed at either name.
+        await WithRepairStore(async (store2,pair2,ct2)=>
+        {
+            var pc2=new FakeSide(Side.Local); var db2=new FakeSide(Side.Dropbox); var paths2=new PathScope(pair2,[pair2],DriveType.Fixed);
+            var parent2=SyncedEntries.From(ItemChecks.File(Side.Local,"old",0,"pc",true),ItemChecks.File(Side.Dropbox,"old",0,"db",true));
+            await store2.CommitAsync(pair2.PairId,null,parent2,null,null,ct2);
+            var localChild=ItemChecks.File(Side.Local,"old/item",1,"carried"); var peerChild=ItemChecks.File(Side.Dropbox,"old/item",1,"remote-child");
+            await store2.CommitAsync(pair2.PairId,null,SyncedEntries.From(localChild,peerChild),null,null,ct2);
+            pc2.Seed(ItemChecks.File(Side.Local,"old",0,"pc",true),[]); db2.Seed(ItemChecks.File(Side.Dropbox,"old",0,"db",true),[]);
+            pc2.Seed(localChild,[1]); db2.Seed(peerChild,[1]);
+            await pc2.MoveAsync(pc2.Items["old"].Entry,"new",ct2); await db2.MoveAsync(db2.Items["old"].Entry,"new",ct2);
+            db2.Items.Remove("new/item"); // the peer child is gone; deleting the local copy needs live proof
+            var queue2=await ItemChecks.StartQueueAsync(pair2,paths2,pc2,db2,store2);
+            var occupant2=ItemChecks.File(Side.Local,"old/item",9,"new-occupant"); pc2.Seed(occupant2,[9]);
+            var destination2=ItemChecks.File(Side.Dropbox,"old/item",8,"replacement-at-destination"); db2.Seed(destination2,[8]);
+            var row2=new Row(parent2.LocalKey,pc2.Items["new"].Entry,db2.Items["new"].Entry,parent2,[],null,RowContext.Neutral with {CompleteInventory=true,Destination="new"});
+            var outcome2=await new global::Massdex.SyncShark.Engine.Executor.Effects().ApplyAsync(pair2,ItemChecks.Settings,_=>{},paths2,
+                new global::Massdex.SyncShark.Engine.Planner.SyncAction(ActionKind.Record,row2),
+                pc2,db2,store2,ItemChecks.Population(pair2,paths2,pc2,db2,store2),ItemChecks.Hop(pair2,paths2,queue2,pc2,db2,store2),ct2);
+            Check.Require(outcome2==global::Massdex.SyncShark.Engine.Executor.EffectOutcome.Applied && await store2.FindAsync(pair2.PairId,Side.Local,PathNames.Key("new"),ct2) is {LocalPath:"new",DropboxPath:"new"},"The unproved hop did not settle its parent");
+            Check.Require(pc2.Items.ContainsKey("new/item") && pc2.Items["new/item"].Bytes.SequenceEqual(new byte[]{1}) && !db2.Items.ContainsKey("new/item"),"An unproved child was guessed at the projected or old name");
+            Check.Require(pc2.Items["old/item"].Entry==occupant2 && db2.Items["old/item"].Entry==destination2,"A guessed write touched a reused old name");
+            // The ordinary observation then arrives at the projected path with its own live proof and settles there.
+            pc2.IdleBoundary=new ChangePage([],null,new(1,42)){ProjectedThrough=new(1,42)};
+            db2.IdleBoundary=new ChangePage([],"complete",null);
+            var tombstone=new Change(Side.Dropbox,ChangeKind.Deleted,"new/item",null,peerChild.Id,null,false,false);
+            await queue2.AdmitAsync(pair2,new ChangePage([tombstone],"after-projection",null),(change,token)=>ItemSync.ApplyAsync(
+                pair2,ItemChecks.Settings,_=>{},paths2,change,pc2,db2,store2,ItemChecks.Population(pair2,paths2,pc2,db2,store2),
+                ItemChecks.Hop(pair2,paths2,queue2,pc2,db2,store2),token,queue2.Held,(_,_)=>throw new WorkQueue.Unsettled(),coversThrough:_=>true),
+                null,(cursor,token)=>store2.SaveCursorAsync(pair2.PairId,cursor,token),null,ct2);
+            Check.Require(await store2.CursorAsync(pair2.PairId,ct2)=="after-projection" && !pc2.Items.ContainsKey("new/item") && pc2.History.Any(x=>x.Entry.Id==localChild.Id),"The later child observation did not settle at the projected path");
+            Check.Require(await store2.FindAsync(pair2.PairId,Side.Local,PathNames.Key("new/item"),ct2)==null,"The deleted child binding survived its projected observation");
+        });
     });
 }

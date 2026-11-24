@@ -8,7 +8,7 @@ public sealed class Unfinished
     private readonly SemaphoreSlim refresh=new(1);
     /// <summary>The reader has projected both endpoints through the removal capture.</summary>
     public Func<(JournalPosition? Local,string? Dropbox),bool>? AcquiredThrough { get; set; }
-    private bool loaded;
+    private bool loaded, recoveringLive, recoverAgain;
     private readonly Dictionary<(string Route,string Id),JobReply.Terminal> finished=[];
     private readonly Dictionary<(string Route,string Id),(JournalPosition? Local,string? Dropbox)> bounds=[];
     private readonly Dictionary<(string Route,string Id),HashSet<int>> settled=[], split=[];
@@ -61,7 +61,15 @@ public sealed class Unfinished
         AcceptedJob[] selected;
         lock(jobs) selected=jobs.Values.Where(j=>j.PairId==pair.PairId && (footprint==null ? received==null || Matches(j,received) : j.Launch.Any(m=>footprint.Overlaps(PathNames.DropboxKey(m.Path)) || m.Destination!=null && footprint.Overlaps(PathNames.DropboxKey(m.Destination))))).ToArray();
         await Task.WhenAll(selected.Select(Check));
-        if(received==null) await RecoverStageAsync(pair,settings,events,paths,local,dropbox,store,heldInput,populate,compareOldBinding,ct,footprint);
+        if(received==null)
+        {
+            await RecoverStageAsync(pair,settings,events,paths,local,dropbox,store,heldInput,populate,compareOldBinding,ct,footprint);
+            if(await store.ArmedAsync(pair.PairId,ct) is {} left && (footprint==null || footprint.Overlaps(PathNames.DropboxKey(left.Victim.Saved?.DropboxPath ?? await FolderDelete.MapAsync(pair,store,Side.Local,left.Victim.Proof.Expected.Path,ct)))))
+            {
+                if(reviewed==null) await Unchecked(store,pair,left.Victim.Proof.Expected,ct);
+                await store.DisarmAsync(pair.PairId,left.Victim,left.Stage,ct);
+            }
+        }
 
         async Task Check(AcceptedJob job)
         {
@@ -240,7 +248,25 @@ public sealed class Unfinished
         }
     }
 
-    private async Task RecoverStageAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,ISide local,ISide dropbox,IStore store,Func<Scope,IEnumerable<Change>> heldInput,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,PrefixSet? footprint)
+    /// <summary>Recover the armed removal, if any, against its recorded identity and endpoints.</summary>
+    public async Task CheckLiveStageAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,ISide local,ISide dropbox,IStore store,Func<Scope,IEnumerable<Change>> heldInput,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct)
+    {
+        lock(jobs) { if(recoveringLive) {recoverAgain=true;return;} recoveringLive=true; }
+        try
+        {
+            while(true)
+            {
+                await RecoverStageAsync(pair,settings,events,paths,local,dropbox,store,heldInput,populate,compareOldBinding,ct,null);
+                lock(jobs) { if(recoverAgain) {recoverAgain=false;continue;} recoveringLive=false;return; }
+            }
+        }
+        catch {lock(jobs) {recoveringLive=false;recoverAgain=false;} throw;}
+    }
+
+    private static Task Unchecked(IStore store,PairConfig pair,Entry v,CancellationToken ct) => new Notices().RaiseAsync(store,pair.PairId,
+        new(0,NoticeKind.Failure,TextKey.RecycleUnchecked,v.Path,new([new(Side.Local,v.Path,v.Id)],Side.Local),DateTimeOffset.UtcNow,false),ct);
+
+    internal async Task RecoverStageAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,ISide local,ISide dropbox,IStore store,Func<Scope,IEnumerable<Change>> heldInput,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,PrefixSet? footprint)
     {
         if(await store.ArmedAsync(pair.PairId,ct) is not {} note) return;
         var victim=note.Victim; var proof=victim.Proof;
@@ -248,17 +274,10 @@ public sealed class Unfinished
         var cloudPath=saved?.DropboxPath??await FolderDelete.MapAsync(pair,store,Side.Local,proof.Expected.Path,ct);
         if(footprint!=null && !footprint.Overlaps(PathNames.DropboxKey(cloudPath))) return;
         var location=await local.ReadByIdAsync(proof.Expected.Id,ct);
-        if(location is not {InScope:false} actual || actual.Location.Domain!=proof.VolumeId || actual.Location.Entry.Id!=proof.Expected.Id) return;
-        if(!proof.Expected.IsFolder)
+        if(location is not {InScope:false} actual || actual.Location.Domain!=proof.VolumeId || actual.Location.Entry.Id!=proof.Expected.Id)
         {
-            if(actual.Location.Entry.Size!=proof.Expected.Size) return;
-            if(!ContentHash.IsValid(actual.Location.Entry.ContentHash))
-            {
-                if(await local.RecoverAsync(actual.Location,proof.Expected with {ContentHash=proof.ContentHash??""},ct) is not Recovery.File file) return;
-                await using var bytes=file.Bytes;
-                if(file.Version.Id!=proof.Expected.Id || file.Version.ContentHash!=proof.ContentHash) return;
-            }
-            else if(actual.Location.Entry.ContentHash!=proof.ContentHash) return;
+            if(location is not {InScope:true}) await Unchecked(store,pair,proof.Expected,ct);
+            await store.DisarmAsync(pair.PairId,victim,note.Stage,ct);return;
         }
         if(note.Stage==null && proof.Expected.IsFolder)
         {
@@ -269,6 +288,27 @@ public sealed class Unfinished
         var other=await dropbox.ReadOneAsync(cloudPath,ct);
         var localKey=PathNames.Key(proof.Expected.Path);
         var currentBinding=await store.FindAsync(pair.PairId,Side.Local,saved?.LocalKey??localKey,ct);
+        if(note.Stage==null)
+        {
+            var peer=saved==null?null:await dropbox.ReadByIdAsync(saved.DropboxId,ct);
+            if(peer==null)
+            {
+                if(proof.Expected.IsFolder)
+                {
+                    var range=new Scope(proof.Expected.Path,cloudPath); bool occupied=current!=null || other!=null;
+                    if(!occupied && !await FolderDelete.RecoverHeldAsync(pair,range,Side.Local,local,dropbox,store,heldInput,populate,ct)) return;
+                    if(saved!=null) await compareOldBinding(saved,range,range,ct);
+                    if(occupied) await Unchecked(store,pair,proof.Expected,ct);
+                }
+                else if(saved!=null)
+                {
+                    var dead=new List<SyncedEntry>();
+                    await foreach(var b in store.ByIdAsync(pair.PairId,Side.Local,saved.LocalId,ct)) if(b.DropboxId==saved.DropboxId && !b.IsFolder) dead.Add(b);
+                    foreach(var b in dead) await store.CommitAsync(pair.PairId,b,null,null,null,ct);
+                }
+            }
+            await store.DisarmAsync(pair.PairId,victim,null,ct);return;
+        }
         if(saved!=null)
         {
             var peer=await dropbox.ReadByIdAsync(saved.DropboxId,ct);
@@ -284,26 +324,12 @@ public sealed class Unfinished
                 {await store.DisarmAsync(pair.PairId,victim,committed,ct);return;}
                 saved=linked;
             }
-            else
-            {
-                if(note.Stage==null && saved!=null && currentBinding==null && current==null && other==null && await FolderDelete.RecoverHeldAsync(pair,new(proof.Expected.Path,cloudPath),Side.Local,local,dropbox,store,heldInput,populate,ct))
-                    await store.DisarmAsync(pair.PairId,victim,null,ct);
-                return;
-            }
+            else return;
         }
-        if(note.Stage is not {} stage)
-        {
-            if(current!=null || other!=null) return;
-            var range=new Scope(proof.Expected.Path,cloudPath);
-            if(!await FolderDelete.RecoverHeldAsync(pair,range,Side.Local,local,dropbox,store,heldInput,populate,ct)) return;
-            if(saved!=null)
-            {
-                if(saved.IsFolder) await compareOldBinding(saved,range,range,ct);
-                else if(await local.ReadOneAsync(proof.Expected.Path,ct)==null && await dropbox.ReadOneAsync(cloudPath,ct)==null) await store.CommitAsync(pair.PairId,saved,null,null,null,ct);
-            }
-            await store.DisarmAsync(pair.PairId,victim,null,ct);return;
-        }
-        if(current!=null && (current.Id!=stage.FileId || current.Size!=stage.Size || await local.ContentHashAsync(current,ct)!=stage.ContentHash)) return;
+        var stage=note.Stage!;
+        // Another object holds the final name: create-only publication can never land.
+        if(current!=null && (current.Id!=stage.FileId || current.Size!=stage.Size || await local.ContentHashAsync(current,ct)!=stage.ContentHash))
+        {await store.DisarmAsync(pair.PairId,victim,stage,ct);return;}
         try
         {
             if(other==null || other.IsFolder || other.Skip!=null || saved!=null && other.Id!=saved.DropboxId || other.Size!=stage.Size || other.ContentHash!=stage.ContentHash)
