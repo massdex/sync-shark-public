@@ -43,8 +43,7 @@ public sealed class Retries
                 if(string.IsNullOrEmpty(subject.Id)){await Stale(); done=false;continue;}
                 var at=await endpoint.ReadByIdAsync(subject.Id,ct);
                 // Re-decide a binned local item only when its name is empty and no bound peer survives.
-                if(subject.Side==Side.Local && at is {InScope:false} binned && binned.Location.Entry.Id==subject.Id && await local.ReadOneAsync(subject.Path,ct)==null
-                    && (await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(subject.Path),ct) is not {} bound || await dropbox.ReadByIdAsync(bound.DropboxId,ct)==null))
+                if(subject.Side==Side.Local && at is {InScope:false} binned && binned.Location.Entry.Id==subject.Id && await local.ReadOneAsync(subject.Path,ct)==null)
                 { done &= await Apply(Side.Local,subject.Path,null); continue; }
                 if(at is not {InScope:true} hit || hit.Location.Entry.Path!=subject.Path) { await Stale(); done=false; continue; }
                 done &= await Apply(subject.Side,subject.Path,subject);
