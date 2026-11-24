@@ -79,7 +79,7 @@ public static class Resolutions
     private static void RequireOriginals(Notice notice, Row localRow, Row dropboxRow)
     {
         var subjects = notice.Subject.Items;
-        if (subjects.Count is < 3 or > 4 || !MatchesEndpoint(subjects[0], Side.Local, localRow.Local) ||
+        if (subjects.Count - IssueSubject.KeptBothOriginals is < 1 or > 2 || !MatchesEndpoint(subjects[0], Side.Local, localRow.Local) ||
             !MatchesEndpoint(subjects[1], Side.Dropbox, dropboxRow.Dropbox)) throw Stale();
         foreach (var side in new[] { Side.Local, Side.Dropbox })
         {

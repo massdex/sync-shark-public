@@ -39,7 +39,7 @@ public static class ResolutionsChecks
         var oneLabelFailures = new List<string>();
         foreach (var side in new[]{Side.Local,Side.Dropbox})
         {
-            var one = notice with {Subject=new(notice.Subject.Items.Where((item,i) => i < 2 || item.Side == side).ToArray(),null)};
+            var one = notice with {Subject=new(notice.Subject.Items.Where((item,i) => i < IssueSubject.KeptBothOriginals || item.Side == side).ToArray(),null)};
             var offered = Resolutions.Choices(one);
             Check.Require(offered.Contains(ResolutionChoice.RenameLocal) == (side == Side.Local) &&
                 offered.Contains(ResolutionChoice.RenameDropbox) == (side == Side.Dropbox), "A one-label notice must offer only the rename that can run");
