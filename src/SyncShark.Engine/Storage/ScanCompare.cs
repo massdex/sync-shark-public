@@ -201,33 +201,17 @@ internal sealed class ScanCompare(ScanTable scan)
         var sql = "WITH candidates AS (" + Candidates(Side.Local) + " UNION ALL " + Candidates(Side.Dropbox) + "), ordered AS (SELECT *,min(plandepth(path)) OVER(PARTITION BY lk) depth FROM candidates) SELECT * FROM ordered ORDER BY depth,lk,side,path";
         using (var temp = StorageCommand.Create(db,null,"PRAGMA temp_store=FILE"))
             await temp.ExecuteNonQueryAsync(ct);
-        using (var fill = StorageCommand.Create(db, null, "CREATE TEMP TABLE rename_order AS " + sql, ("$p",pairId),("$s",scanId.ToByteArray()),("$l",scope?.LocalPath),("$d",scope?.DropboxPath)))
-            await fill.ExecuteNonQueryAsync(ct);
-        try
-        {
-            long after=0;
-            while (true)
-            {
-                var (page,last)=await ReadRenamePage(db,after,pageSize,ct);
-                after=last;
-                if(page.Count==0) yield break;
-                foreach(var candidate in page) yield return candidate;
-            }
-        }
-        finally { using var drop=StorageCommand.Create(db,null,"DROP TABLE temp.rename_order"); drop.ExecuteNonQuery(); }
-    }
-
-    private static async Task<(List<RenameCandidate> Page,long Last)> ReadRenamePage(SqliteConnection db,long after,int size,CancellationToken ct)
-    {
-        var page=new List<RenameCandidate>();
-        using var cmd=StorageCommand.Create(db,null,"SELECT *,rowid AS r FROM temp.rename_order WHERE rowid>$after ORDER BY rowid LIMIT $size",("$after",after),("$size",size));
+        using var cmd=StorageCommand.Create(db,null,sql,("$p",pairId),("$s",scanId.ToByteArray()),("$l",scope?.LocalPath),("$d",scope?.DropboxPath));
         using var reader=await cmd.ExecuteReaderAsync(ct);
-        int row=reader.GetOrdinal("r"), side=reader.GetOrdinal("side"), path=reader.GetOrdinal("path"), key=reader.GetOrdinal("lk"), saved=reader.GetOrdinal("local_path");
-        while (await reader.ReadAsync(ct))
+        int side=reader.GetOrdinal("side"), path=reader.GetOrdinal("path"), key=reader.GetOrdinal("lk"), saved=reader.GetOrdinal("local_path");
+        var page=new List<RenameCandidate>();
+        while(await reader.ReadAsync(ct))
         {
-            after=reader.GetInt64(row);
             page.Add(new((Side)reader.GetInt32(side),Encoding.ReadEntry(reader,path,false),Encoding.ReadSynced(reader,reader.GetString(key),saved)));
+            if(page.Count!=pageSize) continue;
+            foreach(var candidate in page) yield return candidate;
+            page.Clear();
         }
-        return (page,after);
+        foreach(var candidate in page) yield return candidate;
     }
 }
