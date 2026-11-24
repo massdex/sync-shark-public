@@ -48,7 +48,7 @@ public sealed class DeletedNames
                     if(!row.Read()){row.Close();tx.Commit();restored[(pair,scan)]=origin;return true;}
                     var last=row.GetString(0);using var input=new SqliteBlob(db,"discovery_deleted_block","names",row.GetInt64(2),true);
                     using var put=StorageCommand.Create(db,tx,"INSERT INTO scan_state.deleted_name VALUES($s,$k)",("$s",token),("$k",""));
-                    foreach(var name in Encoding.DecodeDeletedNames(input,row.GetInt32(1),last,after))
+                    foreach(var name in DeletedNamesCodec.DecodeDeletedNames(input,row.GetInt32(1),last,after))
                     {ct.ThrowIfCancellationRequested();put.Parameters["$k"].Value=name;put.ExecuteNonQuery();}
                     after=last;
                 }
@@ -132,7 +132,7 @@ public sealed class DeletedNames
         using var cmd=StorageCommand.Create(db,tx,"SELECT rowid,last_key,name_count,(SELECT max(last_key) FROM discovery_deleted_block prior WHERE prior.pair_id=b.pair_id AND prior.last_key<b.last_key) FROM discovery_deleted_block b WHERE pair_id="+Pair+" AND last_key>=$k ORDER BY last_key LIMIT 1",("$p",pair),("$k",candidate));
         using var row=cmd.ExecuteReader();if(!row.Read())return false;
         using var bytes=new SqliteBlob(db,"discovery_deleted_block","names",row.GetInt64(0),true);bool found=false;
-        foreach(var name in Encoding.DecodeDeletedNames(bytes,row.GetInt32(2),row.GetString(1),row.IsDBNull(3)?null:row.GetString(3)))found|=name==candidate;
+        foreach(var name in DeletedNamesCodec.DecodeDeletedNames(bytes,row.GetInt32(2),row.GetString(1),row.IsDBNull(3)?null:row.GetString(3)))found|=name==candidate;
         return found;
     }
     /// <summary>Verify this scan's saved blocks before choosing its listing; return the post-verification deleted-history cursor and acquisition debt.</summary>
@@ -180,7 +180,7 @@ public sealed class DeletedNames
                 if (keys.Count == 0)
                     break;
                 after = keys[^1];
-                using var save = StorageCommand.Create(db, tx, "INSERT INTO discovery_deleted_block VALUES(" + Pair + ",$a,$n,$b)", ("$p", pairId), ("$a", after), ("$n", keys.Count), ("$b", Encoding.EncodeDeletedNames(keys)));
+                using var save = StorageCommand.Create(db, tx, "INSERT INTO discovery_deleted_block VALUES(" + Pair + ",$a,$n,$b)", ("$p", pairId), ("$a", after), ("$n", keys.Count), ("$b", DeletedNamesCodec.EncodeDeletedNames(keys)));
                 await save.ExecuteNonQueryAsync(ct);
             }
 
