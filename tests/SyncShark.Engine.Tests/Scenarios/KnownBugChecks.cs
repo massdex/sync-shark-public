@@ -340,7 +340,9 @@ public static class KnownBugChecks
     {
         using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         var ct = budget.Token;
-        var pair = ItemChecks.Pair() with { OwedScopes = [new Scope("x", "x")] };
+        var exclusion = new Exclusion(Side.Dropbox, "x", false);
+        // The pair must carry the exclusion so FolderDelete knows the kept PC copy is the excluded counterpart.
+        var pair = ItemChecks.Pair() with { Exclusions = [exclusion], OwedScopes = [new Scope("x", "x")] };
         using var store = new InMemoryStateStore();
         var local = new FakeSide(Side.Local);
         var remote = new FakeSide(Side.Dropbox);
@@ -359,7 +361,6 @@ public static class KnownBugChecks
         local.IdleBoundary = new ChangePage([], "l", new JournalPosition(1, 1));
         remote.IdleBoundary = new ChangePage([], "r", null);
         var paths = new PathScope(pair, [pair], DriveType.Fixed);
-        var exclusion = new Exclusion(Side.Dropbox, "x", false);
         // Crash on the first save after the physical Dropbox removal ("crash after removal, before commit").
         var removed = false;
         remote.AfterDelete = entry => { if (entry.Path is "x" or "x/a") removed = true; };
