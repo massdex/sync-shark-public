@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -86,7 +87,15 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
     }
     /// <summary>Stop admitting work and keep the pipe reachable until every runner drains.</summary>
     public Task StopAsync(CancellationToken ct) => Command(async () =>
-    { shutdown.Cancel(); await Task.WhenAll(members.Values.Select(HostLifecycle.Drain)); if(startupVolumes!=null) await Task.WhenAll(startupVolumes.Values.Distinct().Select(v=>v.Work)); members.Clear(); store?.Dispose(); store=null; stopped.Cancel(); },ct);
+    {
+        shutdown.Cancel();
+        try { await Task.WhenAll(members.Values.Select(HostLifecycle.Drain)); }
+        finally
+        {
+            try { if(startupVolumes!=null) await Task.WhenAll(startupVolumes.Values.Distinct().Select(v=>v.Work)); }
+            finally { members.Clear(); store?.Dispose(); store=null; stopped.Cancel(); }
+        }
+    },ct);
     /// <summary>Pause the selected pair or all pairs in this session.</summary>
     public Task PauseAsync(string? pairId,CancellationToken ct) => Command(async () =>
     {
@@ -178,6 +187,10 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
         {
             if (refused) return startupMessage ?? Text.Get(TextKey.StatusUnavailable);
             var result=await Open(false,ct) is { } db ? await new Status().ReadAsync(db,pairId,ct) : Text.Get(TextKey.NoPairsYet);
+            // Changes admitted but not yet settled: Dropbox changes wait to reach this PC, PC changes wait to reach Dropbox.
+            foreach(var m in Selected(pairId).OrderBy(m=>m.Pair.PairId,StringComparer.Ordinal))
+                result+=Environment.NewLine+Text.Get(TextKey.StatusPendingIncoming,(TextArg.Pair,m.Pair.PairId),
+                    (TextArg.Count,m.Queue.Pending(Side.Dropbox).ToString(CultureInfo.InvariantCulture)),(TextArg.Total,m.Queue.Pending(Side.Local).ToString(CultureInfo.InvariantCulture)));
             return startupMessage==null ? result : startupMessage+Environment.NewLine+result;
         }
         finally { commands.Release(); }
@@ -185,9 +198,11 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
     /// <summary>Expose the exact reviewed notice, never just a reusable numeric ID.</summary>
     public async IAsyncEnumerable<Notice> NoticesAsync(string pairId,[EnumeratorCancellation] CancellationToken ct)
     {
+        IStore? db;
         await commands.WaitAsync(ct);
-        try { if (await Open(false,ct) is { } db) await foreach (var n in db.NoticesAsync(pairId,ct)) yield return Project(n); }
-        finally { commands.Release(); }
+        try { db=await Open(false,ct); } finally { commands.Release(); }
+        // The stream has its own connection; never hold commands while a pipe client reads.
+        if (db!=null) await foreach (var n in db.NoticesAsync(pairId,ct)) yield return Project(n);
     }
     private static Notice Project(Notice n) => n with {Choices=Resolutions.Choices(n),Reviewed=Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(n with {Reviewed=null})))};
     /// <summary>Apply only an allowed choice to the same version the caller reviewed.</summary>
@@ -203,7 +218,7 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
         }
         if (n.Kind==NoticeKind.DriveChange && choice is ResolutionChoice.FirstSync or ResolutionChoice.SyncNormally) { await ResolveDriveChangeAsync(pairId,p,n,choice,ct); return; }
         var m=await Life.Ready(p,ct);
-        if(choice==ResolutionChoice.Retry) { await RetryNoticeAsync(pairId,id,p,m,n,ct); return; }
+        if(choice==ResolutionChoice.Retry) { await RetryNoticeAsync(p,m,n,ct); return; }
         if (choice==ResolutionChoice.BindRoots) { await Life.Membership(m,false,ct); Life.Start(m); return; }
         var outcome=await new Resolve().ApplyAsync(p,settings,m.Event,m.Paths,n,choice,name,m.Local,m.Dropbox,store!,
             (s,side,f,token)=>Populate(m,s,side,f,token),(b,before,after,token)=>Compare(m,b,before,after,token),ct,m.Queue.Held);
@@ -220,8 +235,9 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
         await Life.Membership(member,true,ct); member.Local=null!; member.Dropbox=null!; member.Pair=updated; await Life.Observe(member,await Configurations(ct),ct); await Life.Membership(member,false,ct); Life.Start(member);
     }
     // Retry the reviewed notice's held inputs and pending job, then its own retry; a put-back also re-attempts its footprint's owners.
-    private async Task RetryNoticeAsync(string pairId,long id,PairConfig p,HostMember m,Notice n,CancellationToken ct)
+    private async Task RetryNoticeAsync(PairConfig p,HostMember m,Notice n,CancellationToken ct)
     {
+        var pairId=p.PairId; var id=n.Id;
         var held=m.Queue.RetryHeldAsync(null,ct,n);
         var jobs=m.Runner.Unfinished.CheckAsync(p,settings,m.Event,m.Paths,null,m.Local,m.Dropbox,store!,m.Queue.Held,
             (s,side,f,token)=>Populate(m,s,side,f,token),(b,before,after,token)=>Compare(m,b,before,after,token),ct,reviewed:n);
@@ -239,7 +255,7 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
         // A closed put-back ends its ancestor removal's custody; re-attempt only held inputs overlapping this notice's footprint.
         if(n.Kind==NoticeKind.PutBack)
         {
-            var owners=m.Queue.RetryHeldAsync(new Scope(n.Path,n.Path),ct);
+            var owners=m.Queue.RetryHeldAsync(await Pairs.Mapped(m.Pair,n.Subject.EndpointSide(n.Path)??Side.Local,n.Path,ct),ct);
             if(!owners.IsCompleted) await OutsideCommands(()=>owners);
             await owners;
         }

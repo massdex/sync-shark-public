@@ -12,6 +12,9 @@ public sealed class WorkQueue
     private readonly object gate = new();
     private readonly WorkOrder graph = new();
     private readonly bool[] gap = new bool[2];
+    // Admitted page changes not yet settled, per source side.
+    private readonly int[] pendingChanges = [0, 0];
+    internal int Pending(Side source) { lock (gate) return pendingChanges[(int)source]; }
 
     /// <summary>A fresh cursor after a reset is not coverage of the history that was lost.</summary>
     public void LoseCoverage(Side source) { lock (gate) gap[(int)source]=true; }
@@ -105,6 +108,7 @@ public sealed class WorkQueue
             var side = page.Position != null || settleJournal != null ? Side.Local : Side.Dropbox;
             if(page.ContinuityLost) gap[(int)side]=true;
             source=(int)side; admitted=++graph.Order;
+            pendingChanges[source]+=entries.Length;
             previous = prefix[source];
             prefix[(int)side] = completed.Task;
         }
@@ -273,6 +277,7 @@ public sealed class WorkQueue
     private void Release(WorkInput item,Exception? error=null)
     {
         if(item.Nodes==null) return;
+        if(item.Change!=null) pendingChanges[(int)item.Change.Side]--;
         graph.Remove(item); item.Retry=null;
         if(error==null) item.Settled.TrySetResult(); else item.Settled.TrySetException(error);
     }

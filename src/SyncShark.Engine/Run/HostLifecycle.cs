@@ -1,23 +1,8 @@
-using System.Collections.Concurrent;
-
 namespace Massdex.SyncShark.Engine.Run;
 
 /// <summary>Admits, runs, rewinds and drains each host member's pair runner on the host's shared state.</summary>
 internal sealed class HostLifecycle(Host host)
 {
-    // The host's state under its own names, so the bodies moved from Host read unchanged.
-    private IStore? store => host.Store;
-    private EngineSettings settings => host.Settings;
-    private TimeProvider clock => host.Clock;
-    private ILogFiles logs => host.Logs;
-    private ConcurrentDictionary<string,HostMember> members => host.Members;
-    private IReadOnlyList<PairConfig>? publishedPairs => host.PublishedPairs;
-    private CancellationTokenSource stopped => host.Stopped;
-    private CancellationTokenSource shutdown => host.Shutdown;
-    private Func<string,DriveType,CancellationToken,Task>? trim => host.Trim;
-    private Func<PairConfig,IStore,Func<PathScope>,Action<RunEvent>,CancellationToken,Task<(ISide Local,ISide Dropbox)>> openSides => host.OpenSides;
-    private bool IsPaused(string pairId) => host.IsPaused(pairId);
-    private Task<List<PairConfig>> Configurations(CancellationToken ct) => host.Configurations(ct);
     private static string LogFolder => ResourceNames.LogDirectory(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
 
     internal void Launch(HostMember m,IReadOnlyList<PairConfig> pairs,CancellationToken ct)
@@ -49,7 +34,7 @@ internal sealed class HostLifecycle(Host host)
         {
             lock(m) return ((m.RepairFinished??=new()).Token,ct=>ReplayJournal(m,ct));
         };
-        members[p.PairId] = m;
+        host.Members[p.PairId] = m;
         return m;
     }
     internal async Task Observe(HostMember m,IReadOnlyList<PairConfig> pairs,CancellationToken ct,bool liveRootSignal=false,bool retryRead=false)
@@ -60,14 +45,14 @@ internal sealed class HostLifecycle(Host host)
             try
             {
                 var (roots,drive,type) = await ReadRoots(m,ct);
-                lock(members) {m.Type=type; m.Paths=new(m.Pair,publishedPairs ?? pairs,type,settings.DefaultIgnoreRules);}
-                m.Admitted = await m.Runner.CheckRootsAsync(m.Pair,roots,drive,store!,ct);
+                lock(host.Members) {m.Type=type; m.Paths=new(m.Pair,host.PublishedPairs ?? pairs,type,host.Settings.DefaultIgnoreRules);}
+                m.Admitted = await m.Runner.CheckRootsAsync(m.Pair,roots,drive,host.Store!,ct);
                 return;
             }
             catch (Exception e) when (!ct.IsCancellationRequested)
             {
-                if(liveRootSignal && e is not (ItemFailedException or EngineRequestException)) await store!.SaveNoticeAsync(m.Pair.PairId,new(0,NoticeKind.RootIdentity,
-                    TextKey.RootUnavailable,string.Empty,new([],null),clock.GetUtcNow(),false),ct);
+                if(liveRootSignal && e is not (ItemFailedException or EngineRequestException)) await host.Store!.SaveNoticeAsync(m.Pair.PairId,new(0,NoticeKind.RootIdentity,
+                    TextKey.RootUnavailable,string.Empty,new([],null),host.Clock.GetUtcNow(),false),ct);
                 else await Failed(m,e,ct);
                 if(!retryRead || e is EngineRequestException) return;
                 await RetryDelay(e,failures,ct);
@@ -77,14 +62,14 @@ internal sealed class HostLifecycle(Host host)
     }
     internal async Task<HostMember> Ready(PairConfig p,CancellationToken ct)
     {
-        if (!members.TryGetValue(p.PairId,out var m)) m=Attach(p);
+        if (!host.Members.TryGetValue(p.PairId,out var m)) m=Attach(p);
         if(!m.Setup.IsCompleted && !m.Admitted) throw new EngineRequestException(TextKey.RootUnavailable);
-        if (m.Stop==null || !m.Admitted) await Observe(m,await Configurations(ct),ct);
+        if (m.Stop==null || !m.Admitted) await Observe(m,await host.Configurations(ct),ct);
         if (!m.Admitted) throw new EngineRequestException(TextKey.PairAwaitingDecision,(TextArg.Pair,p.PairId)); return m;
     }
     internal async Task Adapters(HostMember m,CancellationToken ct)
     {
-        if (m.Local==null) (m.Local,m.Dropbox)=await openSides(m.Pair,store!,()=>m.Paths,m.Event,ct);
+        if (m.Local==null) (m.Local,m.Dropbox)=await host.OpenSides(m.Pair,host.Store!,()=>m.Paths,m.Event,ct);
     }
     internal async Task<(RootIdentity? Roots,DriveEvidence? Drive,DriveType Type)> ReadRoots(HostMember m,CancellationToken ct,bool acceptDrive=false)
     {
@@ -98,7 +83,7 @@ internal sealed class HostLifecycle(Host host)
     }
     internal void Start(HostMember m)
     {
-        if (!m.Admitted || !m.Pair.Enabled || IsPaused(m.Pair.PairId) || m.Stop != null || stopped.IsCancellationRequested) return;
+        if (!m.Admitted || !m.Pair.Enabled || host.IsPaused(m.Pair.PairId) || m.Stop != null || host.Stopped.IsCancellationRequested) return;
         if(Volatile.Read(ref m.Closing)!=0) return;
         var stop = m.Stop = CancellationTokenSource.CreateLinkedTokenSource(m.Opening?.Token ?? CancellationToken.None);
         m.Live=RunMemberAsync(m,stop);
@@ -121,12 +106,12 @@ internal sealed class HostLifecycle(Host host)
                     if(!caughtUp)
                     {
                         var pc=m.Local.BoundaryAsync(ct);var cloud=m.Dropbox.BoundaryAsync(ct);await Task.WhenAll(pc,cloud);
-                        await m.Runner.CatchUpAsync(m.Pair,((await pc).Position,(await cloud).Cursor),settings,m.Event,m.Paths,m.Queue,m.Local,m.Dropbox,store!,Attempted,ct,continueLive:true);
+                        await m.Runner.CatchUpAsync(m.Pair,((await pc).Position,(await cloud).Cursor),host.Settings,m.Event,m.Paths,m.Queue,m.Local,m.Dropbox,host.Store!,Attempted,ct,continueLive:true);
                         caughtUp=true;
                     }
                     await BeginOwedRepair(m,ct);
                     await ReplayJournal(m,ct);
-                    await m.Runner.RunAsync(m.Pair,settings,m.Event,m.Paths,m.Queue,m.Local,m.Dropbox,store!,ct);
+                    await m.Runner.RunAsync(m.Pair,host.Settings,m.Event,m.Paths,m.Queue,m.Local,m.Dropbox,host.Store!,ct);
                 }
                 catch(ChangedUnderneathException error) when(!ct.IsCancellationRequested && PathNames.Same(error.Path,m.Pair.LocalRoot)) {rewind=true;}
                 catch(Exception error) when(!ct.IsCancellationRequested)
@@ -148,12 +133,12 @@ internal sealed class HostLifecycle(Host host)
         {
             if(!removed && m.Type!=DriveType.Unknown) volume.Type=m.Type;
             if(!volume.Attempted(m.Pair.PairId) || volume.Type==DriveType.Unknown) return;
-            if(trim!=null) volume.Work=TrimAsync();
+            if(host.Trim!=null) volume.Work=TrimAsync();
         }
         async Task TrimAsync()
         {
-            var token=shutdown.Token;
-            try {await trim!(Path.GetPathRoot(m.Pair.LocalRoot)!,volume.Type,token);}
+            var token=host.Shutdown.Token;
+            try {await host.Trim!(Path.GetPathRoot(m.Pair.LocalRoot)!,volume.Type,token);}
             catch(OperationCanceledException) when(token.IsCancellationRequested) { }
             catch(Exception error) {await Failed(m,error,token);}
         }
@@ -162,7 +147,7 @@ internal sealed class HostLifecycle(Host host)
     {
         // The Local reader (or the gap between readers) consumes each latched completion once.
         lock(m) if(m.RepairFinished is {IsCancellationRequested:true} signal){m.RepairFinished=null;signal.Dispose();}
-        if(Volatile.Read(ref m.JournalWake) is not {} wake || (await store!.ReadRepairAsync(m.Pair.PairId,Side.Local,ct)).Reason!=null) return null;
+        if(Volatile.Read(ref m.JournalWake) is not {} wake || (await host.Store!.ReadRepairAsync(m.Pair.PairId,Side.Local,ct)).Reason!=null) return null;
         var floor=await m.Queue.RewindJournalAsync(wake,async ()=>
         {
             await m.Local.SetMembershipAsync(m.Pair,true,false,ct);
@@ -182,12 +167,12 @@ internal sealed class HostLifecycle(Host host)
     }
     private async Task RecheckRoots(HostMember m,CancellationToken ct)
     {
-        await Observe(m,await Configurations(ct),ct,true,retryRead:true); await Membership(m,false,ct);
+        await Observe(m,await host.Configurations(ct),ct,true,retryRead:true); await Membership(m,false,ct);
         if(!m.Admitted) m.Stop?.Cancel();
     }
     internal void WakeRepair(HostMember m)
     {
-        if(!m.Admitted || !m.Pair.Enabled || IsPaused(m.Pair.PairId) || m.Stop==null) return;
+        if(!m.Admitted || !m.Pair.Enabled || host.IsPaused(m.Pair.PairId) || m.Stop==null) return;
         var ct=m.Stop.Token;
         lock(m)
         {
@@ -212,9 +197,9 @@ internal sealed class HostLifecycle(Host host)
     }
     private async Task BeginOwedRepair(HostMember m,CancellationToken ct)
     {
-        var id=m.Pair.PairId; var state=await store!.RepairStateAsync(id,ct);
-        var local=await store.ReadRepairAsync(id,Side.Local,ct); var remote=await store.ReadRepairAsync(id,Side.Dropbox,ct);
-        var scopes=(await store.PairAsync(id,ct))?.OwedScopes;
+        var id=m.Pair.PairId; var state=await host.Store!.RepairStateAsync(id,ct);
+        var local=await host.Store.ReadRepairAsync(id,Side.Local,ct); var remote=await host.Store.ReadRepairAsync(id,Side.Dropbox,ct);
+        var scopes=(await host.Store.PairAsync(id,ct))?.OwedScopes;
         if(local.Reason!=null) m.Queue.LoseCoverage(Side.Local);
         if(remote.Reason!=null) m.Queue.LoseCoverage(Side.Dropbox);
         var full=!state.FirstRepairDone || local.Reason!=null || remote.Reason!=null;
@@ -223,7 +208,7 @@ internal sealed class HostLifecycle(Host host)
         async Task Run(CancellationToken token)
         {
             if(full) await ManualRepair(m,token);
-            else foreach(var scope in scopes!) await Repair.RunAsync(m.Pair,settings,m.Event,m.Paths,m.Queue,m.Local,m.Dropbox,store!,scope,null,token,caughtUp:await m.Boot.WaitAsync(token));
+            else foreach(var scope in scopes!) await Repair.RunAsync(m.Pair,host.Settings,m.Event,m.Paths,m.Queue,m.Local,m.Dropbox,host.Store!,scope,null,token,caughtUp:await m.Boot.WaitAsync(token));
         }
     }
     internal Task ClaimRepair(HostMember m,CancellationToken ct,Func<CancellationToken,Task> work,bool explicitRequest)
@@ -254,21 +239,22 @@ internal sealed class HostLifecycle(Host host)
     private RunLog NewLog(string id)
     {
         if (!PathNames.IsSingleSegment(id) || !PathNames.IsWindowsTransferPath(id)) throw Host.Unknown(id);
-        return new(logs,Path.Combine(LogFolder,id + ResourceNames.LogNameSeparator + ResourceNames.NewId() + ResourceNames.LogExtension),settings);
+        return new(host.Logs,Path.Combine(LogFolder,id + ResourceNames.LogNameSeparator + ResourceNames.NewId() + ResourceNames.LogExtension),host.Settings);
     }
-    private Task RetryDelay(Exception e,int failures,CancellationToken ct) => settings.Backoff.WaitAsync(
+    private Task RetryDelay(Exception e,int failures,CancellationToken ct) => host.Settings.Backoff.WaitAsync(
         e is ItemFailedException {ProviderWait:{} wait} provider && wait>TimeSpan.Zero
-            ? wait-(provider.ProviderWaitStarted is {} start ? clock.GetElapsedTime(start) : TimeSpan.Zero)
-            : settings.Backoff.RetryDelay(failures),clock,ct);
+            ? wait-(provider.ProviderWaitStarted is {} start ? host.Clock.GetElapsedTime(start) : TimeSpan.Zero)
+            : host.Settings.Backoff.RetryDelay(failures),host.Clock,ct);
     private async Task Failed(HostMember m,Exception e,CancellationToken ct)
     {
-        try { await store!.SaveNoticeAsync(m.Pair.PairId,
+        if(e is not (ItemFailedException or EngineRequestException)) m.Event(new(RunEventKind.Failed,nameof(Host),string.Empty,e.Message,string.Empty){Error=e});
+        try { await host.Store!.SaveNoticeAsync(m.Pair.PairId,
         new(0,NoticeKind.Failure,e switch {ItemFailedException i=>i.Cause,EngineRequestException request=>request.Key,_=>TextKey.RootUnavailable},e is ItemFailedException f ? f.Path : string.Empty,
-            new([],null),clock.GetUtcNow(),false),ct); }
+            new([],null),host.Clock.GetUtcNow(),false),ct); }
         catch(OperationCanceledException) when(ct.IsCancellationRequested) { throw; }
         catch(Exception error) { m.Event(new(RunEventKind.Failed,nameof(IStore.SaveNoticeAsync),string.Empty,error.Message,string.Empty){Error=error}); }
     }
-    internal Task Membership(HostMember m,bool removed,CancellationToken ct) => m.Local==null || m.Pair.Roots==null ? Task.CompletedTask : m.Local.SetMembershipAsync(m.Pair,!m.Pair.Enabled || !m.Admitted || IsPaused(m.Pair.PairId),removed,ct);
+    internal Task Membership(HostMember m,bool removed,CancellationToken ct) => m.Local==null || m.Pair.Roots==null ? Task.CompletedTask : m.Local.SetMembershipAsync(m.Pair,!m.Pair.Enabled || !m.Admitted || host.IsPaused(m.Pair.PairId),removed,ct);
     internal static async Task Drain(HostMember m)
     {
         Interlocked.Increment(ref m.Closing);
@@ -290,7 +276,7 @@ internal sealed class HostLifecycle(Host host)
     {
         using var log=NewLog(m.Pair.PairId);
         m.OperationLog.Value=log.Write;
-        await Repair.RunAsync(m.Pair,settings,log.Write,m.Paths,m.Queue,m.Local,m.Dropbox,store!,null,null,ct,caughtUp:await m.Boot.WaitAsync(ct),localRepaired:()=>
+        await Repair.RunAsync(m.Pair,host.Settings,log.Write,m.Paths,m.Queue,m.Local,m.Dropbox,host.Store!,null,null,ct,caughtUp:await m.Boot.WaitAsync(ct),localRepaired:()=>
         {lock(m) if(m.JournalWake!=null) (m.RepairFinished??=new()).Cancel();});
     }
 }

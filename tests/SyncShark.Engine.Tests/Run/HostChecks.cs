@@ -29,7 +29,7 @@ public static class HostChecks
         var stop=host.Stopping; await host.StopAsync(default); Check.Require(stop.IsCancellationRequested,"Host did not notify the pipe owner of stop");
         var errors=new List<string>();
         System.Runtime.ExceptionServices.ExceptionDispatchInfo? missing=null;
-        foreach(var check in new Func<Task>[]{IndependentBind,MemberRewind,ForeignCancellation,DisconnectedAdapter,ExplicitBind,PendingOuterScope,RemovingMember,ReleaseFailure,FailedFirstRead,OldPublicationFence,FailedExplicitRepairAsync,FailedNoticeWriteAsync})
+        foreach(var check in new Func<Task>[]{IndependentBind,MemberRewind,ForeignCancellation,DisconnectedAdapter,ExplicitBind,PendingOuterScope,RemovingMember,ReleaseFailure,FailedFirstRead,OldPublicationFence,FailedExplicitRepairAsync,FailedNoticeWriteAsync,UnexpectedFailureLogged,StopAfterDrainFailure,NoticeStreamReleasesCommands,MalformedPairRemovable})
             try { await check(); }
             catch(NotImplementedException e) {missing??=System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e);}
             catch(InvalidDataException e) {errors.Add($"{check.Method.Name}: {e}");}
@@ -82,8 +82,15 @@ public static class HostChecks
         var v=ItemChecks.File(Side.Dropbox,"item",3,"original");var admitted=Signal();
         db.Feed=async (cursor,token)=>{if(cursor==null)return new([new(Side.Dropbox,ChangeKind.Changed,v.Path,null,v.Id,v,false,false)],"one",null);
             admitted.TrySetResult();await Task.Delay(Timeout.Infinite,token);throw new InvalidOperationException();};
+        // A held PC input at the bound folder Pics (Dropbox Photos) overlaps a put-back at Dropbox Photos/x only through that binding.
+        var pics=ItemChecks.File(Side.Local,"Pics",0,"pics-id",true);var photos=ItemChecks.File(Side.Dropbox,"Photos",0,"photos-id",true);
+        await store.CommitAsync(pair.PairId,null,SyncedEntries.From(pics,photos),null,null,default);pc.Local.Seed(pics,[]);db.Local.Seed(photos,[]);
+        var ledger=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)ledger;tap.Store=store;
+        int picsLookups=0,pcReads=0;tap.Lookup=key=>{if(key==PathNames.Key(pics.Path))Interlocked.Increment(ref picsLookups);};
+        pc.Feed=async (_,token)=>{if(Interlocked.Increment(ref pcReads)==1)return new([new(Side.Local,ChangeKind.Changed,pics.Path,null,"missing",null,false,false)],null,new(1,5));
+            await Task.Delay(Timeout.Infinite,token);throw new InvalidOperationException();};
         using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(10));var ct=stop.Token;
-        var host=new Host((_,_)=>Task.FromResult<IStore?>(store),(_,_,_,_)=>(local,remote),ItemChecks.Settings,logs,TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(ledger),(_,_,_,_)=>(local,remote),ItemChecks.Settings,logs,TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
         try{
             await host.StartAsync(ct);await admitted.Task.WaitAsync(ct);
             Check.Require(await store.CursorAsync(pair.PairId,ct)==null && db.Local.Requests[nameof(ISide.ReadOneAsync)]>0,"Missing feed identity did not leave the page unsettled");
@@ -92,6 +99,14 @@ public static class HostChecks
             Notice? selected=null;await foreach(var n in host.NoticesAsync(pair.PairId,ct))if(n.Kind==NoticeKind.PutBack)selected=n;
             await host.ResolveAsync(pair.PairId,selected!.Id,selected.Reviewed!,ResolutionChoice.Retry,null,ct);
             Check.Require(!store.OpenNotices.Any(n=>n.Kind==NoticeKind.PutBack) && pc.Local.Items.TryGetValue(v.Path,out var a) && a.Bytes.SequenceEqual(new byte[]{3}) && db.Local.Items.TryGetValue(v.Path,out var b) && b.Bytes.SequenceEqual(new byte[]{3}),"Matching held callback swallowed the exact PutBack restore");
+            // Closing the mapped put-back re-attempts the held PC input at its PC-side ancestor.
+            var x=ItemChecks.File(Side.Dropbox,photos.Path+"/x",4,"x-id");db.Local.Recoverable[(x.Id,x.Revision,x.ContentHash)]=new Recovery.File(x,new MemoryStream([4]));
+            await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.PutBack,TextKey.FailChanged,x.Path,new([new(Side.Dropbox,x.Path,x.Id)],Side.Dropbox),DateTimeOffset.UnixEpoch,false),ct);
+            selected=null;await foreach(var n in host.NoticesAsync(pair.PairId,ct))if(n.Kind==NoticeKind.PutBack)selected=n;
+            var before=Volatile.Read(ref picsLookups);
+            Check.Require(before>0,"The PC input at the bound folder was never attempted");
+            await host.ResolveAsync(pair.PairId,selected!.Id,selected.Reviewed!,ResolutionChoice.Retry,null,ct);
+            Check.Require(Volatile.Read(ref picsLookups)>before,"A closed put-back did not re-attempt the held input at its mapped PC folder");
         }finally{stop.Cancel();await host.StopAsync(default);}
     }
     // Two failed reads for one account, then the next successful page without restarting the Host.
@@ -131,7 +146,9 @@ public static class HostChecks
     }
     public static Task FailedExplicitRepairAsync()=>FailureRecovery(true);
     public static Task FailedNoticeWriteAsync()=>FailureRecovery(false);
-    private static async Task FailureRecovery(bool manual)
+    private static Task UnexpectedFailureLogged()=>FailureRecovery(false,true);
+    // An unexpected pair-loop failure (neither an item failure nor a request refusal) is logged with its type; its notice write succeeds.
+    private static async Task FailureRecovery(bool manual,bool unexpected=false)
     {
         using var store=new InMemoryStateStore();var pair=Bound("recover",@"T:\Recover",1);
         await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
@@ -142,7 +159,7 @@ public static class HostChecks
         var injected=new IOException("injected store failure");var item=ItemChecks.File(Side.Dropbox,"later",3,"item-id");
         tap.Finished=()=>finished.TrySetResult();tap.CursorSaved=()=>{if(pc.Items.TryGetValue(item.Path,out var file) && file.Bytes.SequenceEqual(new byte[]{3}))copied.TrySetResult();};
         cloud.Feed=async (_,ct)=>{switch(Interlocked.Increment(ref reads)){
-            case 1:await failRead.Task.WaitAsync(ct);throw new ItemFailedException(string.Empty,TextKey.SignInReturnRetry,null);
+            case 1:await failRead.Task.WaitAsync(ct);if(unexpected)throw new IOException("injected read failure");throw new ItemFailedException(string.Empty,TextKey.SignInReturnRetry,null);
             case 2:if(manual)await finished.Task.WaitAsync(ct);cloud.Local.Seed(item,[3]);return new([new(Side.Dropbox,ChangeKind.Changed,item.Path,null,item.Id,item,true,false)],"later",null);
             default:await Task.Delay(Timeout.Infinite,ct);throw new InvalidOperationException();}};
         var logs=new MemoryLogs();var output=new StringWriter();logs.Capture=output;
@@ -153,12 +170,12 @@ public static class HostChecks
             if(manual){tap.BeforeFinish=()=>throw injected;
                 try{await host.RepairAsync(pair.PairId,token);throw new InvalidDataException("Explicit Repair hid the store failure");}catch(IOException e) when(e==injected){}
                 tap.BeforeFinish=null;
-            }else tap.NoticeFailure=injected;
+            }else if(!unexpected) tap.NoticeFailure=injected;
             failRead.SetResult();
             try{await (manual ? Task.WhenAll(copied.Task,finished.Task) : copied.Task).WaitAsync(token);recovered=true;}catch(OperationCanceledException) when(token.IsCancellationRequested){}
         }finally{stop.Cancel();try{await host.StopAsync(default);}catch(IOException e) when(e==injected){recovered=false;}}
         if(manual)Check.Require(recovered && host.Stopping.IsCancellationRequested,"Failed explicit Repair blocked owed Repair or clean shutdown");
-        else Check.Require(recovered && output.ToString().Contains(nameof(IOException),StringComparison.Ordinal),"Failed notice write stopped later sync or was not logged");
+        else Check.Require(recovered && output.ToString().Contains(nameof(IOException),StringComparison.Ordinal),unexpected ? "Unexpected pair-loop failure stopped later sync or was logged without its type" : "Failed notice write stopped later sync or was not logged");
     }
     private sealed class RetryClock : TimeProvider
     {
@@ -257,9 +274,13 @@ public static class HostChecks
         internal IOException? NoticeFailure;
         internal Func<Task>? BeforeFinish;
         internal Action<string?>? ReadDropboxDebt;
+        internal Exception? PairFailure;
+        internal bool Disposed;
         protected override object? Invoke(System.Reflection.MethodInfo? method,object?[]? args)
         {
-            if(method!.Name==nameof(IStore.FindAsync)){Lookup?.Invoke((string)args![2]!);if(OnFind!=null || FindAt!=null)return Find();}
+            if(method!.Name==nameof(IStore.PairAsync) && PairFailure!=null && (string)args![0]! =="bad") return Task.FromException<PairConfig?>(PairFailure);
+            if(method.Name==nameof(IDisposable.Dispose)) Disposed=true;
+            if(method.Name==nameof(IStore.FindAsync)){Lookup?.Invoke((string)args![2]!);if(OnFind!=null || FindAt!=null)return Find();}
             if(method.Name==nameof(IStore.SaveNoticeAsync) && NoticeFailure!=null)return Task.FromException(NoticeFailure);
             if(method.Name==nameof(IStore.ReadRepairAsync) && ReadDropboxDebt!=null && (Side)args![1]! ==Side.Dropbox) return Debt();
             if(method.Name==nameof(IStore.OweRepairAsync) && Requested!=null){var result=Call();Requested();return result;}
@@ -291,7 +312,7 @@ public static class HostChecks
             using var store=new InMemoryStateStore();var pair=Bound("journal",@"T:\Journal",1);
             await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
             var ledger=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)ledger;tap.Store=store;
-            using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(10));var ct=stop.Token;
+            using var stop=new CancellationTokenSource();var ct=stop.Token; // Cleanup only; the CI job watchdog guards a hang.
             var waiting=Signal();var finished=Signal();if(late)tap.BeforeFinish=()=>waiting.Task.WaitAsync(ct);tap.Finished=()=>finished.TrySetResult();
             var local=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();var pc=(JournalProbe)(object)local;pc.Quiet=true;pc.Local=new(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
             var remote=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();var db=(JournalProbe)(object)remote;db.Quiet=true;db.Local=new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
@@ -348,7 +369,7 @@ public static class HostChecks
     {
         using var store=new InMemoryStateStore();var pair=Bound("journal",@"T:\Journal",1);
         await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
-        using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(10));var ct=stop.Token;
+        using var stop=new CancellationTokenSource();var ct=stop.Token; // Cleanup only; the CI job watchdog guards a hang.
         var ledger=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)ledger;tap.Store=store;
         var waiting=Signal();var acknowledged=Signal();var peer=Signal();var peerRead=Signal();var peerContinued=Signal();int peerStarts=0;
         var local=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();var pc=(JournalProbe)(object)local;pc.Quiet=true;pc.Local=new(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
@@ -371,7 +392,7 @@ public static class HostChecks
         var host=new Host((_,_)=>Task.FromResult<IStore?>(ledger),(_,_,_,_)=>(local,remote),ItemChecks.Settings,logs,TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
         try{
             await host.StartAsync(ct);
-            try{await acknowledged.Task.WaitAsync(ct);}catch(OperationCanceledException) when(ct.IsCancellationRequested){throw new InvalidDataException("Repair did not release the held journal record without a later PC change");}
+            await acknowledged.Task.WaitAsync(ct);
             Check.Require(db.Local.Items.TryGetValue(version.Path,out var file) && file.Bytes.SequenceEqual(new byte[]{3}),"Journal acknowledgement preceded the replayed effect");
             await peerContinued.Task.WaitAsync(ct);Check.Require(peerStarts==1,"Repair restarted the peer reader");
         }finally{stop.Cancel();await host.StopAsync(default);}
@@ -380,7 +401,7 @@ public static class HostChecks
     {
         using var store=new InMemoryStateStore();var pair=Bound("rewind",@"T:\Rewind",1);
         await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
-        using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(10));var ct=stop.Token;
+        using var stop=new CancellationTokenSource();var ct=stop.Token; // Cleanup only; the CI job watchdog guards a hang.
         var ledger=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)ledger;tap.Store=store;
         var entered=Signal();var waiting=Signal();var acknowledged=Signal();var releaseOld=Signal();var drained=Signal();var stale=Signal();
         var local=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();var pc=(JournalProbe)(object)local;pc.Quiet=true;pc.Local=new(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
@@ -432,6 +453,31 @@ public static class HostChecks
             var applied=await host.SetExclusionAsync(pair.PairId,selection,false,true,default);
             Check.Require(applied.Outcome==ExclusionOutcome.Pending && applied.Cause==TextKey.ReadLocalFailed && local.Items.ContainsKey(selection.Path),"Host dropped the observed apply cause or inferred it from the healthy preview");
         } finally {await host.StopAsync(default);}
+        await IncludeAfterInterruptedExclusion();
+    }
+    // A no-keep exclusion removed the Dropbox copy but stopped before forgetting its bindings; including again keeps the PC copy and copies it back.
+    private static async Task IncludeAfterInterruptedExclusion()
+    {
+        using var store=new InMemoryStateStore();var pair=Bound("include",@"T:\Include",1) with {Exclusions=[new(Side.Dropbox,"ex",false)]};
+        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
+        var folder=ItemChecks.File(Side.Local,"ex",0,"pc-ex",true);var file=ItemChecks.File(Side.Local,"ex/f",1,"pc-f");
+        await store.CommitAsync(pair.PairId,null,SyncedEntries.From(folder,ItemChecks.File(Side.Dropbox,"ex",0,"db-ex",true)),null,null,default);
+        await store.CommitAsync(pair.PairId,null,SyncedEntries.From(file,ItemChecks.File(Side.Dropbox,"ex/f",1,"db-f")),null,null,default);
+        var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};pc.Seed(folder,[]);pc.Seed(file,[1]);
+        var cloud=new FakeSide(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
+        var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;
+        var boot=Signal();var finished=Signal();tap.Finished=()=>finished.TrySetResult();
+        var logs=new MemoryLogs();using(var preflight=new RunLog(logs,"include",ItemChecks.Settings)){}
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_,_)=>Task.FromResult((QuietSide(pc),QuietSide(cloud))),ItemChecks.Settings,logs,TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask,(_,_,_)=>{boot.TrySetResult();return Task.CompletedTask;});
+        using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(10));var ct=stop.Token;
+        try{
+            await host.StartAsync(ct);await boot.Task.WaitAsync(ct);
+            var included=await host.SetExclusionAsync(pair.PairId,new(Side.Dropbox,"ex",false),true,false,ct);
+            await finished.Task.WaitAsync(ct);
+            Check.Require(included.Outcome==ExclusionOutcome.Applied && pc.History.Count==0 && pc.Items.ContainsKey(file.Path),"Include after an interrupted no-keep exclusion recycled the kept PC copy");
+            Check.Require(cloud.Items.TryGetValue(file.Path,out var back) && back.Bytes.SequenceEqual(new byte[]{1}) &&
+                await store.FindAsync(pair.PairId,Side.Local,PathNames.KeyFor(Side.Local,file.Path),ct) is {} binding && binding.IdOn(Side.Dropbox)!="db-f","Include did not bring the kept PC copy back to Dropbox under a new binding");
+        }finally{stop.Cancel();await host.StopAsync(default);}
     }
     /// <summary>Later feed input cannot retry a retained item through a configuration publication in progress.</summary>
     public static async Task PublicationRetryAsync()
@@ -460,6 +506,58 @@ public static class HostChecks
             Check.Require(Volatile.Read(ref lookups)==before,"Retained input re-entered before the scope publication finished");
             commit.SetResult();await publication;await resumed.Task.WaitAsync(ct);
         }finally{second.TrySetResult();commit.TrySetResult();cancel.Cancel();await host.StopAsync(default);}
+    }
+    // A client that stops reading the issues stream must not hold the host command lock.
+    private static async Task NoticeStreamReleasesCommands()
+    {
+        using var store=new InMemoryStateStore();var pair=Bound("issues",@"T:\Issues",1);await store.SavePairAsync(pair,default);
+        foreach(var path in new[]{"first","second"})
+            await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,TextKey.FailChanged,path,new([new(Side.Local,path,path+"-id")],Side.Local),DateTimeOffset.UnixEpoch,false),default);
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(store),(_,_,_,_)=>throw new InvalidOperationException(),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
+        var rows=host.NoticesAsync(pair.PairId,default).GetAsyncEnumerator();
+        try{
+            Check.Require(await rows.MoveNextAsync(),"Issues stream lost its first notice");
+            // With no member, Pause completes synchronously whenever the command lock is free.
+            var pause=host.PauseAsync(pair.PairId,default);
+            Check.Require(pause.IsCompleted,"A paused issues reader holds the host command lock");
+            Check.Require(await rows.MoveNextAsync(),"Issues stream lost its second notice");
+            await pause;await host.ResumeAsync(pair.PairId,default);
+        }finally{await rows.DisposeAsync();await host.StopAsync(default);}
+    }
+    // A stored definition that cannot be decoded never launched, so its row can still be removed; the store's own refusals still apply.
+    private static async Task MalformedPairRemovable()
+    {
+        foreach(var (failure,putBack) in new (Exception,bool)[]{(new System.Text.Json.JsonException("undecodable"),false),(new InvalidDataException("undecodable"),false),(new InvalidDataException("undecodable"),true)})
+        {
+            using var store=new InMemoryStateStore();var bad=Bound("bad",@"T:\Bad",1);await store.SavePairAsync(bad,default);
+            if(putBack) await store.SaveNoticeAsync(bad.PairId,new(0,NoticeKind.PutBack,TextKey.FailChanged,"item",new([new(Side.Dropbox,"item","item-id")],Side.Dropbox),DateTimeOffset.UnixEpoch,false),default);
+            var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;tap.PairFailure=failure;
+            var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_)=>throw new InvalidOperationException(),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
+            try{
+                TextKey? cause;
+                try{cause=await host.RemovePairAsync(bad.PairId,default);}
+                catch(Exception e) when(e is System.Text.Json.JsonException or InvalidDataException){throw new InvalidDataException($"Undecodable pair could not be removed ({e.GetType().Name})",e);}
+                var stored=false;await foreach(var p in store.PairsAsync(default)) stored|=p.PairId==bad.PairId;
+                Check.Require(putBack ? cause==TextKey.PairPutBackOutstanding && stored : cause==null && !stored,"Undecodable pair removal ignored the store's result");
+            }finally{await host.StopAsync(default);}
+        }
+    }
+    // A drain that throws still disposes the store and signals the pipe owner; the caller sees the drain's own exception.
+    private static async Task StopAfterDrainFailure()
+    {
+        using var store=new InMemoryStateStore();var pair=Bound("drain",@"T:\Drain",1);
+        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
+        var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;
+        var injected=new IOException("injected drain failure");var admitted=Signal();var failing=false;
+        var local=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();var probe=(JournalProbe)(object)local;probe.Quiet=true;
+        probe.Local=new(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
+        // Drain's last call pauses the journal member; fail only that one, after admission.
+        probe.Published=()=>{if(!probe.Paused)admitted.TrySetResult();else if(failing)throw injected;};
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_)=>(local,QuietSide(new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)})),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
+        await host.StartAsync(default);await admitted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        failing=true;
+        try{await host.StopAsync(default);throw new InvalidDataException("Stop hid the drain failure");}catch(IOException e) when(e==injected){}
+        Check.Require(host.Stopping.IsCancellationRequested && tap.Disposed,"A failed drain skipped the stop signal or store disposal");
     }
     private static async Task RemovingMember()
     {
@@ -622,11 +720,19 @@ public static class HostChecks
         internal Func<JournalPosition,JournalPosition>? OnSettle;
         private JournalPosition? committed;
         private static async Task<ChangePage> WaitForStop(CancellationToken ct){await Task.Delay(Timeout.Infinite,ct);return new([],null,null);}
+        // The endpoint takes the settlement first; only then is it committed and acknowledged, so a waiter cannot stop the host before it ran.
+        private async Task Settle(System.Reflection.MethodInfo method,object?[] args)
+        {
+            try {await (Task)method.Invoke(Local,args)!;}
+            catch(System.Reflection.TargetInvocationException error) when(error.InnerException!=null)
+            {System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error.InnerException).Throw();}
+            var offered=(JournalPosition)args[0]!;committed=OnSettle?.Invoke(offered)??offered;
+        }
         protected override object? Invoke(System.Reflection.MethodInfo? method,object?[]? args)
         {
             if(method!.Name==nameof(ISide.BoundaryAsync) && Boundary!=null) return Boundary((CancellationToken)args![0]!);
             if(method.Name==nameof(ISide.ReadJobAsync) && Job!=null){Interlocked.Increment(ref JobReads);return Job((CancellationToken)args![1]!);}
-            if(Quiet && method.Name==nameof(ISide.SettleJournalAsync)){var offered=(JournalPosition)args![0]!;committed=OnSettle?.Invoke(offered)??offered;}
+            if(Quiet && method.Name==nameof(ISide.SettleJournalAsync)) return Settle(method,args!);
             if(Quiet && method.Name==nameof(ISide.SettledJournalAsync)) return Task.FromResult(committed);
             if(Quiet && method.Name==nameof(ISide.ReadChangesAsync) && args?.Length==3) return Feed?.Invoke((string?)args[0],(CancellationToken)args[2]!) ?? WaitForStop((CancellationToken)args[2]!);
             if(method.Name==nameof(ISide.RootAsync)) ReadRoot?.Invoke();
