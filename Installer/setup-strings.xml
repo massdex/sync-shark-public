@@ -1,0 +1,15 @@
+<messages>
+  <message key="version.invalid">The application has no stable product version: {0}</message>
+  <message key="version.upgrade">Setup requires a version newer than the resolved active predecessor.</message>
+  <message key="manifest.duplicate">Duplicate setup manifest path.</message>
+  <message key="manifest.invalid">Invalid setup manifest path.</message>
+  <message key="payload.missing">Program payload is missing: {0}</message>
+  <message key="recovery.changed">Setup recovery found a changed object; it was retained: {0}</message>
+  <message key="recovery.foreign">Setup recovery found a foreign object; it was retained: {0}</message>
+  <message key="object.invalid">Setup refused an unexpected filesystem object; correct the obstruction and run setup again: {0}</message>
+  <message key="version.occupied">This version is already installed or its name is occupied.</message>
+  <message key="install.success">Installed {0}. The running host was not stopped; the new version applies at the next start.</message>
+  <message key="preparation.retained">Retained setup preparation: {0}. Setup cannot remove it without proof of ownership.</message>
+  <message key="shell.arguments">Unsupported setup arguments.</message>
+  <message key="shell.payload">Missing embedded setup payload.</message>
+</messages>
