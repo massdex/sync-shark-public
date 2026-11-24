@@ -80,7 +80,9 @@ public static class HostChecks
         var remote=System.Reflection.DispatchProxy.Create<ISide,JournalProbe>();var db=(JournalProbe)(object)remote;
         db.Local=new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};db.Quiet=true;
         var v=ItemChecks.File(Side.Dropbox,"item",3,"original");var admitted=Signal();
-        db.Feed=async (cursor,token)=>{if(cursor==null)return new([new(Side.Dropbox,ChangeKind.Changed,v.Path,null,v.Id,v,false,false)],"one",null);
+        // A second put-back subject under the bound Dropbox folder Photos, held the same way as the first.
+        var x=ItemChecks.File(Side.Dropbox,"Photos/x",4,"x-id");
+        db.Feed=async (cursor,token)=>{if(cursor==null)return new([new(Side.Dropbox,ChangeKind.Changed,v.Path,null,v.Id,v,false,false),new(Side.Dropbox,ChangeKind.Changed,x.Path,null,x.Id,x,false,false)],"one",null);
             admitted.TrySetResult();await Task.Delay(Timeout.Infinite,token);throw new InvalidOperationException();};
         // A held PC input at the bound folder Pics (Dropbox Photos) overlaps a put-back at Dropbox Photos/x only through that binding.
         var pics=ItemChecks.File(Side.Local,"Pics",0,"pics-id",true);var photos=ItemChecks.File(Side.Dropbox,"Photos",0,"photos-id",true);
@@ -100,7 +102,7 @@ public static class HostChecks
             await host.ResolveAsync(pair.PairId,selected!.Id,selected.Reviewed!,ResolutionChoice.Retry,null,ct);
             Check.Require(!store.OpenNotices.Any(n=>n.Kind==NoticeKind.PutBack) && pc.Local.Items.TryGetValue(v.Path,out var a) && a.Bytes.SequenceEqual(new byte[]{3}) && db.Local.Items.TryGetValue(v.Path,out var b) && b.Bytes.SequenceEqual(new byte[]{3}),"Matching held callback swallowed the exact PutBack restore");
             // Closing the mapped put-back re-attempts the held PC input at its PC-side ancestor.
-            var x=ItemChecks.File(Side.Dropbox,photos.Path+"/x",4,"x-id");db.Local.Recoverable[(x.Id,x.Revision,x.ContentHash)]=new Recovery.File(x,new MemoryStream([4]));
+            db.Local.Recoverable[(x.Id,x.Revision,x.ContentHash)]=new Recovery.File(x,new MemoryStream([4]));
             await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.PutBack,TextKey.FailChanged,x.Path,new([new(Side.Dropbox,x.Path,x.Id)],Side.Dropbox),DateTimeOffset.UnixEpoch,false),ct);
             selected=null;await foreach(var n in host.NoticesAsync(pair.PairId,ct))if(n.Kind==NoticeKind.PutBack)selected=n;
             var before=Volatile.Read(ref picsLookups);
