@@ -590,7 +590,7 @@ public static class CallBudgetChecks
     {
         var pair = ItemChecks.Pair(); var paths = Paths(pair);
         var (store, pc, cloud, unfinished, _) = await JobAsync(pair, size);
-        var proxy = System.Reflection.DispatchProxy.Create<ISide, HostChecks.JournalProbe>();
+        ISide proxy = System.Reflection.DispatchProxy.Create<ISide, HostChecks.JournalProbe>();
         var probe = (HostChecks.JournalProbe)(object)proxy; probe.Local = cloud;
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -606,10 +606,10 @@ public static class CallBudgetChecks
             return new JobReply.Terminal(new (Entry? Entry, TextKey? Cause, FailureDisposition? Failure)[] { (null, null, null) }) { AbsentOrdinals = new HashSet<int> { 0 } };
         };
         Change Wake(string path) => new(Side.Dropbox, ChangeKind.Changed, path, null, "cd-" + path, null, false, false);
-        var first = unfinished.CheckAsync(pair, ItemChecks.Settings, _ => { }, paths, Wake("folder/member"), pc, probe, store,
+        var first = unfinished.CheckAsync(pair, ItemChecks.Settings, _ => { }, paths, Wake("folder/member"), pc, proxy, store,
             static _ => Array.Empty<Change>(), static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default);
         await entered.Task; // the first check is inside ReadJobAsync with its key held
-        var second = unfinished.CheckAsync(pair, ItemChecks.Settings, _ => { }, paths, Wake("folder/other"), pc, probe, store,
+        var second = unfinished.CheckAsync(pair, ItemChecks.Settings, _ => { }, paths, Wake("folder/other"), pc, proxy, store,
             static _ => Array.Empty<Change>(), static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default);
         await second; // the mid-check wake coalesces and returns without a second provider read
         release.TrySetResult();
