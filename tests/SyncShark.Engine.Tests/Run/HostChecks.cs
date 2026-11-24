@@ -150,6 +150,7 @@ public static class HostChecks
     public static Task FailedNoticeWriteAsync()=>FailureRecovery(false);
     private static Task UnexpectedFailureLogged()=>FailureRecovery(false,true);
     // An unexpected pair-loop failure (neither an item failure nor a request refusal) is logged with its type; its notice write succeeds.
+    // The reader retries an IOException itself, so the unexpected failure is another exception type.
     private static async Task FailureRecovery(bool manual,bool unexpected=false)
     {
         using var store=new InMemoryStateStore();var pair=Bound("recover",@"T:\Recover",1);
@@ -161,7 +162,7 @@ public static class HostChecks
         var injected=new IOException("injected store failure");var item=ItemChecks.File(Side.Dropbox,"later",3,"item-id");
         tap.Finished=()=>finished.TrySetResult();tap.CursorSaved=()=>{if(pc.Items.TryGetValue(item.Path,out var file) && file.Bytes.SequenceEqual(new byte[]{3}))copied.TrySetResult();};
         cloud.Feed=async (_,ct)=>{switch(Interlocked.Increment(ref reads)){
-            case 1:await failRead.Task.WaitAsync(ct);if(unexpected)throw new IOException("injected read failure");throw new ItemFailedException(string.Empty,TextKey.SignInReturnRetry,null);
+            case 1:await failRead.Task.WaitAsync(ct);if(unexpected)throw new InvalidOperationException("injected read failure");throw new ItemFailedException(string.Empty,TextKey.SignInReturnRetry,null);
             case 2:if(manual)await finished.Task.WaitAsync(ct);cloud.Local.Seed(item,[3]);return new([new(Side.Dropbox,ChangeKind.Changed,item.Path,null,item.Id,item,true,false)],"later",null);
             default:await Task.Delay(Timeout.Infinite,ct);throw new InvalidOperationException();}};
         var logs=new MemoryLogs();var output=new StringWriter();logs.Capture=output;
@@ -177,7 +178,7 @@ public static class HostChecks
             try{await (manual ? Task.WhenAll(copied.Task,finished.Task) : copied.Task).WaitAsync(token);recovered=true;}catch(OperationCanceledException) when(token.IsCancellationRequested){}
         }finally{stop.Cancel();try{await host.StopAsync(default);}catch(IOException e) when(e==injected){recovered=false;}}
         if(manual)Check.Require(recovered && host.Stopping.IsCancellationRequested,"Failed explicit Repair blocked owed Repair or clean shutdown");
-        else Check.Require(recovered && output.ToString().Contains(nameof(IOException),StringComparison.Ordinal),unexpected ? "Unexpected pair-loop failure stopped later sync or was logged without its type" : "Failed notice write stopped later sync or was not logged");
+        else Check.Require(recovered && output.ToString().Contains(unexpected ? nameof(InvalidOperationException) : nameof(IOException),StringComparison.Ordinal),unexpected ? "Unexpected pair-loop failure stopped later sync or was logged without its type" : "Failed notice write stopped later sync or was not logged");
     }
     private sealed class RetryClock : TimeProvider
     {
