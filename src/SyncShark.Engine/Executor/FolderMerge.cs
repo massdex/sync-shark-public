@@ -114,7 +114,6 @@ public sealed class FolderMerge
             if(await Writer.ReadOneAsync(to,ct)!=after || await store.FindAsync(pair.PairId,written,binding.KeyOn(written),ct)!=binding) throw new ChangedUnderneathException(to);
             var linked=SyncedEntries.Relink(binding,written==Side.Local?after:mate,written==Side.Dropbox?after:mate);
             var next=new Scope(linked.LocalPath,linked.DropboxPath);
-            if(binding.IsFolder) await store.ProjectSubtreeAsync(pair.PairId,new(binding.LocalPath,binding.DropboxPath),next,ct);
             await store.CommitAsync(pair.PairId,binding,linked,null,null,ct);
             await compareOldBinding(binding,actual,next,ct);
         }
