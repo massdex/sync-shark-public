@@ -361,10 +361,12 @@ public static class KnownBugChecks
         var paths = new PathScope(pair, [pair], DriveType.Fixed);
         var exclusion = new Exclusion(Side.Dropbox, "x", false);
         // Crash on the first save after the physical Dropbox removal ("crash after removal, before commit").
+        var removed = false;
+        remote.AfterDelete = entry => { if (entry.Path is "x" or "x/a") removed = true; };
         var crashed = false;
         var storeCrash = FolderDeleteChecks.Observe.Wrap<IStore>(store, (op, _) =>
         {
-            if (op == nameof(IStore.CommitAsync) && !crashed)
+            if (op == nameof(IStore.CommitAsync) && removed && !crashed)
             {
                 crashed = true;
                 throw new IOException("simulated crash after the Dropbox removal, before the save");
