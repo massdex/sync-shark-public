@@ -199,8 +199,6 @@ internal sealed class ScanCompare(ScanTable scan)
                 " AND ($l IS NULL OR scansubtree(b.local_path,$l) OR scansubtree(b.dropbox_path,$d) OR scansubtree(x.path,"+(local?"$l":"$d")+"))";
         }
         var sql = "WITH candidates AS (" + Candidates(Side.Local) + " UNION ALL " + Candidates(Side.Dropbox) + "), ordered AS (SELECT *,min(plandepth(path)) OVER(PARTITION BY lk) depth FROM candidates) SELECT * FROM ordered ORDER BY depth,lk,side,path";
-        using (var temp = StorageCommand.Create(db,null,"PRAGMA temp_store=FILE"))
-            await temp.ExecuteNonQueryAsync(ct);
         using (var fill = StorageCommand.Create(db, null, "CREATE TEMP TABLE rename_order AS " + sql, ("$p",pairId),("$s",scanId.ToByteArray()),("$l",scope?.LocalPath),("$d",scope?.DropboxPath)))
             await fill.ExecuteNonQueryAsync(ct);
         try
