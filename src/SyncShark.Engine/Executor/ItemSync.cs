@@ -51,7 +51,7 @@ public static class ItemSync
             if(change.Side==Side.Local && saved!=null && !selectedRemoval && (pc==null || change.Id==saved.LocalId && pc.Id!=saved.LocalId))
             {
                 var currentIdentity=change.Id==saved.LocalId && (change.Kind==ChangeKind.Deleted || heldInput!=null) ? await local.ReadByIdAsync(saved.LocalId,ct) : null;
-                if(change.Kind==ChangeKind.Deleted && change.Id is {Length:>0} selected && selected==saved.LocalId && currentIdentity==null)
+                if(change.Kind==ChangeKind.Deleted && change.Id is {Length:>0} selected && selected==saved.LocalId && currentIdentity is null or {InScope:false})
                 {
                     selectedRemoval=true;
                     if(saved.IsFolder) return await RemoveBoundAsync(pair,settings,events,paths,saved,Side.Local,local,dropbox,store,heldInput,populate,compareOldBinding,failed,ct,coversThrough);
@@ -121,17 +121,6 @@ public static class ItemSync
                 }
             }
             bool ok=await ExecuteAsync(pair,settings,events,paths,row,candidates,safeSave||change.LocalContentDirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,false,coversThrough:coversThrough,observedMissing:selectedRemoval && change.Side==Side.Local?(change.Side,successor):null);
-            if(ok && candidates.Count!=0 && incoming is {IsFolder:false} movedFile && baseline!=null)
-            {
-                var settled=await store.FindAsync(pair.PairId,change.Side,key,ct);
-                // A split retires the old pair; a bound collision can relocate it to a label instead.
-                if(settled!=null && settled.LocalId==baseline.LocalId && settled.DropboxId==baseline.DropboxId && settled.PathOn(change.Side)==movedFile.Path)
-                {
-                    var final=await ObserveBindingAsync(paths,settled,local,dropbox,ct);
-                    if(final.Group.Count!=0 || final.Row.Local==null || final.Row.Dropbox==null) Retain(key,failed);
-                    ok=await ExecuteAsync(pair,settings,events,paths,final.Row,[],change.LocalContentDirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,false,coversThrough:coversThrough);
-                }
-            }
             if (!ok || reviewed!=null) return ok;
             if(changedPutBack!=null) await store.CloseNoticeAsync(pair.PairId,changedPutBack,ct);
             await CloseComparedNoticesAsync(pair.PairId,change,incoming,change.Side==Side.Local?db:pc,notices,store,ct);
@@ -170,7 +159,7 @@ public static class ItemSync
     {
         foreach(var n in notices)
         {
-            // Ordinary comparison closes Failure only; PutBack needs the bound item’s content-change decision.
+            // Ordinary comparison closes Failure only; PutBack needs the bound item's content-change decision.
             if(n.Kind==NoticeKind.Failure && n.Subject.Items.Any(i=>i.Id==(i.Side==input.Side?incoming:counterpart)?.Id))
                 await store.CloseNoticeAsync(pairId,n,ct);
         }
@@ -188,7 +177,9 @@ public static class ItemSync
         {
             if(heldInput==null || paths.ExcludesBinding(folder) || await store.FindAsync(pair.PairId,deleted,folder.KeyOn(deleted),ct)!=folder || await source.ReadByIdAsync(folder.IdOn(deleted),ct) is {InScope:true}) Retain(row.Key,failed);
             var found=await target.ReadByIdAsync(folder.IdOn(target.Side),ct);
-            if(found is not {InScope:true} at || !at.Location.Entry.IsFolder || at.Location.Entry.Id!=folder.IdOn(target.Side) || !PathNames.Same(at.Location.Entry.Path,folder.PathOn(target.Side))) { Retain(row.Key,failed); return false; }
+            // Both bound identities are gone (R57, R95 B1): the selected removal already settled; retire the binding as ForgetOnly does.
+            if(found is not {InScope:true} at) { await store.CommitAsync(pair.PairId,folder,null,null,null,ct); return true; }
+            if(!at.Location.Entry.IsFolder || at.Location.Entry.Id!=folder.IdOn(target.Side) || !PathNames.Same(at.Location.Entry.Path,folder.PathOn(target.Side))) { Retain(row.Key,failed); return false; }
             var selected=at.Location.Entry; RequireReadable(target.Side,selected);
             await RequireRemovalAsync(new FolderDelete().ApplyAsync(pair,settings,events,paths,selected,folder,target.Side,SyncAction.DeleteOn(target.Side),local,dropbox,store,heldInput!,populate,compareOldBinding,ct,resolveConflict:(where,side,version,token)=>new Effects().RecoverConflictAsync(pair,settings,events,paths,where,side,version,local,dropbox,store,populate,compareOldBinding,token),coversThrough:coversThrough),()=>failed?.Invoke(row.Key,false));
             return true;
@@ -290,6 +281,15 @@ public static class ItemSync
             if(await CounterpartAsync(pair,Side.Local,left.Path,store,ct)!=right.Path) Retain(row.Key,failed);
             row=row with {Synced=SyncedEntries.Relink(original,left,right)};mappedChild=true;
         }
+        else if(candidates.Count==0 && row?.Synced is {IsFolder:false} single && (row.Local==null)!=(row.Dropbox==null) && row.Context.Destination is {} far &&
+            (row.Local??row.Dropbox) is {IsFolder:false} present && present.Id==single.IdOn(row.Local!=null?Side.Local:Side.Dropbox) &&
+            present.Path!=single.PathOn(row.Local!=null?Side.Local:Side.Dropbox) && far!=single.PathOn(row.Local!=null?Side.Dropbox:Side.Local))
+        {
+            // A one-sided child at a confirmed hop: decide at both final names, commit against the old binding.
+            var (pcPath,dbPath)=row.Local!=null?(present.Path,far):(far,present.Path);
+            if(await CounterpartAsync(pair,Side.Local,pcPath,store,ct)!=dbPath) Retain(row.Key,failed);
+            row=row with {Synced=single with {LocalPath=pcPath,LocalKey=PathNames.Key(pcPath),DropboxPath=dbPath,DropboxKey=PathNames.DropboxKey(dbPath)}};mappedChild=true;
+        }
         var action=candidates.Count==0 ? Decide.For(row!,pair.FirstRun,now,dirty) :
             await Effects.DecideMoveAsync(pair,settings,paths,candidates,local,dropbox,store,dirty,ct);
         row=action.Row;
@@ -334,7 +334,7 @@ public static class ItemSync
         if(row.Synced is {} prior && action.Kind is (ActionKind.Download or ActionKind.Upload or ActionKind.ReplaceKind or ActionKind.EnsureLocalFolder or ActionKind.EnsureDropboxFolder) && row.EntryOn(action.WrittenSide())==null)
         {
             missing=action.WrittenSide();var leg=missing==Side.Local?local:dropbox;
-            var occupant=observedMissing is {} observed && observed.Side==missing ? observed.Occupant : await leg.ReadOneAsync(prior.PathOn(leg.Side),ct);
+            var occupant=observedMissing is {} observed && observed.Side==missing ? observed.Occupant : await leg.ReadOneAsync(action.Target ?? prior.PathOn(leg.Side),ct);
             if(occupant!=null)
             {
                 if(occupant.Id==prior.IdOn(leg.Side)) throw new ChangedUnderneathException(occupant.Path);
@@ -358,7 +358,32 @@ public static class ItemSync
                 incumbent=await store.FindAsync(pair.PairId,written,PathNames.KeyFor(written,target),ct);
             if(incumbent==moving) incumbent=null;
         }
-        return await Locks.RunAsync(pair,action,candidates,ApplyLocked,ct,settings.CaseRenameSuffix,incumbent);
+        Task<(bool,EffectOutcome?)> ApplyWithLocks() => Locks.RunAsync(pair,action,candidates,ApplyLocked,ct,settings.CaseRenameSuffix,incumbent);
+        var applied=Moves.IsFileSplit(action) ? await ApplySplitLocked() : await ApplyWithLocks();
+        async Task<(bool,EffectOutcome?)> ApplySplitLocked()
+        {
+            var keys=new List<(Side,string,bool)>();
+            foreach(var side in new[]{Side.Local,Side.Dropbox})
+            {
+                void Add(Side leg,string path) => keys.Add((leg,ItemLocks.Physical(pair,leg,path),false));
+                Add(side,row.Synced!.PathOn(side));
+                if(row.EntryOn(side) is not {} source) continue;
+                Add(side,source.Path);
+                Add(PathNames.Other(side),await CounterpartAsync(pair,side,source.Path,store,ct));
+            }
+            return await Locks.RunAsync(keys,ApplyLocked,ct);
+        }
+        if(applied.Item1 && candidates.Count!=0 && candidates[0] is {Moved.IsFolder:false} move)
+        {
+            var settled=await store.FindAsync(pair.PairId,move.Side,PathNames.KeyFor(move.Side,move.Moved.Path),ct);
+            if(settled!=null && settled.LocalId==move.Synced.LocalId && settled.DropboxId==move.Synced.DropboxId && settled.PathOn(move.Side)==move.Moved.Path)
+            {
+                var final=await ObserveBindingAsync(paths,settled,local,dropbox,ct);
+                if(final.Group.Count!=0 || final.Row.Local==null || final.Row.Dropbox==null) Retain(row.Key,failed);
+                if(!await ExecuteAsync(pair,settings,events,paths,final.Row,[],dirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,addOnly,failedNotice,coversThrough)) Retain(row.Key,failed);
+            }
+        }
+        return applied;
         async Task<(bool,EffectOutcome?)> ApplyLocked()
         {
             var pcCheck=local.ReadOneAsync(endpoints.Local,ct); var dbCheck=dropbox.ReadOneAsync(endpoints.Dropbox,ct);
@@ -371,7 +396,7 @@ public static class ItemSync
                 if(row.Synced is {} owned && (expected==null || successor!=null && missing==side))
                 {
                     var leg=side==Side.Local?local:dropbox;
-                    if(await leg.ReadByIdAsync(owned.IdOn(side),ct) is {InScope:true}) throw new ChangedUnderneathException(owned.PathOn(side));
+                    if(await leg.ReadByIdAsync(owned.IdOn(side),ct) is {InScope:true} live && !paths.Excludes(side==Side.Local?live.Location.Entry.Path:null,side==Side.Dropbox?live.Location.Entry.Path:null,live.Location.Entry.IsFolder)) throw new ChangedUnderneathException(owned.PathOn(side));
                     // An unrelated occupant is not the missing bound leg. A state-only or peer-only operation never writes it.
                     if(expected==null && seen!=null && (observedMissing is not {} observation || observation.Side!=side || observation.Occupant==seen) && seen.Id!=owned.IdOn(side) && (action.Kind==ActionKind.ForgetOnly || action.Kind is (ActionKind.DeleteLocal or ActionKind.DeleteDropbox) && action.WrittenSide()!=side)) continue;
                 }
@@ -391,7 +416,7 @@ public static class ItemSync
             if(outcome==EffectOutcome.Pending) Retain(row.Key,failed);
             // Vacating another binding only clears the destination; the arriving move still owns its input.
             if(outcome==EffectOutcome.Applied && action.Kind==ActionKind.ForgetOnly && candidates.Count!=0 && row.Synced!=candidates[0].Synced) Retain(row.Key,failed);
-            if(outcome==EffectOutcome.Refused) { failed?.Invoke(row.Key,false); throw new ChangedUnderneathException(Row.Path(row)); }
+            if(outcome==EffectOutcome.Refused) return (false,outcome); // The notice is the decision, not a race.
             return (true,outcome);
         }
 

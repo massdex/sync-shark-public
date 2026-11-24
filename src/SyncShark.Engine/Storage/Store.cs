@@ -105,7 +105,7 @@ public sealed class Store : IStore
     /// <summary>Retire a settled job.</summary>
     public Task SettleJobAsync(AcceptedJob job, CancellationToken ct) => Locked(() => pairs.SettleJobAsync(Connection, job, ct), ct);
     /// <summary>Persist the selected victim and stage proof.</summary>
-    public Task ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct) => Locked(() => pairs.ArmAsync(Connection, pairId, victim, stage, ct), ct);
+    public Task<bool> ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct) => Locked(() => pairs.ArmAsync(Connection, pairId, victim, stage, ct), ct);
     /// <summary>Read the armed victim and stage proof.</summary>
     public Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(string pairId, CancellationToken ct) => Locked(() => pairs.ArmedAsync(Connection, pairId, ct), ct);
     /// <summary>Clear only the matching victim and proof.</summary>

@@ -137,7 +137,9 @@ public static class RecoveryChecks
         x.Cloud.ClockOffset=measured?(TimeSpan.Zero,TimeSpan.Zero):null;
         x.Cloud.DeletedHistory[path]=folder?new DeletionEvidence.DeletedPath(path,path):
             new DeletionEvidence.DeletedFile(path,"cloud","previous","r1",entry.Modified.AddDays(1),null,entry.ContentHash,null);
-        await x.CompareAsync();
+        using var budget=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        FolderChecks.AdmitFullRepair(x.Queue,x.Pc,x.Cloud);
+        await Repair.RunAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,x.Pc,x.Cloud,x.Store,null,null,budget.Token);
         Check.Require(x.Cloud.Requests[nameof(ISide.DeletedAsync)]==1,"Ineligible live name received a history lookup or eligible name was missed");
         if(folder || measured)
         {
@@ -187,7 +189,9 @@ public static class RecoveryChecks
         var moved=a with { Path="dest" };x.Pc.Seed(moved,folder?[]:[1]);x.Cloud.Seed(b,folder?[]:[1]);
         var occupant=Src(Side.Dropbox,"dest","existing",1,folder);x.Cloud.Seed(occupant,folder?[]:[1]);
         if(folder) { x.Pc.Seed(Src(Side.Local,"dest/new","child-a",2),[2]);x.Cloud.Seed(Src(Side.Dropbox,"dest/other","child-b",3),[3]); }
-        await x.CompareAsync();x.VerifyLinks();
+        using var budget=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        FolderChecks.AdmitFullRepair(x.Queue,x.Pc,x.Cloud);
+        await Repair.RunAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,x.Pc,x.Cloud,x.Store,null,null,budget.Token);x.VerifyLinks();
         foreach(var side in new[]{x.Pc,x.Cloud})
         {
             Check.Require(!side.Items.ContainsKey("old") && side.Items["dest"].Entry.IsFolder==folder,"Obsolete source or missing destination");
@@ -370,15 +374,35 @@ public static class RecoveryChecks
         Check.Require(x.Pc.Requests[nameof(ISide.SettleJournalAsync)]>=1,"An irrelevant local page did not advance its settled position");
         x.VerifyLinks();Check.Require(x.Pc.Items.Count==1 && x.Cloud.Items.Count==1 && x.Store.Records.Count==1 && x.Store.OpenNotices.Count==0,"An irrelevant local page touched data");
     }
-    public static Task A38JournalPageIrrelevantReasonsAsync() => throw new NotImplementedException();
-    public static Task A38RestartAfterEmptyPageAsync() => throw new NotImplementedException();
+    public static async Task A38JournalPageIrrelevantReasonsAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();await x.LinkAsync("steady",1);
+        // An irrelevant local journal page, then a restart re-reads from the settled position: a no-op both times.
+        await AutoSync.ApplyPageAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,Side.Local,ItemChecks.Journal([],4),x.Pc,x.Cloud,x.Store,default);
+        await AutoSync.ApplyPageAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,Side.Local,ItemChecks.Journal([],5),x.Pc,x.Cloud,x.Store,default);
+        Check.Require((await x.Store.ReadRepairAsync(x.Pair.PairId,Side.Local,default)).Reason==null,"An irrelevant local page owed a Repair after the restart");
+        Check.Require(x.Pc.Requests[nameof(ISide.SettleJournalAsync)]>=1,"An irrelevant local page did not advance its settled position");
+        x.VerifyLinks();Check.Require(x.Pc.Items.Count==1 && x.Cloud.Items.Count==1 && x.Store.Records.Count==1 && x.Store.OpenNotices.Count==0,"An irrelevant local page replayed work after the restart");
+    }
+    public static async Task A38RestartAfterEmptyPageAsync()
+    {
+        using var x=new PairState();await x.InitializeAsync();await x.LinkAsync("steady",1);
+        await x.Store.SaveCursorAsync(x.Pair.PairId,"before",default);
+        // An empty Dropbox page with a new cursor, then a restart: the settled cursor stands and nothing replays.
+        await AutoSync.ApplyPageAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,Side.Dropbox,new([],"settled",null),x.Pc,x.Cloud,x.Store,default);
+        await AutoSync.ApplyPageAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,x.Queue,Side.Dropbox,new([],"settled",null),x.Pc,x.Cloud,x.Store,default);
+        Check.Require(await x.Store.CursorAsync(x.Pair.PairId,default)=="settled","An empty page did not persist its cursor across a restart");
+        Check.Require((await x.Store.ReadRepairAsync(x.Pair.PairId,Side.Dropbox,default)).Reason==null,"An empty page owed a Repair after the restart");
+        x.VerifyLinks();Check.Require(x.Store.Records.Count==1 && x.Store.OpenNotices.Count==0 && x.Cloud.Requests[nameof(ISide.ReadOneAsync)]==0,"An empty page replayed work after the restart");
+    }
     public static Task A38OneFailedReadThenSuccessNoRepairAsync() => throw new NotImplementedException();
     public static async Task A39InUseHolderNameAsync()
     {
         using var x=new PairState();await x.InitializeAsync();var saved=await x.LinkAsync("item",1);
         var edit=ItemChecks.File(Side.Dropbox,"item",2,saved.DropboxId);x.Cloud.Items["item"]=(edit,[2]);
         x.Pc.PublishFailures["item"]=new ItemFailedException("item",TextKey.FailLocalInUse,null){Holder="Word"};
-        await ItemSync.ApplyAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,new Change(Side.Dropbox,ChangeKind.Changed,"item",null,saved.DropboxId,edit,false,false),x.Pc,x.Cloud,x.Store,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
+        // Admitted pre/post-effect fixture: the download reaches the mutation and is refused in use, never left Pending.
+        await ItemChecks.CloudChangeAsync(x.Pair,x.Paths,x.Queue,new Change(Side.Dropbox,ChangeKind.Changed,"item",null,saved.DropboxId,edit,false,false),x.Pc,x.Cloud,x.Store,expectEffect:false);
         var notice=x.Store.OpenNotices.Single();
         Check.Require(notice.Kind==NoticeKind.Failure && notice.Cause==TextKey.FailLocalInUse && notice.Subject.Holder=="Word","In-use failure did not name the holding program");
         Check.Require(x.Pc.Items["item"].Bytes.SequenceEqual(new byte[]{1}) && x.Cloud.Items["item"].Bytes.SequenceEqual(new byte[]{2}) && x.Store.Records.Count==1,"In-use failure overwrote user data or lost the binding");
@@ -590,7 +614,7 @@ public static class RecoveryChecks
     {
         using var x=new PairState();await x.InitializeAsync();
         var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","tok",[new("tok","gone",null)]);
-        await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies["tok"]=new([new JobReply.Running()]);
+        await InstallJobAsync(x,job);x.Cloud.JobReplies["tok"]=new([new JobReply.Running()]);
         long lookups=x.Cloud.Requests[nameof(ISide.ReadByIdAsync)];
         await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,new Change(Side.Dropbox,ChangeKind.Deleted,"gone",null,null,null,false,false),x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         Check.Require(x.Cloud.Requests[nameof(ISide.ReadJobAsync)]==1 && x.Cloud.Requests[nameof(ISide.ReadByIdAsync)]==lookups,"A path wake performed a current id lookup");
@@ -612,7 +636,7 @@ public static class RecoveryChecks
     {
         using var x=new PairState();await x.InitializeAsync();
         var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","tok",[new("id:tok","gone",null)]);
-        await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies["tok"]=new([new JobReply.Invalid()]);
+        await InstallJobAsync(x,job);x.Cloud.JobReplies["tok"]=new([new JobReply.Invalid()]);
         await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,new Change(Side.Dropbox,ChangeKind.Deleted,"gone",null,null,null,false,false),x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         Check.Require(x.Cloud.Requests[nameof(ISide.DeleteAsync)]==0 && x.Store.OpenNotices.Any(n=>n.Cause==TextKey.FailDropboxDeleteJobInvalid),"An invalid token was resent or went unreported");
     }
@@ -621,6 +645,13 @@ public static class RecoveryChecks
     private static async Task<List<AcceptedJob>> PendingJobs(PairState x)
     {
         var jobs=new List<AcceptedJob>();await foreach(var job in x.Store.JobsAsync(x.Pair.PairId,default)) jobs.Add(job);return jobs;
+    }
+    // Persist the token and index it in the live queue owner, as the boot and feed install paths do; without this a
+    // feed wake sees only the empty index the CatchUp loaded.
+    private static async Task InstallJobAsync(PairState x, AcceptedJob job)
+    {
+        await x.Store.SaveJobAsync(job,default);
+        await x.Queue.Unfinished.InstalledAsync(job,x.Queue.Held,_=>throw new InvalidOperationException("Empty held input woke a job during installation"));
     }
     private static Change NewsAt(string path)=>new(Side.Dropbox,ChangeKind.Deleted,path,null,null,null,false,false);
     // A45: only an Invalid reply raises the invalid-job notice; an inconclusive reply never does.
@@ -638,7 +669,7 @@ public static class RecoveryChecks
         using var x=new PairState();await x.InitializeAsync();
         var a=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","t1",[new("id:a","gone",null)]);
         var b=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","t2",[new("id:b","gone",null)]);
-        await x.Store.SaveJobAsync(a,default);await x.Store.SaveJobAsync(b,default);
+        await InstallJobAsync(x,a);await InstallJobAsync(x,b);
         x.Cloud.JobReplies["t1"]=new([new JobReply.Invalid()]);x.Cloud.JobReplies["t2"]=new([new JobReply.Invalid()]);
         await JobCheck(x,NewsAt("gone"));
         Check.Require(x.Store.OpenNotices.Count(n=>n.Cause==TextKey.FailDropboxDeleteJobInvalid)==1,"Two invalid tokens at one path did not coalesce to one notice");
@@ -649,7 +680,7 @@ public static class RecoveryChecks
         using var x=new PairState();await x.InitializeAsync();
         var a=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","ja",[new("id:a","a",null)]);
         var b=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","jb",[new("id:b","b",null)]);
-        await x.Store.SaveJobAsync(a,default);await x.Store.SaveJobAsync(b,default);
+        await InstallJobAsync(x,a);await InstallJobAsync(x,b);
         x.Cloud.JobReplies["ja"]=new([new JobReply.Invalid(),new JobReply.Running()]);x.Cloud.JobReplies["jb"]=new([new JobReply.Invalid()]);
         await JobCheck(x,NewsAt("a"));await JobCheck(x,NewsAt("b"));
         Check.Require(x.Store.OpenNotices.Count(n=>n.Cause==TextKey.FailDropboxDeleteJobInvalid)==2,"Each invalid token did not raise its own contribution");
@@ -671,7 +702,7 @@ public static class RecoveryChecks
     {
         using var x=new PairState();await x.InitializeAsync();
         var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","tok",[new("id:tok","gone",null)]);
-        await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies["tok"]=new([new JobReply.Invalid(),new JobReply.Invalid()]);
+        await InstallJobAsync(x,job);x.Cloud.JobReplies["tok"]=new([new JobReply.Invalid(),new JobReply.Invalid()]);
         await x.Store.SaveNoticeAsync(x.Pair.PairId,new Notice(1,NoticeKind.Failure,TextKey.FailChanged,"gone",new([new(Side.Dropbox,"gone","id:tok")],Side.Dropbox),DateTimeOffset.UnixEpoch,false),default);
         await JobCheck(x,NewsAt("gone"));
         Check.Require(x.Store.OpenNotices.All(n=>n.Cause!=TextKey.FailDropboxDeleteJobInvalid),"A higher failure did not mask the invalid contribution");
@@ -686,7 +717,7 @@ public static class RecoveryChecks
     {
         using var x=new PairState();await x.InitializeAsync();
         var job=new AcceptedJob(x.Pair.PairId,"files/delete_batch/check","tok",[new("tok","gone",null)]);
-        await x.Store.SaveJobAsync(job,default);x.Cloud.JobReplies["tok"]=new([new JobReply.Running(),new JobReply.Running()]);
+        await InstallJobAsync(x,job);x.Cloud.JobReplies["tok"]=new([new JobReply.Running(),new JobReply.Running()]);
         await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,new Change(Side.Dropbox,ChangeKind.Deleted,"gone",null,null,null,false,false),x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         var pending=new List<AcceptedJob>();await foreach(var p in x.Store.JobsAsync(x.Pair.PairId,default)) pending.Add(p);

@@ -86,6 +86,7 @@ public sealed class WorkQueue
     private readonly Func<CancellationToken,Task<JournalPosition?>>? actualPosition;
     public WorkQueue() { }
     public WorkQueue(Func<CancellationToken,Task<JournalPosition?>> actualPosition) => this.actualPosition=actualPosition;
+    internal Func<Func<(JournalPosition? Local,string? Dropbox),bool>?>? ProofNow { get; set; }
     internal Func<PathScope>? ScopeNow { get; init; }
     public PathScope CurrentScope(PathScope fallback) => ScopeNow?.Invoke() ?? fallback;
 
@@ -366,7 +367,7 @@ public sealed class WorkQueue
             try
             {
                 await Attempt(item,ct,item.Order).ConfigureAwait(false);
-                await item.Settled.Task.WaitAsync(ct).ConfigureAwait(false);
+                if(item.Change!=null || item.Publication) await item.Settled.Task.WaitAsync(ct).ConfigureAwait(false);
             }
             catch(Exception error) {lock(gate) Release(item,error); throw;}
         }

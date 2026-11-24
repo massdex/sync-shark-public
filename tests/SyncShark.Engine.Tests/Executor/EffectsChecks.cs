@@ -8,8 +8,41 @@ namespace Massdex.SyncShark.Engine.Tests.Executor;
 /// <summary>Check bytes, binding and the distinction between a pending, refused and completed action.</summary>
 public static class EffectsChecks
 {
+    public static Task MoveWithEditAsync() => RepairMove("renamed",2,"item",1,null);
+    public static Task MoveOppositeEditAsync() => RepairMove("renamed",1,"item",2,TextKey.InfoMovedEdited);
+    public static Task MoveTwiceAsync() => RepairMove("pc-place",1,"cloud-place",1,TextKey.InfoMovedTwice);
+    public static Task MoveOppositeDeleteAsync() => RepairMove("renamed",1,null,0,TextKey.InfoMovedDeleted);
+    public static Task DifferentRenamesAsync() => RepairMove("first",1,"second",1,TextKey.InfoMovedTwice);
+
+    private static Task RepairMove(string pcPath,byte pcValue,string? dbPath,byte dbValue,TextKey? cause) =>
+        global::Massdex.SyncShark.Engine.Tests.Run.RepairChecks.WithRepairStore(async (store,pair,ct)=>
+        {
+            var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox);
+            var oldPc=ItemChecks.File(Side.Local,"item",1,"pc"); var oldDb=ItemChecks.File(Side.Dropbox,"item",1,"cloud");
+            pc.Seed(ItemChecks.File(Side.Local,pcPath,pcValue,oldPc.Id),[pcValue]);
+            if(dbPath!=null) db.Seed(ItemChecks.File(Side.Dropbox,dbPath,dbValue,oldDb.Id),[dbValue]);
+            await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",ct)),"{}",ct);
+            await store.CommitAsync(pair.PairId,null,SyncedEntries.From(oldPc,oldDb),null,null,ct);
+            var paths=new PathScope(pair,[pair],DriveType.Fixed);
+            var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,db,store).WaitAsync(ct);
+            await global::Massdex.SyncShark.Engine.Run.Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,db,store,null,null,ct).WaitAsync(ct);
+            bool Has(FakeSide leg,string path,byte value) => leg.Items.TryGetValue(path,out var item) && item.Entry.Path==path && item.Bytes.SequenceEqual(new[]{value});
+            if(cause==null) Check.Require(Has(db,pcPath,pcValue) && db.Items[pcPath].Entry.Id==oldDb.Id && db.History.Any(h=>h.Entry.Revision==oldDb.Revision && h.Bytes.SequenceEqual(new byte[]{1})),"Moved edit did not replace the old Dropbox revision at its new path");
+            var expected=new Dictionary<string,byte>{{pcPath,pcValue}};
+            if(cause!=null && dbPath!=null) expected.Add(dbPath,dbValue);
+            foreach(var (path,value) in expected)
+            {
+                Check.Require(Has(pc,path,value) && Has(db,path,value),"A surviving move version is missing from its peer");
+                Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(path),ct)==SyncedEntries.From(pc.Items[path].Entry,db.Items[path].Entry),"Move did not bind the final peers");
+            }
+            Check.Require(pc.Items.Count==expected.Count && db.Items.Count==expected.Count && pc.Items[pcPath].Entry.Id==oldPc.Id && (cause==null || dbPath==null || db.Items[dbPath].Entry.Id==oldDb.Id),"Move changed an original identity or left an extra path");
+            var notices=new List<TextKey>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) if(!n.Dismissed) notices.Add(n.Cause);
+            Check.Require(cause==null ? notices.Count==0 : notices.SequenceEqual(new[]{cause.Value}),"Move did not settle the expected notice");
+        });
+
     public static async Task RunAsync()
     {
+        await MoveWithEditAsync(); await MoveOppositeEditAsync(); await MoveTwiceAsync(); await MoveOppositeDeleteAsync(); await DifferentRenamesAsync();
         var pc = new FakeSide(Side.Local); var db = new FakeSide(Side.Dropbox);
         using var store = new InMemoryStateStore(); var pair = ItemChecks.Pair();
         var a = ItemChecks.File(Side.Local,"item",7,"pc"); pc.Seed(a,[7]);
@@ -47,6 +80,12 @@ public static class EffectsChecks
         }
         Check.Require(db.Requests[nameof(ISide.StageAsync)]==stages+1 && db.Items[victim.Path].Entry==victim && db.Requests[nameof(ISide.DeleteAsync)]==0,"Source re-read refusal changed the selected folder or did not reach staging");
         pc.ReadFailures.Remove("p");
+        int recoveries=0;
+        db.AfterDelete=entry=>{if(entry==victim){recoveries++;db.Seed(victim with {Id="recovered-folder"},[]);}};
+        await effects.ApplyAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),replace,pc,FolderDeleteChecks.DeleteSide(db),store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[],FolderDeleteChecks.Admitted(pc,db));
+        Check.Require(recoveries==1,"The recovered-folder window was never reached");
+        Check.Require(db.Items["p"].Entry.Id=="recovered-folder" && pc.Items["p"].Bytes.SequenceEqual(new byte[]{5}) && store.OpenNotices.Any(n=>n.Cause==TextKey.InfoKeptBoth),"The competing folder did not take keep-both");
+        db.AfterDelete=null;
         // Identical relative path, opposite selection: the actual reader, not a fixed PC tag, wins.
         var remoteSource=source with {Id="db-source",Revision="r5"}; var pcFolder=victim with {Id="pc-folder"};
         var otherPc=new FakeSide(Side.Local); var otherDb=new FakeSide(Side.Dropbox);

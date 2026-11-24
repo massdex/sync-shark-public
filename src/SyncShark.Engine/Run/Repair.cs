@@ -19,6 +19,7 @@ public static class Repair
         var id=pair.PairId; var scan=Guid.NewGuid(); var started=DateTimeOffset.UtcNow;
         // A null After marks live meeting folders; their caller owns the root binding.
         var meetingRoot=physicalHop is {After:null} meeting ? meeting.Binding : null;
+        var removal=physicalHop is {After:{} gone} cleanup && gone==cleanup.Before; // Equal scopes: confirmed-removal cleanup; the caller retires only the selected root.
         if(physicalHop!=null && meetingRoot==null)
         {
             var localEnd=local.BoundaryAsync(ct); var remoteEnd=dropbox.BoundaryAsync(ct);
@@ -34,7 +35,9 @@ public static class Repair
         var mapped=logical!=selected;
         var unreadLocal=new PrefixSet(); var unreadRemote=new PrefixSet();
         var folders=new List<FolderMark>();
+        var linkWrites=new List<(NoticeItem Member,bool Present)>();
         var discoveryEnded=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool scanCleared=false;
         var admitted=new HashSet<Task>();
         Exception? admissionError=null;
         void Schedule(Task work)
@@ -100,37 +103,53 @@ public static class Repair
                 if ((await db).Cursor is {} cursor && await store.CursorAsync(id,ct)==null) await store.SaveCursorAsync(id,cursor,ct);
             }
             var acquireHistory=full && first && (await store.DeletedHistoryAsync(id,scan,ct)).Owed;
-            await Task.WhenAll(store.AddScanAsync(id,scan,Side.Local,Observe(ReadInventory(local.ReadAllAsync,selected.LocalPath,Log,null,ct),selected.LocalPath,logical.LocalPath,unreadLocal,ct),null,ct),
-                store.AddScanAsync(id,scan,Side.Dropbox,Observe(ReadInventory(dropbox.ReadAllAsync,selected.DropboxPath,Log,acquireHistory?value=>terminal=value:null,ct),selected.DropboxPath,logical.DropboxPath,unreadRemote,ct),
+            async IAsyncEnumerable<Listed> Inventory(ISide side,string path,Action<string>? cursor,[EnumeratorCancellation] CancellationToken token)
+            {
+                if(physicalHop is {After:{} end} hopRoot && end==hopRoot.Before && await side.ReadOneAsync(path,token) is null or {IsFolder:false,Skip:null}) yield break;
+                await foreach(var item in ReadInventory(side.ReadAllAsync,path,Log,cursor,token)) yield return item;
+            }
+            await Task.WhenAll(store.AddScanAsync(id,scan,Side.Local,Observe(Inventory(local,selected.LocalPath,null,ct),selected.LocalPath,logical.LocalPath,unreadLocal,ct),null,ct),
+                store.AddScanAsync(id,scan,Side.Dropbox,Observe(Inventory(dropbox,selected.DropboxPath,acquireHistory?value=>terminal=value:null,ct),selected.DropboxPath,logical.DropboxPath,unreadRemote,ct),
                     acquireHistory?()=>terminal??throw new InvalidDataException(nameof(ListOptions.CursorAcquired)):null,ct));
             if(acquireHistory) await store.PublishDeletedHistoryAsync(id,scan,ct);
             var moves=new List<RenameCandidate>();
             await foreach(var move in store.RenamesAsync(id,scan,physicalHop!=null?logical:scope,ct))
             {
-                if(mapped) throw new WorkQueue.Unsettled();
+                if(mapped) continue; // The caller re-paths the subtree before ordinary move decisions.
                 if (moves.Count!=0 && moves[0].Synced!=move.Synced) { await Submit(null,moves.ToArray()); moves.Clear(); }
                 moves.Add(move);
             }
             if(moves.Count!=0) await Submit(null,moves);
             await foreach(var (raw,notices) in store.CompareAsync(id,scan,physicalHop!=null?logical:scope,Evidence,ct))
             {
-                // Descendant listings omit the live meeting root; its caller owns Record.
-                if(meetingRoot!=null && raw.Local==null && raw.Dropbox==null && raw.Synced==meetingRoot) continue;
+                // Descendant listings omit the hop's own root; its caller owns that binding (Record, Relink or meeting).
+                if(physicalHop is {} owner && raw.Local==null && raw.Dropbox==null && raw.Synced==owner.Binding) continue;
                 await FinishFolders(raw.Key);
                 if(notices.Count==0 && !raw.Ambiguous && raw.Local is {Skip:null} pc && raw.Dropbox is {Skip:null} db && pc.IsFolder==db.IsFolder && raw.Synced is {} old && SyncedEntries.From(pc,db)==(old with {LocalPublished=null})) continue;
                 if(mapped)
                 {
-                    // The scan joins on the old names. Only the confirmed final endpoints may enter the file decision.
-                    if(notices.Count!=0 || raw.Ambiguous || !raw.Context.CompleteInventory || raw.Synced is not {IsFolder:false} link ||
-                        raw.Local is not {IsFolder:false,Skip:null} left || left.Id!=link.LocalId || raw.Dropbox is not {IsFolder:false,Skip:null} right || right.Id!=link.DropboxId ||
-                        PathNames.RelativeUnderDropboxRoot(logical.LocalPath,left.Path) is not {} l || PathNames.RelativeUnderDropboxRoot(logical.DropboxPath,right.Path) is not {} d ||
-                        await MissingPath(Side.Dropbox,selected.LocalPath)!=selected.DropboxPath) throw new WorkQueue.Unsettled();
+                    var left=raw.Local; var right=raw.Dropbox; var link=raw.Synced;
+                    if(notices.Count!=0 || raw.Ambiguous || !raw.Context.CompleteInventory || left==null && right==null || left?.Skip!=null || right?.Skip!=null ||
+                        (link==null ? left!=null && right!=null : link.IsFolder || left!=null && (left.IsFolder || left.Id!=link.LocalId) || right!=null && (right.IsFolder || right.Id!=link.DropboxId)) ||
+                        await MissingPath(Side.Dropbox,selected.LocalPath)!=selected.DropboxPath) continue;
+                    var l=PathNames.RelativeUnderDropboxRoot(logical.LocalPath,left?.Path??link?.LocalPath??string.Empty);
+                    var d=PathNames.RelativeUnderDropboxRoot(logical.DropboxPath,right?.Path??link?.DropboxPath??string.Empty);
+                    if(link==null){l??=d;d??=l;}
+                    if(l==null || d==null) continue;
                     var pcPath=PathNames.Child(selected.LocalPath,l); var dbPath=PathNames.Child(selected.DropboxPath,d); var current=queue.CurrentScope(paths);
-                    if(current.Excludes(pcPath,dbPath,false) || current.ExcludesBinding(link) || Touched(raw,false)) throw new WorkQueue.Unsettled();
-                    var actual=raw with {Local=left with {Path=pcPath},Dropbox=right with {Path=dbPath}};
-                    try { await ItemSync.ApplyAsync(pair,settings,Log,current,actual,[],local,dropbox,store,Populate,Hop,ct,queue.Held,(_,_)=>throw new WorkQueue.Unsettled()); }
-                    catch(ChangedUnderneathException race) when(!PathNames.Same(race.Path,pair.LocalRoot) && !PathNames.Same(race.Path,pair.DropboxRoot)) {throw new WorkQueue.Unsettled();}
-                    if(await store.FindAsync(id,Side.Local,PathNames.Key(pcPath),ct) is not {} settled || settled.LocalPath!=pcPath || settled.DropboxPath!=dbPath) throw new WorkQueue.Unsettled();
+                    if(current.Excludes(pcPath,dbPath,raw.IsFolder()) || link!=null && current.ExcludesBinding(link) || Touched(raw,false)) continue;
+                    var actual=raw with {Local=left is null?null:left with {Path=pcPath},Dropbox=right is null?null:right with {Path=dbPath},
+                        Context=raw.Context with {Destination=left is null?pcPath:dbPath}};
+                    try { await ItemSync.ApplyAsync(pair,settings,Log,current,actual,[],local,dropbox,store,Populate,Hop,ct,queue.Held,(_,_)=>throw new WorkQueue.Unsettled(),coversThrough:queue.ProofNow?.Invoke()); }
+                    catch(WorkQueue.Unsettled)
+                    {
+                        if(link!=null && (left==null || right==null))
+                        {
+                            var item=actual.Local??actual.Dropbox!; var side=left==null?Side.Dropbox:Side.Local;
+                            await new Notices().RaiseAsync(store,id,new(0,NoticeKind.Failure,TextKey.WaitItemRetry,item.Path,new([new(side,item.Path,item.Id)],side),DateTimeOffset.UtcNow,false),ct);
+                        }
+                    }
+                    catch(ChangedUnderneathException race) when(!PathNames.Same(race.Path,pair.LocalRoot) && !PathNames.Same(race.Path,pair.DropboxRoot)) {}
                     continue;
                 }
                 var row=raw;
@@ -152,7 +171,7 @@ public static class Repair
                         else (retiring??=[]).Add((footprint,notice));
                     }
                     if(notice.Cause==TextKey.InfoLinks && member!=null && !(row.EntryOn(member.Side) is {} current && current.Skip==nameof(TextKey.SkipLink) && current.Id==member.Id))
-                        await store.UpdateLinkMemberAsync(id,member,false,ct);
+                        linkWrites.Add((member,false));
                 }
                 if(row.Local==null && row.Dropbox==null && row.Synced==null) continue;
                 var lp=row.Local?.Path??row.Synced?.LocalPath??row.Context.Destination;
@@ -162,7 +181,7 @@ public static class Repair
                 if((row.Local==null && !coveredLocal) || (row.Dropbox==null && !coveredRemote)) continue;
                 foreach(var side in new[]{Side.Local,Side.Dropbox})
                     if(row.EntryOn(side) is {Skip:nameof(TextKey.SkipLink)} link && !store.ScanTouched(id,scan,side,link.Path,false) && !notices.Any(n=>n.Notice.Cause==TextKey.InfoLinks && n.Member==new NoticeItem(side,link.Path,link.Id)))
-                        await store.UpdateLinkMemberAsync(id,new(side,link.Path,link.Id),true,ct);
+                        linkWrites.Add((new(side,link.Path,link.Id),true));
                 if(row.Local?.Skip==nameof(TextKey.SkipLink) || row.Dropbox?.Skip==nameof(TextKey.SkipLink)) continue;
                 var historical=notices.Where(n=>n.Notice.Subject.FirstRunDeletion!=IssueSubject.FirstRunDeletionKind.None && n.Notice.Subject.Items.Any(m=>row.EntryOn(m.Side)?.Id==m.Id)).Select(n=>n.Notice.Subject.FirstRunDeletion).FirstOrDefault();
                 var eligible=first && row.Local is {} pcItem && row.Dropbox==null && row.Synced==null && coveredRemote && pcItem.Skip==null && !paths.Excludes(lp,dp,pcItem.IsFolder) && await store.DeletedNameAsync(id,scan,PathNames.DropboxKey(dp),pcItem.IsFolder,ct);
@@ -178,11 +197,13 @@ public static class Repair
             await FinishFolders(null);
             discoveryEnded.TrySetResult();
             await Drain();
+            // Apply scan bookkeeping after attempts so it cannot mask an outside change.
+            foreach(var (member,present) in linkWrites) await store.UpdateLinkMemberAsync(id,member,present,ct);
             if(unreadLocal.Keys.Concat(unreadRemote.Keys).FirstOrDefault() is {} unreadPath) throw new InventoryIncompleteException(Text.Get(TextKey.SkipUnreadable,(TextArg.Path,unreadPath)),null);
             if(physicalHop!=null) return;
             await Finish();
         }
-        finally { discoveryEnded.TrySetCanceled(); try {await Drain();} finally {await store.ClearScanAsync(id,scan,ct);} }
+        finally { discoveryEnded.TrySetCanceled(); try {await Drain();} finally {Volatile.Write(ref scanCleared,true);await store.ClearScanAsync(id,scan,ct);} }
 
         async Task ReconcileDirtyNotices()
         {
@@ -229,7 +250,7 @@ public static class Repair
             var notice=await CurrentRetryAsync(store,id,original,token); if(notice==null) return;
             var remote=notice.Subject.Items.FirstOrDefault(m=>m.Side==Side.Dropbox);
             await CheckJob(new Change(Side.Dropbox,ChangeKind.Changed,remote?.Path??notice.Path,null,remote?.Id,null,false,false),token);
-            await new Retries(queue.Unfinished).RetryAsync(pair,settings,Log,queue.CurrentScope(paths),notice,local,dropbox,store,queue.Held,Populate,Hop,token,coversThrough:null);
+            await new Retries(queue.Unfinished).RetryAsync(pair,settings,Log,queue.CurrentScope(paths),notice,local,dropbox,store,queue.Held,Populate,Hop,token,coversThrough:queue.ProofNow?.Invoke());
         }
         (bool Covered,bool Touched) Evidence(Side side,string path)
         {
@@ -259,11 +280,13 @@ public static class Repair
         Task<string> MissingPath(Side to,string path) => ItemSync.CounterpartAsync(pair,PathNames.Other(to),path,store,ct);
         async Task<Scope?> RetiringFootprint(Row raw,Notice notice,NoticeItem? member,CancellationToken token)
         {
+            var (left,right)=Row.Paths(raw); var items=notice.Subject.Items;
             if(Retirable(notice) && !notice.Ignored && !notice.Dismissed && !raw.CounterpartElsewhere && !raw.Ambiguous && raw.Context.CompleteInventory &&
-                (member==null ? notice.Subject.Items.Count==0 : notice.Subject.Items.Count==1 && notice.Subject.Items[0]==member))
+                (member==null ? items.Count==0 : items.Count==1 && items[0]==member ||
+                    // Every member of a multi-member notice sits on this bilaterally absent row (A51/A52).
+                    items.Count>1 && raw.Local==null && raw.Dropbox==null && items.Contains(member) && items.All(i=>PathNames.Same(i.Path,i.Side==Side.Local?left:right))))
             {
                 var footprint=await Footprint(member?.Side??notice.Subject.Incoming??Side.Local,member?.Path??notice.Path,token);
-                var (left,right)=Row.Paths(raw);
                 if(PathNames.Same(left,footprint.LocalPath) && PathNames.Same(right,footprint.DropboxPath) && CanClose(footprint) &&
                     !store.ScanTouched(id,scan,Side.Local,left,raw.IsFolder()) && !store.ScanTouched(id,scan,Side.Dropbox,right,raw.IsFolder()) &&
                     (raw.Local==null && raw.Dropbox==null || member!=null && notice.Kind!=NoticeKind.Tie && raw.EntryOn(member.Side) is {Skip:null} currentMember && currentMember.Id!=member.Id && raw.EntryOn(PathNames.Other(member.Side))==null))
@@ -313,8 +336,9 @@ public static class Repair
             }
             async Task Attempt(CancellationToken token)
             {
-                if(row!=null && Touched(row,row.IsFolder()) || candidates.Any(c=>store.ScanTouched(id,scan,c.Side,c.Moved.Path,c.Moved.IsFolder)))
+                if(row!=null && !(removal && row is {Local:null,Dropbox:null,Synced:not null}) && Touched(row,row.IsFolder()) || candidates.Any(c=>store.ScanTouched(id,scan,c.Side,c.Moved.Path,c.Moved.IsFolder)))
                 {
+                    if(Volatile.Read(ref scanCleared)) reobserve=true;
                     if(retained==null && !reobserve) return;
                     // Our own Failure touched this scan. Retry the retained input, not a notice that replaced it.
                     if(retained!=null && await CurrentRetryAsync(store,id,retained,token)==null) throw new WorkQueue.Unsettled();
@@ -347,23 +371,30 @@ public static class Repair
                     prepared=prepared with {Context=prepared.Context with {OutOfScope=current.Excludes(lp,dp,prepared.IsFolder())}};
                 }
                 Notice? own=null; EffectOutcome? outcome;
-                try { outcome=await ItemSync.ApplyAsync(pair,settings,Log,current,prepared,moves,local,dropbox,store,coveredFolder?PopulateCovered:Populate,Hop,token,queue.Held,
-                    (_,reproducible)=>{if(!reproducible) throw new WorkQueue.Unsettled();},failedNotice:n=>own=n,coversThrough:null); }
+                try { outcome=await ItemSync.ApplyAsync(pair,settings,Log,current,prepared,moves,local,dropbox,store,coveredFolder && !reobserve?PopulateCovered:Populate,Hop,token,queue.Held,
+                    (_,reproducible)=>{if(!reproducible) throw new WorkQueue.Unsettled();},failedNotice:n=>own=n,coversThrough:queue.ProofNow?.Invoke()); }
                 catch(WorkQueue.Unsettled) when(own!=null && physicalHop==null)
                 {
-                    // The queue re-attempts this exact callback after it catches Unsettled. Wait for discovery, not release.
                     retained=own;
-                    if(!endAttempted) {await discoveryEnded.Task.WaitAsync(token); endAttempted=true;}
+                    // After discovery the durable notice is the retry. A second failure releases the row so its followers and the run finish.
+                    if(endAttempted) return;
+                    await discoveryEnded.Task.WaitAsync(token); endAttempted=true;
                     throw;
                 }
                 if(own==null && !reobserve && retiring!=null && outcome==EffectOutcome.Applied) await CloseSelected(retiring,token);
-                if(own!=null && !endAttempted && physicalHop==null)
+                if(own!=null && !endAttempted && physicalHop==null && outcome!=EffectOutcome.Refused)
                 {
                     await discoveryEnded.Task.WaitAsync(token); endAttempted=true;
                     await RetryOwn(own,token);
                 }
             }
-            if(physicalHop!=null) return Apply(ct);
+            async Task Settle()
+            {
+                // A live identity or a changed binding belongs to its own input. Leave it and finish this removal.
+                try { await Apply(ct); }
+                catch(ChangedUnderneathException race) when(!PathNames.Same(race.Path,pair.LocalRoot) && !PathNames.Same(race.Path,pair.DropboxRoot)) {}
+            }
+            if(physicalHop!=null) return removal && row is {Local:null,Dropbox:null,Synced:not null} ? Settle() : Apply(ct);
             Schedule(queue.AdmitAsync(pair,row,candidates,Apply,ct));
             return Task.CompletedTask;
         }

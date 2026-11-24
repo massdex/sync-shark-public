@@ -78,6 +78,113 @@ public static class AutoSyncChecks
         Check.Require(attempts>=2 && pc.Items.TryGetValue("racing",out var fileA) && fileA.Bytes.SequenceEqual(new byte[]{2}) && pc.Items.TryGetValue("sibling",out var fileB) && fileB.Bytes.SequenceEqual(new byte[]{2}) && await store.CursorAsync(pair.PairId,ct)=="done","Child precondition failure escaped the pair instead of re-observing its input");
     });
 
+    public static Task TwoLiveRecyclesAsync() => WithinDeadline(ct=>LiveRecyclesAsync(ct));
+    public static Task ConcurrentRecoveryAsync() => WithinDeadline(async ct=>
+    {
+        using var store=new InMemoryStateStore();var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,db,store);
+        var item=ItemChecks.File(Side.Local,"a",1,"old");var saved=SyncedEntries.From(item,ItemChecks.File(Side.Dropbox,"a",1,"old-peer"));
+        await store.CommitAsync(pair.PairId,null,saved,null,null,ct);pc.Seed(item,[1]);
+        var victim=new RemovalSelection(new(item,"volume",item.ContentHash),saved);
+        Check.Require(await store.ArmAsync(pair.PairId,victim,null,ct),"Fixture could not arm the recycle");await pc.DeleteAsync(item,victim,ct);
+        var pages=System.Threading.Channels.Channel.CreateUnbounded<ChangePage>();
+        var acquired=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);var last=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);int reads=0,hashes=0;
+        var c=item with {Path="c",Id="c"};var second=new RemovalSelection(new(c,"volume",c.ContentHash),null);
+        var settled=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task Disarm(RemovalSelection v,CancellationToken token)
+        {
+            await store.DisarmAsync(pair.PairId,v,null,token);
+            if(v==victim) Check.Require(await store.ArmAsync(pair.PairId,second,null,token),"Second note did not arm");
+            else if(v==second) settled.TrySetResult();
+        }
+        var observed=Observation.Wrap<IStore>((m,args)=>m.Name==nameof(IStore.DisarmAsync)?Disarm((RemovalSelection)args[1]!, (CancellationToken)args[^1]!):Observation.Forward(store,m,args));
+        async Task<(IdentityLocation,bool)?> Locate(string id,CancellationToken token)
+        {
+            if(id==item.Id){Interlocked.Increment(ref reads);await release.Task.WaitAsync(token);}
+            var entry=id==item.Id?item:c;return (new("volume",entry.Path,entry with {ContentHash=""}),false);
+        }
+        Task<Recovery?> Hash(){Interlocked.Increment(ref hashes);return Task.FromResult<Recovery?>(new Recovery.File(item,new MemoryStream([1],false)));}
+        Task<ChangePage> Journal(JournalPosition? prior,CancellationToken token){if(prior?.NextUsn==5) last.TrySetResult();return pages.Reader.ReadAsync(token).AsTask();}
+        var local=Observation.Wrap<ISide>((m,args)=>m.Name switch {
+            nameof(ISide.ReadChangesAsync)=>Journal((JournalPosition?)args[1],(CancellationToken)args[^1]!),
+            nameof(ISide.ReadByIdAsync)=>Locate((string)args[0]!, (CancellationToken)args[^1]!),
+            nameof(ISide.RecoverAsync)=>Hash(),_=>Observation.Forward(pc,m,args)});
+        var cloud=System.Threading.Channels.Channel.CreateUnbounded<ChangePage>();cloud.Writer.TryWrite(new([],"start",null));
+        Task<ChangePage> Cloud(string? prior,CancellationToken token){if(prior=="start") acquired.TrySetResult();return cloud.Reader.ReadAsync(token).AsTask();}
+        var remote=Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.ReadChangesAsync)?Cloud((string?)args[0],(CancellationToken)args[^1]!):Observation.Forward(db,m,args));
+        using var stop=CancellationTokenSource.CreateLinkedTokenSource(ct);var live=AutoSync.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,remote,observed,stop.Token);
+        try
+        {
+            await acquired.Task.WaitAsync(ct);
+            for(ulong i=1;i<=5;i++){var at=new JournalPosition(1,i);pages.Writer.TryWrite(new([],null,at){ProjectedThrough=at});}
+            await last.Task.WaitAsync(ct);Check.Require(Volatile.Read(ref reads)==1,"Concurrent pages must share one victim lookup");
+            release.TrySetResult();await settled.Task.WaitAsync(ct);
+        }
+        finally {release.TrySetResult();stop.Cancel();try{await live;}catch(OperationCanceledException) when(stop.IsCancellationRequested){} }
+        Check.Require(reads==1 && hashes==0 && await store.ArmedAsync(pair.PairId,ct)==null,"Recovery hashed a victim or failed to settle both notes");
+    });
+    public static Task ReusedRecycleNameAsync() => WithinDeadline(ct=>LiveRecyclesAsync(ct,reuseName:true));
+
+    private static async Task LiveRecyclesAsync(CancellationToken ct,bool reuseName=false)
+    {
+        using var store=new InMemoryStateStore();var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,db,store);
+        var journal=System.Threading.Channels.Channel.CreateUnbounded<ChangePage>();var cloud=System.Threading.Channels.Channel.CreateUnbounded<ChangePage>();
+        var gates=new Dictionary<string,TaskCompletionSource>();var next=new Dictionary<string,TaskCompletionSource>();
+        foreach(var name in new[]{"a","b"})
+        {
+            var item=ItemChecks.File(Side.Local,name,1,name);pc.Seed(item,[1]);
+            await store.CommitAsync(pair.PairId,null,SyncedEntries.From(item,ItemChecks.File(Side.Dropbox,name,1,"db-"+name)),null,null,ct);
+            gates[name]=new(TaskCreationOptions.RunContinuationsAsynchronously);next[name]=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        int usn=1;string cursor="start";
+        async Task<RemovalResult> Recycle(Entry item,RemovalSelection selection,CancellationToken token)
+        {
+            await gates[item.Id].Task.WaitAsync(token);
+            if(!await store.ArmAsync(pair.PairId,selection,null,token)) return new(RemovalOutcome.Pending,null,null);
+            var result=await pc.DeleteAsync(item,selection,token);++usn;return result;
+        }
+        var projected=new[]{new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)};
+        Task<ChangePage> ReadJournal(JournalPosition? prior,CancellationToken token){if(prior is {NextUsn:2 or 3}) projected[(int)prior.NextUsn-2].TrySetResult();return journal.Reader.ReadAsync(token).AsTask();}
+        var local=Observation.Wrap<ISide>((m,args)=>m.Name switch {
+            nameof(ISide.DeleteAsync)=>Recycle((Entry)args[0]!, (RemovalSelection)args[1]!, (CancellationToken)args[^1]!),
+            nameof(ISide.ReadChangesAsync)=>ReadJournal((JournalPosition?)args[1],(CancellationToken)args[^1]!),
+            nameof(ISide.BoundaryAsync)=>Task.FromResult(((string?)null,(JournalPosition?)new JournalPosition(1,(ulong)usn))),
+            nameof(ISide.ReadByIdAsync) when pc.Items.TryGetValue((string)args[0]!,out var hit) && hit.Entry.Id==(string)args[0]! =>Task.FromResult<(IdentityLocation,bool)?>((new("volume",hit.Entry.Path,hit.Entry),true)),
+            _=>Observation.Forward(pc,m,args)});
+        Task<ChangePage> ReadCloud(string? prior,CancellationToken token){if(prior!=null && next.TryGetValue(prior,out var gate)) gate.TrySetResult();return cloud.Reader.ReadAsync(token).AsTask();}
+        var remote=Observation.Wrap<ISide>((m,args)=>m.Name switch {
+            nameof(ISide.ReadChangesAsync)=>ReadCloud((string?)args[0],(CancellationToken)args[^1]!),
+            nameof(ISide.BoundaryAsync)=>Task.FromResult(((string?)cursor,(JournalPosition?)null)),_=>Observation.Forward(db,m,args)});
+        void Project(){var at=new JournalPosition(1,(ulong)usn);journal.Writer.TryWrite(new([],null,at){ProjectedThrough=at});}
+        using var stop=CancellationTokenSource.CreateLinkedTokenSource(ct);Project();cloud.Writer.TryWrite(new([],cursor,null));
+        var live=AutoSync.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,remote,store,stop.Token);
+        try
+        {
+            foreach(var name in new[]{"a","b"})
+            {
+                cursor=name;cloud.Writer.TryWrite(new([new(Side.Dropbox,ChangeKind.Deleted,name,null,"db-"+name,null,false,false)],name,null));
+                await next[name].Task.WaitAsync(ct);gates[name].TrySetResult();
+                while(await store.CursorAsync(pair.PairId,ct)!=name){ct.ThrowIfCancellationRequested();await Task.Yield();}
+                Check.Require((await store.ArmedAsync(pair.PairId,ct))?.Victim.Proof.Expected.Id==name,"The unprojected recycle receipt did not leave its note pending");
+                SyncedEntry? replacement=null;
+                if(reuseName && name=="a")
+                {
+                    var fresh=ItemChecks.File(Side.Dropbox,name,2,"replacement");db.Seed(fresh,[2]);
+                    await AutoSync.ApplyPageAsync(pair,ItemChecks.Settings,_=>{},paths,queue,Side.Dropbox,new([new(Side.Dropbox,ChangeKind.Changed,name,null,fresh.Id,fresh,false,false)],"replacement",null),local,remote,store,ct);
+                    replacement=await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(name),ct);
+                    Check.Require(replacement?.DropboxId==fresh.Id && pc.Items[name].Bytes.SequenceEqual(new byte[]{2}),"Replacement was not downloaded and bound");
+                }
+                Project();await projected[usn-2].Task.WaitAsync(ct);
+                if(replacement!=null) Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(name),ct)==replacement,"Recovery forgot the replacement binding");
+                Check.Require(await store.ArmedAsync(pair.PairId,ct)==null,"Journal progress did not clear the pending recycle note");
+            }
+            Check.Require(pc.History.Select(h=>h.Entry.Id).SequenceEqual(new[]{"a","b"}) && await store.CursorAsync(pair.PairId,ct)=="b" && await store.ArmedAsync(pair.PairId,ct)==null,"Both live recycles must reach the bin and publish the second cursor");
+        }
+        finally {stop.Cancel();try{await live;}catch(OperationCanceledException) when(stop.IsCancellationRequested){} }
+    }
+
     // RAW 30 is available, but Local can prove projection only through 11. The selected peer must not be sent to trash.
     public static Task UnprovedFolderStaysAsync() => FolderProofAsync(null);
     public static Task ProofDuringCallbackAsync() => FolderProofAsync(true);
@@ -318,12 +425,14 @@ public static class AutoSyncChecks
             if(m.Name==nameof(IStore.SaveNoticeAsync) && args[1] is Notice {Kind:NoticeKind.PutBack,Cause:TextKey.FailLocalInUse}) refused.TrySetResult();
             return result;
         });
-        var local=Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.ReadByIdAsync) && (string?)args[0]==old.Id ? MissingAfterAdmission() :
+        async Task<ChangePage> Idle(CancellationToken token){await Task.Delay(Timeout.Infinite,token);throw new InvalidOperationException();}
+        var local=Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.ReadChangesAsync) && args.Length==3 ? Idle((CancellationToken)args[2]!) : m.Name==nameof(ISide.ReadByIdAsync) && (string?)args[0]==old.Id ? MissingAfterAdmission() :
             m.Name==nameof(ISide.BoundaryAsync) ? Task.FromResult(((string?)null,(JournalPosition?)end)) :
             m.Name==nameof(ISide.SettledJournalAsync) ? store.PositionAsync("1",ct) : Observation.Forward(pc,m,args));
         async Task<(IdentityLocation Location,bool InScope)?> MissingAfterAdmission(){await admitted.Task.WaitAsync(ct); return await pc.ReadByIdAsync(old.Id,ct);}
         var cloud=Observation.Wrap<ISide>((m,args)=>{
             if(m.Name==nameof(ISide.BoundaryAsync)) return Task.FromResult(((string?)"after",(JournalPosition?)null));
+            if(m.Name==nameof(ISide.ReadChangesAsync) && args.Length==3) return Idle((CancellationToken)args[2]!);
             if(m.Name==nameof(ISide.ReadChangesAsync) && (string?)args[0]=="held") admitted.TrySetResult();
             if(m.Name==nameof(ISide.RecoverAsync) && args[1] is Entry e && (e==first || e==last)) return Task.FromResult<Recovery?>(new Recovery.File(e,new MemoryStream(e==first ? new byte[]{1} : new byte[]{2},false)));
             return Observation.Forward(db,m,args);
@@ -350,6 +459,7 @@ public static class AutoSyncChecks
             Check.Require(db.Requests[nameof(ISide.ReadJobAsync)]==jobReads+1 && independent==0,"Manual Retry skipped its token or independently dispatched a consumed child");
             Check.Require(await store.CursorAsync(pair.PairId,ct)=="after" && !store.OpenNotices.Any(n=>n.Kind==NoticeKind.PutBack),"Recovery failed to settle its cursor or notice");
             Check.Require(pc.Items[path].Bytes.SequenceEqual(new byte[]{2}) && db.Items[path].Bytes.SequenceEqual(new byte[]{2}),"Recovery lost the revision after the path-only tombstone");
+            Check.Require(store.Records.Values.All(r=>r.LocalId!=old.Id && r.DropboxId!=peer.Id),"The removed parent's binding was not retired");
         }
         catch(OperationCanceledException e) when(ct.IsCancellationRequested) {throw new InvalidDataException("Manual retry did not finish before its deadline",e);}
         finally {admitted.TrySetResult();timeout.Cancel();try {await host.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));} catch(TimeoutException e){throw new InvalidDataException("Manual retry host did not stop",e);}}

@@ -98,7 +98,7 @@ public static class RecycleBinChecks
                 {
                     var culture=System.Globalization.CultureInfo.InvariantCulture; using var hash=new ContentHash(); hash.Append(new byte[]{1,3}); var digest=hash.Finish();
                     var entry=new Entry("source",false,2,File.GetLastWriteTimeUtc(path),unchecked((long)identity.FileId).ToString(culture),"",digest,null);
-                    bool armed=false; var bin=(RecycleBin)Activator.CreateInstance(typeof(RecycleBin),System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance,null,[(Func<Task>)(()=>{armed=true;return Task.CompletedTask;}),null],null)!;
+                    bool armed=false; var bin=(RecycleBin)Activator.CreateInstance(typeof(RecycleBin),System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance,null,[(Func<Task<bool>>)(()=>{armed=true;return Task.FromResult(true);}),null],null)!;
                     RemovalResult? result=null;
                     try { result=await bin.RemoveAsync(root,DriveType.Removable,entry,new(new(entry,identity.VolumeSerialNumber.ToString(culture),digest),null),default); }
                     catch(ChangedUnderneathException) { /* A thrown change is not the required recoverable refusal. */ }
@@ -188,7 +188,7 @@ public static class RecycleBinChecks
             var item=new Entry("selected",false,data.Length,stamp,BitConverter.ToInt64(id,8).ToString(culture),"",digest.Finish(),null);
             var victim=new RemovalSelection(new(item,BitConverter.ToUInt64(id).ToString(culture),item.ContentHash),null);
             bool denied=false;
-            Task Arm()
+            Task<bool> Arm()
             {
                 try { using var writer=File.OpenHandle(full,FileMode.Open,FileAccess.Write,FileShare.ReadWrite|FileShare.Delete); }
                 catch(IOException e) when((e.HResult&0xffff)==32) { denied=true; }
@@ -196,7 +196,7 @@ public static class RecycleBinChecks
             }
             // Construct the production removal owner with its existing arm delegate; no product test hook.
             var bin=(RecycleBin)Activator.CreateInstance(typeof(RecycleBin),System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance,
-                null,[(Func<Task>)Arm,null],null)!;
+                null,[(Func<Task<bool>>)Arm,null],null)!;
             try { await bin.RemoveAsync(root,DriveType.Fixed,item,victim,default); throw new InvalidDataException("arm was bypassed"); }
             catch(ArmStop) { }
             Check.Require(denied && File.ReadAllBytes(full).SequenceEqual(data),"selected file admitted a writer after verifying bytes at the pre-shell arm");
@@ -225,7 +225,7 @@ public static class RecycleBinChecks
                 var selection=new RemovalSelection(new(expected,BitConverter.ToUInt64(id).ToString(culture),offline?null:expected.ContentHash),null);
                 bool armed=false;
                 bool denied=false;
-                Task Arm()
+                Task<bool> Arm()
                 {
                     if(attemptRename)
                     {
@@ -233,10 +233,10 @@ public static class RecycleBinChecks
                         catch(IOException e) when((e.HResult&0xffff)==32) { denied=true; }
                     }
                     else File.SetLastWriteTimeUtc(alias,stamp.AddMinutes(1));
-                    armed=true; return Task.CompletedTask;
+                    armed=true; return Task.FromResult(true);
                 }
                 var bin=(RecycleBin)Activator.CreateInstance(typeof(RecycleBin),System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance,
-                    null,[(Func<Task>)Arm,null],null)!;
+                    null,[(Func<Task<bool>>)Arm,null],null)!;
                 var binRoot=Path.Combine(root,ResourceNames.RootBinFolder);
                 if(attemptRename) { Directory.CreateDirectory(binRoot); File.WriteAllBytes(Path.Combine(binRoot,name),[4]); }
                 var result=await bin.RemoveAsync(volume,DriveType.Removable,expected,selection,default);
@@ -249,7 +249,7 @@ public static class RecycleBinChecks
                     File.WriteAllText(Path.Combine(folder,"quiet"),"kept"); var identity=Identity(folder);
                     var entry=new Entry(group,true,0,default,unchecked((long)identity.FileId).ToString(culture),"","",null);
                     Directory.CreateDirectory(Path.Combine(binRoot,group)); Directory.CreateDirectory(Path.Combine(binRoot,group+" (2)"));
-                    var mover=(RecycleBin)Activator.CreateInstance(typeof(RecycleBin),System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance,null,[(Func<Task>)(()=>Task.CompletedTask),null],null)!;
+                    var mover=(RecycleBin)Activator.CreateInstance(typeof(RecycleBin),System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance,null,[(Func<Task<bool>>)(()=>Task.FromResult(true)),null],null)!;
                     var moved=await mover.RemoveAsync(volume,DriveType.Removable,entry,new(new(entry,identity.VolumeSerialNumber.ToString(culture),null),null),default);
                     var target=Path.Combine(binRoot,group+" (3)");
                     Check.Require(moved.Outcome==RemovalOutcome.Removed && Directory.Exists(target) && Identity(target)==identity && File.ReadAllText(Path.Combine(target,"quiet"))=="kept","managed folder collision did not preserve the dotted folder name");

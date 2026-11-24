@@ -20,7 +20,7 @@ public static class UnfinishedChecks
         foreach(var mode in new[]{"lease","legacy-mapped","backdated","stale-echo","moved-away","legacy-failure","stage-race","folder-grant"}) await Run(mode,()=>FolderDeleteChecks.MappedRetryAsync(mode),true);
         await Run("older-snapshot",()=>FolderDeleteChecks.RecoveryAsync(true),true);
         await Run(nameof(FolderDeleteChecks.RecoveryAsync),FolderDeleteChecks.RecoveryAsync,true);
-        foreach(var test in new Func<Task>[]{MovedPeerAsync,ReviewedJobsAsync,InterruptedRestoreAsync,PublishedCommitAsync,UnboundMoveAsync,DeletedStageAsync,TerminalAsync,MixedAsync,PendingParentAsync,UnknownAsync,ThirdPathAsync,AbsentMoveAsync,MissingOriginAsync,PolicyAsync,PlainRecycleAsync,UnboundStageAsync,ComparedFolderAsync}) await Run(test.Method.Name,test);
+        foreach(var test in new Func<Task>[]{ArmedHopDeleteRetiresProjectedBindingAsync,TwoChildDeletesDuringMoveAsync,MovedPeerAsync,ReviewedJobsAsync,InterruptedRestoreAsync,PublishedCommitAsync,UnboundMoveAsync,DeletedStageAsync,TerminalAsync,MixedAsync,PendingParentAsync,UnknownAsync,ThirdPathAsync,AbsentMoveAsync,MissingOriginAsync,PolicyAsync,PlainRecycleAsync,UnboundStageAsync,ComparedFolderAsync}) await Run(test.Method.Name,test);
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
         var owner=new Unfinished();var change=new Change(Side.Dropbox,ChangeKind.Deleted,"else",null,null,null,false,false){AffectedPath="new/child"};
         Task Visit(Change? c)=>owner.CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),c,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
@@ -60,6 +60,137 @@ public static class UnfinishedChecks
         Check.Require(original && lookups==1,"Deferred ensure did not preserve the selected lookup wait");Check.Require(goodLookups==1,"Deferred ensure blocked a good neighbour before its wait expired");clock.Advance(delay);await Visit();
         Check.Require(goodLookups==1 && lookups==2 && db.Requests[nameof(ISide.ReadJobAsync)]==1 && db.Mutations.Count==0 && db.Requests[nameof(ISide.EnsureFolderAsync)]==0 && db.Requests[nameof(ISide.CreateFolderExclusiveAsync)]==0,"A settled ensure neighbour, mutation or job poll was replayed");await foreach(var _ in store.JobsAsync(pair.PairId,default))throw new InvalidDataException("Resolved ensure still owns its job");
     }
+    private static async Task ArmedHopDeleteRetiresProjectedBindingAsync()
+    {
+        foreach(bool present in new[]{false,true})
+        {
+            var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
+            var f=ItemChecks.File(Side.Local,"New/c",1,"c");var r=ItemChecks.File(Side.Dropbox,f.Path,1,"dc");
+            var old=SyncedEntries.From(f with {Path="Old/c"},r with {Path="Old/c"});var projected=SyncedEntries.From(f,r);
+            await store.CommitAsync(pair.PairId,null,projected,null,null,default);pc.Seed(f,[1]);await pc.DeleteAsync(f,null,default);
+            if(present)db.Seed(r,[1]);
+            await store.ArmAsync(pair.PairId,new(new(f,"volume",f.ContentHash),old),null,default);
+            await new Unfinished().CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
+            if(present) Check.Require(store.Records.Values.Single()==projected && db.Items[r.Path].Entry==r,"Recovery retired a live projected member");
+            else Check.Require(store.Records.Count==0 && await store.ArmedAsync(pair.PairId,default)==null && pc.Items.Count==0 && db.Items.Count==0,"A hop-projected binding of an armed, recycled file was not retired");
+        }
+    }
+
+    private static Task TwoChildDeletesDuringMoveAsync()=>HopDeletesAsync(false);
+    public static Task HopChildrenSettleAtReceiptAsync()=>HopDeletesAsync(true);
+    public static Task HopRetryKeepsLivePeerAsync()=>HopDeletesAsync(true,true);
+    private static async Task HopDeletesAsync(bool settle,bool livePeer=false)
+    {
+        var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);using var state=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
+        using var sql=await Storage.DeletedNamesChecks.OpenAsync();var table=new global::Massdex.SyncShark.Engine.Storage.PairTable();int arms=0;
+        var store=FolderDeleteChecks.Observe.Wrap<IStore>(state,(op,args)=>op switch {
+            nameof(IStore.ArmAsync)=>table.ArmAsync(sql,"p",(RemovalSelection)args[1]!, (StageProof?)args[2],(CancellationToken)args[3]!),
+            nameof(IStore.ArmedAsync)=>table.ArmedAsync(sql,"p",(CancellationToken)args[1]!),
+            nameof(IStore.DisarmAsync)=>table.DisarmAsync(sql,"p",(RemovalSelection)args[1]!, (StageProof?)args[2],(CancellationToken)args[3]!),_=>null});
+        async Task<RemovalResult> Recycle(Entry child,RemovalSelection victim)
+        {
+            arms++;if(!await store.ArmAsync(pair.PairId,victim,null,default)) return new(RemovalOutcome.Pending,null,null);
+            var result=await pc.DeleteAsync(child,victim,default);
+            if(settle && result.Outcome==RemovalOutcome.Removed) await store.DisarmAsync(pair.PairId,victim,null,default);
+            return result;
+        }
+        var local=FolderDeleteChecks.Observe.On(pc,(op,args)=>op==nameof(ISide.DeleteAsync)?Recycle((Entry)args[0]!,(RemovalSelection)args[1]!):
+            op==nameof(ISide.ReadByIdAsync) && pc.Items.Values.FirstOrDefault(v=>v.Entry.Id==(string?)args[0]).Entry is {} entry ? Task.FromResult<(IdentityLocation,bool)?>((new("volume",entry.Path,entry),true)):null);
+        var queue=await ItemChecks.StartQueueAsync(pair,paths,local,db,store);
+        bool covered=false;Func<Func<(JournalPosition? Local,string? Dropbox),bool>> proof=()=>_=>covered;
+        queue.GetType().GetProperty("ProofNow",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.SetValue(queue,proof);
+        var root=ItemChecks.File(Side.Local,"Old",0,"folder",true);var peer=root with {Id="peer"};var link=SyncedEntries.From(root,peer);
+        await store.CommitAsync(pair.PairId,null,link,null,null,default);pc.Seed(root,[]);db.Seed(peer,[]);
+        foreach(var name in new[]{"a","b"})
+        {
+            var child=ItemChecks.File(Side.Local,"Old/"+name,1,name);pc.Seed(child,[1]);await store.CommitAsync(pair.PairId,null,SyncedEntries.From(child,ItemChecks.File(Side.Dropbox,child.Path,1,"peer-"+name)),null,null,default);
+        }
+        await pc.MoveAsync(root,"New",default);await db.MoveAsync(peer,"New",default);
+        var hop=ItemChecks.Hop(pair,paths,queue,local,db,store);await hop(link,new("Old","Old"),new("New","New"),default);
+        if(settle) Check.Require(pc.History.Select(v=>v.Entry.Id).Order().SequenceEqual(new[]{"a","b"}) && await store.ArmedAsync(pair.PairId,default)==null && state.OpenNotices.Where(n=>!n.Dismissed && n.Cause==TextKey.WaitItemRetry).Select(n=>n.Path).Order().SequenceEqual(new[]{"New/a","New/b"}),"Both recycles must settle before hop Retry");
+        else Check.Require(pc.History.Count==1 && pc.History[0].Entry.Id=="a" && pc.Items["New/b"].Bytes.SequenceEqual(new byte[]{1}) && (await store.ArmedAsync(pair.PairId,default))?.Victim.Proof.Expected.Id=="a" && state.Records.Values.Any(r=>r.LocalId=="b"),"First hop lost custody of the waiting child or the original note");
+        await store.ProjectSubtreeAsync(pair.PairId,new("Old","Old"),new("New","New"),default);
+        var parent=SyncedEntries.From(pc.Items["New"].Entry,db.Items["New"].Entry);await store.CommitAsync(pair.PairId,link,parent,null,null,default);
+        covered=true;pc.IdleBoundary=new([],null,new JournalPosition(1,1));db.IdleBoundary=new([],"end",null);
+        await queue.Unfinished.CheckAsync(pair,ItemChecks.Settings,_=>{},paths,null,local,db,store,_=>[],ItemChecks.Population(pair,paths,local,db,store),hop,default);
+        if(settle)
+        {
+            if(livePeer) db.Seed(ItemChecks.File(Side.Dropbox,"New/b",1,"peer-b"),[1]);
+            var dbDeletes=db.Requests[nameof(ISide.DeleteAsync)];
+            foreach(var n in state.OpenNotices.Where(n=>!n.Dismissed && (!livePeer || n.Path=="New/b")).ToArray()) await new Retries(queue.Unfinished).RetryAsync(pair,ItemChecks.Settings,_=>{},paths,n,local,db,store,queue.Held,ItemChecks.Population(pair,paths,local,db,store),hop,default,_=>covered);
+            if(livePeer)
+            {
+                Check.Require(db.Items.TryGetValue("New/b",out var peerB) && peerB.Entry.Id=="peer-b" && peerB.Bytes.SequenceEqual(new byte[]{1})
+                    && db.Requests[nameof(ISide.DeleteAsync)]==dbDeletes
+                    && state.OpenNotices.Where(n=>!n.Dismissed && n.Path=="New/b").ToArray() is [{Cause:TextKey.FailChanged}]
+                    && await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("New/b"),default) is {LocalId:"b",DropboxId:"peer-b"},"Hop Retry deleted or decided a live bound peer instead of keeping it with one stale notice");return;
+            }
+            Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("New/a"),default)==null && await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("New/b"),default)==null && !state.OpenNotices.Any(n=>!n.Dismissed) && await store.ArmedAsync(pair.PairId,default)==null
+                && pc.History.Select(v=>v.Entry.Id).Order().SequenceEqual(new[]{"a","b"}) && pc.History.All(v=>v.Bytes.SequenceEqual(new byte[]{1}))
+                && !db.Items.ContainsKey("New/a") && !db.Items.ContainsKey("New/b") && db.Requests[nameof(ISide.DeleteAsync)]==dbDeletes,"Retry of binned hop children did not forget the dead bindings by identity, or touched a version");return;
+        }
+        var retry=state.OpenNotices.SingleOrDefault(n=>n.Kind==NoticeKind.Failure && !n.Dismissed && n.Path=="New/b");
+        Check.Require(retry!=null,"The second child has no Failure notice at New/b");
+        await new Retries(queue.Unfinished).RetryAsync(pair,ItemChecks.Settings,_=>{},paths,retry!,local,db,store,queue.Held,ItemChecks.Population(pair,paths,local,db,store),hop,default,_=>covered);
+        Check.Require(!state.OpenNotices.Any(n=>n.Id==retry!.Id && !n.Dismissed),"Retry left the second child's notice open");
+        Check.Require(arms>=3 && pc.History.Select(v=>v.Entry.Id).SequenceEqual(new[]{"a","b"}) && pc.History.All(v=>v.Bytes.SequenceEqual(new byte[]{1})) && state.Records.Values.Single()==parent && await store.ArmedAsync(pair.PairId,default)==null,"Waiting child did not settle with both original versions recoverable and only the moved parent bound");
+    }
+
+    public static async Task NoteAsync(int row)
+    {
+        var pair=FolderDeleteChecks.BoundPair();var paths=new PathScope(pair,[pair],DriveType.Fixed);using var store=new TestDoubles.InMemoryStateStore();
+        var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
+        var path=row==12?"New/a":row==13?"f":"a";var original=row==12?"Old/a":path;
+        var a=ItemChecks.File(Side.Local,path,1,"L1",row==13);var d=ItemChecks.File(Side.Dropbox,original,1,"D1",row==13);
+        var saved=SyncedEntries.From(a with {Path=original},d);var binding=row==12?SyncedEntries.From(a,d with {Path=path}):saved;
+        var fresh=ItemChecks.File(Side.Dropbox,path,2,"D2");var put=ItemChecks.File(Side.Local,path,1,row switch {12=>"L5",15=>"L9",_=>"L3"});
+        if(row==9) binding=SyncedEntries.From(put with {Id="L2"},fresh);
+        await store.CommitAsync(pair.PairId,null,binding,null,null,default);
+        if(row==6)pc.Seed(a,[1]);else if(row!=7)pc.History.Add((a,[1]));
+        if(row is 10 or 12 or 13 or 15) pc.Seed(put,[1]);
+        if(row is 9 or 11) db.Seed(fresh,[2]);
+        if(row==14) db.Seed(d with {Path="b"},[1]);
+        if(row==13){var x=ItemChecks.File(Side.Local,"f/x",1,"child");await store.CommitAsync(pair.PairId,null,SyncedEntries.From(x,x with {Id="peer-child"}),null,null,default);}
+        var victim=new RemovalSelection(new(a,"volume",a.IsFolder?null:a.ContentHash),saved);
+        await using var stage=row>=15?await pc.StageAsync(path,new MemoryStream([2]),fresh,a,default):null;
+        await store.ArmAsync(pair.PairId,victim,stage?.Proof,default);
+        if(row>=16) await pc.PublishAsync(stage!,null,null,default);
+        Notice? reviewed=null;
+        if(row==18){await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,TextKey.WaitItemRetry,path,new([new(Side.Local,path,a.Id)],Side.Local),DateTimeOffset.UtcNow,false),default);reviewed=store.OpenNotices.Single();}
+        var queue=new global::Massdex.SyncShark.Engine.Run.WorkQueue();var owner=new Unfinished{CoversThrough=_=>true};int compares=0;
+        async Task Compare(SyncedEntry b,Scope from,Scope? to,CancellationToken ct)
+        {
+            Check.Require(b==saved && from==new Scope(path,path) && from==to,"Unexpected comparison");compares++;
+            await ItemChecks.Hop(pair,paths,queue,pc,db,store)(b,from,to,ct);
+        }
+        var populate=ItemChecks.Population(pair,paths,pc,db,store);
+        if(row is 8 or 10 or 11 or 16) queue=await ItemChecks.StartQueueAsync(pair,paths,pc,db,store);
+        else if(reviewed!=null) await owner.CheckAsync(pair,ItemChecks.Settings,_=>{},paths,null,pc,db,store,_=>[],populate,Compare,default,reviewed);
+        else await owner.CheckLiveStageAsync(pair,ItemChecks.Settings,_=>{},paths,pc,db,store,_=>[],populate,Compare,default);
+        var armed=await store.ArmedAsync(pair.PairId,default);var found=await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(path),default);
+        var notices=store.OpenNotices.Where(n=>!n.Dismissed && n.Kind==NoticeKind.Failure && n.Cause==TextKey.RecycleUnchecked).ToArray();
+        if(row==17) Check.Require(armed==(victim,stage!.Proof) && notices.Length==0,"Live page ended unfinishable note");
+        else Check.Require(armed==null,"Note remained armed");
+        bool ok=row switch {
+            6=>notices.Length==0 && found==saved && pc.Items.ContainsKey(path),
+            7=>notices.Length==1 && notices[0].Subject.Items.SequenceEqual(new[]{new NoticeItem(Side.Local,path,a.Id)}),
+            8=>found==null && notices.Length==0,9=>found==binding,10=>found==null,
+            13=>!store.Records.Values.Any(b=>b.LocalPath.StartsWith("f/",StringComparison.OrdinalIgnoreCase)) && notices.Length==1 && notices[0].Path==path && compares==1,
+            14=>found==saved && db.Items.ContainsKey("b") && db.Requests[nameof(ISide.DeleteAsync)]==0,
+            15=>pc.Items[path].Entry.Id==put.Id && pc.Requests[nameof(ISide.PublishAsync)]==0,
+            16=>notices.Length==1 && notices[0].Path==path,18=>store.OpenNotices.Where(n=>!n.Dismissed && n.Path==path).SequenceEqual(new[]{reviewed}),_=>true};
+        Check.Require(ok,"Unexpected recovery result for row "+row);
+        if(row==12){await foreach(var _ in store.ByIdAsync(pair.PairId,Side.Local,a.Id,default)) throw new InvalidDataException("Dead projected binding retained");Check.Require(pc.Items[path].Entry.Id==put.Id,"Replacement lost");}
+        if(row is 10 or 11)
+        {
+            var e=row==10?put:fresh;await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new(row==10?Side.Local:Side.Dropbox,ChangeKind.Changed,path,null,e.Id,e,true,false),pc,db,store,populate,ItemChecks.Hop(pair,paths,queue,pc,db,store),default,coversThrough:_=>true);
+            found=await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(path),default);
+            Check.Require(row==10?db.Items[path].Bytes.SequenceEqual(new byte[]{1}) && found?.LocalId==put.Id && pc.History.All(h=>h.Entry.Id!=put.Id):found?.DropboxId==fresh.Id && pc.Items[path].Bytes.SequenceEqual(new byte[]{2}),"Replacement was not synchronized by replay");
+        }
+    }
+    private static bool RecycleUnchecked(TestDoubles.InMemoryStateStore store,string path,string id)=>
+        store.OpenNotices.Where(n=>!n.Dismissed && n.Cause==TextKey.RecycleUnchecked).ToArray() is [{Kind:NoticeKind.Failure} notice]
+        && notice.Path==path && notice.Subject.Items.SequenceEqual(new[]{new NoticeItem(Side.Local,path,id)});
     private static async Task MovedPeerAsync()
     {
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
@@ -67,11 +198,10 @@ public static class UnfinishedChecks
         await store.CommitAsync(pair.PairId,null,saved,null,null,default);pc.History.Add((local,[1]));db.Seed(peer,[2]);var victim=new RemovalSelection(new(local,"volume",local.ContentHash),saved);
         await store.ArmAsync(pair.PairId,victim,null,default);
         Task Restart()=>new Unfinished().CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
-        await Restart();Check.Require(await store.ArmedAsync(pair.PairId,default) is {} arm && arm.Victim==victim,"Restart disarmed a live moved peer");
-        await store.DisarmAsync(pair.PairId,victim,null,default);
+        bool VersionsIntact()=>store.Records.Values.Single()==saved && pc.Items.Count==0 && pc.History.Any(h=>h.Entry.Id==local.Id) && db.Items["elsewhere"].Bytes.SequenceEqual(new byte[]{2});
+        await Restart();Check.Require(await store.ArmedAsync(pair.PairId,default)==null && VersionsIntact() && !store.OpenNotices.Any(n=>!n.Dismissed),"Restart did not end a binned victim whose peer is live, or touched a version");
         await using var stage=await pc.StageAsync(local.Path,new MemoryStream([1]),local,local,default);await store.ArmAsync(pair.PairId,victim,stage.Proof,default);
-        await Restart();Check.Require(await store.ArmedAsync(pair.PairId,default) is {} held && held.Stage==stage.Proof && store.Records.Values.Single()==saved && pc.Items.Count==0,"Edited arrival settled as a split binding");
-        await using var retained=await pc.ReopenStageAsync(victim,stage.Proof!,default);
+        await Restart();Check.Require(await store.ArmedAsync(pair.PairId,default)==null && RecycleUnchecked(store,"arrival",local.Id) && VersionsIntact(),"Restart did not end the unfinishable stage note with one notice, or published, split or touched a version");
     }
     private static async Task ReviewedJobsAsync()
     {
@@ -95,7 +225,8 @@ public static class UnfinishedChecks
                 if(op==nameof(ISide.ReadByIdAsync) && Equals(args[0],actual.Id) && pc.Items.ContainsKey(actual.Path))return Task.FromResult<(IdentityLocation,bool)?>((new("volume",actual.Path,actual),true));return null;});
             try{await FolderDelete.PutBackSubstituteAsync(pair,new("p","p"),receipt,side,db,store,(_,_,_,_)=>Task.CompletedTask,default);}catch(OperationCanceledException){}
             await new Unfinished().CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,side,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
-            Check.Require(await store.ArmedAsync(pair.PairId,default) is {} armed && armed.Victim==note && armed.Stage==stage.Proof && stage.Proof!=null && store.OpenNotices.Any(n=>n.Kind==NoticeKind.PutBack) && pc.Items["p"].Entry.Id==actual.Id && pc.Items["p"].Bytes.SequenceEqual(new byte[]{2}) && store.Records.Values.Single()==saved && db.Items.Count==0,"Interrupted restore released an unproved substitute or its independent stage");
+            Check.Require(await store.ArmedAsync(pair.PairId,default) ==null && stage.Proof!=null && store.OpenNotices.Any(n=>!n.Dismissed && n.Kind==NoticeKind.PutBack) && pc.Items["p"].Entry.Id==actual.Id && pc.Items["p"].Bytes.SequenceEqual(new byte[]{2}) && store.Records.Values.Single()==saved && db.Items.Count==0
+                && (same ? !store.OpenNotices.Any(n=>!n.Dismissed && n.Cause==TextKey.RecycleUnchecked) : RecycleUnchecked(store,"p",original.Id)),"Interrupted restore: the note was not ended (U/G), or the substitute, the put-back notice or the binding changed");
         }
     }
     private static async Task PublishedCommitAsync()
@@ -207,7 +338,8 @@ public static class UnfinishedChecks
         var folder=ItemChecks.File(Side.Local,"p",0,"old",true);var saved=SyncedEntries.From(folder,folder with {Id="peer"});var selection=new RemovalSelection(new(folder,"volume",null),saved);
         local.History.Add((folder,[]));await store.CommitAsync(pair.PairId,null,saved,null,null,default);await store.ArmAsync(pair.PairId,selection,null,default);await store.CommitAsync(pair.PairId,saved,null,null,null,default);
         var full=FolderDeleteChecks.Admitted(local,db);bool acquired=false;var owner=new Unfinished{CoversThrough=f=>acquired && full(f)};Task Visit()=>owner.CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,local,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>throw new InvalidDataException("Recompared an already settled folder"),default);
-        await Visit();Check.Require(await store.ArmedAsync(pair.PairId,default)!=null,"Restart discharged unread child input");acquired=true;await Visit();Check.Require(await store.ArmedAsync(pair.PairId,default)==null && local.History.Count==1 && store.Records.Count==0,"Restart stranded the note after the selected folder comparison committed");
+        await Visit();Check.Require(await store.ArmedAsync(pair.PairId,default)==null && RecycleUnchecked(store,"p",folder.Id) && local.History.Count==1 && local.History[0].Entry.Id==folder.Id && store.Records.Count==0,"Start-up did not end the waiting folder note with one notice");
+        acquired=true;await Visit();Check.Require(await store.ArmedAsync(pair.PairId,default)==null && RecycleUnchecked(store,"p",folder.Id) && local.History.Count==1 && store.Records.Count==0,"A second start-up raised a second notice or changed the bin");
     }
     private static Task PlainRecycleAsync()=>ReplayNote(false);
     private static Task UnboundStageAsync()=>ReplayNote(true);
