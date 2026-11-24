@@ -7,7 +7,7 @@ namespace Massdex.SyncShark.Engine.Dropbox;
 
 /// <summary>An attempt-local decoder; only validated response completion transfers its typed result.</summary>
 /// <remarks>This one token walk keeps the winning selected values of every closed shape, so shape rules run once on
-/// winners at Complete. It stays above the 300-line prompt because its shapes share that single walk.</remarks>
+/// winners at Complete.</remarks>
 public sealed partial class DropboxReply<T>
 {
     private readonly DropboxReplyShapes.Selection? _root;
