@@ -70,7 +70,7 @@ public sealed class Unfinished
             await new StageRecovery(this,pair,settings,events,paths,local,dropbox,store,heldInput,populate,compareOldBinding,ct).RunAsync(footprint);
             if(await store.ArmedAsync(pair.PairId,ct) is {} left && (footprint==null || footprint.Overlaps(PathNames.DropboxKey(left.Victim.Saved?.DropboxPath ?? await FolderDelete.MapAsync(pair,store,Side.Local,left.Victim.Proof.Expected.Path,ct)))))
             {
-                if(reviewed==null || !PathNames.Same(reviewed.Path,left.Victim.Proof.Expected.Path)) await Unchecked(store,pair,left.Victim.Proof.Expected,ct);
+                if(reviewed==null) await Unchecked(store,pair,left.Victim.Proof.Expected,ct);
                 await StageRecovery.EndNoteAsync(store,local,pair,left.Victim,left.Stage,ct);
             }
         }
