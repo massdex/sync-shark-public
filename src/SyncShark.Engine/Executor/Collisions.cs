@@ -172,23 +172,19 @@ public static class Collisions
         return EffectOutcome.Applied;
     }
 
-    // A new publish found its name taken: adopt equal content, otherwise keep both.
-    internal static async Task<(EffectOutcome? Done, RemovalResult? Result)> PublishNewAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Row row, Side written, ISide to, ISide from, Entry source, string target, IStaged stage, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Action<SyncedEntry>? collectCreate, CancellationToken ct)
+    // A new publish found its name taken: adopt equal content, otherwise keep both; (null,null) when the occupant is gone or skipped, so the caller rethrows.
+    internal static async Task<(EffectOutcome? Done, RemovalResult? Result)> OccupiedAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, Row row, Side written, ISide to, ISide from, Entry source, string target, ISide local, ISide dropbox, IStore store, Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate, Action<SyncedEntry>? collectCreate, CancellationToken ct)
     {
-        try { return (null,await to.PublishAsync(stage,null,null,ct)); }
-        catch (PathOccupiedException ex) when (RemovalReceipts.AtTarget(ex,written,target))
+        var competitor = await Effects.ReadOneAsync(to,target,ct);
+        if (competitor == null || competitor.Skip != null) return (null,null);
+        if (await Effects.ReadOneAsync(from,source.Path,ct) != source) throw new ChangedUnderneathException(source.Path){FailedSide=from.Side};
+        if (competitor.IsFolder || await to.ContentHashAsync(competitor,ct) != await from.ContentHashAsync(source,ct))
         {
-            var competitor = await Effects.ReadOneAsync(to,target,ct);
-            if (competitor == null || competitor.Skip != null) throw;
-            if (await Effects.ReadOneAsync(from,source.Path,ct) != source) throw new ChangedUnderneathException(source.Path){FailedSide=from.Side};
-            if (competitor.IsFolder || await to.ContentHashAsync(competitor,ct) != await from.ContentHashAsync(source,ct))
-            {
-                if(collectCreate!=null) throw new ItemFailedException(target,TextKey.ClashNameTaken,null);
-                var conflict = written == Side.Local ? row with {Local=competitor} : row with {Dropbox=competitor};
-                return (await new KeepBoth().ApplyAsync(pair,settings,events,paths,conflict,local,dropbox,store,populate,ct),null);
-            }
-            return (null,new RemovalResult(RemovalOutcome.Published,competitor,null));
+            if(collectCreate!=null) throw new ItemFailedException(target,TextKey.ClashNameTaken,null);
+            var conflict = written == Side.Local ? row with {Local=competitor} : row with {Dropbox=competitor};
+            return (await new KeepBoth().ApplyAsync(pair,settings,events,paths,conflict,local,dropbox,store,populate,ct),null);
         }
+        return (null,new RemovalResult(RemovalOutcome.Published,competitor,null));
     }
 
     /// <summary>Resolve the selected final-name collision without deleting a third version or a replacement at the obsolete path.</summary>

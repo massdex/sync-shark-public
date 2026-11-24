@@ -246,7 +246,13 @@ public sealed class Effects
                 (scope,side,version,token)=>RecoverConflictAsync(pair,settings,events,paths,scope,side,version,local,dropbox,store,populate,compareOldBinding,token),coversThrough,ct,userSelected);
             return Published(written,source,target,result,armed,proof);
         }
-        var (clash,published) = await Collisions.PublishNewAsync(pair,settings,events,paths,row,written,to,from,source,target,stage,local,dropbox,store,populate,collectCreate,ct);
+        EffectOutcome? clash = null; RemovalResult? published;
+        try { published = await to.PublishAsync(stage,null,null,ct); }
+        catch (PathOccupiedException ex) when (RemovalReceipts.AtTarget(ex,written,target))
+        {
+            (clash,published) = await Collisions.OccupiedAsync(pair,settings,events,paths,row,written,to,from,source,target,local,dropbox,store,populate,collectCreate,ct);
+            if (clash == null && published == null) throw;
+        }
         return clash is {} stopped ? Stop(stopped) : Published(written,source,target,published!,armed,proof);
     }
 
