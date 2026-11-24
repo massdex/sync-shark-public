@@ -78,6 +78,12 @@ public static class CallBudgetChecks
         new[]{nameof(ISide.OpenReadAsync),nameof(ISide.StageAsync),nameof(ISide.PublishAsync)}
             .Sum(op => side.Requests[op]);
 
+    /// <summary>Every provider mutation attempted on a side, regardless of outcome.</summary>
+    private static long EffectAttempts(FakeSide side) =>
+        new[]{nameof(ISide.StageAsync),nameof(ISide.PublishAsync),nameof(ISide.DeleteAsync),nameof(ISide.MoveAsync),
+              nameof(ISide.EnsureFolderAsync),nameof(ISide.CreateFolderExclusiveAsync)}
+            .Sum(op => side.Requests[op]);
+
     private static void Exact(long actual, long expected, string what) =>
         Check.Require(actual == expected, $"Budget: {what} expected {expected} got {actual}");
 
@@ -114,10 +120,41 @@ public static class CallBudgetChecks
         AtMost(store.Requests[nameof(IStore.CommitAsync)] - commits, 1, "upload record write");
     }
 
-    // STOPPED: the session/direct split and the per-upload write-request count live in the real Dropbox writer
-    // (Dropbox/DropboxWriter.cs); FakeSide models one Stage + one Publish and cannot count session content writes.
-    // Needs a double change (a session-aware fake), so it is left for the double owner.
-    public static Task ChangedUploadSessionAsync(int size) => throw new NotImplementedException();
+    // A changed upload that must use a session costs one content request per provider window, never one per byte.
+    // The real UploadContent writer is driven over a scripted append/finish wire and the content requests are
+    // counted: the window is a quarter of the file, so the derived count is four at either registry population.
+    public static async Task ChangedUploadSessionAsync(int size)
+    {
+        var writer = new global::Massdex.SyncShark.Engine.Dropbox.UploadContent();
+        long limit = (size + 3) / 4; // a quarter of the file: forces the session split with a bounded, derived window
+        static Uri Endpoint(string name) => new(new Uri("https://example.invalid/"), name);
+        var file = ItemChecks.File(Side.Local, "item", 1, "source");
+        var sent = new List<(string Route, bool Close, int Length)>();
+        async Task<System.Net.HttpResponseMessage> Send(System.Net.Http.HttpRequestMessage request, CancellationToken ct)
+        {
+            using var args = System.Text.Json.JsonDocument.Parse(request.Headers.GetValues("Dropbox-API-Arg").Single());
+            var close = args.RootElement.GetProperty("close").GetBoolean();
+            var append = args.RootElement.TryGetProperty("cursor", out _);
+            var chunk = await request.Content!.ReadAsByteArrayAsync(ct);
+            sent.Add((request.RequestUri!.Segments[^1], close, chunk.Length));
+            return new(System.Net.HttpStatusCode.OK) { Content = new System.Net.Http.StringContent(append ? string.Empty : "{\"session_id\":\"receipt\"}") };
+        }
+        // Session path: a seekable source larger than the window is still sent in bounded windows.
+        using var source = new MemoryStream(new byte[size]);
+        await using var staged = await writer.StageAsync(Send, Endpoint, limit, file.Path, source, file with { Size = size, ContentHash = "" }, null, default);
+        var expected = (int)((size + limit - 1) / limit);
+        Check.Require(sent.Count == expected && sent[0].Route == "upload_session/start" && sent.Skip(1).All(r => r.Route == "upload_session/append") &&
+            sent.All(r => r.Close == (r == sent[^1])) && sent.Sum(r => r.Length) == size && staged.SessionId == "receipt",
+            "Changed upload session did not cost one bounded content request per provider window");
+        // Direct path: a seekable source no larger than the window costs no content request at all.
+        using var direct = new MemoryStream(new byte[limit]);
+        int directSends = 0;
+        Task<System.Net.Http.HttpResponseMessage> Refuse(System.Net.Http.HttpRequestMessage request, CancellationToken ct)
+        { directSends++; return Task.FromResult(new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new System.Net.Http.StringContent("{}") }); }
+        await using var single = await writer.StageAsync(Refuse, Endpoint, limit, file.Path, direct, file with { Size = limit, ContentHash = "" }, null, default);
+        Exact(directSends, 0, "direct upload content requests");
+        Check.Require(single.ConsumesSourceOnPublish, "A direct upload did not keep its source until publication");
+    }
 
     public static async Task UploadFolderReplacementAsync(int size)
     {
@@ -295,12 +332,31 @@ public static class CallBudgetChecks
         Check.Require(store.Records.Count == size, "First run did not bind every matched item");
     }
 
-    // STOPPED: the first-run PC-only probe needs a name that is eligible in the Dropbox deleted-name history and the
-    // exact get_metadata -> list_revisions -> get_metadata-by-id chain. The double models the spent mask and the
-    // deleted-name enumeration but not the three per-path provider reads of the real deletion-evidence adapter
-    // (Dropbox/DeletedHistory.cs), whose contract is already proven by Dropbox/DeletedHistoryChecks. Needs a
-    // history-backed first-run fixture.
-    public static Task FirstSyncDeletedNameProbeAsync(int size) => throw new NotImplementedException();
+    // The first-run PC-only probe of an eligible deleted name costs exactly three provider reads: the exact-path
+    // metadata miss, the revision history head, and the by-id metadata miss. The real DeletedHistory adapter is
+    // driven over a scripted wire; the stub only accepts (and consumes) those three routes, so an extra read fails.
+    public static async Task FirstSyncDeletedNameProbeAsync(int size)
+    {
+        var roots = new RootIdentity(@"T:\Pair A", "/Pair A", "connection-a",
+            new DirectoryIdentity(1, 2, null), new DropboxRootIdentity("account", "ns-root", "ns-home", "folder"));
+        var pair = ItemChecks.Pair() with { Roots = roots };
+        using var wire = new Massdex.SyncShark.Engine.Tests.Dropbox.DropboxStubHandler();
+        var api = wire.Client();
+        const string child = "A/Child", native = "/Pair A/A/Child", id = "id:retained", revision = "rev-a";
+        var hash = new string('a', 64);
+        var head = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            is_deleted = true, server_deleted = "2024-03-02T14:05:06Z",
+            entries = new[] { new { id, rev = revision, path_display = native, content_hash = hash } }
+        });
+        wire.Add("files/get_metadata", native, Massdex.SyncShark.Engine.Tests.Dropbox.DropboxStubHandler.Missing, System.Net.HttpStatusCode.Conflict);
+        wire.Add("files/list_revisions", native, head);
+        wire.Add("files/get_metadata", id, Massdex.SyncShark.Engine.Tests.Dropbox.DropboxStubHandler.Missing, System.Net.HttpStatusCode.Conflict);
+        var result = await new global::Massdex.SyncShark.Engine.Dropbox.DeletedHistory().ReadAsync(api, pair, child, false, default);
+        wire.Done(); // all three scripted routes were required, in order, and no fourth was sent
+        Check.Require(result is DeletionEvidence.DeletedFile deleted && deleted.Path == child && deleted.RemoteId == id &&
+            deleted.Revision == revision && deleted.ContentHash == hash, "A retained deletion did not cost exactly the three evidence reads");
+    }
 
     // A full Repair after a gap must not read or transfer unchanged files, in any operation. The provider-call budget
     // is a per-item ISide count, so the parity-proven in-memory double is used (R93); SQL-statement counts, which must
@@ -376,13 +432,15 @@ public static class CallBudgetChecks
         cloud.Seed(folder, []);
         var children = new[] { "folder/a", "folder/b" };
         foreach (var name in children) cloud.Seed(ItemChecks.File(Side.Dropbox, name, 1, "cd-" + name), [1]);
+        var unrelated = ItemChecks.File(Side.Dropbox, "other", 1, "other");
+        cloud.Seed(unrelated, [9]);
         Boundary(pc); Boundary(cloud);
         bool refused = false;
         var attempted = new List<string>();
         var deleting = FolderDeleteChecks.Observe.On(cloud, (op, args) =>
         {
-            // Count every provider delete attempt at the observation boundary, including the one this fake then refuses.
-            if (op == nameof(ISide.DeleteAsync) && args.Length == 4 && args[0] is Entry victim)
+            // Count every provider delete attempt at the observation boundary, on either overload, including the refused root.
+            if (op == nameof(ISide.DeleteAsync) && args.Length >= 1 && args[0] is Entry victim)
             {
                 attempted.Add(victim.Path);
                 if (victim.Path == root && !refused)
@@ -398,10 +456,13 @@ public static class CallBudgetChecks
             static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default, coversThrough: _ => true);
         Check.Require(result.Outcome == RemovalOutcome.Removed, "Refused folder split did not settle");
         Check.Require(!cloud.Items.ContainsKey(root) && children.All(c => !cloud.Items.ContainsKey(c)), "Refused folder split left an entry");
-        // The initial refused root attempt, each selected child exactly once, then the final root removal, in order.
-        Check.Require(attempted.Count > 0 && attempted[0] == root && attempted[^1] == root &&
-            attempted.Count(p => p == root) == 2 && children.All(c => attempted.Count(p => p == c) == 1),
-            "Refused folder split did not try the root, each selected child, then the root again");
+        // Exactly the refused root, each selected child once, then the final root removal: no extra delete target of any kind.
+        Check.Require(attempted.Count == children.Length + 2 && attempted[0] == root && attempted[^1] == root &&
+            attempted.Count(p => p == root) == 2 && children.All(c => attempted.Count(p => p == c) == 1) &&
+            attempted.All(p => p == root || children.Contains(p)),
+            "Refused folder split did not delete exactly the root, each selected child, then the root again");
+        Check.Require(cloud.Items.TryGetValue("other", out var kept) && kept.Entry == unrelated && kept.Bytes.SequenceEqual(new byte[] { 9 }),
+            "Refused folder split deleted an unrelated cloud item");
         Exact(Transfer(pc), 0, "refused folder split pc work");
     }
 
@@ -428,14 +489,7 @@ public static class CallBudgetChecks
     public static async Task MoveOrMergeDestinationAsync(int size)
     {
         var pair = ItemChecks.Pair(); var paths = Paths(pair);
-        var (store, pc, cloud, _) = await SteadyAsync(pair, size);
-        var source = ItemChecks.File(Side.Local, "old", 0, "source", folder: true);
-        var dest = source with { Path = "new", Id = "dest" };
-        var child = ItemChecks.File(Side.Local, "old/free", 1, "file");
-        var peer = ItemChecks.File(Side.Dropbox, "old/free", 1, "peer");
-        pc.Seed(source, []); pc.Seed(dest, []); pc.Seed(child, [1]); cloud.Seed(peer, [1]);
-        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(child, peer), null, null, default);
-        Boundary(pc); Boundary(cloud);
+        var (store, pc, cloud, source, dest, children) = await LocalMergeAsync(pair, size, ["free"], null);
         long ensures = 0, moves = 0, deletes = 0;
         var local = FolderDeleteChecks.Observe.On(pc, (op, args) =>
         {
@@ -446,12 +500,35 @@ public static class CallBudgetChecks
         });
         var result = await new FolderMerge().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, source, dest, Side.Local, local, cloud, store,
             _ => [], static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default, coversThrough: _ => true);
-        Check.Require(pc.Items.TryGetValue("new/free", out var moved) && moved.Entry.Id == "file", "Move or merge did not move the child by identity");
+        Check.Require(pc.Items.TryGetValue("new/free", out var moved) && moved.Entry == (children[0] with { Path = "new/free" }),
+            "Move or merge did not move the child by identity");
         Exact(ensures, 0, "existing destination folder ensures");
-        Exact(moves, 1, "merge destination child move");
+        Exact(moves, children.Length, "merge destination child moves");
         Exact(deletes, 1, "merge source folder delete");
         Exact(ContentTransfer(pc) + ContentTransfer(cloud), 0, "merge content transfer");
         Check.Require(!pc.Items.ContainsKey("old") && result.Outcome == RemovalOutcome.Removed, "Merge did not settle the source");
+    }
+    // Shared local-written merge setup: a source folder "old" with the named children bound to cloud peers, an
+    // existing destination "new", and (optionally) an unrelated local sentinel. Each check adds its own observers.
+    private static async Task<(InMemoryStateStore Store, FakeSide Pc, FakeSide Cloud, Entry Source, Entry Dest, Entry[] Children)>
+        LocalMergeAsync(PairConfig pair, int size, string[] names, Entry? unrelated)
+    {
+        var (store, pc, cloud, _) = await SteadyAsync(pair, size);
+        var source = ItemChecks.File(Side.Local, "old", 0, "source", folder: true);
+        var dest = source with { Path = "new", Id = "dest" };
+        pc.Seed(source, []); pc.Seed(dest, []);
+        if (unrelated is { } keep) pc.Seed(keep, [7]);
+        var children = new Entry[names.Length];
+        for (int i = 0; i < names.Length; i++)
+        {
+            var child = ItemChecks.File(Side.Local, $"old/{names[i]}", 1, $"file-{names[i]}");
+            var peer = ItemChecks.File(Side.Dropbox, $"old/{names[i]}", 1, $"peer-{names[i]}");
+            pc.Seed(child, [1]); cloud.Seed(peer, [1]);
+            await store.CommitAsync(pair.PairId, null, SyncedEntries.From(child, peer), null, null, default);
+            children[i] = child;
+        }
+        Boundary(pc); Boundary(cloud);
+        return (store, pc, cloud, source, dest, children);
     }
     // A selected folder move refused for provider size is driven through the real Effects path: it creates the
     // absent destination exactly once and then moves each child once (subdivision). Counts are fixed by the fixture
@@ -465,16 +542,18 @@ public static class CallBudgetChecks
         cloud.Seed(source, []); pc.Seed(peer, []);
         var saved = SyncedEntries.From(peer, source);
         await store.CommitAsync(pair.PairId, null, saved, null, null, default);
-        cloud.Seed(ItemChecks.File(Side.Dropbox, "old/child", 1, "child"), [1]);
+        var children = new[] { "a", "b" };
+        foreach (var name in children) cloud.Seed(ItemChecks.File(Side.Dropbox, $"old/{name}", 1, name), [1]);
         Boundary(pc); Boundary(cloud);
-        // The root move is refused for size; Effects must create the destination and subdivide into child moves.
+        // The root move is refused for size; Effects must create the destination and subdivide into per-child moves.
         cloud.MoveOutcomes.Enqueue(new(RemovalOutcome.NoEffect, source, TextKey.FailDropboxTooManyFiles));
-        long ensures = 0, childMoves = 0, deletes = 0;
+        long ensures = 0;
+        var moves = new List<string>(); var deletes = new List<string>();
         var remote = FolderDeleteChecks.Observe.On(cloud, (op, args) =>
         {
             if (op == nameof(ISide.EnsureFolderAsync)) ensures++;
-            else if (op == nameof(ISide.MoveAsync) && args[1] is string to && to.StartsWith("new/", StringComparison.Ordinal)) childMoves++;
-            else if (op == nameof(ISide.DeleteAsync)) deletes++;
+            else if (op == nameof(ISide.MoveAsync) && args[1] is string to) moves.Add(to);
+            else if (op == nameof(ISide.DeleteAsync) && args.Length >= 1 && args[0] is Entry victim) deletes.Add(victim.Path);
             return null;
         });
         var action = new SyncAction(ActionKind.MoveDropbox,
@@ -483,48 +562,56 @@ public static class CallBudgetChecks
             static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default, _ => [], _ => true);
         Check.Require(outcome == EffectOutcome.Applied, "Refused folder move was not subdivided");
         Exact(ensures, 1, "refused folder move created the absent destination");
-        Exact(childMoves, 1, "refused folder move subdivided per child");
-        Exact(deletes, 1, "refused folder move removed the source");
-        Check.Require(cloud.Items.ContainsKey("new/child") && !cloud.Items.ContainsKey("old"), "Refused folder move lost the child or the source");
+        // Exactly the refused root attempt plus one move per selected child, and no other move target.
+        Exact(moves.Count, children.Length + 1, "refused folder move attempts");
+        Check.Require(moves.Count(m => m == "new") == 1 && children.All(n => moves.Count(m => m == $"new/{n}") == 1),
+            "Refused folder move did not target exactly the root then each child");
+        // Exactly the original source folder is removed, and no content is transferred.
+        Check.Require(deletes.SequenceEqual(new[] { "old" }), "Refused folder move did not remove exactly the original source");
+        Exact(ContentTransfer(pc) + ContentTransfer(cloud), 0, "refused folder move content transfer");
+        foreach (var name in children)
+            Check.Require(cloud.Items.TryGetValue($"new/{name}", out var moved) && moved.Entry.Id == name && moved.Bytes.SequenceEqual(new byte[] { 1 }) && !cloud.Items.ContainsKey($"old/{name}"),
+                $"Refused folder move lost or altered child {name}");
+        Check.Require(!cloud.Items.ContainsKey("old"), "Refused folder move left the source folder");
     }
-    // R94-PENDING: the mapped-range compare precedes a folder repath whose source cleanup is the same held removal
-    // under standalone Repair (R94(b)); the compare itself is read-only but the enclosing Repair cannot settle.
+    // Still NI: count and order the read-only mapped-range acquisition before a folder repath through the unproved
+    // physical hop (RepairChecks.CoveredHopAsync) with the existing IStore observation wrapper. Not implemented here.
     public static Task MappedRangeBeforeRepathAsync(int size) => throw new NotImplementedException();
     // Source cleanup after a merge removes only the original source folder, not one delete per moved child, and
     // preserves the destination children, an unrelated local file and an untouched cloud peer. The source removal
-    // and the destination moves are counted and observed separately, and nothing grows with `size`.
+    // and the destination moves are counted and observed separately, and a local-only merge makes no cloud effect.
     public static async Task SourceCleanupAsync(int size)
     {
         var pair = ItemChecks.Pair(); var paths = Paths(pair);
-        var (store, pc, cloud, _) = await SteadyAsync(pair, size);
-        var source = ItemChecks.File(Side.Local, "old", 0, "source", folder: true);
-        var dest = source with { Path = "new", Id = "dest" };
-        pc.Seed(source, []); pc.Seed(dest, []);
         var unrelated = ItemChecks.File(Side.Local, "unrelated", 1, "keep");
-        pc.Seed(unrelated, [7]);
-        var names = new[] { "a", "b" };
-        foreach (var name in names)
-        {
-            var child = ItemChecks.File(Side.Local, $"old/{name}", 1, $"file-{name}");
-            var peer = ItemChecks.File(Side.Dropbox, $"old/{name}", 1, $"peer-{name}");
-            pc.Seed(child, [1]); cloud.Seed(peer, [1]);
-            await store.CommitAsync(pair.PairId, null, SyncedEntries.From(child, peer), null, null, default);
-        }
-        Boundary(pc); Boundary(cloud);
+        var (store, pc, cloud, source, dest, children) = await LocalMergeAsync(pair, size, ["a", "b"], unrelated);
+        var cloudKeep = ItemChecks.File(Side.Dropbox, "cloud-keep", 1, "cloud-keep");
+        cloud.Seed(cloudKeep, [9]);
         var deletes = new List<string>();
         var local = FolderDeleteChecks.Observe.On(pc, (op, args) =>
         {
-            if (op == nameof(ISide.DeleteAsync) && args[0] is Entry victim) deletes.Add(victim.Path);
+            if (op == nameof(ISide.DeleteAsync) && args.Length >= 1 && args[0] is Entry victim) deletes.Add(victim.Path);
             return null;
         });
         var result = await new FolderMerge().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, source, dest, Side.Local, local, cloud, store,
             _ => [], static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default, coversThrough: _ => true);
-        foreach (var name in names) Check.Require(pc.Items.ContainsKey($"new/{name}"), $"Source cleanup lost moved child {name}");
-        // The only removal is the original source folder; the destination children, an unrelated file and the peer survive.
+        // Each moved child kept its identity and bytes at the destination.
+        foreach (var child in children)
+        {
+            var at = "new" + child.Path["old".Length..];
+            Check.Require(pc.Items.TryGetValue(at, out var moved) && moved.Entry.Id == child.Id && moved.Bytes.SequenceEqual(new byte[] { 1 }),
+                $"Source cleanup lost moved child {at}");
+        }
+        // The only removal is the original source folder; the destination children, an unrelated file and the peers survive.
         Check.Require(deletes.SequenceEqual(new[] { "old" }), "Source cleanup removed more than the original source folder");
         Check.Require(pc.Items.ContainsKey("unrelated") && pc.Items["unrelated"].Bytes.SequenceEqual(new byte[] { 7 }), "Source cleanup deleted an unrelated file");
-        Check.Require(cloud.Items.ContainsKey("old/a") && cloud.Items.ContainsKey("old/b"), "Source cleanup removed an untouched cloud peer");
-        Exact(pc.Requests[nameof(ISide.MoveAsync)], names.Length, "source cleanup destination moves");
+        Check.Require(cloud.Items.TryGetValue("old/a", out var peerA) && cloud.Items.TryGetValue("old/b", out var peerB) && peerA.Bytes.SequenceEqual(new byte[] { 1 }) && peerB.Bytes.SequenceEqual(new byte[] { 1 }),
+            "Source cleanup removed or altered an untouched cloud peer");
+        Check.Require(cloud.Items.TryGetValue("cloud-keep", out var kept) && kept.Bytes.SequenceEqual(new byte[] { 9 }), "Source cleanup deleted an unrelated cloud item");
+        // A local-only merge must leave the cloud endpoint completely untouched by effects.
+        Exact(cloud.Requests[nameof(ISide.MoveAsync)] + cloud.Requests[nameof(ISide.DeleteAsync)] + cloud.Requests[nameof(ISide.PublishAsync)] +
+            cloud.Requests[nameof(ISide.EnsureFolderAsync)] + cloud.Requests[nameof(ISide.CreateFolderExclusiveAsync)], 0, "source cleanup cloud effect attempts");
+        Exact(pc.Requests[nameof(ISide.MoveAsync)], children.Length, "source cleanup destination moves");
         Exact(ContentTransfer(pc) + ContentTransfer(cloud), 0, "source cleanup content transfer");
         Check.Require(!pc.Items.ContainsKey("old") && result.Outcome == RemovalOutcome.Removed, "Source cleanup left the source folder");
     }
@@ -584,9 +671,9 @@ public static class CallBudgetChecks
         Exact(cloud.Requests[nameof(ISide.ReadJobAsync)] - overlapping, 0, "unrelated folder-job checks");
     }
 
-    // A wake that arrives while a check is still in flight joins one follow-up read instead of opening a second
-    // concurrent provider read. The JournalProbe holds the first ReadJobAsync open and counts every read.
-    public static async Task FolderJobCoalescedWakeAsync(int size)
+    // Several wakes that arrive while a check is still in flight all collapse into one follow-up read instead of
+    // opening concurrent provider reads. The JournalProbe holds the first ReadJobAsync open and counts every read.
+    public static Task FolderJobCoalescedWakeAsync(int size) => AutoSyncChecks.WithinDeadline(async ct =>
     {
         var pair = ItemChecks.Pair(); var paths = Paths(pair);
         var (store, pc, cloud, unfinished, _) = await JobAsync(pair, size);
@@ -594,10 +681,9 @@ public static class CallBudgetChecks
         var probe = (HostChecks.JournalProbe)(object)proxy; probe.Local = cloud;
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        int reads = 0;
         probe.Job = async token =>
         {
-            if (Interlocked.Increment(ref reads) == 1)
+            if (probe.JobReads == 1)
             {
                 entered.TrySetResult();
                 await release.Task.WaitAsync(token);
@@ -606,26 +692,108 @@ public static class CallBudgetChecks
             return new JobReply.Terminal(new (Entry? Entry, TextKey? Cause, FailureDisposition? Failure)[] { (null, null, null) }) { AbsentOrdinals = new HashSet<int> { 0 } };
         };
         Change Wake(string path) => new(Side.Dropbox, ChangeKind.Changed, path, null, "cd-" + path, null, false, false);
-        var first = unfinished.CheckAsync(pair, ItemChecks.Settings, _ => { }, paths, Wake("folder/member"), pc, proxy, store,
-            static _ => Array.Empty<Change>(), static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default);
-        await entered.Task; // the first check is inside ReadJobAsync with its key held
-        var second = unfinished.CheckAsync(pair, ItemChecks.Settings, _ => { }, paths, Wake("folder/other"), pc, proxy, store,
-            static _ => Array.Empty<Change>(), static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default);
-        await second; // the mid-check wake coalesces and returns without a second provider read
-        release.TrySetResult();
-        await first;
-        Exact(probe.JobReads, 2, "coalesced folder-job checks");
-    }
+        Task Check(string path) => unfinished.CheckAsync(pair, ItemChecks.Settings, _ => { }, paths, Wake(path), pc, proxy, store,
+            static _ => Array.Empty<Change>(), static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, ct);
+        try
+        {
+            var first = Check("folder/first");
+            await entered.Task.WaitAsync(ct); // the first check is inside ReadJobAsync with its key held
+            Exact(probe.JobReads, 1, "held folder-job read");
+            // Multiple overlapping wakes arrive mid-check; each coalesces and returns with no concurrent provider read.
+            var overlapping = new[] { "folder/second", "folder/third", "folder/fourth" }.Select(Check).ToArray();
+            await Task.WhenAll(overlapping).WaitAsync(ct);
+            Exact(probe.JobReads, 1, "overlapping wakes opened a concurrent provider read");
+            release.TrySetResult();
+            await first;
+            // Exactly one follow-up read performs the single coalesced check.
+            Exact(probe.JobReads, 2, "overlapping wakes did not collapse into exactly one follow-up read");
+        }
+        finally { release.TrySetResult(); }
+    });
 
-    // DOUBLE: the block-and-delta split lives in the real Dropbox deleted-history adapter (Dropbox/DeletedHistory.cs);
-    // the in-memory acquisition history models the cursor, spent mask and deleted-name enumeration but carries no
-    // encoded compressed blocks, so the block/delta request split cannot be driven through the scenario. That adapter
-    // contract is already proven by Dropbox/DeletedHistoryChecks.
-    public static Task DeletedNameBlockAndDeltaAsync(int size) => throw new NotImplementedException();
-    // COUNTER: scratch scan rows are now written by AddScan inside a Repair acquisition (BeginScan works), but neither
-    // InMemoryStateStore nor the real Store exposes a scratch-row counter to assert "1 row per listed entry, cleared
-    // after". Needs a scratch-row counter/reader on the store; the real Store is required for SQL counts and has none.
-    public static Task ScratchScanWritesAndClearAsync(int size) => throw new NotImplementedException();
+    // A published deleted-name block and an independent delta both answer lookups, and the encoded block is decoded
+    // once (at most twice) across many probes rather than replayed per name. The real SQLite DeletedNames fixture is used.
+    public static async Task DeletedNameBlockAndDeltaAsync(int size)
+    {
+        using var db = await Massdex.SyncShark.Engine.Tests.Storage.DeletedNamesChecks.OpenAsync();
+        var table = new Massdex.SyncShark.Engine.Storage.ScanTable();
+        var scan = Guid.NewGuid();
+        var keys = Enumerable.Range(0, size).Select(i => PathNames.Key($"old/{i:D6}")).ToArray();
+        var bytes = Massdex.SyncShark.Engine.Storage.Encoding.EncodeDeletedNames(keys);
+        const string delta = "append";
+        using (var seed = db.CreateCommand())
+        {
+            seed.CommandText = "UPDATE pair SET deleted_history_cursor='previous',deleted_history_owed=0;"
+                + "INSERT INTO discovery_deleted_block VALUES(1,$last,$count,$bytes);"
+                + "INSERT INTO discovery_deleted_delta VALUES(1,'append',0);";
+            seed.Parameters.AddWithValue("$last", keys[^1]);
+            seed.Parameters.AddWithValue("$count", size);
+            seed.Parameters.AddWithValue("$bytes", bytes);
+            await seed.ExecuteNonQueryAsync();
+        }
+        int blockReads = 0;
+        SQLitePCL.strdelegate_trace trace = (_, text) =>
+        {
+            if (text.StartsWith("SELECT", StringComparison.OrdinalIgnoreCase) && text.Contains("FROM discovery_deleted_block", StringComparison.OrdinalIgnoreCase)) blockReads++;
+        };
+        SQLitePCL.raw.sqlite3_trace(db.Handle!, trace, null);
+        try
+        {
+            // Probe both partitions: names from the compressed block and the independent delta name.
+            foreach (var index in new[] { 0, size / 3, size / 2, size * 2 / 3, size - 1 })
+                Check.Require(await table.History.ContainsAsync(db, "p", scan, keys[index], false, default), "A compact block name was lost");
+            Check.Require(await table.History.ContainsAsync(db, "p", scan, delta, false, default), "The independent delta name was lost");
+            Check.Require(!await table.History.ContainsAsync(db, "p", scan, PathNames.Key("absent"), false, default), "A missing name was selected");
+        }
+        finally { SQLitePCL.raw.sqlite3_trace(db.Handle!, (SQLitePCL.strdelegate_trace)null!, null); }
+        Check.Require(blockReads is > 0 and <= 2, $"Deleted-name block was decoded {blockReads} times");
+    }
+    // A real store's scratch scan records exactly one row per listed entry, and ClearScan removes every row. The
+    // derived synthetic .scan image is inspected directly between ingestion and clear; the live database is not used.
+    public static async Task ScratchScanWritesAndClearAsync(int size)
+    {
+        var dir = Directory.CreateTempSubdirectory();
+        try
+        {
+            var image = Path.Combine(dir.FullName, "fixture.sqlite");
+            using (var db = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = image, Pooling = false }.ToString()))
+            {
+                await db.OpenAsync();
+                db.CreateFunction<string, string>("pathkey", PathNames.Key, isDeterministic: true);
+                using var schema = db.CreateCommand();
+                schema.CommandText = global::Massdex.SyncShark.Engine.Storage.Schema.Create + $"PRAGMA user_version={global::Massdex.SyncShark.Engine.Storage.Schema.Version};";
+                await schema.ExecuteNonQueryAsync();
+            }
+            using var store = new global::Massdex.SyncShark.Engine.Storage.Store(image, false, ItemChecks.Settings);
+            var pair = ItemChecks.Pair(); await store.SavePairAsync(pair, default);
+            var scan = Guid.NewGuid();
+            var paths = Enumerable.Range(0, size).Select(i => $"s/{i:D6}").ToArray();
+            await store.AddScanAsync(pair.PairId, scan, Side.Local, Rows(paths), null, default);
+            var recorded = await ScratchPathsAsync(image);
+            Check.Require(recorded.SequenceEqual(paths.Order(StringComparer.Ordinal)), "Scratch scan did not record one row per listed entry");
+            await store.ClearScanAsync(pair.PairId, scan, default);
+            Check.Require((await ScratchPathsAsync(image)).Count == 0, "Scratch scan rows survived ClearScan");
+        }
+        finally { dir.Delete(true); }
+
+        static async IAsyncEnumerable<Listed> Rows(string[] paths)
+        {
+            await Task.CompletedTask;
+            foreach (var path in paths) yield return new(path, ItemChecks.File(Side.Local, path, 1, "id-" + path));
+        }
+    }
+    // Read the derived scratch image (main image path + ".scan") without touching the live store or state database.
+    private static async Task<List<string>> ScratchPathsAsync(string image)
+    {
+        using var db = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = image + ".scan", Pooling = false }.ToString());
+        await db.OpenAsync();
+        db.CreateFunction<string, string>("pathkey", PathNames.Key, isDeterministic: true);
+        using var cmd = db.CreateCommand(); cmd.CommandText = "PRAGMA busy_timeout=5000; SELECT path FROM scan ORDER BY path";
+        using var reader = await cmd.ExecuteReaderAsync();
+        var paths = new List<string>();
+        while (await reader.ReadAsync()) paths.Add(reader.GetString(0));
+        return paths;
+    }
 
     // ---- Scoped compare -----------------------------------------------------------------------------------
 
@@ -658,9 +826,8 @@ public static class CallBudgetChecks
         }
     }
 
-    // DOUBLE (unworkable interruption seam): an interrupted-and-repeated scoped compare needs the acquisition to abort
-    // midway at a chosen entry; the FakeSide enumerates atomically so the interruption point cannot be fixed, and no
-    // double holds a scan open. The scoped budget itself is proven by ScopeCompareAsync.
+    // Still NI: interrupt the chosen acquisition through the existing IStore observation wrapper, resume the scope and
+    // count the unaffected work. The scoped budget itself is proven by ScopeCompareAsync.
     public static Task ScopePartialRepeatAsync(int size) => throw new NotImplementedException();
 
     // ---- Failure and notices ------------------------------------------------------------------------------
@@ -693,9 +860,10 @@ public static class CallBudgetChecks
         Exact(store.OpenNotices.Count, 0, "notices after close");
     }
 
-    // A move whose reply was lost is re-observed by the exact selected identity; a different name-reused successor
-    // at the old name is neither adopted nor mutated, and no unproved write is resent.
-    public static async Task UnknownEffectReadbacksAsync(int size)
+    // A move whose reply was lost is re-observed by the exact selected identity: exactly one by-id read, no effect on
+    // either side before that proof, and the job stays owed. A different name-reused successor at the old name is
+    // neither adopted nor mutated. This proves evidence-based checking only, not terminal recovery or stage replay.
+    public static Task UnknownEffectReadbacksAsync(int size) => AutoSyncChecks.WithinDeadline(async ct =>
     {
         var pair = ItemChecks.Pair(); var paths = Paths(pair);
         var (store, pc, cloud, _) = await SteadyAsync(pair, size);
@@ -706,7 +874,7 @@ public static class CallBudgetChecks
         await store.CommitAsync(pair.PairId, null, SyncedEntries.From(pcOriginal, original), null, null, default);
         // A move whose reply was lost: the selected identity now sits at "moved"; a different successor reused the old name.
         var job = new AcceptedJob(pair.PairId, "files/move_batch/check", "lost", [new(original.Id, old, "moved")]);
-        await store.SaveJobAsync(job, default);
+        await store.SaveJobAsync(job, ct);
         cloud.Items.Remove(old);
         cloud.Seed(original with { Path = "moved" }, [1]);
         var successor = ItemChecks.File(Side.Dropbox, old, 2, "id:successor");
@@ -715,14 +883,23 @@ public static class CallBudgetChecks
         Boundary(pc); Boundary(cloud);
         var unfinished = new PairRunner().Unfinished; unfinished.AcquiredThrough = _ => true;
         await unfinished.CheckAsync(pair, ItemChecks.Settings, _ => { }, paths, null, pc, cloud, store,
-            static _ => Array.Empty<Change>(), static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, default);
+            static _ => Array.Empty<Change>(), static (_, _, _, _) => Task.CompletedTask, static (_, _, _, _) => Task.CompletedTask, ct);
         Exact(cloud.Requests[nameof(ISide.ReadJobAsync)], 1, "lost reply job reads");
-        Check.Require(cloud.Requests[nameof(ISide.ReadByIdAsync)] > 0, "lost reply did not read the selected identity back by id");
+        // A one-member invalid reply re-observes its selected identity exactly once, and nothing before that proof.
+        Exact(cloud.Requests[nameof(ISide.ReadByIdAsync)], 1, "lost reply by-id readbacks");
+        Exact(EffectAttempts(pc) + EffectAttempts(cloud), 0, "unproved write attempts before the by-id proof");
         Check.Require(cloud.Items[old].Entry == successor && cloud.Items[old].Bytes.SequenceEqual(new byte[] { 2 }), "lost reply adopted or overwrote a successor at the old name");
         Check.Require(cloud.Mutations.All(id => id != successor.Id), "lost reply mutated a successor");
-    }
-    // STOPPED: held-version retry needs an armed note, a ReopenStageAsync proof and recoverable versions; the
-    // InMemoryStateStore keeps armed notes but the recovery chain is not exercised by the existing doubles.
+        // The job is still owed, and the recorded Failure notice names the original subject.
+        var owed = new List<AcceptedJob>();
+        await foreach (var pending in store.JobsAsync(pair.PairId, ct)) owed.Add(pending);
+        Check.Require(owed.Count == 1 && owed[0].JobId == job.JobId, "an unproved invalid reply settled the job");
+        Check.Require(store.OpenNotices.Any(n => n.Kind == NoticeKind.Failure && n.Cause == TextKey.FailDropboxDeleteJobInvalid &&
+            n.Subject.Items.Any(m => m.Side == Side.Dropbox && m.Path == old && m.Id == original.Id)),
+            "an unproved invalid reply did not name its original subject in a failure notice");
+    });
+    // Still NI: arm a stage plus a pinned recoverable version, then drive the ReopenStageAsync recovery chain
+    // (Unfinished.RecoverStageAsync) and count the reads. Not implemented here.
     public static Task HeldVersionRetryAsync(int size) => throw new NotImplementedException();
 
     // ---- Restart / resume ---------------------------------------------------------------------------------
@@ -739,12 +916,10 @@ public static class CallBudgetChecks
         Exact(Transfer(pc) + Transfer(cloud), 0, "startup per-item provider work");
     }
 
-    // DOUBLE: replay of held reports needs a journal replay source (PairRunner.JournalReplay / the Local journal).
-    // The doubles still expose no replay source (harness-f1 added BeginScan/ScanTouched, not a journal); the resumed
-    // Repair that consumes the replay has no fixture to seed it.
+    // Still NI: drive the held-position replay through the existing journal fixture
+    // (HostChecks.JournalProbe.Feed via the Host pattern) and count the history requests. Not implemented here.
     public static Task ResumeReplayAsync(int size) => throw new NotImplementedException();
-    // DOUBLE: paused-volume history is a journal-replay path whose history fixture the doubles do not provide; the
-    // resumed pair likewise has no replay source to drive the counts.
+    // Still NI: exercise pause, read-ahead rewind and replay on the existing journal fixture with counted calls.
     public static Task PausedVolumeHistoryAsync(int size) => throw new NotImplementedException();
 
     public static async Task CleanBootNoBindingWalkAsync(int size)
@@ -760,16 +935,13 @@ public static class CallBudgetChecks
         Exact(Transfer(pc) + Transfer(cloud), 0, "clean boot per-item provider work");
     }
 
-    // COUNTER: per-SQL-statement and rows-changed counts. Per the rule these must use the real SQLite Store, and Repair
-    // now acquires (BeginScan works), but neither the real Store nor the double exposes a statement/rows counter. Needs
-    // a counting IStore wrapper (or a per-statement hook on Store); no such seam exists and this helper may not build
-    // new ones.
+    // WRITABLE-SMALL-HOOK, harness/designer-owned: attach the existing SQLite statement and row-change observer to
+    // the fixture Store connections used in each phase. Left NI for that lane.
     public static Task PerPhaseSqlAndRowCountsAsync(int size) => throw new NotImplementedException();
-    // COUNTER: durable bytes per item need a byte/page counter. Neither InMemoryStateStore nor the real Store exposes
-    // one, and opening state.db for a file-size measure is forbidden by the brief.
+    // Still NI: a disposable Store image measured by page_count/page_size, but no product-declared per-item byte bound
+    // exists (section 7 certifies none), so no sourced assertion is available; a per-item bound would be an invented number.
     public static Task DurableBytesPerItemAsync(int size) => throw new NotImplementedException();
-    // COUNTER: scratch bytes per item need a scratch-byte counter; the scan now runs (BeginScan works) but no store
-    // exposes a scratch-byte/page counter.
+    // Still NI: the same synthetic .scan image before ClearScan, under the same missing sourced per-item byte bound.
     public static Task ScratchBytesPerItemAsync(int size) => throw new NotImplementedException();
     // COUNTER: window/waiter memory has no counter and section 7 certifies no memory bound; measuring live memory is
     // not a reproducible check and the doubles expose no measurement seam.
