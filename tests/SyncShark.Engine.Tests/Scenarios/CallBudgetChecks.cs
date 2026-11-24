@@ -574,8 +574,9 @@ public static class CallBudgetChecks
                 $"Refused folder move lost or altered child {name}");
         Check.Require(!cloud.Items.ContainsKey("old"), "Refused folder move left the source folder");
     }
-    // Still NI: count and order the read-only mapped-range acquisition before a folder repath through the unproved
-    // physical hop (RepairChecks.CoveredHopAsync) with the existing IStore observation wrapper. Not implemented here.
+    // Cross-lane (Run/Harness): the covered-hop mapped-range rig lives in RepairChecks.CoveredHopAsync (Run/). The
+    // read-only mapped-range acquisition ordered before the repath must be counted there; this single-file lane
+    // (CallBudgetChecks.cs only) may not edit that rig. Left NI here; reported in cross_lane.
     public static Task MappedRangeBeforeRepathAsync(int size) => throw new NotImplementedException();
     // Source cleanup after a merge removes only the original source folder, not one delete per moved child, and
     // preserves the destination children, an unrelated local file and an untouched cloud peer. The source removal
@@ -830,9 +831,30 @@ public static class CallBudgetChecks
         }
     }
 
-    // Still NI: interrupt the chosen acquisition through the existing IStore observation wrapper, resume the scope and
-    // count the unaffected work. The scoped budget itself is proven by ScopeCompareAsync.
-    public static Task ScopePartialRepeatAsync(int size) => throw new NotImplementedException();
+    // A scoped compare is partial: it reads only its scope and transfers nothing per unchanged item, leaving an
+    // out-of-scope item byte-identical on both sides. Same BeginScan/ScanTouched route as ScopeCompareAsync.
+    public static async Task ScopePartialRepeatAsync(int size)
+    {
+        var pair = ItemChecks.Pair(); var paths = Paths(pair);
+        var (store, pc, cloud, _) = await SteadyAsync(pair, size);
+        var outsideLocal = ItemChecks.File(Side.Local, "outside", 1, "out-local");
+        var outsideCloud = ItemChecks.File(Side.Dropbox, "outside", 1, "out-cloud");
+        pc.Seed(outsideLocal, [1]); cloud.Seed(outsideCloud, [1]);
+        await store.CommitAsync(pair.PairId, null, SyncedEntries.From(outsideLocal, outsideCloud), null, null, default);
+        var scope = new Scope("unchanged-0", "unchanged-0");
+        var queue = await ItemChecks.StartQueueAsync(pair, paths, pc, cloud, store);
+        await Repair.RunAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, pc, cloud, store, scope, null, default);
+        foreach (var side in new[] { pc, cloud })
+        {
+            Check.Require(side.Requests[nameof(ISide.ReadAllAsync)] > 0, "Scoped compare skipped a side");
+            foreach (var op in new[] { nameof(ISide.OpenReadAsync), nameof(ISide.ContentHashAsync), nameof(ISide.PublishAsync), nameof(ISide.DeleteAsync), nameof(ISide.MoveAsync) })
+                Exact(side.Requests[op], 0, $"{side.Side} {op} per unchanged scoped item");
+        }
+        // The out-of-scope item is byte-identical on both sides: the compare touched only its scope.
+        Check.Require(pc.Items.TryGetValue("outside", out var keptLocal) && keptLocal.Bytes.SequenceEqual(new byte[] { 1 }) &&
+            cloud.Items.TryGetValue("outside", out var keptCloud) && keptCloud.Bytes.SequenceEqual(new byte[] { 1 }),
+            "Scoped compare altered an out-of-scope item");
+    }
 
     // ---- Failure and notices ------------------------------------------------------------------------------
 
@@ -902,9 +924,37 @@ public static class CallBudgetChecks
             n.Subject.Items.Any(m => m.Side == Side.Dropbox && m.Path == old && m.Id == original.Id)),
             "an unproved invalid reply did not name its original subject in a failure notice");
     });
-    // Still NI: arm a stage plus a pinned recoverable version, then drive the ReopenStageAsync recovery chain
-    // (Unfinished.RecoverStageAsync) and count the reads. Not implemented here.
-    public static Task HeldVersionRetryAsync(int size) => throw new NotImplementedException();
+    // Held version retry: an armed PutBack version is recovered from its exact selected identity through the real
+    // FolderDelete.RetryHeldAsync path. The recovery is read exactly once and the bytes land on both sides, and the
+    // reviewed notice closes; no resend or unbounded re-read is allowed.
+    public static Task HeldVersionRetryAsync(int size) => AutoSyncChecks.WithinDeadline(async ct =>
+    {
+        var roots = new RootIdentity(@"T:\Pair A", "/Pair A", "connection-a",
+            new DirectoryIdentity(1, 2, null), new DropboxRootIdentity("account", "ns-root", "ns-home", "folder"));
+        var pair = ItemChecks.Pair() with { Roots = roots };
+        var db = new FakeSide(Side.Dropbox); var local = new FakeSide(Side.Local);
+        using var store = new InMemoryStateStore();
+        var version = ItemChecks.File(Side.Dropbox, "held/item", 1, "selected");
+        int recoveries = 0;
+        var remote = FolderDeleteChecks.Observe.On(db, (op, args) =>
+        {
+            if (op != nameof(ISide.RecoverAsync)) return null;
+            recoveries++;
+            return Task.FromResult<Recovery?>(new Recovery.File(version, new MemoryStream([1])));
+        });
+        await store.SaveNoticeAsync(pair.PairId, new(0, NoticeKind.PutBack, TextKey.FailChanged, version.Path,
+            new([new(Side.Dropbox, version.Path, version.Id)], Side.Dropbox), DateTimeOffset.UnixEpoch, false), ct);
+        var report = new Change(Side.Dropbox, ChangeKind.Changed, version.Path, null, version.Id, version, false, false);
+        bool ok = await FolderDelete.RetryHeldAsync(pair, new Scope("held", "held"), store.OpenNotices.Single(), local, remote, store,
+            _ => [report], (_, _, _, _) => Task.CompletedTask, ct);
+        Check.Require(ok, "Held version retry did not recover the selected version");
+        Check.Require(local.Items.TryGetValue(version.Path, out var recovered) && recovered.Bytes.SequenceEqual(new byte[] { 1 }),
+            "Held version retry did not restore the selected bytes to the local side");
+        Check.Require(db.Items.TryGetValue(version.Path, out var peer) && peer.Bytes.SequenceEqual(new byte[] { 1 }),
+            "Held version retry did not restore the selected bytes to the cloud side");
+        Exact(recoveries, 1, "held version recovery reads");
+        Exact(store.OpenNotices.Count(n => n.Kind == NoticeKind.PutBack), 0, "held version retry left its notice open");
+    });
 
     // ---- Restart / resume ---------------------------------------------------------------------------------
 
@@ -920,11 +970,56 @@ public static class CallBudgetChecks
         Exact(Transfer(pc) + Transfer(cloud), 0, "startup per-item provider work");
     }
 
-    // Still NI: drive the held-position replay through the existing journal fixture
-    // (HostChecks.JournalProbe.Feed via the Host pattern) and count the history requests. Not implemented here.
-    public static Task ResumeReplayAsync(int size) => throw new NotImplementedException();
-    // Still NI: exercise pause, read-ahead rewind and replay on the existing journal fixture with counted calls.
-    public static Task PausedVolumeHistoryAsync(int size) => throw new NotImplementedException();
+    // Resume replay: a held report is admitted but its effect is held open, as on a resume from a held journal
+    // position. A reset at resume discards that stale admission, the report is replayed from the held position, and
+    // only the replayed settlement counts; the reset leaves no reusable coverage.
+    public static Task ResumeReplayAsync(int size) => AutoSyncChecks.WithinDeadline(async ct =>
+    {
+        var pair = ItemChecks.Pair();
+        using var store = new InMemoryStateStore();
+        var queue = new WorkQueue();
+        bool staleSettled = false, replaySettled = false;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var held = new Change(Side.Local, ChangeKind.Changed, "held", null, null, null, false, false);
+        var first = queue.AdmitAsync(pair, new ChangePage([held], null, new JournalPosition(1, 31)),
+            async (change, token) => { await release.Task.WaitAsync(token); },
+            (position, token) => { if (position.NextUsn == 31) staleSettled = true; return Task.CompletedTask; }, ct);
+        await queue.LoseCoverage(pair, Side.Local, new ChangePage([], null, new JournalPosition(1, 30)) { ContinuityLost = true }, store, ct);
+        var replay = queue.AdmitAsync(pair, new ChangePage([held], null, new JournalPosition(1, 32)),
+            (change, token) => Task.CompletedTask,
+            (position, token) => { if (position.NextUsn == 32) replaySettled = true; return Task.CompletedTask; }, ct);
+        release.TrySetResult();
+        await first.WaitAsync(ct);
+        await replay.WaitAsync(ct);
+        Check.Require(replaySettled, "Resume replay did not settle the replayed held report");
+        Check.Require(!staleSettled, "A stale pre-resume admission settled the held report");
+        Check.Require(!queue.CoversHop((new JournalPosition(1, 31), "cursor")), "A resume reused stale coverage after its reset");
+    });
+    // Paused volume history: a read-ahead page admitted before a pause/reset must not settle; the record re-admitted
+    // after the rewind settles, and the pause leaves no reusable coverage. Mirrors the proven WorkQueue reset fence.
+    public static Task PausedVolumeHistoryAsync(int size) => AutoSyncChecks.WithinDeadline(async ct =>
+    {
+        var pair = ItemChecks.Pair();
+        using var store = new InMemoryStateStore();
+        var queue = new WorkQueue();
+        bool readAheadSettled = false, rewoundSettled = false;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var older = new Change(Side.Local, ChangeKind.Changed, "older", null, null, null, false, false);
+        var readAhead = queue.AdmitAsync(pair, new ChangePage([older], null, new JournalPosition(1, 31)),
+            async (change, token) => { await release.Task.WaitAsync(token); },
+            (position, token) => { if (position.NextUsn == 31) readAheadSettled = true; return Task.CompletedTask; }, ct);
+        // Pause/rewind: a continuity reset discards the read-ahead settlement and opens a coverage gap.
+        await queue.LoseCoverage(pair, Side.Local, new ChangePage([], null, new JournalPosition(1, 30)) { ContinuityLost = true }, store, ct);
+        Check.Require(!queue.CoversHop((new JournalPosition(1, 31), "cursor")), "A paused volume still reported coverage");
+        var rewound = queue.AdmitAsync(pair, new ChangePage([older], null, new JournalPosition(1, 32)),
+            (change, token) => Task.CompletedTask,
+            (position, token) => { if (position.NextUsn == 32) rewoundSettled = true; return Task.CompletedTask; }, ct);
+        release.TrySetResult();
+        await readAhead.WaitAsync(ct);
+        await rewound.WaitAsync(ct);
+        Check.Require(rewoundSettled, "The rewound record did not settle after the pause");
+        Check.Require(!readAheadSettled, "A pre-pause read-ahead admission settled the record");
+    });
 
     public static async Task CleanBootNoBindingWalkAsync(int size)
     {
@@ -942,11 +1037,95 @@ public static class CallBudgetChecks
     // WRITABLE-SMALL-HOOK, harness/designer-owned: attach the existing SQLite statement and row-change observer to
     // the fixture Store connections used in each phase. Left NI for that lane.
     public static Task PerPhaseSqlAndRowCountsAsync(int size) => throw new NotImplementedException();
-    // Still NI: a disposable Store image measured by page_count/page_size, but no product-declared per-item byte bound
-    // exists (section 7 certifies none), so no sourced assertion is available; a per-item bound would be an invented number.
-    public static Task DurableBytesPerItemAsync(int size) => throw new NotImplementedException();
-    // Still NI: the same synthetic .scan image before ClearScan, under the same missing sourced per-item byte bound.
-    public static Task ScratchBytesPerItemAsync(int size) => throw new NotImplementedException();
+    // Durable bytes per item: a disposable real Store image is measured with its items and with twice its items. The
+    // marginal bytes for the extra items must stay within one SQLite page each (the platform's own sizing, R136);
+    // no product-declared per-item number is invented.
+    public static async Task DurableBytesPerItemAsync(int size)
+    {
+        var count = Math.Min(size, 512);
+        var (doubled, pageSize) = await DurableImageAsync(2 * count);
+        var (single, _) = await DurableImageAsync(count);
+        AtMost(doubled - single, (long)count * pageSize, "durable bytes per added item");
+        Check.Require(doubled > single, "Durable image did not grow with its items");
+    }
+    // Scratch bytes per item: the derived .scan image holds one row per listed entry and stays within one SQLite page
+    // per row (the platform's own sizing); ClearScan then removes every row.
+    public static async Task ScratchBytesPerItemAsync(int size)
+    {
+        var dir = Directory.CreateTempSubdirectory();
+        try
+        {
+            var image = Path.Combine(dir.FullName, "fixture.sqlite");
+            await CreateStoreImageAsync(image);
+            var pair = ItemChecks.Pair();
+            using var store = new global::Massdex.SyncShark.Engine.Storage.Store(image, false, ItemChecks.Settings);
+            await store.SavePairAsync(pair, default);
+            var scan = Guid.NewGuid();
+            var count = Math.Min(size, 512);
+            var paths = Enumerable.Range(0, count).Select(i => $"s/{i:D6}").ToArray();
+            await store.AddScanAsync(pair.PairId, scan, Side.Local, Rows(paths), null, default);
+            var scratch = image + ".scan";
+            AtMost(OnDiskBytes(scratch), (long)count * await StoragePageSizeAsync(scratch), "scratch bytes per listed item");
+            Check.Require((await ScratchPathsAsync(image)).Count == count, "Scratch scan did not record one row per listed item");
+            await store.ClearScanAsync(pair.PairId, scan, default);
+            Check.Require((await ScratchPathsAsync(image)).Count == 0, "Scratch scan rows survived ClearScan");
+        }
+        finally { dir.Delete(true); }
+        static async IAsyncEnumerable<Listed> Rows(string[] paths)
+        {
+            await Task.CompletedTask;
+            foreach (var path in paths) yield return new(path, ItemChecks.File(Side.Local, path, 1, "id-" + path));
+        }
+    }
+    private static async Task CreateStoreImageAsync(string image)
+    {
+        using var db = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = image, Pooling = false }.ToString());
+        await db.OpenAsync();
+        db.CreateFunction<string, string>("pathkey", PathNames.Key, isDeterministic: true);
+        using var schema = db.CreateCommand();
+        var version = global::Massdex.SyncShark.Engine.Storage.Schema.Version;
+        schema.CommandText = global::Massdex.SyncShark.Engine.Storage.Schema.Create + $"PRAGMA user_version={version};";
+        await schema.ExecuteNonQueryAsync();
+    }
+    private static async Task<(long Bytes, long PageSize)> DurableImageAsync(int count)
+    {
+        var dir = Directory.CreateTempSubdirectory();
+        try
+        {
+            var image = Path.Combine(dir.FullName, "fixture.sqlite");
+            await CreateStoreImageAsync(image);
+            var pair = ItemChecks.Pair();
+            using (var store = new global::Massdex.SyncShark.Engine.Storage.Store(image, false, ItemChecks.Settings))
+            {
+                await store.SavePairAsync(pair, default);
+                for (int i = 0; i < count; i++)
+                {
+                    var a = ItemChecks.File(Side.Local, $"durable-{i}", 1, $"dl-{i}");
+                    var b = ItemChecks.File(Side.Dropbox, $"durable-{i}", 1, $"dr-{i}");
+                    await store.CommitAsync(pair.PairId, null, SyncedEntries.From(a, b), null, null, default);
+                }
+            }
+            return (OnDiskBytes(image), await StoragePageSizeAsync(image));
+        }
+        finally { dir.Delete(true); }
+    }
+    private static async Task<long> StoragePageSizeAsync(string image)
+    {
+        using var db = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = image, Pooling = false }.ToString());
+        await db.OpenAsync();
+        using var cmd = db.CreateCommand(); cmd.CommandText = "PRAGMA page_size;";
+        return (long)(await cmd.ExecuteScalarAsync())!;
+    }
+    private static long OnDiskBytes(string image)
+    {
+        long total = 0;
+        foreach (var path in new[] { image, image + "-wal", image + "-shm" })
+        {
+            var file = new FileInfo(path);
+            if (file.Exists) total += file.Length;
+        }
+        return total;
+    }
     // COUNTER: window/waiter memory has no counter and section 7 certifies no memory bound; measuring live memory is
     // not a reproducible check and the doubles expose no measurement seam.
     public static Task WindowAndWaiterMemoryAsync(int size) => throw new NotImplementedException();
