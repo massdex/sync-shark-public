@@ -16,9 +16,6 @@ public static class VolumeSpace
         return (long)availableToCaller;
     }
 
-    // The file-system format name DriveInfo.DriveFormat reports for an NTFS root; a format fact, not user text.
-    internal const string NtfsFormat = "NTFS";
-
     private const string KernelLibrary = "kernel32.dll";
     [DllImport(KernelLibrary, CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
     private static extern bool GetDiskFreeSpaceExW(string directoryName, out ulong availableToCaller,

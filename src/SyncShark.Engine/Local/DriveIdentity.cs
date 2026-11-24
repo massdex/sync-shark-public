@@ -5,6 +5,8 @@ namespace Massdex.SyncShark.Engine.Local;
 /// <summary>Reads a supported local root's drive type and native directory identity.</summary>
 public static class DriveIdentity
 {
+    // The NTFS file-system format name DriveInfo.DriveFormat reports for a supported local root.
+    private const string NtfsFormat = "NTFS";
     public static (DirectoryIdentity Identity, DriveType Type) Read(string root)
     {
         var full = Path.GetFullPath(root);
@@ -14,7 +16,7 @@ public static class DriveIdentity
         var drive = new DriveInfo(Path.GetPathRoot(full)!);
         var type = drive.DriveType;
         if (type == DriveType.Network) throw new ItemFailedException(root, TextKey.RootLocalNetworkUnsupported, null);
-        if (!string.Equals(drive.DriveFormat,VolumeSpace.NtfsFormat,StringComparison.OrdinalIgnoreCase)) throw new ItemFailedException(root,TextKey.RootLocalFormatUnsupported,null);
+        if (!string.Equals(drive.DriveFormat,NtfsFormat,StringComparison.OrdinalIgnoreCase)) throw new ItemFailedException(root,TextKey.RootLocalFormatUnsupported,null);
         using var handle=Open(root); return (FromHandle(handle),type);
     }
     // Win32 FILE_FLAG_OPEN_NO_RECALL: do not recall an object that changed since its parent listed it.
