@@ -373,9 +373,48 @@ public static class ReconciliationChecks
     public static Task A29OtherMatchingRuleRemainsAsync() => throw new NotImplementedException();
     public static Task A29IgnoredChildTravelsWithFolderAsync() => throw new NotImplementedException();
     public static Task A32ValidRenameClosesNoticeAsync() => throw new NotImplementedException();
-    public static Task A33DepartureBeforeArrivalAsync() => throw new NotImplementedException();
-    public static Task A33EarlierPrerequisiteBeforeDepartureAsync() => throw new NotImplementedException();
-    public static Task A33NoReciprocalWaitAsync() => throw new NotImplementedException();
+    // A33 (ordering pinned by Run/WorkQueueChecks.RunAsync): a departure must run before the arrival that
+    // reuses its path, and an earlier prerequisite before both, so the queue never creates then re-moves.
+    public static Task A33DepartureBeforeArrivalAsync() =>
+        global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
+        {
+            var queue = new WorkQueue(); var pair = ItemChecks.Pair();
+            var version = ItemChecks.File(Side.Dropbox, "remote/item", 1, "child");
+            var first = new Change(Side.Dropbox, ChangeKind.Changed, "remote/item", null, version.Id, version, false, false);
+            var arrival = first with { Kind = ChangeKind.Renamed, OldPath = "a", Path = "b" };
+            var departure = first with { Kind = ChangeKind.Renamed, OldPath = "b", Path = "c" };
+            var applied = new List<string>();
+            await queue.AdmitAsync(pair, new([arrival, departure], "moved", null),
+                (change, _) => { lock (applied) applied.Add(change.Path!); return Task.CompletedTask; }, null, deadline);
+            Check.Require(applied.IndexOf("c") < applied.IndexOf("b"), "The departure ran after the arrival that reuses its path (A33)");
+        });
+    public static Task A33EarlierPrerequisiteBeforeDepartureAsync() =>
+        global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
+        {
+            var queue = new WorkQueue(); var pair = ItemChecks.Pair();
+            var version = ItemChecks.File(Side.Dropbox, "remote/item", 1, "child");
+            var first = new Change(Side.Dropbox, ChangeKind.Changed, "remote/item", null, version.Id, version, false, false);
+            var arrival = first with { Kind = ChangeKind.Renamed, OldPath = "a", Path = "b" };
+            var prerequisite = first with { Path = "b/child" };
+            var departure = first with { Kind = ChangeKind.Renamed, OldPath = "b", Path = "c" };
+            var applied = new List<string>();
+            await queue.AdmitAsync(pair, new([arrival, prerequisite, departure], "moved", null),
+                (change, _) => { lock (applied) applied.Add(change.Path!); return Task.CompletedTask; }, null, deadline);
+            Check.Require(applied.SequenceEqual(new[] { "b/child", "c", "b" }), "An earlier prerequisite did not precede its departure and arrival (A33)");
+        });
+    public static Task A33NoReciprocalWaitAsync() =>
+        global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
+        {
+            var queue = new WorkQueue(); var pair = ItemChecks.Pair();
+            var version = ItemChecks.File(Side.Dropbox, "remote/item", 1, "child");
+            var first = new Change(Side.Dropbox, ChangeKind.Changed, "remote/item", null, version.Id, version, false, false);
+            var arrival = first with { Kind = ChangeKind.Renamed, OldPath = "a", Path = "b" };
+            var departure = first with { Kind = ChangeKind.Renamed, OldPath = "b", Path = "c" };
+            var applied = new List<string>();
+            await queue.AdmitAsync(pair, new([arrival, departure], "moved", null),
+                (change, _) => { lock (applied) applied.Add(change.Path!); return Task.CompletedTask; }, null, deadline);
+            Check.Require(applied.Count == 2, "Departure and arrival waited on each other instead of settling (A33)");
+        });
     public static Task A34SameSizeSameSecondAsync()
     {
         var t=DateTimeOffset.UnixEpoch.AddSeconds(100);
