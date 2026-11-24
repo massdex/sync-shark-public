@@ -3,43 +3,46 @@ using Microsoft.Data.Sqlite;
 namespace Massdex.SyncShark.Engine.Tests.Harness;
 
 /// <summary>
-/// Attaches the SQLite statement trace and a row-change measure to one open connection, so a phase's SQL-statement and
-/// rows-changed counts are read from the connection the phase actually uses, not from a second connection to the same
-/// image. This is the statement/row observer the budget checks need on their fixture connections.
+/// Attaches the SQLite statement trace and a rows-changed measure to each open connection a phase uses (the writer,
+/// plus the Store's separate streaming and ingestion connections), so the counts are read from the connections the
+/// phase actually uses and never from a second connection to the same image. Rows are read with the native
+/// total_changes counter from a baseline captured at <see cref="Attach"/>, so reading them adds no statement and each
+/// connection's count starts at Attach rather than at connection open.
 /// </summary>
 internal sealed class SqlTrace
 {
-    private readonly SqliteConnection _db;
+    private readonly List<(SqliteConnection Connection, int Baseline)> _observed = new();
     private int _statements;
     private SQLitePCL.strdelegate_trace? _trace;
 
-    private SqlTrace(SqliteConnection db) => _db = db;
+    private SqlTrace() { }
 
-    /// <summary>Start observing the connection this phase uses; the returned counter is read after the phase.</summary>
-    internal static SqlTrace Attach(SqliteConnection db)
+    /// <summary>Start observing each connection the phase uses; read the counters after the phase.</summary>
+    internal static SqlTrace Attach(params SqliteConnection[] connections)
     {
-        var trace = new SqlTrace(db);
+        var trace = new SqlTrace();
         SQLitePCL.strdelegate_trace handler = (_, text) => { if (!string.IsNullOrEmpty(text)) trace._statements++; };
         trace._trace = handler;
-        SQLitePCL.raw.sqlite3_trace(db.Handle!, handler, null);
+        foreach (var db in connections)
+        {
+            trace._observed.Add((db, SQLitePCL.raw.sqlite3_total_changes(db.Handle!)));
+            SQLitePCL.raw.sqlite3_trace(db.Handle!, handler, null);
+        }
         return trace;
     }
 
-    /// <summary>Statements observed on this connection since <see cref="Attach"/>.</summary>
+    /// <summary>Statements observed on the observed connections since <see cref="Attach"/>.</summary>
     internal int Statements => _statements;
 
-    /// <summary>Rows changed on this connection so far (INSERT/UPDATE/DELETE), read over the same connection.</summary>
-    internal int TotalChanges()
-    {
-        using var command = _db.CreateCommand();
-        command.CommandText = "SELECT total_changes()";
-        return Convert.ToInt32(command.ExecuteScalar());
-    }
+    /// <summary>Rows changed on the observed connections since <see cref="Attach"/>; read natively, so no statement is emitted.</summary>
+    internal int TotalChanges =>
+        _observed.Sum(o => SQLitePCL.raw.sqlite3_total_changes(o.Connection.Handle!) - o.Baseline);
 
-    /// <summary>Stop observing; the trace callback is detached so later statements on the connection are not counted.</summary>
+    /// <summary>Stop observing; every observed connection's trace callback is detached.</summary>
     internal void Detach()
     {
-        if (_trace is not null) SQLitePCL.raw.sqlite3_trace(_db.Handle!, (SQLitePCL.strdelegate_trace)null!, null);
+        if (_trace is null) return;
+        foreach (var o in _observed) SQLitePCL.raw.sqlite3_trace(o.Connection.Handle!, (SQLitePCL.strdelegate_trace)null!, null);
         _trace = null;
     }
 }

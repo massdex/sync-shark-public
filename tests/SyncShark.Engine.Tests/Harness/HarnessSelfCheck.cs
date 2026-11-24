@@ -5,9 +5,9 @@ using Massdex.SyncShark.Engine.Dropbox;
 namespace Massdex.SyncShark.Engine.Tests.Harness;
 
 /// <summary>
-/// Self-checks the two harness seams this lane owns, on real code: the SQLite statement/row observer on a real
-/// connection, and the synthetic loopback browser against the real ReceiveCallbackAsync verification. A new check
-/// cannot be registered from this lane, so it runs inside the registered harness entry point that calls it.
+/// Self-checks the two harness seams this lane owns, on real code: the SQLite statement/row observer across the
+/// connections a phase uses, and the synthetic loopback browser against the real ReceiveCallbackAsync verification. A
+/// new check cannot be registered from this lane, so it runs inside the registered harness entry point that calls it.
 /// </summary>
 internal static class HarnessSelfCheck
 {
@@ -19,45 +19,58 @@ internal static class HarnessSelfCheck
 
     private static async Task SqlObserverAsync(CancellationToken ct)
     {
-        var path = Path.Combine(Path.GetTempPath(), "syncshark-harness-sql-" + Guid.NewGuid().ToString("N") + ".db");
+        var paths = new List<string>();
+        var connections = new List<Microsoft.Data.Sqlite.SqliteConnection>();
         try
         {
-            using var db = new Microsoft.Data.Sqlite.SqliteConnection(
-                new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
-            await db.OpenAsync(ct);
-            using (var create = db.CreateCommand())
+            for (var i = 0; i < 2; i++)
             {
-                create.CommandText = "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);";
-                await create.ExecuteNonQueryAsync(ct);
+                var path = Path.Combine(Path.GetTempPath(), "syncshark-harness-sql-" + Guid.NewGuid().ToString("N") + ".db");
+                paths.Add(path);
+                var db = new Microsoft.Data.Sqlite.SqliteConnection(
+                    new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+                connections.Add(db);
+                await db.OpenAsync(ct);
+                await ExecAsync(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);", ct);
             }
-            var trace = SqlTrace.Attach(db);
-            using (var insert = db.CreateCommand())
-            {
-                insert.CommandText = "INSERT INTO t(v) VALUES('a'),('b');";
-                await insert.ExecuteNonQueryAsync(ct);
-            }
-            using (var update = db.CreateCommand())
-            {
-                update.CommandText = "UPDATE t SET v='c' WHERE id<=1;";
-                await update.ExecuteNonQueryAsync(ct);
-            }
-            var statements = trace.Statements;
+            var first = connections[0];
+            var second = connections[1];
+            // An earlier write precedes Attach, so its row must not be counted after Attach.
+            await ExecAsync(first, "INSERT INTO t(v) VALUES('pre');", ct);
+            var trace = SqlTrace.Attach(first, second);
+            var statementsBeforeRead = trace.Statements;
+            var baselineRows = trace.TotalChanges;
+            Check.Require(trace.Statements == statementsBeforeRead, "Reading the row count added a SQL statement");
+            await ExecAsync(first, "INSERT INTO t(v) VALUES('a'),('b');", ct);   // window 1: two rows on the writer
+            await ExecAsync(second, "INSERT INTO t(v) VALUES('c');", ct);        // window 1: one row on the reader
+            var afterWindow1 = trace.TotalChanges;
+            await ExecAsync(first, "UPDATE t SET v='z' WHERE id=1;", ct);        // window 2: one row
+            var afterWindow2 = trace.TotalChanges;
+            Check.Require(baselineRows == 0, $"SQL observer counted {baselineRows} rows before the first window, expected the earlier write excluded");
+            Check.Require(afterWindow1 - baselineRows == 3, $"First window counted {afterWindow1 - baselineRows} rows, expected 3");
+            Check.Require(afterWindow2 - afterWindow1 == 1, $"Second window counted {afterWindow2 - afterWindow1} rows, expected 1");
+            Check.Require(afterWindow2 == 4, $"SQL observer counted {afterWindow2} rows since Attach, expected 4");
+            Check.Require(trace.Statements == 3, $"SQL observer saw {trace.Statements} statements since Attach, expected 3");
             trace.Detach();
-            var rows = trace.TotalChanges();
-            using (var after = db.CreateCommand())
-            {
-                after.CommandText = "DELETE FROM t;";
-                await after.ExecuteNonQueryAsync(ct);
-            }
-            Check.Require(statements >= 2, $"SQL observer did not see the phase statements ({statements})");
-            Check.Require(rows == 3, $"SQL observer saw {rows} row changes, expected 3");
-            Check.Require(trace.Statements == statements, "SQL observer kept counting after Detach");
+            await ExecAsync(first, "INSERT INTO t(v) VALUES('after');", ct);
+            Check.Require(trace.Statements == 3, "SQL observer kept counting after Detach");
         }
         finally
         {
+            foreach (var db in connections) await db.DisposeAsync();
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-            try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            foreach (var path in paths)
+            {
+                try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
         }
+    }
+
+    private static async Task ExecAsync(Microsoft.Data.Sqlite.SqliteConnection db, string sql, CancellationToken ct)
+    {
+        using var command = db.CreateCommand();
+        command.CommandText = sql;
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task LoopbackSeamAsync(CancellationToken ct)
@@ -66,6 +79,7 @@ internal static class HarnessSelfCheck
         var browser = LoopbackBrowser.For(redirect, "code-1", "state-a");
         var code = await SignIn.ReceiveCallbackAsync(redirect, redirect.AbsolutePath, "state-a", ct, browser.Action);
         await browser.Drain;
+        Check.Require(browser.Started && browser.Sent, "Synthetic loopback exchange never sent its callback");
         Check.Require(code == "code-1", "Synthetic loopback exchange did not return the verified code");
 
         var wrongRedirect = new Uri("http://127.0.0.1:" + FreePort() + "/oauth/dropbox/callback/");
@@ -73,8 +87,9 @@ internal static class HarnessSelfCheck
         var refused = false;
         try { await SignIn.ReceiveCallbackAsync(wrongRedirect, wrongRedirect.AbsolutePath, "state-a", ct, wrong.Action); }
         catch (InvalidDataException) { refused = true; }
-        catch (InvalidOperationException) { refused = true; }
         await wrong.Drain;
+        // A listener-start failure throws InvalidOperationException before invoking the browser; it must not count as rejection.
+        Check.Require(wrong.Started && wrong.Sent, "Wrong-state loopback return was rejected before its callback was sent and received");
         Check.Require(refused, "Real state validation accepted a wrong-state loopback return");
     }
 
