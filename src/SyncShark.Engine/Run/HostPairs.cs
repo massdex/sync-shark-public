@@ -147,7 +147,9 @@ internal sealed class HostPairs(Host host)
             var list=p.Exclusions.Where(e => e.Side!=exclusion.Side || !PathNames.Same(e.Path,exclusion.Path)).ToList(); if (!include) list.Add(exclusion);
             var next=p with {Exclusions=list};
             if (!include && !exclusion.Keep) return await Exclude(m,next,exclusion,confirmed,ct);
-            var mapped=await Mapped(p,exclusion.Side,exclusion.Path,ct); await Change(m,next,include ? [mapped] : [],ct,mapped); return (ExclusionOutcome.Applied,0,0,0,0,null,null);
+            // Map before forgetting: a leftover binding still names the kept side's actual folder, which the owed Repair must scan.
+            var mapped=await Mapped(p,exclusion.Side,exclusion.Path,ct);
+            await Change(m,next,include ? [mapped] : [],ct,mapped); return (ExclusionOutcome.Applied,0,0,0,0,null,null);
         }
         finally { host.Commands.Release(); }
     }
