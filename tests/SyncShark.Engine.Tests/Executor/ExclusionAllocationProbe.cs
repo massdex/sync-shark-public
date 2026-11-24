@@ -16,7 +16,7 @@ public static class ExclusionAllocationProbe
             $"outcome={large.Outcome} hashes={large.Hashes}");
     }
 
-    private static async Task<(long Thread, long Total, string Outcome, int Hashes)> MeasureAsync(int count)
+    private static async Task<(long Thread, long Total, string Outcome, long Hashes)> MeasureAsync(int count)
     {
         var pair = Scenarios.ItemChecks.Pair();
         var exclusion = new Exclusion(Side.Local, "dir", false);
