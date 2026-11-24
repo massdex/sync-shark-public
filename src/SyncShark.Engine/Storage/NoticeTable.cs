@@ -171,7 +171,7 @@ public sealed class NoticeTable
         using var header=StorageCommand.Create(db,null,Select+"path='' AND kind=$kind AND cause=$cause",("$p",pairId),("$kind",(int)NoticeKind.Info),("$cause",nameof(TextKey.InfoLinks)));
         Notice? link;
         using(var h=await header.ExecuteReaderAsync(ct)) link=await h.ReadAsync(ct)?Row(h):null;
-        if(link==null) yield break;
+        if(link!=null)
         foreach(var side in new[]{Side.Local,Side.Dropbox})
         {
             var key=side==Side.Local?local:cloud;
