@@ -1485,7 +1485,7 @@ public static class FolderChecks
                 var recent = Path.Combine(bin, "recent"); File.WriteAllText(recent, "kept"); File.SetCreationTimeUtc(recent, now.UtcDateTime.AddDays(-1));
                 // Retention is decided by the top-level item's own creation; a fresh top-level folder holding an expired
                 // descendant is kept whole (the trim never descends), so an old child cannot drag its parent out.
-                var freshTop = Path.Combine(bin, "fresh-top"); Directory.CreateDirectory(freshTop); File.SetCreationTimeUtc(freshTop, now.UtcDateTime.AddDays(-1));
+                var freshTop = Directory.CreateDirectory(Path.Combine(bin, "fresh-top")).FullName; Directory.SetCreationTimeUtc(freshTop, now.UtcDateTime.AddDays(-1));
                 var oldDescendant = Path.Combine(freshTop, "old-descendant"); File.WriteAllText(oldDescendant, "kept"); File.SetCreationTimeUtc(oldDescendant, now.UtcDateTime.AddDays(-40));
                 await new global::Massdex.SyncShark.Engine.Local.RecycleBin().TrimAsync(volume, DriveType.Removable, now, default);
                 Check.Require(!File.Exists(old) && File.Exists(recent) && File.Exists(oldDescendant), "Startup trim removed an expired descendant or kept only some expired top-level items");
