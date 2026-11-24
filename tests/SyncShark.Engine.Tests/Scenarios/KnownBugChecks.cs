@@ -373,15 +373,16 @@ public static class KnownBugChecks
             }
             return null;
         });
+        ExclusionOutcome? firstOutcome = null;
         try
         {
-            await new Exclusions().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, exclusion,
+            firstOutcome = (await new Exclusions().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, exclusion,
                 local, remote, storeCrash, (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, ct,
-                heldInput: _ => [], coversThrough: _ => true);
+                heldInput: _ => [], coversThrough: _ => true)).Outcome;
         }
         catch (Exception error) when (error is IOException or AggregateException) { }
         Check.Require(crashed && !remote.Items.ContainsKey("x") && !remote.Items.ContainsKey("x/a"),
-            "L119: the crash cut did not remove the excluded Dropbox copy before the save");
+            $"L119: the crash cut did not remove the excluded Dropbox copy before the save (crashed={crashed} removed={removed} outcome={firstOutcome} remoteX={remote.Items.ContainsKey("x")} remoteXA={remote.Items.ContainsKey("x/a")} deletes={remote.Requests[nameof(ISide.DeleteAsync)]} reads={remote.Requests[nameof(ISide.ReadOneAsync)]})");
         Check.Require(store.Records.Values.Any(r => r.LocalPath == "x/a"),
             "L119: the crash cut committed the binding removal, so the restart has nothing to resolve");
         // Restart: the owed exclusion re-applies on the plain store (the root is already gone, so it settles).
