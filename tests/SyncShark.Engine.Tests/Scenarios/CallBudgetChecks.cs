@@ -143,7 +143,7 @@ public static class CallBudgetChecks
         using var source = new MemoryStream(new byte[size]);
         await using var staged = await writer.StageAsync(Send, Endpoint, limit, file.Path, source, file with { Size = size, ContentHash = "" }, null, default);
         var expected = (int)((size + limit - 1) / limit);
-        Check.Require(sent.Count == expected && sent[0].Route == "upload_session/start" && sent.Skip(1).All(r => r.Route == "upload_session/append") &&
+        Check.Require(sent.Count == expected && sent[0].Route == "start" && sent.Skip(1).All(r => r.Route == "append_v2") &&
             sent.All(r => r.Close == (r == sent[^1])) && sent.Sum(r => r.Length) == size && staged.SessionId == "receipt",
             "Changed upload session did not cost one bounded content request per provider window");
         // Direct path: a seekable source no larger than the window costs no content request at all.
