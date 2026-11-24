@@ -91,7 +91,8 @@ public static class Moves
 
     // Consume the terminal reply's single member: the decided action, or the remote entry the later checks use (null
     // when the item is proved absent).
-    private static (SyncAction? Action, Entry? Remote) TerminalRemote(JobMember member, Row destination,
+    private static (SyncAction? Action, Entry? Remote) TerminalRemote(
+        (Entry? Entry, TextKey? Cause, FailureDisposition? Failure) member, Row destination,
         RenameCandidate candidate, JobMember selected, (IdentityLocation Location, bool InScope)? observed,
         Observations observations, Func<string, SyncedEntry?>? savedDropboxParent)
     {
