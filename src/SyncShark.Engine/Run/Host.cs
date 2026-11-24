@@ -323,7 +323,7 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
                 return m.Manual;
             }
             m.ManualStop?.Dispose(); m.ManualStop=CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var token=m.ManualStop.Token; return m.Manual=Task.Run(async ()=>
+            var token=m.ManualStop.Token; var run=Task.Run(async ()=>
             {
                 try { await work(token); }
                 catch(ChangedUnderneathException error) when(!token.IsCancellationRequested && PathNames.Same(error.Path,m.Pair.LocalRoot))
@@ -333,6 +333,8 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
                 }
                 catch(Exception error) when(!explicitRequest && !token.IsCancellationRequested) { await Failed(m,error,token); }
             },token);
+            m.Manual=run.ContinueWith(static _=>{},CancellationToken.None,TaskContinuationOptions.ExecuteSynchronously,TaskScheduler.Default);
+            return run;
         }
     }
     private RunLog NewLog(string id)
@@ -344,9 +346,14 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
         e is ItemFailedException {ProviderWait:{} wait} provider && wait>TimeSpan.Zero
             ? wait-(provider.ProviderWaitStarted is {} start ? clock.GetElapsedTime(start) : TimeSpan.Zero)
             : settings.Backoff.RetryDelay(failures),clock,ct);
-    private Task Failed(Member m,Exception e,CancellationToken ct) => store!.SaveNoticeAsync(m.Pair.PairId,
+    private async Task Failed(Member m,Exception e,CancellationToken ct)
+    {
+        try { await store!.SaveNoticeAsync(m.Pair.PairId,
         new(0,NoticeKind.Failure,e switch {ItemFailedException i=>i.Cause,EngineRequestException request=>request.Key,_=>TextKey.RootUnavailable},e is ItemFailedException f ? f.Path : string.Empty,
-            new([],null),clock.GetUtcNow(),false),ct);
+            new([],null),clock.GetUtcNow(),false),ct); }
+        catch(OperationCanceledException) when(ct.IsCancellationRequested) { throw; }
+        catch(Exception error) { m.Event(new(RunEventKind.Failed,nameof(IStore.SaveNoticeAsync),string.Empty,error.Message,string.Empty){Error=error}); }
+    }
     private Task Membership(Member m,bool removed,CancellationToken ct) => m.Local==null || m.Pair.Roots==null ? Task.CompletedTask : m.Local.SetMembershipAsync(m.Pair,!m.Pair.Enabled || !m.Admitted || IsPaused(m.Pair.PairId),removed,ct);
     private static async Task Drain(Member m)
     {
@@ -428,7 +435,7 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
                 token.ThrowIfCancellationRequested(); var all=await Configurations(token); all.Add(m.Pair);
                 m.Paths=new(m.Pair,all,m.Type,settings.DefaultIgnoreRules);
                 await PublishParents(pair,all,async ()=>{await db.SavePairAsync(m.Pair,token); return true;},token);
-                // Register the bound adapters only after this pair exists in the store’s published membership.
+                // Register the bound adapters only after this pair exists in the store's published membership.
                 m.Local=null!; m.Dropbox=null!; await Adapters(m,token);
                 m.Admitted=true; await Membership(m,false,token); Start(m);
             }
@@ -673,6 +680,13 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
                 (s,side,f,token)=>Populate(m,s,side,f,token),(b,before,after,token)=>Compare(m,b,before,after,token),ct,m.Queue.CoversHop);
             if(n.Kind==NoticeKind.PutBack && await store.NoticeAsync(pairId,id,ct) is {} remaining)
                 throw new EngineRequestException(remaining.Matches(n)?TextKey.WaitItemRetry:TextKey.ResolveStale,(TextArg.Id,id.ToString()));
+            // A closed put-back ends its ancestor removal's custody; re-attempt only held inputs overlapping this notice's footprint.
+            if(n.Kind==NoticeKind.PutBack)
+            {
+                var owners=m.Queue.RetryHeldAsync(new Scope(n.Path,n.Path),ct);
+                if(!owners.IsCompleted) await OutsideCommands(()=>owners);
+                await owners;
+            }
             return;
         }
         if (choice==ResolutionChoice.BindRoots) { await Membership(m,false,ct); Start(m); return; }

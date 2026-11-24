@@ -35,7 +35,7 @@ public interface IStore : IDisposable
     Task SaveJobAsync(AcceptedJob job, CancellationToken ct);
     IAsyncEnumerable<AcceptedJob> JobsAsync(string pairId, CancellationToken ct);
     Task SettleJobAsync(AcceptedJob job, CancellationToken ct);
-    Task ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct);
+    Task<bool> ArmAsync(string pairId, RemovalSelection victim, StageProof? stage, CancellationToken ct);
     Task<(RemovalSelection Victim, StageProof? Stage)?> ArmedAsync(string pairId, CancellationToken ct);
     Task DisarmAsync(string pairId, RemovalSelection expected, StageProof? expectedStage, CancellationToken ct);
     /// <summary>Capture names only for the Dropbox history acquisition; read its terminal cursor only after the listing finishes successfully.</summary>

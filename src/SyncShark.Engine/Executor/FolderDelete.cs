@@ -25,12 +25,12 @@ public sealed class FolderDelete
     public static async Task<SyncedEntry?> HighestMissingAsync(PairConfig pair,PathScope paths,SyncedEntry folder,ISide source,IStore store,CancellationToken ct)
     {
         var deleting=source.Side;
-        if(await source.ReadByIdAsync(folder.IdOn(deleting),ct) is not null) return null;
+        if(await source.ReadByIdAsync(folder.IdOn(deleting),ct) is {InScope:true}) return null;
         foreach(var ancestor in PathNames.Ancestors(folder.PathOn(deleting)))
         {
             var parent=await store.FindAsync(pair.PairId,deleting,PathNames.KeyFor(deleting,ancestor),ct);
             if(parent is not {IsFolder:true} || paths.ExcludesBinding(parent)) break;
-            if(await source.ReadByIdAsync(parent.IdOn(deleting),ct) is not null) break;
+            if(await source.ReadByIdAsync(parent.IdOn(deleting),ct) is {InScope:true}) break;
             folder=parent;
         }
         return folder;
@@ -261,7 +261,13 @@ public sealed class FolderDelete
             if(uncertain) return removal with {Outcome=RemovalOutcome.Unknown,Cause=TextKey.FailDropboxOutcomeUnknown};
             if(!await RecoverHeldAsync(pair,footprint,deleting,local,dropbox,store,_=>reports,populate,ct,capturedAt:capturedAt,origin:origin,resolveConflict:resolveConflict,selectedCloudWindow:frozen!=null && deleting==Side.Dropbox)) return new(RemovalOutcome.Retained,null,TextKey.RetryRecoveryRequired);
             if(frozen?.Remove(key)==true) frozenChildren![PathNames.KeyFor(deleting,PathNames.Parent(entry.Path))]--;
-            if(saved!=null) await compareOldBinding(saved,footprint,footprint,ct);
+            if(saved!=null)
+            {
+                await compareOldBinding(saved,footprint,footprint,ct);
+                // Effects owns its root commit; direct and recursive deletes have no outer writer.
+                if(origin is (ActionKind.DeleteLocal or ActionKind.DeleteDropbox) && (entry!=folder || covered==null && !splitSelected) && await store.FindAsync(pair.PairId,deleting,saved.KeyOn(deleting),ct)==saved)
+                    await store.CommitAsync(pair.PairId,saved,null,null,null,ct);
+            }
             if(selection!=null) await store.DisarmAsync(pair.PairId,selection,null,ct);
             return removal;
         }
@@ -321,6 +327,7 @@ public sealed class FolderDelete
         var latest=new Dictionary<(string Path,string Id), (long Order,Change Report)>();
         var pathDeletes=new Dictionary<string,long>(PathNames.Comparer);
         var acks=new List<((string Path,string Id) Key,Action Ack)>();long order=0;
+        var superseded=new List<Action>();
         var pinned=retry?.Subject.DropboxVersion;
         if(pinned!=null && (side!=Side.Dropbox || subject==null || pinned.Domain!=pair.Roots?.Dropbox.RootNamespaceId || pinned.Entry.Id!=subject.Id || pinned.Entry.Path!=subject.Path || pinned.NativePath!=PathNames.RootedDropboxPath(pair.DropboxRoot,subject.Path))) return false;
         Entry? distinct=null,echoed=null;
@@ -348,7 +355,10 @@ public sealed class FolderDelete
             {
                 // Borrow only the pinned observation. An unrelated queue entry keeps its own acknowledgement.
                 distinct=c.Observed is {} observed && observed.Id==pinned.Entry.Id && observed.Revision!=pinned.Entry.Revision?observed:null;
+                if(distinct!=null && c.Kind!=ChangeKind.Deleted && !latest.ContainsKey(key) && c.ConsumeHeld!=null) superseded.Add(c.ConsumeHeld);
                 if(c.Observed!=pinned.Entry || c.Kind==ChangeKind.Deleted) continue;
+                foreach(var ack in superseded) acks.Add((key,ack));
+                superseded.Clear();
             }
             latest[key]=(++order,c);
             if(side==Side.Dropbox && key.Item2.Length==0 && c.Kind==ChangeKind.Deleted) pathDeletes[key.Item1]=order;

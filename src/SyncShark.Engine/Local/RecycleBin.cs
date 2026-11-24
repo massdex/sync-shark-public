@@ -270,10 +270,10 @@ public sealed class RecycleBin
         int IFileOperationProgressSink.PauseTimer() => S_OK;
         int IFileOperationProgressSink.ResumeTimer() => S_OK;
     }
-    private readonly Func<Task>? arm;
+    private readonly Func<Task<bool>>? arm;
     private readonly PathScope? scope;
     public RecycleBin() { }
-    internal RecycleBin(Func<Task> arm,PathScope scope) { this.arm=arm; this.scope=scope; }
+    internal RecycleBin(Func<Task<bool>> arm,PathScope scope) { this.arm=arm; this.scope=scope; }
 
     /// <summary>Remove only the selected version; the caller with a store supplies the arm callback.</summary>
     public async Task<RemovalResult> RemoveAsync(string root,DriveType driveType,Entry expected,RemovalSelection? selection,CancellationToken ct)
@@ -296,7 +296,7 @@ public sealed class RecycleBin
             if(!StringComparer.OrdinalIgnoreCase.Equals(hash,selection.Proof.ContentHash))
                 return RemovalResult.Refused(new ChangedUnderneathException(expected.Path){ObservedLocal=expected with {ContentHash=hash}});
         }
-        ct.ThrowIfCancellationRequested(); await arm();
+        ct.ThrowIfCancellationRequested(); if(!await arm()) return new(RemovalOutcome.Pending,null,null);
         string? receipt;
         if(managed)
         {

@@ -409,5 +409,9 @@
   "SignInReturnRetry": "Sign-in did not finish. Run accounts connect again.",
   "HostNotRunning": "The Sync Shark host is not running.",
   "DifferingConnections": "The connection lists differ. The original append log is at {Path}. On the next start the fixed list is used; reconnect any missing account.",
-  "ProductName": "Sync Shark"
+  "ProductName": "Sync Shark",
+  "CredentialUserName": "Dropbox refresh token",
+  "SignInPage": "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{Name}</title></head><body><main><h1>{Name}</h1><p>{Message}</p></main></body></html>",
+  "ChangeLatency": "Change applied {Elapsed} after it was first seen.",
+  "StatusPendingIncoming": "{Pair}  changes waiting: {Count} to this PC, {Total} to Dropbox"
 }

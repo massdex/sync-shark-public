@@ -155,6 +155,7 @@ public static class MovesChecks
         Check.Require(One(facts).Kind == ActionKind.NeedLocalHash && One(facts with { LocalHash="different" }) is {Kind:ActionKind.ForgetOnly, InfoAfter:TextKey.InfoMovedEdited}, "Same-size dirty content needs a hash before splitting");
         Check.Require(One(facts with {LocalHash="base"}) is {Kind:ActionKind.MoveLocal, Target:"new"}, "Unchanged counterpart must follow");
         Check.Require(One(facts with {CarriesOtherPair=true}).Cause == TextKey.FailCarriesOtherPair && One(facts with {OldOrNewHeld=true}).None == NoneReason.Held && One(facts with {NewOutOfScope=true}).None == NoneReason.OutOfScope, "Eligibility must precede all move legs");
+        Check.Require(One(facts with {LocalHash="base",LeavesScope=true}) is {Kind:ActionKind.DeleteLocal, Row.Dropbox:null} && One(facts with {LocalHash="different",LeavesScope=true}) is {Kind:ActionKind.Upload, InfoAfter:TextKey.InfoEditBeatsDelete},"A move out of scope did not take the ordinary delete or keep the changed peer");
         return Task.CompletedTask;
     }
 }

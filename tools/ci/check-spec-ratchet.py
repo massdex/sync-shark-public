@@ -157,7 +157,46 @@ def tunable_name(name):
 
 
 # Protocol nesting and select-list ordinals are fixed by format, not settings.
-PROTOCOL_FACTS = {('DropboxEntries.cs', 'SharingDepth'), ('StateSchema.cs', 'PlanDepthColumn')}
+# Each further entry is a provider, format or adopted fact kept as a named constant (std 2.3/2.4), with its source.
+PROTOCOL_FACTS = {('DropboxEntries.cs', 'SharingDepth'), ('StateSchema.cs', 'PlanDepthColumn'),
+    ('ContentHash.cs', 'DropboxBlockSize'),  # Dropbox content-hash format: 4,194,304-byte blocks (Dropbox content-hash reference; known-facts D11)
+    ('CredentialStore.cs', 'MaximumTokenBytes'),  # wincred.h CRED_MAX_CREDENTIAL_BLOB_SIZE = 5 * 512 bytes
+    ('DeletedNamesCodec.cs', 'DeletedBlockRows'),  # v16 persisted discovery_deleted_block.name_count capacity, a stored encoding (std 2.4/9.4); store-core split moves it from Encoding.cs
+    ('DirectoryListing.cs', 'EaSizeOffset'),  # ntifs.h FILE_ID_BOTH_DIR_INFORMATION.EaSize field offset 64
+    ('DirectoryListing.cs', 'MaxNameCharacters'),  # NTFS maximum name component, 255 UTF-16 units
+    ('DropboxApi.cs', 'DateResolutionSeconds'),  # RFC 9110 5.6.7: HTTP-date resolution is one second
+    ('DropboxApi.cs', 'LongpollClientAllowanceSeconds'),  # Dropbox files/list_folder/longpoll adds up to 90 s jitter (known-facts D12, D16)
+    ('DropboxApi.cs', 'LongpollMaxSeconds'),  # Dropbox files/list_folder/longpoll timeout maximum 480 s (known-facts D12)
+    ('DropboxApi.cs', 'MaximumWriteSliceBytes'),  # transport bound adopted from Okio's 64 KiB segment slice (READING 8.4; RETAINED write slice)
+    ('DropboxReply.cs', 'ChunkBytes'),  # 0.3.95 streaming chunk, 128 KiB (known-facts M04/K08)
+    ('HostServer.cs', 'MaximumConcurrentCommands'),  # 0.3.95 host connection count, 32 (08a9d06b2 EngineHostEntry.MaximumConnections); named in W1
+    ('HostServer.cs', 'Utf8BytesPerUtf16Unit'),  # RFC 3629: UTF-8 needs at most 3 bytes per UTF-16 code unit; named in W1
+    ('IdentityPaths.cs', 'MaximumNameCharacters'),  # NTFS maximum name component, 255 UTF-16 units
+    ('IdentityPaths.cs', 'MaximumPathCharacters'),  # Win32 extended-length path limit 32,767 characters plus the terminator; named in W1
+    ('IdentityPaths.cs', 'Size'),  # winbase.h FILE_ID_DESCRIPTOR is 24 bytes (dwSize, Type, 16-byte union)
+    ('IdentityPaths.cs', 'StatusBufferOverflow'),  # ntstatus.h STATUS_BUFFER_OVERFLOW = 0x80000005
+    ('InUse.cs', 'SizeConst'),  # restartmanager.h RM_PROCESS_INFO: CCH_RM_MAX_APP_NAME+1 = 256, CCH_RM_MAX_SVC_NAME+1 = 64
+    ('LocalSide.cs', 'readBufferBytes'),  # 0.3.95 streaming chunk, 128 KiB (known-facts M04/K08)
+    ('ResponseStream.cs', 'ReadAllowanceSeconds'),  # dropbox-sdk-java HttpRequestor.DEFAULT_READ_TIMEOUT_MILLIS, 2 min (known-facts D15)
+    ('Routes.cs', 'BytesPerMiB'),  # IEC 80000-13: 1 MiB = 2^20 bytes
+    ('SettingsParser.cs', 'MinimumJournalPageBytes'),  # winioctl.h USN_RECORD_V2: 60-byte header, at most 255 UTF-16 name units
+    ('UsnJournal.cs', 'ErrorInvalidUserBuffer'),  # winerror.h ERROR_INVALID_USER_BUFFER = 1784
+    ('UsnJournal.cs', 'JournalStateBufferBytes'),  # winioctl.h USN_JOURNAL_DATA_V2 is 80 bytes
+    ('UsnJournal.cs', 'JournalStateBytes'),  # winioctl.h USN_JOURNAL_DATA_V0 is 56 bytes
+    ('UsnJournal.cs', 'ReadJournalDataBytes'),  # winioctl.h READ_USN_JOURNAL_DATA_V0 is 40 bytes
+    ('UsnJournal.cs', 'UsnRecordHeaderBytes'),  # winioctl.h USN_RECORD_V2 FileName offset 60
+}
+
+# 0 and 1 as operands (offsets, +1 terminators, indexes, a binary mutex) are structural, as the threshold pattern
+# already treats them. A bare 0 or 1 default, a time-valued call and a time-named default stay counted.
+ZERO_ONE = re.compile(r'(?:0[xX]0*[01]|[01](?:\.0*)?)[fFdDmMlLuU]*')
+TIME_CALL = re.compile(r'(?:TimeSpan\s*\.\s*From\w+|new\s+TimeSpan|Delay|Sleep|Wait|WaitAsync|Timeout|'
+                       r'Add(?:Seconds|Minutes|Milliseconds|Hours|Days)|CancellationTokenSource)\s*\($')
+TIME_NAME = re.compile(r'Seconds|Minutes|Milliseconds|Hours|Timeout|Delay|Interval', re.I)
+
+
+def zero_one(text):
+    return all(ZERO_ONE.fullmatch(token[0]) for token in NUMBER.finditer(text))
 
 
 def tunable_count(masked, path, finding=None):
@@ -167,12 +206,15 @@ def tunable_count(masked, path, finding=None):
     sites = {}
     for match in CALL.finditer(masked):
         end = lex.match_close(masked, match.end() - 1, '(', ')')
-        if NUMBER.search(masked[match.end():end]):
+        arguments = masked[match.end():end]
+        if NUMBER.search(arguments) and (TIME_CALL.search(match[0]) or not zero_one(arguments)):
             sites[('call', match.start())] = end + 1
     for match in re.finditer(r'\b(\w+)\s*=\s*(?!=|>)([^;{}\n]*)', masked):
         if (path.name, match[1]) in PROTOCOL_FACTS:
             continue
-        if tunable_name(match[1]) and not NON_TUNABLE.search(match[1]) and NUMBER.search(match[2]):
+        bare = re.fullmatch(r'\s*' + NUMBER.pattern + r'(?:\s*,\s*\w+\s*=\s*' + NUMBER.pattern + r')*\s*', match[2])
+        structural = zero_one(match[2]) and not bare and not TIME_NAME.search(match[1])
+        if tunable_name(match[1]) and not NON_TUNABLE.search(match[1]) and NUMBER.search(match[2]) and not structural:
             sites[('default', match.start())] = match.end()
     for match in re.finditer(r'\b(?:[\w]+\.)*(count|elapsed|entries|attempts|size|age|depth|bytes)\s*[<>]=?\s*(\d[\d_]*)', masked, re.I):
         if match[2] not in ('0', '1'):

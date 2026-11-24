@@ -79,6 +79,22 @@ class RatchetChecks(unittest.TestCase):
                 self.assertEqual(1, ratchet.tunable_count(source, Path('Example.cs')))
                 self.assertEqual(1, ratchet.tunable_count(source.replace(name, 'RetryLimit'), Path(filename)))
 
+    def test_listed_protocol_fact_is_bound_to_its_file(self):
+        source = 'private const int JournalStateBytes = 56;'
+        self.assertEqual(0, ratchet.tunable_count(source, Path('UsnJournal.cs')))
+        self.assertEqual(1, ratchet.tunable_count(source, Path('Example.cs')))
+        self.assertTrue(all(isinstance(entry, tuple) and len(entry) == 2 for entry in ratchet.PROTOCOL_FACTS))
+
+    def test_zero_one_operands_are_structural(self):
+        for source, count in (('x = 0;', 0), ('items.Skip(1);', 0), ('new SemaphoreSlim(1);', 0),
+                              ('var size = header.AsSpan(1);', 0), ('var bufferBytes = length + 1;', 0),
+                              ('items.Skip(2);', 1), ('var bufferBytes = length + 2;', 1),
+                              ('int minimum = 0;', 1), ('long copyBytes = 0, removeBytes = 0;', 1),
+                              ('Task.Delay(1);', 1), ('TimeSpan.FromSeconds(1);', 1), ('items.WaitAsync(1);', 1),
+                              ('DelaySeconds = 1;', 1), ('var DelaySeconds = x + 1;', 1), ('var pollInterval = x - 1;', 1)):
+            with self.subTest(source=source):
+                self.assertEqual(count, ratchet.tunable_count(source, Path('Example.cs')))
+
     def test_utf8_suffix_is_token_text_not_display_text(self):
         for suffix in ('u8', 'U8'):
             with self.subTest(suffix=suffix):

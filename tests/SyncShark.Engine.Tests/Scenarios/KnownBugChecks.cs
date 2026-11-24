@@ -28,19 +28,18 @@ public static class KnownBugChecks
     public static Task B207BothSidesGoneAsync() =>
         ReconciliationChecks.CompareAsync(true, [], [], [], [], 0, []);
 
-    /// <summary>B-223: an untagged HTTP 500 on upload-session start is a temporary server error to retry
-    /// in place, not an attributed Dropbox refusal. F1 treats only 429 as transient (Dispatcher.cs:271-273)
-    /// and otherwise leaves an unproved dispatched write as UnknownEffect with cause DropboxRefused
-    /// (DropboxErrors.cs:91-102).</summary>
+    /// <summary>B-223: an untagged HTTP 500 on upload-session start carries no proof of no effect. product-0519 makes a
+    /// 500 a failure and forbids resending a dispatched write without proof, so it stays UnknownEffect (no unsafe
+    /// resend) rather than a temporary in-place retry. The host's normal later retry is a separate, later opportunity.</summary>
     public static Task B223Untagged500UploadSessionAsync()
     {
         using var body = JsonDocument.Parse("{}");
         var classified = new DropboxErrors().Classify(HttpStatusCode.InternalServerError, body.RootElement,
             DropboxProtocol.UploadSessionStart, expectedIsNull: false,
             new DropboxErrors.RequestEvidence(false, true, false, false));
-        Check.Require(classified.Disposition == FailureDisposition.TemporaryNoEffect,
+        Check.Require(classified.Disposition == FailureDisposition.UnknownEffect && !classified.ProvenNoEffect,
             $"Untagged 500 on upload_session/start settled as {classified.Disposition}/{classified.Cause}; " +
-            "a temporary server error must retry in place, not be reported as a Dropbox refusal (product-0519).");
+            "product-0519 makes a 500 a failure and forbids resending a dispatched write without proof of no effect.");
         return Task.CompletedTask;
     }
 
@@ -350,35 +349,108 @@ public static class KnownBugChecks
         "followed by a rename-over; the doubles expose only terminal entries, so the superseded remote read cannot be counted.");
 
     public static Task B211MalformedFrameListenerAsync() => throw new NotImplementedException(
-        "DOUBLE: the malformed-frame-then-good-client listener check needs an authenticated named-pipe host " +
-        "(HostServer.AuthenticatedPeer requires the signed product image), which the doubles cannot provide.");
+        "LIVE-ONLY (RS-23): the malformed-frame-then-good-client listener check needs an authenticated named-pipe host " +
+        "(HostServer.AuthenticatedPeer requires the signed product image); verified by rehearsal step RS-23.");
 
     public static Task B214CWakeBehindEchoAsync() => throw new NotImplementedException(
         "DOUBLE: non-starvation behind a folder-move echo backlog needs continuous echo pages; " +
         "F1 CloudEntryEcho/CloudTombstoneEcho are stubs.");
 
     public static Task B229ScopedJournalRepairAsync() => throw new NotImplementedException(
-        "NI: scoped Repair for a verified isolatable journal loss is not implemented (Monitor.cs only separates a " +
-        "verified reset from a failed read); there is no scoped-recovery path to assert.");
+        "PRODUCT-MISSING (closed): B-229-ii is not a defect (product decision); no scoped Repair path is required.");
 
     public static Task B231UnrelatedEffectKeepsMoveNoticeAsync() => throw new NotImplementedException(
         "DOUBLE: the unrelated-effect notice protection lives in SQLite NoticeTable; the in-memory double keeps a " +
         "single slot by path/kind and cannot reproduce the mapped-move subject rejection (NoticeTable.cs:119).");
 
-    public static Task B240ArrivalFloodOpportunityAsync() => throw new NotImplementedException(
-        "DOUBLE: an arrival flood with small unrelated arrivals needs per-change opportunity accounting that the " +
-        "change-page doubles do not expose.");
+    /// <summary>B-240: a slow arrival flood must not take the opportunity from small unrelated arrivals; the five
+    /// small files all complete while the flood is still held.</summary>
+    public static async Task B240ArrivalFloodOpportunityAsync()
+    {
+        using var end = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var queue = new WorkQueue();
+        var pair = ItemChecks.Pair();
+        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // The 128-entry page shape already used in Run/WorkQueueChecks, but 128 distinct new file paths (the slow flood).
+        var flood = Enumerable.Range(0, 128)
+            .Select(i => new Change(Side.Dropbox, ChangeKind.Changed, $"flood/{i}", null, $"flood{i}", null, false, false)).ToArray();
+        var floodPage = queue.AdmitAsync(pair, new(flood, "flood", null), (_, _) => hold.Task, null, end.Token);
+        var smallDone = 0;
+        var smallSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // The bug report's shape: five small unrelated arrivals.
+        var small = Enumerable.Range(0, 5)
+            .Select(i => new Change(Side.Dropbox, ChangeKind.Changed, $"small/{i}", null, $"small{i}", null, false, false)).ToArray();
+        var smallPage = queue.AdmitAsync(pair, new(small, "small", null),
+            (_, _) => { if (Interlocked.Increment(ref smallDone) == small.Length) smallSignal.TrySetResult(); return Task.CompletedTask; }, null, end.Token);
+        try { await smallSignal.Task.WaitAsync(end.Token); }
+        catch (OperationCanceledException) { throw new InvalidDataException("A small unrelated arrival waited behind an earlier arrival flood (B-240)"); }
+        Check.Require(!hold.Task.IsCompleted, "A small unrelated arrival only ran once the flood was released (B-240)");
+        hold.SetResult();
+        await Task.WhenAll(floodPage, smallPage).WaitAsync(end.Token);
+    }
 
     public static Task B250CapacityWaitCancellationAsync() => throw new NotImplementedException(
         "DOUBLE: injected mid-wait cancellation followed by another active pair needs concurrent pair execution, " +
         "which the single-pair doubles do not model.");
 
-    public static Task L60FolderRemovalSaturationAsync() => throw new NotImplementedException(
-        "DOUBLE: pending folder removals occupying every continuation slot needs a bounded continuation pool; " +
-        "the doubles run removals serially.");
+    /// <summary>L60: more pending folder removals than the engine's largest capacity must not occupy a bounded
+    /// continuation pool; an unrelated change still runs while every removal is held, and the removals stay retried,
+    /// not dropped.</summary>
+    public static async Task L60FolderRemovalSaturationAsync()
+    {
+        using var end = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var queue = new WorkQueue();
+        var pair = ItemChecks.Pair();
+        // More held removals than the largest capacity the engine has (the Committer's StoreBatchRows slots).
+        var held = ItemChecks.Settings.StoreBatchRows + 1;
+        var removals = new List<Task>(held + 1);
+        for (var i = 0; i < held; i++)
+            removals.Add(queue.AdmitAsync(pair,
+                new([new Change(Side.Dropbox, ChangeKind.Deleted, $"f{i}", null, $"id{i}", null, false, false)], $"c{i}", null),
+                (_, _) => throw new WorkQueue.Unsettled(), null, end.Token));
+        var ran = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        removals.Add(queue.AdmitAsync(pair,
+            new([new Change(Side.Dropbox, ChangeKind.Changed, "unrelated", null, "unrelated-id", null, false, false)], "unrelated", null),
+            (_, _) => { ran.TrySetResult(); return Task.CompletedTask; }, null, end.Token));
+        try { await ran.Task.WaitAsync(end.Token); }
+        catch (OperationCanceledException) { throw new InvalidDataException("An unrelated change waited behind held folder removals (L60)"); }
+        Check.Require(await queue.RetryHeldAsync(null, default), "The held folder removals were dropped instead of retried (L60)");
+        end.Cancel();
+        try { await Task.WhenAll(removals); } catch { /* the intentionally cancelled held removals release here */ }
+    }
 
-    public static Task L64ChurnOpportunityAsync() => throw new NotImplementedException(
-        "DOUBLE: sustained churn starvation needs replenished refused work across attempts; the double pages are finite.");
+    /// <summary>L64/L100: a refused key is retried at most once per arrival, so sustained churn or repeated refusals
+    /// cannot keep one opportunity alive forever, and an unrelated change in each round still runs.</summary>
+    public static async Task L64ChurnOpportunityAsync()
+    {
+        using var end = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var queue = new WorkQueue();
+        var pair = ItemChecks.Pair();
+        var permitted = false;
+        var hotAttempts = 0;
+        var arrivals = 0;
+        var tasks = new List<Task>();
+        // One page per round; the count only has to exceed one (StoragePageSize is the existing page bound).
+        for (var round = 1; round <= ItemChecks.Settings.StoragePageSize; round++)
+        {
+            arrivals++;
+            tasks.Add(queue.AdmitAsync(pair,
+                new([new Change(Side.Dropbox, ChangeKind.Changed, "hot", null, "hot", null, false, false)], $"hot{round}", null),
+                (_, _) => { Interlocked.Increment(ref hotAttempts); if (!permitted) throw new WorkQueue.Unsettled(); return Task.CompletedTask; }, null, end.Token));
+            var ran = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            tasks.Add(queue.AdmitAsync(pair,
+                new([new Change(Side.Dropbox, ChangeKind.Changed, $"other{round}", null, $"o{round}", null, false, false)], $"other{round}", null),
+                (_, _) => { ran.TrySetResult(); return Task.CompletedTask; }, null, end.Token));
+            try { await ran.Task.WaitAsync(end.Token); }
+            catch (OperationCanceledException) { throw new InvalidDataException("A round's unrelated change never ran while the churned key was refused (L64/L100)"); }
+        }
+        Check.Require(hotAttempts <= arrivals, "A refused key was retried more often than it arrived (L64/L100)");
+        permitted = true;
+        Check.Require(await queue.RetryHeldAsync(null, end.Token), "The refused churned key was dropped instead of retried (L64/L100)");
+        try { await Task.WhenAll(tasks).WaitAsync(end.Token); }
+        catch (OperationCanceledException) { }
+        finally { end.Cancel(); }
+    }
 
     public static Task L66SqlOrdinalsAndParserDepthsAsync() => throw new NotImplementedException(
         "DOUBLE: hand-coded SQL ordinals and provider parser depths need the real SQLite NoticeTable and a reordered " +
@@ -392,16 +464,72 @@ public static class KnownBugChecks
         "DOUBLE: a scope change taking effect at intake needs a live scope mutation between pages; " +
         "the doubles seed a fixed PathScope.");
 
-    public static Task L98MissingMappedParentChildAsync() => throw new NotImplementedException(
-        "DOUBLE: a bound-elsewhere/missing mapped parent with a child arriving before it needs AutoSync intake; " +
-        "the doubles seed terminal entries.");
+    /// <summary>L98/L108: a child arriving before its parent folder, or a move into a counterpart parent that has
+    /// vanished, binds and moves by identity; the provider creates the missing parent.</summary>
+    public static async Task L98MissingMappedParentChildAsync()
+    {
+        // (a) child arriving before its parent folder: nothing is bound yet.
+        {
+            var pair = ItemChecks.Pair();
+            var (paths, queue, store, local, remote) = await BeginAsync(pair, true);
+            var child = ItemChecks.File(Side.Dropbox, "newp/child", 1, "child-id");
+            var parent = ItemChecks.File(Side.Dropbox, "newp", 0, "folder-id", folder: true);
+            remote.Seed(parent, []);
+            remote.Seed(child, [1]);
+            var page = new ChangePage([
+                new Change(Side.Dropbox, ChangeKind.Changed, "newp/child", null, child.Id, child, false, false),
+                new Change(Side.Dropbox, ChangeKind.Changed, "newp", null, parent.Id, parent, false, false)], "c", null);
+            await AutoSync.ApplyPageAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, Side.Dropbox, page, local, remote, store, default);
+            Check.Require(local.Items.TryGetValue("newp/child", out var got) && got.Bytes.SequenceEqual(new byte[] { 1 }),
+                "A child arriving before its parent folder did not reach the PC (L98/L108)");
+            Check.Require(store.Records.Count == 2, $"A child before its parent did not bind both entries ({store.Records.Count}) (L98/L108)");
+            Check.Require(!store.OpenNotices.Any(n => n.Kind == NoticeKind.Failure), "A child before its parent raised a Failure notice (L98/L108)");
+        }
+        // (b) parent gone on the counterpart at effect time: the file must still move by identity.
+        {
+            var pair = ItemChecks.Pair();
+            var folderL = ItemChecks.File(Side.Local, "F", 0, "lf-F", folder: true);
+            var folderD = ItemChecks.File(Side.Dropbox, "F", 0, "df-F", folder: true);
+            var xL = ItemChecks.File(Side.Local, "x", 1, "lf-x");
+            var xD = ItemChecks.File(Side.Dropbox, "x", 1, "df-x");
+            using var store = new InMemoryStateStore();
+            var local = new FakeSide(Side.Local);
+            var remote = new FakeSide(Side.Dropbox);
+            await store.SavePairAsync(pair, default);
+            await store.CommitAsync(pair.PairId, null, SyncedEntries.From(folderL, folderD), null, null, default);
+            await store.CommitAsync(pair.PairId, null, SyncedEntries.From(xL, xD), null, null, default);
+            local.Seed(folderL, []);
+            var movedL = xL with { Path = "F/x" };
+            local.Seed(movedL, [1]);
+            remote.Seed(folderD, []);
+            remote.Seed(xD, [1]);
+            var paths = new PathScope(pair, [pair], DriveType.Fixed);
+            var decision = await Effects.DecideMoveAsync(pair, ItemChecks.Settings, paths,
+                new[] { new RenameCandidate(Side.Local, movedL, SyncedEntries.From(xL, xD)) }, local, remote, store, false, default);
+            Check.Require(decision.Kind == ActionKind.MoveDropbox,
+                $"L98/L108: the file move into a folder decided {decision.Kind} instead of moving the counterpart");
+            var removed = false;
+            var guarded = FolderDeleteChecks.Observe.On(remote, (op, _) =>
+            {
+                if (op == nameof(ISide.MoveAsync) && !removed) { removed = true; remote.Items.Remove("F"); }
+                return null;
+            });
+            var outcome = await new Effects().ApplyAsync(pair, ItemChecks.Settings, _ => { }, paths, decision, local, guarded, store,
+                (_, _, _, _) => Task.CompletedTask, (_, _, _, _) => Task.CompletedTask, default);
+            Check.Require(outcome == EffectOutcome.Applied, "L98/L108: the file move was not applied when its counterpart parent vanished");
+            Check.Require(remote.Items.TryGetValue("F/x", out var moved) && moved.Entry.Id == xD.Id,
+                "L98/L108: the file was not moved by identity under the missing counterpart parent");
+            Check.Require(remote.Requests[nameof(ISide.PublishAsync)] == 0, "L98/L108: the file was re-uploaded instead of moved");
+            Check.Require(!store.OpenNotices.Any(n => n.Kind == NoticeKind.Failure), "L98/L108: a missing counterpart parent raised a Failure notice");
+        }
+    }
 
     public static Task L101ExcludedDescendantFloodAsync() => throw new NotImplementedException(
         "DOUBLE: the excluded-descendant read flood after a folder move needs tombstone routing under exclusion; " +
         "the doubles do not script tombstones for excluded ranges.");
 
     public static Task L102MissingRootPointerAsync() => throw new NotImplementedException(
-        "NI: missing product-root pointer recovery is not implemented at F1 (RecoveryChecks and scenario proof incomplete).");
+        "PRODUCT-MISSING (closed): L102 needs no code (product design); the missing product-root pointer is not a defect.");
 
     public static Task L107AcceptedJobPollingAsync() => throw new NotImplementedException(
         "DOUBLE: evidence-based accepted-job checking without fixed polling needs a live job feed; " +
