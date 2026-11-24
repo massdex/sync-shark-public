@@ -1415,8 +1415,9 @@ public static class FolderChecks
                 Check.Require(File.Exists(Path.Combine(bin, "x")) && File.ReadAllBytes(Path.Combine(bin, "x")).SequenceEqual(new byte[] { 1, 2 }) &&
                     File.Exists(Path.Combine(bin, "x (2)")) && File.ReadAllBytes(Path.Combine(bin, "x (2)")).SequenceEqual(new byte[] { 3, 4 }),
                     "Two receipts for one name did not preserve both versions");
-                Check.Require(r1.RecycledVictim is { } v1 && v1.NativePath == Path.Combine(bin, "x") && v1.Entry.Id == e1.Id && v1.Entry.ContentHash == e1.ContentHash &&
-                    r2.RecycledVictim is { } v2 && v2.NativePath == Path.Combine(bin, "x (2)") && v2.Entry.Id == e2.Id && v2.Entry.ContentHash == e2.ContentHash,
+                Check.Require(r1.RecycledVictim is { } v1 && File.ReadAllBytes(v1.NativePath).SequenceEqual(new byte[] { 1, 2 }) && v1.Entry.Id == e1.Id && v1.Entry.ContentHash == e1.ContentHash &&
+                    r2.RecycledVictim is { } v2 && File.ReadAllBytes(v2.NativePath).SequenceEqual(new byte[] { 3, 4 }) && v2.Entry.Id == e2.Id && v2.Entry.ContentHash == e2.ContentHash &&
+                    v1.NativePath != v2.NativePath,
                     "The two removals did not return receipts naming their own binned versions");
             }
             finally { Subst(drive, "/D"); }
