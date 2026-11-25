@@ -1,0 +1,18 @@
+namespace users
+
+route get_current_account (Void, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "account_info.read"
+        is_preview = false
+
+route get_space_usage (Void, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "account_info.read"
+        is_preview = false
+
