@@ -1,0 +1,170 @@
+namespace files
+
+route create_folder_batch (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route create_folder_batch/check (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route create_folder:2 (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route delete_batch (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route delete_batch/check (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route delete:2 (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route download (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "content"
+        style = "download"
+        scope = "files.content.read"
+        is_preview = false
+
+route get_metadata (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.metadata.read"
+        is_preview = false
+
+route list_folder (Arg, Res, Err)
+    attrs
+        auth = "app,user"
+        host = "api"
+        style = "rpc"
+        scope = "files.metadata.read"
+        is_preview = false
+
+route list_folder/continue (Arg, Res, Err)
+    attrs
+        auth = "app,user"
+        host = "api"
+        style = "rpc"
+        scope = "files.metadata.read"
+        is_preview = false
+
+route list_folder/get_latest_cursor (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.metadata.read"
+        is_preview = false
+
+route list_folder/longpoll (Arg, Res, Err)
+    attrs
+        auth = "noauth"
+        host = "notify"
+        style = "rpc"
+        scope = "files.metadata.read"
+        is_preview = false
+
+route list_revisions (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.metadata.read"
+        is_preview = false
+
+route move_batch/check:2 (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route move_batch:2 (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route move:2 (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route upload (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "content"
+        style = "upload"
+        scope = "files.content.write"
+        is_preview = false
+
+route upload_session/append:2 (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "content"
+        style = "upload"
+        scope = "files.content.write"
+        is_preview = false
+
+route upload_session/finish (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "content"
+        style = "upload"
+        scope = "files.content.write"
+        is_preview = false
+
+route upload_session/finish_batch:2 (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "api"
+        style = "rpc"
+        scope = "files.content.write"
+        is_preview = false
+
+route upload_session/start (Arg, Res, Err)
+    attrs
+        auth = "user"
+        host = "content"
+        style = "upload"
+        scope = "files.content.write"
+        is_preview = false
+
