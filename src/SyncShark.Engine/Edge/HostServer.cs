@@ -1,0 +1,245 @@
+using System.Buffers.Binary;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO.Pipes;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Security.AccessControl;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
+
+namespace Massdex.SyncShark.Engine.Edge;
+
+/// <summary>Owns the one local host address through shutdown and the last admitted command.</summary>
+public sealed class HostServer : IDisposable
+{
+    /// <summary>Signal a waiting CLI launcher without making readiness depend on its continued presence.</summary>
+    public static void Ready(string[] args) {
+        if (args is not [ResourceNames.HostReadyArgument]) return;
+        try { Console.Out.WriteLine(1); Console.Out.Flush(); }
+        catch (IOException) { /* The initiating CLI exited. */ }
+    }
+
+    // The incumbent probe and command send share the original EngineHostEntry connection window (08a9d06b2).
+    internal const int ConnectTimeoutMilliseconds = 300;
+
+    internal static string PipeName {
+        get {
+            // The per-user store is shared across logon sessions.
+            using var identity = WindowsIdentity.GetCurrent();
+            return $"{nameof(HostServer)}.{ResourceNames.HostExecutable}.{identity.User!.Value}";
+        }
+    }
+    private NamedPipeServerStream? waiting;
+    private NamedPipeServerStream Listen(bool first)
+    {
+        // .NET 8 NamedPipeServerStream.Windows passes PipeOptions as open flags, not pipe modes.
+        // Match its CurrentUserOnly DACL and owner; reject network clients in CreateNamedPipeW itself.
+        using var identity=WindowsIdentity.GetCurrent();
+        var owner=identity.Owner ?? throw new UnauthorizedAccessException();
+        var security=new PipeSecurity();
+        security.SetOwner(owner);
+        security.AddAccessRule(new PipeAccessRule(owner,PipeAccessRights.FullControl,AccessControlType.Allow));
+        var pinned=GCHandle.Alloc(security.GetSecurityDescriptorBinaryForm(),GCHandleType.Pinned);
+        try {
+            var attributes=new SecurityAttributes { Length=Marshal.SizeOf<SecurityAttributes>(), Descriptor=pinned.AddrOfPinnedObject(), Inherit=0 };
+            var options=PipeOptions.Asynchronous | (first ? PipeOptions.FirstPipeInstance : PipeOptions.None);
+            const uint RejectRemoteClients=0x8; // winbase.h PIPE_REJECT_REMOTE_CLIENTS; byte type/read mode and WAIT are zero.
+            var handle=CreateNamedPipe(@"\\.\pipe\"+PipeName,(int)options | (int)PipeDirection.InOut,RejectRemoteClients,
+                byte.MaxValue,0,0,0,ref attributes); // winbase.h PIPE_UNLIMITED_INSTANCES; system-default buffers and wait.
+            try {
+                if(handle.IsInvalid) {
+                    int hr=Marshal.GetHRForLastWin32Error();
+                    var error=new Win32Exception(hr & ushort.MaxValue);
+                    if(error.NativeErrorCode==5) throw new UnauthorizedAccessException(error.Message,error); // winerror.h ERROR_ACCESS_DENIED
+                    throw new IOException(error.Message,hr);
+                }
+                return new NamedPipeServerStream(PipeDirection.InOut,true,false,handle);
+            } catch {handle.Dispose();throw;}
+        } finally {pinned.Free();}
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct SecurityAttributes { public int Length; public nint Descriptor; public int Inherit; }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] private static extern SafePipeHandle CreateNamedPipe(string name,int openMode,uint pipeMode,uint instances,uint output,uint input,uint timeout,ref SecurityAttributes attributes);
+
+    /// <summary>Claim before opening product state; authenticate any already-running instance.</summary>
+    public async Task<bool> ClaimAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        try { waiting = Listen(true); return true; }
+        // winerror.h HRESULT_CODE: ERROR_ACCESS_DENIED or ERROR_PIPE_BUSY.
+        catch (Exception e) when (e is UnauthorizedAccessException || e is IOException && (e.HResult & ushort.MaxValue) is 5 or 231) {
+            using var probe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            await probe.ConnectAsync(ConnectTimeoutMilliseconds, ct);
+            using var existing = AuthenticatedPeer(probe);
+            if (existing is null) throw new UnauthorizedAccessException();
+            return false;
+        }
+    }
+    /// <summary>Serve the claimed pipe; stop intake and drain before releasing its name.</summary>
+    public async Task ServeAsync(Run.Host host, CancellationToken ct)
+    {
+        var commands = new Commands();
+        using var intake = CancellationTokenSource.CreateLinkedTokenSource(ct, host.Stopping);
+        await ServeAsync((args, output, error, token) => commands.ExecuteAsync(args, host, output, error, token),
+            token => host.Stopping.IsCancellationRequested ? Task.CompletedTask : host.StopAsync(token), intake.Token);
+    }
+    /// <summary>Serve one authenticated command per connection; the dispatcher owns command semantics.</summary>
+    private async Task ServeAsync(Func<string[], TextWriter, TextWriter, CancellationToken, Task<int>> execute, Func<CancellationToken,Task> shutdown, CancellationToken ct)
+    {
+        if (waiting == null) throw new InvalidOperationException(nameof(ClaimAsync));
+        var active = new List<Task>(); using var intake = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        try {
+            while (!intake.IsCancellationRequested) {
+                var connected = waiting;
+                try { await connected.WaitForConnectionAsync(intake.Token); }
+                // winerror.h HRESULT_CODE: ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_NOT_CONNECTED.
+                catch (IOException e) when ((e.HResult & ushort.MaxValue) is 109 or 232 or 233) { waiting = Listen(false); connected.Dispose(); continue; }
+                waiting = Listen(false);
+                foreach (var task in active.Where(t => t.IsCompleted).ToArray()) { await task; active.Remove(task); }
+                active.Add(HandleAsync(connected));
+            }
+        } catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        finally {
+            try { await intake.CancelAsync(); await shutdown(CancellationToken.None); }
+            finally { try { await Task.WhenAll(active); } finally { Dispose(); } }
+        }
+        async Task HandleAsync(NamedPipeServerStream pipe)
+        {
+            using (pipe) try {
+                using var peer = AuthenticatedPeer(pipe);
+                if (peer is null) return;
+                await DispatchAsync(pipe, execute, intake.Token);
+            } catch (Exception e) when (e is JsonException or InvalidDataException or IOException || e is OperationCanceledException && intake.IsCancellationRequested) { /* End this connection without replay. */ }
+            catch (Exception e) when (e is not OutOfMemoryException) {
+                Console.Error.WriteLine(Text.Get(TextKey.FailureDetail,
+                    (TextArg.Name, e.GetType().FullName ?? e.GetType().Name), (TextArg.Message, e.Message)));
+            }
+        }
+    }
+    /// <summary>Read one command from an authenticated stream and send its output and terminal status.</summary>
+    private static async Task DispatchAsync(Stream pipe, Func<string[],TextWriter,TextWriter,CancellationToken,Task<int>> execute, CancellationToken ct)
+    {
+        var request = await PipeFrame.ReadAsync(pipe, ct);
+        if (request[0] != PipeFrame.Arguments) return;
+        var args = JsonSerializer.Deserialize<string[]>(request.AsSpan(1));
+        if (args == null || args.Any(a => a == null)) return;
+        await PipeFrame.WriteAsync(pipe, new byte[] {PipeFrame.Accepted}, ct);
+        using var gate = new SemaphoreSlim(1);
+        using var output = new Writer(pipe, PipeFrame.Output, gate, ct); using var error = new Writer(pipe, PipeFrame.Error, gate, ct);
+        int code;
+        try { code = await execute(args, output, error, CancellationToken.None); }
+        catch (Exception failure) when (failure is not OutOfMemoryException) {
+            await error.WriteLineAsync(failure.Message);
+            code = 1;
+        }
+        var exit = new byte[1 + sizeof(int)]; exit[0] = PipeFrame.Exit;
+        BinaryPrimitives.WriteInt32LittleEndian(exit.AsSpan(1), code);
+        // Stop cancels intake itself; its successful reply is the only remaining frame on this connection.
+        var replyToken = ct.IsCancellationRequested && code==Cli.SuccessExitCode && Cli.Parse(args)?.CommandKey==CommandKeys.HostStop ? CancellationToken.None : ct;
+        await PipeFrame.WriteAsync(pipe, exit, replyToken);
+    }
+    /// <summary>Authenticate a local peer by its token SID and the Authenticode signer of its process image.</summary>
+    internal static Process? AuthenticatedPeer(PipeStream pipe)
+    {
+        if (!pipe.IsConnected) return null;
+        Process? peer = null;
+        try {
+            uint pid;
+            if (!(pipe is NamedPipeServerStream ? GetNamedPipeClientProcessId(pipe.SafePipeHandle,out pid) : GetNamedPipeServerProcessId(pipe.SafePipeHandle,out pid))) return null;
+            peer = Process.GetProcessById(checked((int)pid)); using var own = Process.GetCurrentProcess();
+            if (pid == own.Id || !OpenProcessToken(peer.SafeHandle, TokenAccessLevels.Query, out var token)) return null;
+            using (token) using (var other = new WindowsIdentity(token.DangerousGetHandle())) using (var me = WindowsIdentity.GetCurrent()) {
+                if (me.User is not { } selfSid || other.User is not { } peerSid || !selfSid.Equals(peerSid)) return null;
+            }
+            var actual = Image(peer);
+            if (actual == null || !(string.Equals(Path.GetFileName(actual), ResourceNames.HostExecutable, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(Path.GetFileName(actual), ResourceNames.CliExecutable, StringComparison.OrdinalIgnoreCase)) ||
+                !SignedProduct(@"\\?\GLOBALROOT" + actual) || peer.HasExited || !pipe.IsConnected) return null;
+            var authenticated = peer; peer = null; return authenticated;
+        } catch (Exception e) when (e is ArgumentException or InvalidOperationException or Win32Exception or UnauthorizedAccessException or IOException or CryptographicException) { return null; }
+        finally { peer?.Dispose(); }
+    }
+    // Windows verifies the PE digest. Read the signer from that very trust state (not a separate certificate lookup).
+    private static bool SignedProduct(string image)
+    {
+        var file = new TrustFile { Size = (uint)Marshal.SizeOf<TrustFile>(), Path = image };
+        var ptr = Marshal.AllocHGlobal((int)file.Size);
+        Marshal.StructureToPtr(file, ptr, false);
+        var trust = new TrustData { Size=(uint)Marshal.SizeOf<TrustData>(), Ui=WtdUiNone, Choice=WtdChoiceFile, File=ptr, Action=WtdStateActionVerify, Flags=WtdOfflineUrlRetrieval };
+        var action = new Guid("00AAC56B-CD44-11D0-8CC2-00C04FC295EE");
+        try {
+            var status = WinVerifyTrust(-1, ref action, ref trust);
+            // winerror.h CERT_E_UNTRUSTEDROOT: only the independently pinned signer is eligible.
+            if (status is not (0 or 0x800B0109) || trust.State == 0) return false;
+            var provider = WTHelperProvDataFromStateData(trust.State);
+            var signer = provider == 0 ? 0 : WTHelperGetProvSignerFromChain(provider, 0, false, 0);
+            var leaf = signer == 0 ? 0 : WTHelperGetProvCertFromChain(signer, 0);
+            if (leaf == 0) return false;
+            using var cert = new X509Certificate2(Marshal.ReadIntPtr(leaf, IntPtr.Size));
+            using var resource = typeof(HostServer).Assembly.GetManifestResourceStream("SyncShark.SignerIdentity.json");
+            if (resource == null) return false;
+            using var pins = JsonDocument.Parse(resource);
+            var pin = pins.RootElement.GetProperty("roles").GetProperty("publisher");
+            var spki = Convert.ToHexString(SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo()));
+            return cert.Subject == pin.GetProperty("subject").GetString() && cert.Issuer == cert.Subject &&
+                pin.GetProperty("thumbprints").EnumerateArray().Any(x => string.Equals(x.GetString(),cert.Thumbprint,StringComparison.OrdinalIgnoreCase)) &&
+                pin.GetProperty("spki").EnumerateArray().Any(x => string.Equals(x.GetString(),spki,StringComparison.OrdinalIgnoreCase));
+        } finally {
+            trust.Action=WtdStateActionClose; WinVerifyTrust(-1,ref action,ref trust);
+            Marshal.DestroyStructure<TrustFile>(ptr); Marshal.FreeHGlobal(ptr);
+        }
+    }
+    // WINTRUST_DATA values from wintrust.h.
+    private const uint WtdUiNone = 2;
+    private const uint WtdChoiceFile = 1;
+    private const uint WtdStateActionVerify = 1;
+    private const uint WtdStateActionClose = 2;
+    private const uint WtdOfflineUrlRetrieval = 0x1000; // wintrust.h WTD_CACHE_ONLY_URL_RETRIEVAL
+    [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] private struct TrustFile { public uint Size; public string Path; public nint File,Subject; }
+    [StructLayout(LayoutKind.Sequential)] private struct TrustData {
+        public uint Size; public nint Policy,Sip; public uint Ui,Revocation,Choice; public nint File;
+        public uint Action; public nint State,Url; public uint Flags,Context; public nint Settings;
+    }
+    [DllImport("wintrust.dll",ExactSpelling=true)] private static extern uint WinVerifyTrust(nint window,ref Guid action,ref TrustData trust);
+    [DllImport("wintrust.dll")] private static extern nint WTHelperProvDataFromStateData(nint state);
+    [DllImport("wintrust.dll")] private static extern nint WTHelperGetProvSignerFromChain(nint provider,uint index,bool counter,uint counterIndex);
+    [DllImport("wintrust.dll")] private static extern nint WTHelperGetProvCertFromChain(nint signer,uint index);
+    // winbase.h PROCESS_NAME_NATIVE (1) identifies the loaded image without following a mutable active junction.
+    private static string? Image(Process process) {
+        // ProcessImageFileName uses UNICODE_STRING.Length (bytes, ushort); QueryFullProcessImageNameW needs a UTF-16 terminator.
+        const int NativeImagePathCapacity = ushort.MaxValue / sizeof(char) + 1;
+        int length = NativeImagePathCapacity; var path = new StringBuilder(length);
+        return QueryFullProcessImageName(process.SafeHandle, 1, path, ref length) ? path.ToString() : null;
+    }
+    [DllImport("kernel32.dll")] private static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint pid);
+    [DllImport("kernel32.dll")] private static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] private static extern bool QueryFullProcessImageName(SafeProcessHandle process, int flags, StringBuilder path, ref int length);
+    [DllImport("advapi32.dll")] private static extern bool OpenProcessToken(SafeProcessHandle process, TokenAccessLevels rights, out SafeAccessTokenHandle token);
+    public void Dispose() { waiting?.Dispose(); waiting = null; }
+    private sealed class Writer(Stream pipe, byte kind, SemaphoreSlim gate, CancellationToken ct) : TextWriter
+    {
+        public override Encoding Encoding => Encoding.UTF8;
+        // UTF-8 needs at most 3 bytes per UTF-16 code unit (RFC 3629).
+        private const int Utf8BytesPerUtf16Unit = 3;
+        public override void Write(char value) => Write(value.ToString());
+        public override void Write(string? value) => WriteAsync(value).GetAwaiter().GetResult();
+        public override Task WriteLineAsync(string? value) => WriteAsync(value + NewLine);
+        public override async Task WriteAsync(string? value) {
+            if (string.IsNullOrEmpty(value)) return;
+            await gate.WaitAsync(ct);
+            try {
+                int offset = 0;
+                while (offset < value.Length) {
+                    int chars = Math.Min(value.Length - offset, PipeFrame.MaximumPayload / Utf8BytesPerUtf16Unit);
+                    if (offset + chars < value.Length && char.IsHighSurrogate(value[offset + chars - 1])) chars--;
+                    var message = new byte[1 + Encoding.GetByteCount(value.AsSpan(offset,chars))]; message[0] = kind;
+                    Encoding.GetBytes(value.AsSpan(offset,chars), message.AsSpan(1));
+                    await PipeFrame.WriteAsync(pipe, message, ct); offset += chars;
+                }
+            } finally { gate.Release(); }
+        }
+    }
+}
