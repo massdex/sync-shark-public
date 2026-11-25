@@ -1,0 +1,4 @@
+# Recycles a synthetic tree through the real Shell; requires github-hosted.
+receipt-walk-measure
+# Runs a cleanup child intended only for disposable CI runners.
+--setup-update-checks
