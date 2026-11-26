@@ -61,9 +61,7 @@ internal sealed class HostLifecycle(Host host)
         }
     }
     // A missing or replaced root is a definite refusal: admission fails (RecheckRoots stops the run). Other read faults retry.
-    private static bool RootGone(Exception e) => e is ChangedUnderneathException or ItemFailedException {Cause:TextKey.RootLocalIdentityChanged}
-        || e is ItemFailedException {InnerException:IOException io} && Local.LocalErrors.Missing(io.HResult)
-        || e is ItemFailedException {InnerException:System.ComponentModel.Win32Exception native} && Local.LocalErrors.Missing(native.NativeErrorCode);
+    private static bool RootGone(Exception e) => e is ChangedUnderneathException or ItemFailedException {Cause:TextKey.RootLocalIdentityChanged or TextKey.LocalRootMissing};
     internal async Task<HostMember> Ready(PairConfig p,CancellationToken ct)
     {
         if (!host.Members.TryGetValue(p.PairId,out var m)) m=Attach(p);

@@ -171,7 +171,7 @@ public static class HostChecks
             var ok=await (Task<bool>)AutoSyncChecks.Observation.Forward(inner,m,args)!;if(ok)finished.TrySetResult();return ok;
         }
         var local=QuietSide(new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)});var pc=(JournalProbe)(object)local;
-        pc.ReadRoot=()=>{if(Volatile.Read(ref gone))throw new ItemFailedException(pair.Name,TextKey.RootLocalIdentityUnavailable,new IOException("gone",unchecked((int)0x80070003)));};
+        pc.ReadRoot=()=>{if(Volatile.Read(ref gone))throw new ItemFailedException(pair.Name,TextKey.LocalRootMissing,new IOException("gone",unchecked((int)0x80070003)));};
         var remote=QuietSide(new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)});var cloud=(JournalProbe)(object)remote;
         cloud.Feed=async (_,ct)=>{if(Interlocked.Increment(ref reads)==1){await failRead.Task.WaitAsync(ct);throw new ItemFailedException(string.Empty,TextKey.SignInReturnRetry,null);}
             rewound.TrySetResult();await Task.Delay(Timeout.Infinite,ct);throw new InvalidOperationException();};
@@ -187,7 +187,7 @@ public static class HostChecks
                 try{await repair.WaitAsync(TimeSpan.FromSeconds(10),token);}catch(OperationCanceledException) when(!token.IsCancellationRequested){stopped=true;}
                 catch(TimeoutException e){throw new InvalidDataException("A root that was gone at the rewind left the Repair running",e);}
                 Check.Require(stopped && !finished.Task.IsCompleted,"A Repair finished after its root was gone");
-                Check.Require(raw.OpenNotices.Any(n=>n.Cause==TextKey.RootLocalIdentityUnavailable),"A root that was gone raised no root notice");
+                Check.Require(raw.OpenNotices.Any(n=>n.Cause==TextKey.LocalRootMissing),"A root that was gone raised no root notice");
                 return;
             }
             try{await rewound.Task.WaitAsync(TimeSpan.FromSeconds(10),token);}

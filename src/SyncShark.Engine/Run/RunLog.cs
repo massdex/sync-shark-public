@@ -148,15 +148,16 @@ public sealed class RunLog : IDisposable
     internal static bool IsCommittedEffect(string outcome) => outcome is nameof(Side.Local) or nameof(Side.Dropbox)
         or nameof(Executor.EffectOutcome.Applied) or nameof(RemovalOutcome.Published) or nameof(RemovalOutcome.Removed);
 
-    // Exceptions may contain credentials, headers or response bodies. Only typed facts cross the log boundary.
-    /// <summary>The exception type and a path-free cause key or HRESULT; never Message or an item path.</summary>
-    internal static string FailureTag(Exception error) => error.GetType().Name + FactJoiner + (error switch
+    /// <summary>The exception type and a path-free cause key, space text or HRESULT; never Message or an item path.</summary>
+    public static string FailureTag(Exception error) => error.GetType().Name + FactJoiner + (error switch
     {
         ItemFailedException item => item.Cause.ToString(),
         EngineRequestException request => request.Key.ToString(),
+        InsufficientSpaceException => Text.Get(TextKey.RepairStoppedNoSpace),
         _ => error.HResult.ToString(CultureInfo.InvariantCulture)
     });
 
+    // Exceptions may contain credentials, headers or response bodies. Only typed facts cross the log boundary.
     private static string FailureReason(Exception error)
     {
         for (Exception? current = error; current is not null; current = current.InnerException)

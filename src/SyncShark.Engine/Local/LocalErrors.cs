@@ -49,6 +49,8 @@ public static class LocalErrors
             ItemFailedException { Cause: TextKey.RootLocalNetworkUnsupported or TextKey.RootLocalFormatUnsupported } f => f.Cause,
             ChangedUnderneathException => TextKey.RootLocalIdentityChanged,
             UnauthorizedAccessException or Win32Exception { NativeErrorCode: ErrorAccessDenied } => TextKey.RootLocalAccessDenied,
+            IOException io when Missing(io.HResult) => TextKey.LocalRootMissing,
+            Win32Exception native when Missing(native.NativeErrorCode) => TextKey.LocalRootMissing,
             _ when IsFileFailure(error) => TextKey.RootLocalIdentityUnavailable,
             _ => null
         };
