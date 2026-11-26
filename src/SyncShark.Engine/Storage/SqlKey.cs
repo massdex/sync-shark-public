@@ -33,6 +33,7 @@ public enum SqlKey
     PairTablePosition2,
     PairTableCursor1,
     PairTableCursor2,
+    PairTableAppendDeleted1,
     PairTableAdvance1,
     PairTableReadRepair1,
     PairTableResolveDrive1,

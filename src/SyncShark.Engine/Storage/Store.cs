@@ -117,6 +117,8 @@ public sealed class Store : IStore
     public Task<string?> CursorAsync(string pairId, CancellationToken ct) => Locked(() => pairs.CursorAsync(Connection, pairId, ct), ct);
     /// <summary>Save the settled ordinary change cursor.</summary>
     public Task SaveCursorAsync(string pairId, string cursor, CancellationToken ct) => Locked(() => pairs.SaveCursorAsync(Connection, pairId, cursor, ct), ct);
+    /// <summary>Save the settled change cursor with the deleted names its page reported.</summary>
+    public Task SaveCursorAsync(string pairId, string cursor, IReadOnlyList<string> deletedKeys, CancellationToken ct) => Locked(() => pairs.SaveCursorAsync(Connection, pairId, cursor, deletedKeys, ct), ct);
     /// <summary>Advance the Repair revision with its reason.</summary>
     public Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct) => Locked(() => pairs.OweRepairAsync(Connection, pairId, side, reason, ct), ct);
     /// <summary>Owe one scoped Repair at the stored pair in one transaction.</summary>

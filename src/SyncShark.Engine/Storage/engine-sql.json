@@ -29,6 +29,7 @@
   "PairTablePosition2": "INSERT INTO journal_position VALUES($v,$j,$n) ON CONFLICT(volume_key) DO UPDATE SET journal_id=excluded.journal_id,next_usn=excluded.next_usn",
   "PairTableCursor1": "SELECT cursor FROM source_state WHERE pair_id={PairTablePairKey} AND side=1",
   "PairTableCursor2": "INSERT INTO source_state(pair_id,side,cursor,repair_revision) VALUES({PairTablePairKey},1,$c,0) ON CONFLICT(pair_id,side) DO UPDATE SET cursor=excluded.cursor",
+  "PairTableAppendDeleted1": "INSERT OR IGNORE INTO discovery_deleted_delta(pair_id,path_key) VALUES({PairTablePairKey},$k)",
   "PairTableAdvance1": "INSERT INTO source_state(pair_id,side,repair_reason,repair_revision) VALUES({PairTablePairKey},$side,$reason,1) ON CONFLICT(pair_id,side) DO UPDATE SET repair_revision=repair_revision+1,repair_reason=CASE WHEN excluded.repair_reason='requested' THEN coalesce(repair_reason,excluded.repair_reason) ELSE coalesce(excluded.repair_reason,repair_reason) END RETURNING repair_revision",
   "PairTableReadRepair1": "SELECT repair_revision,repair_reason FROM source_state WHERE pair_id={PairTablePairKey} AND side=$s",
   "PairTableResolveDrive1": "UPDATE pair SET def_json=$json WHERE pair_id=$p",

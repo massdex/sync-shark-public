@@ -176,15 +176,17 @@ public static class DropboxListingChecks
         Check.Require(!await rows.MoveNextAsync() && acquired == "end" && waits == 1,
             "The retried page did not complete after exactly one wait.");
 
-        wire.Add(route, folderId, null);
-        try
-        {
-            await foreach (var _ in listing.ReadFolderAsync(api, pair, folderId, options, default))
-                Check.Require(false, "A failed inventory read published a row.");
-            Check.Require(false, "A failed inventory read completed normally.");
-        }
-        catch (InventoryIncompleteException failure) when (failure.InnerException is HttpRequestException) { }
-        Check.Require(acquired == "end", "A failed read replaced the last acquired cursor.");
+        // A transport failure on a later page retries that page with its cursor after the backoff, keeping earlier rows.
+        acquired = null;
+        wire.Add(route, folderId, DropboxStubHandler.Page("mid", true, DropboxStubHandler.Folder("/Pair A/Child", childId)));
+        wire.Add("files/list_folder/continue", "mid", null);
+        wire.Add("files/list_folder/continue", "mid", DropboxStubHandler.Page("last", false));
+        await using var again = listing.ReadFolderAsync(api, pair, folderId, options, default).GetAsyncEnumerator();
+        Check.Require(await again.MoveNextAsync() && again.Current.Entry?.Id == childId, "The first page lost its row.");
+        var retried = again.MoveNextAsync();
+        Check.Require(!retried.IsCompleted && waits == 2 && acquired is null, "A transport failure did not wait to retry its page.");
+        clock.ElapseScheduledDelay();
+        Check.Require(!await retried && acquired == "last", "The failed page was not retried with its own cursor.");
         wire.Done();
     }
 

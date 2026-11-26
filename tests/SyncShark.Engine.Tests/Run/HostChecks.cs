@@ -29,7 +29,7 @@ public static class HostChecks
         var stop=host.Stopping; await host.StopAsync(default); Check.Require(stop.IsCancellationRequested,"Host did not notify the pipe owner of stop");
         var errors=new List<string>();
         System.Runtime.ExceptionServices.ExceptionDispatchInfo? missing=null;
-        foreach(var check in new Func<Task>[]{IndependentBind,MemberRewind,ForeignCancellation,DisconnectedAdapter,ExplicitBind,PendingOuterScope,RemovingMember,ReleaseFailure,FailedFirstRead,OldPublicationFence,FailedExplicitRepairAsync,FailedNoticeWriteAsync,UnexpectedFailureLogged,StopAfterDrainFailure,NoticeStreamReleasesCommands,MalformedPairRemovable,OwedScopeIsolationAsync,OwedScopeHandOffAsync,OwedScopeReadFailureAsync,ExplicitRepairPartialInventoryWakesAsync,DirectSettlementFailureWakesAsync})
+        foreach(var check in new Func<Task>[]{IndependentBind,MemberRewind,ForeignCancellation,DisconnectedAdapter,ExplicitBind,PendingOuterScope,RemovingMember,ReleaseFailure,FailedFirstRead,OldPublicationFence,FailedExplicitRepairAsync,FailedNoticeWriteAsync,UnexpectedFailureLogged,StopAfterDrainFailure,NoticeStreamReleasesCommands,MalformedPairRemovable,OwedScopeIsolationAsync,OwedScopeHandOffAsync,OwedScopeReadFailureAsync,ExplicitRepairPartialInventoryWakesAsync,DirectSettlementFailureWakesAsync,RequiredRepairRetryNoticeAsync})
             try { await check(); }
             catch(NotImplementedException e) {missing??=System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e);}
             catch(InvalidDataException e) {errors.Add($"{check.Method.Name}: {e}");}
@@ -859,6 +859,30 @@ public static class HostChecks
             Check.Require(!((await raw.PairAsync(pair.PairId,ct))?.OwedScopes ?? []).Contains(new Scope("B","B")),"The newly owed scope was left behind");
             Check.Require(db.Items.ContainsKey("B/ok"),"The newly owed scope did not sync");
         }
+        finally {stop.Cancel();try{await host.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));}catch(TimeoutException){}}
+    }
+    // A failing owed full Repair shows the one retry notice from its first failure; the retried Repair's success closes it.
+    private static async Task RequiredRepairRetryNoticeAsync()
+    {
+        using var raw=new InMemoryStateStore();
+        var pair=Bound("retry",@"T:\Retry",1);
+        await raw.SavePairAsync(pair,default);
+        var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
+        var db=new FakeSide(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
+        pc.Seed(ItemChecks.File(Side.Local,"bad",0,"pc-bad",true),[]); pc.Seed(ItemChecks.File(Side.Local,"bad/x",0,"pc-badx",true),[]); pc.ReadFailures["bad/x"]=new ItemFailedException("bad/x",TextKey.ReadLocalFailed,null);
+        bool Open() => raw.OpenNotices.Any(n=>n is {Kind:NoticeKind.Failure,Cause:TextKey.RequiredRepairRetry});
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(raw),(_,_,_,_,_)=>Task.FromResult((QuietSide(pc),QuietSide(db))),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
+        using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(30)); var ct=stop.Token;
+        try
+        {
+            await host.StartAsync(ct);
+            while(!Open()) await Task.Delay(20,ct);
+            Check.Require(raw.OpenNotices.Count(n=>n.Cause==TextKey.RequiredRepairRetry)==1 && !raw.OpenNotices.Any(n=>n.Cause==TextKey.RootUnavailable),"A failed owed Repair did not raise exactly the one retry notice");
+            pc.ReadFailures.Clear();
+            while(Open()) await Task.Delay(20,ct);
+            Check.Require((await raw.RepairStateAsync(pair.PairId,ct)).FirstRepairDone,"The retry notice closed before a full Repair succeeded");
+        }
+        catch(OperationCanceledException) when(stop.IsCancellationRequested) { throw new InvalidDataException("The retry notice was not raised or never closed"); }
         finally {stop.Cancel();try{await host.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));}catch(TimeoutException){}}
     }
     private static async Task<PairConfig?> SignalPair(Task<PairConfig?> read,TaskCompletionSource signal)

@@ -140,7 +140,7 @@ public static class AutoSync
         }
         var settlement=queue.AdmitAsync(pair,page,Apply,
             source==Side.Local ? local.SettleJournalAsync : null,
-            source==Side.Dropbox ? (cursor,token)=>store.SaveCursorAsync(pair.PairId,cursor,token) : null,
+            source==Side.Dropbox ? (cursor,token)=>store.SaveCursorAsync(pair.PairId,cursor,page.Changes.Where(c=>c.Kind==ChangeKind.Deleted && c.Path!=null).Select(c=>PathNames.Key(c.Path!)).ToArray(),token) : null,
             source==Side.Dropbox ? (change,token)=>queue.Unfinished.CheckAsync(pair,settings,events,paths,change,local,dropbox,store,queue.Held,Populate,Hop,token) : null,ct);
         if(!settlement.IsFaulted && !settlement.IsCanceled) Registered(); // Empty and prerequisite-blocked pages have no immediate callback.
         if(gained)

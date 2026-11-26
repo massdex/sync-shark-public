@@ -17,14 +17,25 @@ public static class Repair
         var run=new RepairRun(pair,settings,events,paths,queue,local,dropbox,store,scope,physicalHop,ct,caughtUp,localRepaired);
         await run.PrepareAsync();
         if(await run.FastPathAsync()) return;
+        await CheckRootsAsync(pair,local,dropbox,store,ct);
         store.BeginScan(pair.PairId,run.scan);
         try
         {
             await run.AcquireAsync();
+            await CheckRootsAsync(pair,local,dropbox,store,ct);
             await run.ScanAsync();
             await run.BookkeepingAsync();
         }
         finally { await run.CleanupAsync(); }
+    }
+
+    // Both saved top-folder identities are compared right before and right after the listing; a change refuses the Repair with the root notice.
+    private static async Task CheckRootsAsync(PairConfig pair,ISide local,ISide dropbox,IStore store,CancellationToken ct)
+    {
+        if(pair.Roots==null) return;
+        var a=await local.RootAsync(ct); var b=await dropbox.RootAsync(ct);
+        var observed=a.Local!=null && b.Dropbox!=null ? new RootIdentity(pair.LocalRoot,pair.DropboxRoot,pair.ConnectionId,a.Local,b.Dropbox) : null;
+        if(!await new PairRunner().CheckRootsAsync(pair,observed,a.Drive,store,ct)) throw new ChangedUnderneathException(pair.LocalRoot);
     }
 
     /// <summary>Resolve the assigned id of this attempt, never retry a replacement at its path.</summary>

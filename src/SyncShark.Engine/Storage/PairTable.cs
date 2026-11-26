@@ -194,6 +194,14 @@ public sealed class PairTable
     private static Task Cursor(SqliteConnection db,SqliteTransaction? tx,string id,string cursor,CancellationToken ct) => Write(db,tx,Sql.Get(SqlKey.PairTableCursor2),ct,("$p",id),("$c",cursor));
     /// <summary>Advance a settled cursor without replacing outstanding debt.</summary>
     public Task SaveCursorAsync(SqliteConnection db,string pairId,string cursor,CancellationToken ct) => Cursor(db,null,pairId,cursor,ct);
+    /// <summary>Advance the settled cursor and append that page's deleted names in one transaction.</summary>
+    public async Task SaveCursorAsync(SqliteConnection db,string pairId,string cursor,IReadOnlyList<string> deletedKeys,CancellationToken ct)
+    {
+        using var tx=db.BeginTransaction(deferred:false);
+        await Cursor(db,tx,pairId,cursor,ct);
+        foreach(var key in deletedKeys) await Write(db,tx,Sql.Get(SqlKey.PairTableAppendDeleted1),ct,("$p",pairId),("$k",key));
+        tx.Commit();
+    }
     private static async Task<long> Advance(SqliteConnection db,SqliteTransaction? tx,string id,Side side,string? reason,CancellationToken ct) => (long)(await Value(db,tx,Sql.Get(SqlKey.PairTableAdvance1),ct,("$p",id),("$side",(int)side),("$reason",reason)) ?? throw new InvalidDataException());
     /// <summary>Advance the affected side's Repair revision and record its reason.</summary>
     public Task<long> OweRepairAsync(SqliteConnection db,string pairId,Side side,string reason,CancellationToken ct) => Advance(db,null,pairId,side,reason,ct);

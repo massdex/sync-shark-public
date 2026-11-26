@@ -31,6 +31,9 @@ public interface IStore : IDisposable
     Task SavePositionAsync(string volume, JournalPosition position, CancellationToken ct);
     Task<string?> CursorAsync(string pairId, CancellationToken ct);
     Task SaveCursorAsync(string pairId, string cursor, CancellationToken ct);
+    /// <summary>Save the settled change cursor and append its page's deleted names in the same transaction.</summary>
+    Task SaveCursorAsync(string pairId, string cursor, IReadOnlyList<string> deletedKeys, CancellationToken ct) =>
+        deletedKeys.Count == 0 ? SaveCursorAsync(pairId, cursor, ct) : throw new NotImplementedException();
     Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct);
     /// <summary>Owe one scoped Repair at the stored pair in one transaction.</summary>
     Task OweScopeAsync(string pairId, Scope scope, CancellationToken ct);

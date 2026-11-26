@@ -190,6 +190,9 @@ public sealed class DropboxApi
     /// <summary>Waits through the shared transport limiter.</summary>
     public Task WaitAsync(TimeSpan delay, CancellationToken ct) => _limiter.Value.WaitAsync(delay, _clock, ct);
 
+    /// <summary>The adopted backoff delay after this many consecutive transient failures.</summary>
+    public TimeSpan RetryDelay(int failures) => _limiter.Value.RetryDelay(failures);
+
     private async Task<JsonDocument> SendJsonAsync(string route, string argumentJson, CancellationToken ct)
     {
         using var request = DropboxHttp.BuildRequest(route, argumentJson);

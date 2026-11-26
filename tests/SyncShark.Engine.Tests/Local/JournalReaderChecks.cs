@@ -110,7 +110,7 @@ public static class JournalReaderChecks
     private static async Task ReviewCases()
     {
         var failures=new List<string>();
-        foreach(var test in new[]{"rename","rename-file","rename-keep","unreadable","settled-hops","reset-wrap","reset-id","root","skip","remove","skew","live-skew","early-write","child-hop","redacted-hop","locate-fails","entry-fails","join-reset","leave-reset","mismatch-fence","backlog16","backlog32","name-race","after-observation","alias-old","alias-new","alias-unbound","armed-child","link-race","link-unlink","wake-mixed","cold-high","stale-valid","member-bound","paused-alias-write","paused-alias-write-excluded","armed-missing","armed-substitute","reset-crash","settlement-surface","armed-delete","lookup-hold","entry-hold","failed-order","child-lookup-failed","child-exact-absent","child-exact-substitute","stage-lookup-failure","stage-entry-failure","armed-stage-entry-failure","retired-stage-create","retired-stage-delete"})
+        foreach(var test in new[]{"rename","rename-file","rename-keep","unreadable","settled-hops","reset-wrap","reset-id","root","skip","remove","skew","live-skew","early-write","child-hop","redacted-hop","locate-fails","entry-fails","join-reset","leave-reset","mismatch-fence","backlog16","backlog32","name-race","after-observation","alias-old","alias-new","alias-unbound","armed-child","link-race","link-unlink","wake-mixed","cold-high","stale-valid","member-bound","paused-alias-write","paused-alias-write-excluded","armed-missing","armed-substitute","reset-crash","settlement-surface","armed-delete","lookup-hold","entry-hold","failed-order","child-lookup-failed","child-exact-absent","child-exact-substitute","stage-lookup-failure","stage-entry-failure","armed-stage-entry-failure","retired-stage-create","retired-stage-delete","repeat-fault"})
         {
             try { await RunCase(test); }
             catch(Exception error) { failures.Add(test+": "+error.GetType().Name+" "+error.Message); }
@@ -146,6 +146,15 @@ public static class JournalReaderChecks
             p=>test=="entry-fails" && failRead && p=="END" ? throw new IOException() : new(p,false,1,DateTimeOffset.UnixEpoch,p=="independent"?"14":p.EndsWith("child",StringComparison.Ordinal)?"13":"12","","",test=="skip"?nameof(TextKey.SkipOnlineOnly):null));
         foreach(var pair in new[]{a,b}) {await store.SavePairAsync(pair,default); Attach(pair);}
         Task<ChangePage> Fetch(PairConfig pair,ulong n)=>reader.ReadPageAsync(pair,start,new(1,n),settings,default);
+        if(test=="repeat-fault")
+        {
+            // The first page failure is retried from the same position; failing there again starts fresh and owes Repair.
+            src.Page=(p,_,_)=>Task.FromResult(new NtfsUsnPage(NtfsUsnPageStatus.Unavailable,p.NextUsn,5));
+            await reader.Membership(b,false,true);
+            try { await Fetch(a,80); throw new InvalidDataException("A failed journal page returned a page"); } catch(JournalSourceException) { }
+            var fresh=await Fetch(a,80);
+            Check.Require(fresh.ContinuityLost && (await store.ReadRepairAsync("a",Side.Local,default)).Revision==1 && await store.PositionAsync("1",default)==src.Tail,"A repeated journal page fault did not start fresh and owe Repair");return;
+        }
         if(test is "cold-high" or "stale-valid")
         {
             await store.SavePositionAsync("1",new(1,80),default); src.Tail=new(1,test=="cold-high"?60UL:100UL);

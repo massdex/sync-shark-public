@@ -667,6 +667,43 @@ public static class RepairChecks
         finally {directory.Delete(true);}
     }
 
+    /// <summary>A Dropbox top folder replaced while the Repair lists is refused by the check right after the listing.</summary>
+    public static Task RootsCheckedAroundListingAsync() => AutoSyncChecks.WithinDeadline(async ct=>
+    {
+        using var store=new InMemoryStateStore(); var p=ItemChecks.Pair();
+        var pair=p with {Roots=new(p.LocalRoot,p.DropboxRoot,p.ConnectionId,new(1,2,null),new("account","root","home","folder"))};
+        await store.SavePairAsync(pair,ct);
+        var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
+        var cloud=new FakeSide(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
+        pc.Seed(ItemChecks.File(Side.Local,"a",1,"pc-a"),[1]);
+        var remote=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>{
+            if(m.Name==nameof(ISide.ReadAllAsync)) cloud.Root=(null,pair.Roots.Dropbox with {FolderId="other"},null,null);
+            return AutoSyncChecks.Observation.Forward(cloud,m,args);
+        });
+        try { await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(),pc,remote,store,null,null,ct); throw new InvalidDataException("A Repair over a replaced Dropbox top folder completed"); }
+        catch(ChangedUnderneathException) { }
+        Check.Require(!cloud.Items.ContainsKey("a") && store.OpenNotices.Any(n=>n is {Kind:NoticeKind.RootIdentity,Cause:TextKey.RootDropboxFolderChanged}),"A replaced Dropbox top folder was synced into or raised no root notice");
+    });
+
+    /// <summary>A Dropbox change page's deleted names join the saved deleted-name history together with its cursor.</summary>
+    public static Task AutoSyncAppendsDeletedNamesAsync() => AutoSyncChecks.WithinDeadline(async ct=>
+    {
+        var directory=Directory.CreateTempSubdirectory();
+        try
+        {
+            var image=Path.Combine(directory.FullName,"fixture.sqlite");
+            using var db=new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder {DataSource=image,Pooling=false}.ToString());
+            await db.OpenAsync(ct);db.CreateFunction<string,string>("pathkey",PathNames.Key,isDeterministic:true);
+            using var seed=db.CreateCommand();seed.CommandText=global::Massdex.SyncShark.Engine.Storage.Schema.Create+$"PRAGMA user_version={(global::Massdex.SyncShark.Engine.Storage.Schema.Version)};";await seed.ExecuteNonQueryAsync(ct);
+            using var store=new global::Massdex.SyncShark.Engine.Storage.Store(image,false,ItemChecks.Settings); var pair=ItemChecks.Pair();await store.SavePairAsync(pair,ct);
+            seed.CommandText="UPDATE pair SET deleted_history_cursor='previous',deleted_history_owed=0 WHERE pair_id=$id;";seed.Parameters.AddWithValue("$id",pair.PairId);await seed.ExecuteNonQueryAsync(ct);
+            await store.SaveCursorAsync(pair.PairId,"next",[PathNames.Key("Gone")],ct);
+            Check.Require(await store.CursorAsync(pair.PairId,ct)=="next" && await store.DeletedNameAsync(pair.PairId,null,PathNames.Key("Gone"),ct) && !await store.DeletedNameAsync(pair.PairId,null,PathNames.Key("Kept"),ct),
+                "A Dropbox deletion seen by AutoSync was not appended to the saved deleted names with its cursor");
+        }
+        finally {directory.Delete(true);}
+    });
+
     /// <summary>A damaged saved history must be replaced by the first Repair, before it publishes completion.</summary>
     public static Task CorruptHistoryAsync() => AutoSyncChecks.WithinDeadline(async ct=>
     {

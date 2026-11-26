@@ -225,6 +225,12 @@ public sealed class InMemoryStateStore : IStore
         ct.ThrowIfCancellationRequested();
         lock(pairs) cursors[pairId]=cursor; return Task.CompletedTask;
     }
+    public Task SaveCursorAsync(string pairId, string cursor, IReadOnlyList<string> deletedKeys, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock(pairs) { cursors[pairId]=cursor; foreach(var key in deletedKeys) spentDeleted.TryAdd((pairId,key),(false,null)); }
+        return Task.CompletedTask;
+    }
     /// <summary>OweRepair operation on the supplied facts.</summary>
     public Task<long> OweRepairAsync(string pairId, Side side, string reason, CancellationToken ct)
     {

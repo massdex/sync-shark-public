@@ -290,6 +290,8 @@ public static class CheckRegistry
             new("Run/retained repair attempt", Run.RepairChecks.RetainedAttemptAsync),
             new("Run/covered repair hop", Run.RepairChecks.CoveredHopAsync),
             new("Run/corrupt history", Run.RepairChecks.CorruptHistoryAsync),
+            new("Run/roots around listing", Run.RepairChecks.RootsCheckedAroundListingAsync),
+            new("Run/AutoSync deleted names", Run.RepairChecks.AutoSyncAppendsDeletedNamesAsync),
             new("Run/BilateralNotice", Run.RepairChecks.BilateralNoticeAsync),
             new("Run/KeepRuleMissingNotice", Run.RepairChecks.KeepRuleMissingNoticeAsync),
             new("Run/HealthyDirtySet", Run.RepairChecks.HealthyDirtySetAsync),

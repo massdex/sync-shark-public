@@ -150,6 +150,7 @@ public sealed class DropboxListing
         return new IdentityLocation(domain, native, entry with { Path = relative ?? native });
     }
 
+    // One loop owns the cursor, the same-page retry and publication, so a retry can never advance or publish a page early.
     private static async IAsyncEnumerable<Listed> PageLoopAsync(DropboxApi api, PairConfig pair, string firstRoute,
         object firstArg, string? previous, Action<string>? acquired, Action<string, long>? progress,
         string subject, [EnumeratorCancellation] CancellationToken ct)
@@ -157,18 +158,22 @@ public sealed class DropboxListing
         var (route, arg) = FirstRequest(firstRoute, firstArg, previous, subject);
         var cycle = new ContinuationCycle();
         long pages = 0;
+        var failures = 0;
         var currentPath = subject;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
             DropboxPage page;
             try { page = await api.ReadPageAsync(route, JsonSerializer.Serialize(arg), pair, ct).ConfigureAwait(false); }
-            catch (ItemFailedException error) when (RemainingProviderWait(api, error) is { } remaining)
+            // A transient failure retries the same page with the same cursor, keeping the pages already read.
+            catch (Exception error) when (!ct.IsCancellationRequested && error is HttpRequestException or IOException or TimeoutException
+                or ItemFailedException { Disposition: FailureDisposition.TemporaryNoEffect })
             {
-                if (remaining > TimeSpan.Zero) await api.WaitAsync(remaining, ct).ConfigureAwait(false);
+                await api.WaitAsync(error is ItemFailedException provider && RemainingProviderWait(api, provider) is { } remaining ? remaining : api.RetryDelay(failures++), ct).ConfigureAwait(false);
                 continue;
             }
             catch (Exception error) when (IsIncompleteRead(error)) { throw Incomplete(currentPath, error); }
+            failures = 0;
             await using var owned = page;
             var cursor = CheckedCursor(page, cycle, previous, currentPath);
             foreach (var listed in page.ReadEntries())

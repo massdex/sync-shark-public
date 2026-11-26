@@ -34,6 +34,8 @@ public sealed class JournalReader
     {
         public JournalPosition? Read, Settled, PausedThrough;
         public ulong? FailedUsn;
+        // Where the last page failure happened; kept across pauses so a resume that fails again there is seen.
+        public JournalPosition? FaultedAt;
         public PairConfig? Pair;
         public bool Paused, ResetDue, RepairWake;
         public readonly Queue<Hop> Paired=new();
@@ -183,7 +185,10 @@ public sealed class JournalReader
                     if (ResetAfterRead(pair,v,m,from,ct) is { } reset) return reset;
                     if (raw is null || range.From!=from && raw.Status is (NtfsUsnPageStatus.More or NtfsUsnPageStatus.Complete)) continue;
                 }
-                if (raw.Status is NtfsUsnPageStatus.HistoryLost or NtfsUsnPageStatus.JournalChanged)
+                // A resume that fails again at the same position cannot establish continuity: start fresh and owe Repair.
+                var failed=raw.Status is not (NtfsUsnPageStatus.Complete or NtfsUsnPageStatus.More) || raw.ConsumedNextUsn<=from.NextUsn;
+                var repeated=failed && m.FaultedAt==from; m.FaultedAt=failed && !repeated ? from : null;
+                if (raw.Status is NtfsUsnPageStatus.HistoryLost or NtfsUsnPageStatus.JournalChanged || repeated)
                 {
                     var fresh=journal.Current(pair.LocalRoot);
                     await ResetVolume(v,m,key,fresh,store,ct).ConfigureAwait(false);

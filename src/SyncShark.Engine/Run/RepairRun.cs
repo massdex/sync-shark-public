@@ -123,7 +123,7 @@ internal sealed class RepairRun
                 await local.SettleJournalAsync(position,ct);
             if ((await db).Cursor is {} cursor && await store.CursorAsync(id,ct)==null) await store.SaveCursorAsync(id,cursor,ct);
         }
-        var acquireHistory=full && first && (await store.DeletedHistoryAsync(id,scan,ct)).Owed;
+        var acquireHistory=full && (first || (await store.DeletedHistoryAsync(id,ct)).Owed) && (await store.DeletedHistoryAsync(id,scan,ct)).Owed;
         await Task.WhenAll(store.AddScanAsync(id,scan,Side.Local,Repair.Observe(Inventory(local,selected.LocalPath,null,ct),selected.LocalPath,logical.LocalPath,unreadLocal,ct),null,ct),
             store.AddScanAsync(id,scan,Side.Dropbox,Repair.Observe(Inventory(dropbox,selected.DropboxPath,acquireHistory?value=>terminal=value:null,ct),selected.DropboxPath,logical.DropboxPath,unreadRemote,ct),
                 acquireHistory?()=>terminal??throw new InvalidDataException(nameof(ListOptions.CursorAcquired)):null,ct));
