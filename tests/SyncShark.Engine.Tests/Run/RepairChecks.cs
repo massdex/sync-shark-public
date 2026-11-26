@@ -25,8 +25,11 @@ public static class RepairChecks
         var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); var paths=new PathScope(pair,[pair],DriveType.Fixed); var queue=new WorkQueue();
         pc.Seed(ItemChecks.File(Side.Local,"Parent",0,"p",true),[]); pc.Seed(ItemChecks.File(Side.Local,"Parent/Child",0,"c",true),[]); pc.Seed(ItemChecks.File(Side.Local,"Parent/Child/f",1,"f"),[1]);
         db.Seed(ItemChecks.File(Side.Dropbox,"Parent",0,"dp",true),[]); db.Seed(ItemChecks.File(Side.Dropbox,"Parent/Child",0,"dc",true),[]); db.Seed(ItemChecks.File(Side.Dropbox,"Parent/Child/f",1,"df"),[1]);
-        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,db,store,null,null,ct,caughtUp:true);
-        Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("Parent/Child/f"),ct) is {DropboxPath:"Parent/Child/f"},"The first Repair did not record the file");
+        var first=new List<string>();
+        await Repair.RunAsync(pair,ItemChecks.Settings,e=>{lock(first) first.Add($"{e.Kind}:{e.Action}:{e.Path}:{e.Cause}");},paths,queue,pc,db,store,null,null,ct,caughtUp:true);
+        var firstNotices=new List<string>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) firstNotices.Add(n.Cause+"@"+n.Path);
+        Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("Parent/Child/f"),ct) is {DropboxPath:"Parent/Child/f"},
+            $"The first Repair did not record the file (events {string.Join(" | ",first)}; notices {string.Join(",",firstNotices)})");
         // Dropbox's listing keeps the parent's old case for its descendants.
         foreach(var path in new[]{"Parent/Child/f","Parent/Child"}) { var (entry,bytes)=db.Items[path]; db.Items.Remove(path); db.Seed(entry with {Path="parent"+path["Parent".Length..]},bytes); }
         string[] writes=[nameof(ISide.PublishAsync),nameof(ISide.MoveAsync),nameof(ISide.EnsureFolderAsync),nameof(ISide.DeleteAsync),nameof(ISide.CreateFolderExclusiveAsync)];
