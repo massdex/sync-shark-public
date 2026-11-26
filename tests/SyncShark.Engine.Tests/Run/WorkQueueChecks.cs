@@ -168,6 +168,33 @@ public static class WorkQueueChecks
         Check.Require(allocated<32L*1024*1024,$"A stopped backlog of {count} pages allocated {allocated:N0} bytes");
     }
 
+    // A genuine failure at the head of a deep backlog: every page behind it fails with that same cause, in linear cost, and none settles.
+    public static Task FaultDrainsDeepBacklogAsync()=>FaultDrains(false);
+    // The same through overlapping items: each later page's item waits on the one before it, so the cause also travels every item's ordering signal.
+    public static Task FaultDrainsOverlappingBacklogAsync()=>FaultDrains(true);
+    private static async Task FaultDrains(bool overlap)
+    {
+        const int count=1024;
+        var queue=new WorkQueue(); var pair=ItemChecks.Pair();
+        var gate=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var root=new InvalidDataException("head failure");
+        int settled=0;
+        Task Settle(JournalPosition _, CancellationToken __) {Interlocked.Increment(ref settled);return Task.CompletedTask;}
+        var change=new Change(Side.Local,ChangeKind.Changed,"same",null,null,null,false,false);
+        var pages=new Task[count];
+        pages[0]=queue.AdmitAsync(pair,new([change],null,new(1,1)),async (_,_)=>{await gate.Task;throw root;},Settle,default);
+        for(int i=1;i<count;++i) pages[i]=queue.AdmitAsync(pair,new(overlap ? [change] : [],null,new(1,(ulong)i+1)),(_,_)=>Task.CompletedTask,Settle,default);
+        Check.Require(!pages[^1].IsCompleted && settled==0,"The backlog settled past a failing item");
+        var before=GC.GetTotalAllocatedBytes(true);
+        gate.SetResult();
+        var drained=Task.WhenAll(pages);
+        if(await Task.WhenAny(drained,Task.Delay(TimeSpan.FromSeconds(30)))!=drained) throw new InvalidDataException("A failed backlog did not drain");
+        var allocated=GC.GetTotalAllocatedBytes(true)-before;
+        Check.Require(settled==0,"A failed backlog settled a page past the failing item");
+        Check.Require(pages.All(p=>p.IsFaulted && WorkQueue.Cause(p.Exception!.InnerException!)==root),"A page behind the failure reported a different first cause");
+        Check.Require(allocated<32L*1024*1024,$"A failed backlog of {count} pages allocated {allocated:N0} bytes");
+    }
+
     public static async Task RunAsync()
     {
         JournalPosition? clamped=new(2,9);

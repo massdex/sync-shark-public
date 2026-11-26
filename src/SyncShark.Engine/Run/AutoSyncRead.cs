@@ -44,7 +44,7 @@ internal sealed class AutoSyncRead
     private void Abort(Exception error)
     {
         // Save the failing source or effect before cancellation wakes its siblings.
-        lock(pending) failure??=error;
+        lock(pending) failure??=WorkQueue.Cause(error);
         stop.Cancel();
     }
     private async Task RetireAsync(Task work)

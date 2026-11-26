@@ -76,7 +76,7 @@ public sealed class WorkQueue
             input.Before=prior.Where(i=>i.Started || i.Publication).ToHashSet();
             foreach(var i in prior.Where(i=>!i.Started && !i.Publication)) {i.Before.Add(input); i.Changed?.TrySetResult();}
         }
-        return Execute(input,publish,ct);
+        return Unwrapped(Execute(input,publish,ct));
     }
     private JournalPosition? settledLocal;
     private string? settledDropbox;
@@ -160,8 +160,8 @@ public sealed class WorkQueue
         }
         catch (Exception error)
         {
-            // A stop must not relay one exception down the backlog: each rethrow grows its stack, so N pages cost O(N^2).
-            if (error is OperationCanceledException && ct.IsCancellationRequested) completed.TrySetCanceled(ct); else completed.TrySetException(error);
+            // A stop cancels the backlog; any other failure reaches the next page as a fresh marker, never the shared exception.
+            if (error is OperationCanceledException && ct.IsCancellationRequested) completed.TrySetCanceled(ct); else completed.TrySetException(Relay(error));
             try { await Task.WhenAll(jobs).ConfigureAwait(false); } catch { /* The first unsettled boundary is reported below. */ }
             throw;
         }
@@ -182,7 +182,7 @@ public sealed class WorkQueue
             Destinations = bindingCandidates.Select(c => PathNames.Key(c.Moved.Path)).ToArray()
         };
         WorkInput[] opportunities; lock (gate) opportunities=graph.RegisterWork([item]);
-        return Task.WhenAll(Task.WhenAll(opportunities.Select(i=>Attempt(i,ct))),Execute(item, () => apply(ct), ct));
+        return Unwrapped(Task.WhenAll(Task.WhenAll(opportunities.Select(i=>Attempt(i,ct))),Execute(item, () => apply(ct), ct)));
     }
 
     /// <summary>Run one Repair attempt only when nothing overlapping is running or held; a waiting Repair row is no queue link. False: declined.</summary>
@@ -347,7 +347,7 @@ public sealed class WorkQueue
         WorkInput[] entries;
         lock(gate) entries=(selected!=null ? selected.Subject.Items.Select(x=>PathNames.KeyFor(x.Side,x.Path)).Distinct() : scope==null ? graph.HeldByKey.Keys : Keys([scope.LocalPath,scope.DropboxPath]).SelectMany(graph.Matches))
             .Where(graph.HeldByKey.ContainsKey).SelectMany(k=>graph.HeldByKey[k]).Distinct().Where(i=>i.Failed && (selected==null || i.SameSubject(selected))).OrderBy(i=>i.Order).ToArray();
-        foreach(var item in entries) await Attempt(item,ct).ConfigureAwait(false);
+        foreach(var item in entries) await Unwrapped(Attempt(item,ct)).ConfigureAwait(false);
         return entries.Length!=0;
     }
     private async Task Attempt(WorkInput item,CancellationToken ct,long? observed=null)
@@ -376,7 +376,18 @@ public sealed class WorkQueue
         if(item.Change!=null) pendingChanges[(int)item.Change.Side]--;
         graph.Remove(item); item.Retry=null;
         item.Changed?.TrySetResult();
-        if(error==null) item.Settled.TrySetResult(); else item.Settled.TrySetException(error);
+        if(error==null) item.Settled.TrySetResult(); else if(error is OperationCanceledException) item.Settled.TrySetCanceled(); else item.Settled.TrySetException(Relay(error));
+    }
+
+    /// <summary>A failure on an ordering signal; one fresh marker per hop, because rethrowing one instance down a backlog grows its stack each time (O(N^2)).</summary>
+    private sealed class Relayed(Exception cause) : Exception(cause.Message, cause);
+    /// <summary>The failure a relayed ordering signal refers to; the first-failure record and the queue's callers see only this.</summary>
+    public static Exception Cause(Exception error) => error is Relayed relayed ? relayed.InnerException! : error;
+    private static Exception Relay(Exception error) => new Relayed(Cause(error));
+    private static async Task Unwrapped(Task work)
+    {
+        try { await work.ConfigureAwait(false); }
+        catch (Relayed relayed) { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(relayed.InnerException!); }
     }
 
     /// <summary>Mark the entire settled cohort before waking any dependent input.</summary>
