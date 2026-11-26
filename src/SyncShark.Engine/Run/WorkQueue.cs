@@ -160,7 +160,8 @@ public sealed class WorkQueue
         }
         catch (Exception error)
         {
-            completed.TrySetException(error);
+            // A stop must not relay one exception down the backlog: each rethrow grows its stack, so N pages cost O(N^2).
+            if (error is OperationCanceledException && ct.IsCancellationRequested) completed.TrySetCanceled(ct); else completed.TrySetException(error);
             try { await Task.WhenAll(jobs).ConfigureAwait(false); } catch { /* The first unsettled boundary is reported below. */ }
             throw;
         }

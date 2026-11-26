@@ -145,6 +145,29 @@ public static class WorkQueueChecks
         Check.Require(calls==1,"The overlapping page did not run exactly once after the retained row settled");
     }
 
+    // One held item stops settlement while empty pages pile up behind it; a stop must drain them in linear cost and settle none.
+    public static async Task StopDrainsDeepBacklogAsync()
+    {
+        const int count=1024;
+        var queue=new WorkQueue(); var pair=ItemChecks.Pair();
+        using var stop=new CancellationTokenSource();
+        int settled=0;
+        Task Settle(JournalPosition _, CancellationToken __) {Interlocked.Increment(ref settled);return Task.CompletedTask;}
+        var change=new Change(Side.Local,ChangeKind.Changed,"held",null,null,null,false,false);
+        var pages=new Task[count];
+        pages[0]=queue.AdmitAsync(pair,new([change],null,new(1,1)),(_,_)=>throw new WorkQueue.Unsettled(),Settle,stop.Token);
+        for(int i=1;i<count;++i) pages[i]=queue.AdmitAsync(pair,new([],null,new(1,(ulong)i+1)),(_,_)=>Task.CompletedTask,Settle,stop.Token);
+        Check.Require(!pages[^1].IsCompleted && settled==0,"The backlog settled past a held item");
+        var before=GC.GetTotalAllocatedBytes(true);
+        stop.Cancel();
+        try { await Task.WhenAll(pages).WaitAsync(TimeSpan.FromSeconds(30)); throw new InvalidDataException("A stopped backlog did not fail"); }
+        catch(OperationCanceledException) { }
+        var allocated=GC.GetTotalAllocatedBytes(true)-before;
+        Check.Require(settled==0,"A stopped backlog settled a page past the held item");
+        // The relayed exception cost about 690 MB at this depth; per-page fresh cancellations cost a few KB each.
+        Check.Require(allocated<32L*1024*1024,$"A stopped backlog of {count} pages allocated {allocated:N0} bytes");
+    }
+
     public static async Task RunAsync()
     {
         JournalPosition? clamped=new(2,9);
