@@ -57,10 +57,11 @@ public sealed record IgnoreRule(IgnoreRule.KindName Kind, string Value)
     public static bool IsIgnored(string relativePath, bool isDirectory, IReadOnlyList<IgnoreRule> rules)
     {
         if (relativePath.Length == 0 || rules.Count == 0) return false;
-        // Rules cannot contain control characters, so such a path matches no rule; every other malformed
-        // spelling is still a normalisation error.
-        if (relativePath.Any(char.IsControl)) return false;
-        var path = PathNames.NormalizeInventoryPath(relativePath.Replace('\\', '/'));
+        // A malformed listed name (control character, empty segment, '.' or '..') matches no rule, so the item
+        // reaches its own item-level name check and gets one notice instead of failing the whole run.
+        string path;
+        try { path = PathNames.NormalizeInventoryPath(relativePath.Replace('\\', '/')); }
+        catch (ArgumentException) { return false; }
         var components = path.Split('/');
         var name = components[^1];
         foreach (var rule in rules)

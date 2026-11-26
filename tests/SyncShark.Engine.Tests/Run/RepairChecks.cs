@@ -38,6 +38,16 @@ public static class RepairChecks
         Check.Require(notices.Count(n=>n.Kind==NoticeKind.Failure && n.Path=="bad." && n.Cause==TextKey.LocalNameInvalid)==1,$"The invalid name did not get exactly one notice: {string.Join(",",notices.Select(n=>n.Cause+"@"+n.Path))}");
     });
 
+    // A listed Dropbox name ending in a backslash, with an ignore rule present, matches no rule and does not fail the Repair.
+    public static Task MalformedIgnoredNameAsync() => WithRepairStore(async (store,pair,ct)=>
+    {
+        var p=pair with {IgnoreRules=["FileExtension:.tmp"]}; await store.SavePairAsync(p,ct);
+        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox);
+        db.Seed(ItemChecks.File(Side.Dropbox,"ok",1,"ok"),[1]); db.Seed(ItemChecks.File(Side.Dropbox,"bad\\",2,"bad"),[2]);
+        await Repair.RunAsync(p,ItemChecks.Settings,_=>{},new PathScope(p,[p],DriveType.Fixed),new WorkQueue(),pc,db,store,null,null,ct,caughtUp:true);
+        Check.Require((await store.RepairStateAsync(p.PairId,ct)).FirstRepairDone && pc.Items.ContainsKey("ok"),"A malformed name under an ignore rule stopped the Repair");
+    });
+
     // An unreadable PC folder is skipped with its own notice: the Repair completes for the rest, nothing under it moves on either side, and it stays owed.
     private static Task UnreadableFolderSkippedAsync() => WithRepairStore(async (store,pair,ct)=>
     {
