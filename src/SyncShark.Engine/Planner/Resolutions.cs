@@ -28,13 +28,13 @@ public static class Resolutions
     };
 
     public static IReadOnlyList<SyncAction> For(Notice notice, ResolutionChoice choice) =>
-        choice is (ResolutionChoice.Dismiss or ResolutionChoice.Ignore or ResolutionChoice.Unignore) && Allows(notice, choice) ? [] : throw Bad();
+        choice is (ResolutionChoice.Dismiss or ResolutionChoice.Ignore or ResolutionChoice.Unignore) && Allows(notice, choice) ? [] : throw Bad(notice, choice);
 
     /// <summary>Validate all subjects before returning any actions, including both endpoints of a losing binding.</summary>
     public static IReadOnlyList<SyncAction> For(Notice notice, ResolutionChoice choice, string? name, Row localRow,
         Row dropboxRow, bool incomingBound = false)
     {
-        if (choice is ResolutionChoice.Dismiss or ResolutionChoice.Ignore or ResolutionChoice.Unignore || !Allows(notice, choice)) throw Bad();
+        if (choice is ResolutionChoice.Dismiss or ResolutionChoice.Ignore or ResolutionChoice.Unignore || !Allows(notice, choice)) throw Bad(notice, choice);
         if (notice.Subject.Items.Count == 0) throw Stale();
         if (notice.Kind == NoticeKind.NameClash) return Clash(notice, choice, name, localRow, dropboxRow, incomingBound);
         if ((notice.Kind != NoticeKind.Info || notice.Cause != TextKey.InfoKeptBoth || choice == ResolutionChoice.KeepBoth) &&
@@ -43,9 +43,9 @@ public static class Resolutions
         {
             Require(notice, Side.Local, On(Side.Local, localRow, dropboxRow));
             Require(notice, Side.Dropbox, On(Side.Dropbox, localRow, dropboxRow));
-            return Tie(notice.Cause, choice, localRow, dropboxRow);
+            return Tie(notice, choice, localRow, dropboxRow);
         }
-        if (notice.Kind != NoticeKind.Info) throw Bad();
+        if (notice.Kind != NoticeKind.Info) throw Bad(notice, choice);
         if (choice == ResolutionChoice.KeepBoth) return [];
         if (notice.Cause == TextKey.InfoMovedTwice)
         {
@@ -55,7 +55,7 @@ public static class Resolutions
         }
         RequireOriginals(notice, localRow, dropboxRow);
         var renameSide = choice == ResolutionChoice.RenameLocal ? Side.Local : choice == ResolutionChoice.RenameDropbox ? Side.Dropbox : (Side?)null;
-        if (renameSide is { } rename) return [Unlinked(rename, rename == Side.Local ? dropboxRow.Local! : localRow.Dropbox!, name, localRow, dropboxRow)];
+        if (renameSide is { } rename) return [Unlinked(notice, choice, rename, rename == Side.Local ? dropboxRow.Local! : localRow.Dropbox!, name, localRow, dropboxRow)];
         var written = choice == ResolutionChoice.UseLocal ? Side.Dropbox : Side.Local;
         var pc = localRow.Local!;
         var remote = dropboxRow.Dropbox!;
@@ -97,12 +97,12 @@ public static class Resolutions
 
     private static SyncAction Delete(Notice notice, Side side, Row row) =>
         new(SyncAction.DeleteOn(side), row, Side: side, Target: Require(notice, side, row.EntryOn(side)).Path);
-    private static IReadOnlyList<SyncAction> Tie(TextKey cause, ResolutionChoice choice, Row localRow, Row dropboxRow)
+    private static IReadOnlyList<SyncAction> Tie(Notice notice, ResolutionChoice choice, Row localRow, Row dropboxRow)
     {
         var pair = Pair(localRow, dropboxRow);
         var local = pair.Local ?? throw Stale();
         var dropbox = pair.Dropbox ?? throw Stale();
-        return [(cause, choice) switch
+        return [(notice.Cause, choice) switch
         {
             (TextKey.TieEqualTimes or TextKey.TieUnreliableTime, ResolutionChoice.UseLocal)
                 => new SyncAction(ActionKind.Upload, pair, Target: dropbox.Path),
@@ -118,7 +118,7 @@ public static class Resolutions
                 => new SyncAction(ActionKind.ReplaceKind, pair, Target: dropbox.Path, Side: Side.Dropbox),
             (TextKey.TieKindBoth, ResolutionChoice.UseDropbox)
                 => new SyncAction(ActionKind.ReplaceKind, pair, Target: local.Path, Side: Side.Local),
-            _ => throw Bad()
+            _ => throw Bad(notice, choice)
         }];
     }
 
@@ -139,17 +139,17 @@ public static class Resolutions
             (ResolutionChoice.RenameIncoming or ResolutionChoice.ReplaceExisting, { } incoming) => incoming,
             (ResolutionChoice.KeepLocal or ResolutionChoice.RenameLocal, null) => Side.Local,
             (ResolutionChoice.KeepDropbox or ResolutionChoice.RenameDropbox, null) => Side.Dropbox,
-            _ => throw Bad()
+            _ => throw Bad(issue, choice)
         };
         var entry = Incoming(matches, side, issue);
         return (choice is ResolutionChoice.RenameIncoming or ResolutionChoice.RenameLocal or ResolutionChoice.RenameDropbox)
-            ? [Unlinked(side, entry, newName, localRow, dropboxRow)]
+            ? [Unlinked(issue, choice, side, entry, newName, localRow, dropboxRow)]
             : Replace(side, entry, matches, issue.Path, localRow, dropboxRow, incomingBound);
     }
 
-    private static SyncAction Unlinked(Side side, Entry entry, string? newName, Row localRow, Row dropboxRow)
+    private static SyncAction Unlinked(Notice notice, ResolutionChoice choice, Side side, Entry entry, string? newName, Row localRow, Row dropboxRow)
     {
-        if (!PathNames.IsSingleSegment(newName)) throw Bad();
+        if (!PathNames.IsSingleSegment(newName)) throw Bad(notice, choice);
         return new SyncAction(ActionKind.MoveUnlinked, Single(side, entry, localRow, dropboxRow),
             Target: PathNames.Child(PathNames.Parent(entry.Path), newName!), Side: side);
     }
@@ -287,5 +287,6 @@ public static class Resolutions
 
     private static EngineRequestException Stale() => new(TextKey.ResolveSubjectStale);
 
-    private static EngineRequestException Bad() => new(TextKey.ResolveBadChoice);
+    private static EngineRequestException Bad(Notice notice, ResolutionChoice choice) =>
+        new(TextKey.ResolveBadChoice, (TextArg.Id, notice.Id.ToString()), (TextArg.Choice, choice.ToString()));
 }

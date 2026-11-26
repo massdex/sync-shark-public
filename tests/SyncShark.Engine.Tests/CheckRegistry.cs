@@ -187,7 +187,8 @@ public static class CheckRegistry
             new("Layout/CliParityChecks", () => Layout.CliParityChecks.RunAsync(input))
         ],
         ["strings"] = [
-            new("Layout/StringsChecks", Layout.StringsChecks.RunAsync)
+            new("Layout/StringsChecks", Layout.StringsChecks.RunAsync),
+            new("Layout/thrown text placeholders", () => Layout.StringsChecks.ThrownPlaceholdersAsync(input))
         ],
         ["local"] = [
             new("Local/DirectoryListingChecks", Local.DirectoryListingChecks.RunAsync),
@@ -298,6 +299,7 @@ public static class CheckRegistry
             new("Run/DiagnosisSlot", Run.PairRunnerChecks.DiagnosisSlotAsync),
             new("Run/PairRunnerChecks", Run.PairRunnerChecks.RunAsync),
             new("Run/retained repair attempt", Run.RepairChecks.RetainedAttemptAsync),
+            new("Run/repair waits the provider time", Run.RepairChecks.ProviderWaitAsync),
             new("Run/covered repair hop", Run.RepairChecks.CoveredHopAsync),
             new("Run/corrupt history", Run.RepairChecks.CorruptHistoryAsync),
             new("Run/AutoSync deleted names", Run.RepairChecks.AutoSyncAppendsDeletedNamesAsync),

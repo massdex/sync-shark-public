@@ -48,7 +48,7 @@ internal static class KeepRows
         if(selected?.Token is {} id)
         {
             var current=await Derive(db,tx,pairId,ct);
-            if(selected.KeptBy!=null && !current.Any(e=>e.Side==selected.Side && e.Path==selected.Path && e.Token==id)) throw new EngineRequestException(TextKey.ResolveStale);
+            if(selected.KeptBy!=null && !current.Any(e=>e.Side==selected.Side && e.Path==selected.Path && e.Token==id)) throw new EngineRequestException(TextKey.PairChangedDuringRequest);
             foreach(var leg in current.Select(e=>e.KeptBy!.Value).Where(k=>k.Id==id).Distinct().OrderByDescending(k=>k.Index))
             {
                 using var clear=StorageCommand.Create(db,tx,Sql.Get(SqlKey.KeepRowsClear),("$row",leg.Row),("$idx","$["+leg.Index+"]"));

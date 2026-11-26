@@ -8,7 +8,7 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
     private bool reobserve, final, settled, retained, uncertain;
     private Notice? own;
     private ItemFailedException? error; // the last turn's failure, for its logged reason
-    private TimeSpan? floor; private long? floorStart; private TextKey floorCause;
+    private TimeSpan? floor; private long floorStart;
 
     /// <summary>The first turn failed; the in-place reobservation is owed.</summary>
     internal bool OwesInPlace { get; private set; }
@@ -23,15 +23,12 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
         if(run.physicalHop!=null) {await HopAsync(token); return;} // a hop keeps today's single attempt and split
         var since=DateTimeOffset.UtcNow; var endOwn=own;
         TextKey? cause; Notice? raised;
-        if(FloorActive()) { cause=floorCause; raised=null; } // a provider floor refused this turn locally, without a send
-        else
+        await run.settings.Backoff.WaitAsync(FloorLeft(),TimeProvider.System,token).ConfigureAwait(false); // the rest of the last failure's wait before this turn resends
+        try { (cause,raised)=await OnceAsync(token).ConfigureAwait(false); }
+        catch(Exception error) when(own!=null && !final && error is not (OperationCanceledException or WorkQueue.Unsettled))
         {
-            try { (cause,raised)=await OnceAsync(token).ConfigureAwait(false); }
-            catch(Exception error) when(own!=null && !final && error is not (OperationCanceledException or WorkQueue.Unsettled))
-            {
-                await SaveAsync(own,token).ConfigureAwait(false); // an independent error stops the retry; the earlier item failure keeps its notice
-                throw;
-            }
+            await SaveAsync(own,token).ConfigureAwait(false); // an independent error stops the retry; the earlier item failure keeps its notice
+            throw;
         }
         if(cause==null)
         {
@@ -98,8 +95,11 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
         catch(ItemFailedException failure)
         {
             var error=this.error=failure;
-            if(error.Disposition==FailureDisposition.TemporaryNoEffect && error.ProviderWait is {} wait && wait>TimeSpan.Zero)
-            { floor=wait; floorStart=error.ProviderWaitStarted; floorCause=error.Cause; }
+            if(error.Disposition==FailureDisposition.TemporaryNoEffect)
+            { // Honour a positive provider wait in full; none given waits the adopted schedule's first step
+                floor=error.ProviderWait is {} wait && wait>TimeSpan.Zero ? wait : run.settings.Backoff.RetryDelay(0);
+                floorStart=error.ProviderWaitStarted ?? TimeProvider.System.GetTimestamp();
+            }
             own=null;
             if(error.Disposition==FailureDisposition.UnknownEffect) uncertain=true;
             return (error.Cause,BuildNotice(error));
@@ -237,7 +237,7 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
     }
     private Notice FallbackNotice(TextKey cause) => new(0,NoticeKind.Failure,cause,PathOf(),RowExecution.Subject(row,candidates),DateTimeOffset.UtcNow,false);
     private string PathOf() => row!=null ? Row.Path(row) : candidates.Count!=0 ? candidates[0].Moved.Path : string.Empty;
-    private bool FloorActive() => floor is {} wait && wait - (floorStart is {} start ? TimeProvider.System.GetElapsedTime(start) : TimeSpan.Zero) > TimeSpan.Zero;
+    private TimeSpan FloorLeft() => floor is {} wait ? wait-TimeProvider.System.GetElapsedTime(floorStart) : TimeSpan.Zero;
 
     private async Task SaveAsync(Notice proposed,CancellationToken token)
     {

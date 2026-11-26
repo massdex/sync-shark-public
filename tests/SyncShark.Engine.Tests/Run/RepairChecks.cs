@@ -507,6 +507,32 @@ public static class RepairChecks
             Check.Require(tries==2 && dbSide.Items.TryGetValue("range/a",out var a) && a.Bytes.SequenceEqual(new byte[]{1}) && dbSide.Items.TryGetValue("range/b",out var b) && b.Bytes.SequenceEqual(new byte[]{2}),"Repair treated its own failure-notice touch as settlement or blocked the independent sibling");
     });
 
+    /// <summary>A throttled write's in-place retry waits the time Dropbox gave, then settles without a notice.</summary>
+    public static Task ProviderWaitAsync() => WithRepairStore(async (store,pair,ct)=>
+    {
+        var pc=new FakeSide(Side.Local);var dbSide=new FakeSide(Side.Dropbox);var queue=new WorkQueue();var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        await SeedRangeAsync(store,pair,pc,dbSide,ct);
+        var wait=TimeSpan.FromMilliseconds(250); long? refused=null; TimeSpan? retried=null; int tries=0;
+        var remote=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>
+        {
+            if(m.Name!=nameof(ISide.PublishAsync) || args[0] is not IStaged {Path:"range/a"}) return AutoSyncChecks.Observation.Forward(dbSide,m,args);
+            if(++tries==1)
+            {
+                refused=TimeProvider.System.GetTimestamp();
+                return Task.FromException<RemovalResult>(new ItemFailedException("range/a",TextKey.WaitTooManyWrites,null){Disposition=FailureDisposition.TemporaryNoEffect,ProviderWait=wait,ProviderWaitStarted=refused});
+            }
+            retried??=TimeProvider.System.GetElapsedTime(refused!.Value);
+            return AutoSyncChecks.Observation.Forward(dbSide,m,args);
+        });
+        await new PairRunner().CatchUpAsync(pair,(null,null),ItemChecks.Settings,_=>{},paths,queue,pc,remote,store,static()=>{},ct);
+        pc.Seed(ItemChecks.File(Side.Local,"range/a",1,"11"),[1]);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,remote,store,new("range","range"),null,ct);
+        // Windows timers can fire up to one default clock tick (1/64 s) before the requested time.
+        Check.Require(tries==2 && retried>=wait-TimeSpan.FromSeconds(1d/64) && dbSide.Items.ContainsKey("range/a"),"Repair resent a throttled write before the provider wait ended, or never resent it");
+        await foreach(var n in store.NoticesAsync(pair.PairId,ct))
+            Check.Require(n.Kind!=NoticeKind.Failure || !PathNames.Same(n.Path,"range/a"),"A throttled write settled by its in-place retry kept a failure notice");
+    });
+
     /// <summary>A write may have landed before the source error arrived. Its queued retry must compare, not publish twice.</summary>
     public static Task SelectedStreamRaceAsync() => WithRepairStore(async (store,pair,ct)=>
     {

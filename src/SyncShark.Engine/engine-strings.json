@@ -84,7 +84,7 @@
   "NoPairsYet": "There are no pairs yet.",
   "NetworkDown": "Waiting for the network to come back.",
   "WaitTooManyRequests": "Dropbox asked Sync Shark to slow down; waiting {Seconds} seconds.",
-  "WaitTooManyWrites": "Dropbox is busy with other changes in this account; waiting {Seconds} seconds.",
+  "WaitTooManyWrites": "Dropbox is busy with other changes in this account; Sync Shark waits the time Dropbox gives and tries again.",
   "RecoveryRecycleBin": "the Windows Recycle Bin",
   "RecoveryDropboxHistory": "Dropbox version history",
   "StagePending": "Finishing the previous run's interrupted replace",
@@ -418,5 +418,6 @@
   "ChangeLatency": "Change applied {Elapsed} after it was first seen.",
   "CliHelpEffectLine": "  {Value}",
   "StatusPendingIncoming": "{Pair}  changes waiting: {Count} to this PC, {Total} to Dropbox",
-  "KeepRuleItemMissing": "The excluded item at {Path} is no longer there. If you moved it, add an exclusion at its new place."
+  "KeepRuleItemMissing": "The excluded item at {Path} is no longer there. If you moved it, add an exclusion at its new place.",
+  "PairChangedDuringRequest": "The pair changed while this request ran; refresh and try again."
 }

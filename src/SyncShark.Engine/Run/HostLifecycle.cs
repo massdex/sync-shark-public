@@ -272,7 +272,7 @@ internal sealed class HostLifecycle(Host host)
             if(m.Closing!=0) throw new OperationCanceledException(ct);
             if(!m.Manual.IsCompleted)
             {
-                if(explicitRequest) throw new EngineRequestException(TextKey.RepairAlreadyRunning);
+                if(explicitRequest) throw new EngineRequestException(TextKey.RepairAlreadyRunning,(TextArg.Pair,m.Pair.PairId));
                 return m.Manual;
             }
             m.ManualStop?.Dispose(); m.ManualStop=CancellationTokenSource.CreateLinkedTokenSource(ct);

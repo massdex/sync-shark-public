@@ -35,7 +35,7 @@ public static class Repair
     internal static async IAsyncEnumerable<T> Counted<T>(IAsyncEnumerable<T> rows,Action<RunEvent>? stage,Action<RunEvent>? progress,TextKey what,Func<T,string> path,[EnumeratorCancellation] CancellationToken ct)
     {
         var at=Stopwatch.GetTimestamp(); stage?.Invoke(Stage(what,null,null)); long count=0;
-        await foreach(var row in rows.WithCancellation(ct)) { count++; progress?.Invoke(new(RunEventKind.Stage,what.ToString(),path(row),string.Empty,RunLog.InProgressOutcome){Count=count}); yield return row; }
+        await foreach(var row in rows.WithCancellation(ct)) { count++; progress?.Invoke(new(RunEventKind.Stage,what.ToString(),path(row),string.Empty,string.Empty){Outcome=RunLog.InProgressOutcome,Count=count}); yield return row; }
         stage?.Invoke(Stage(what,count,Stopwatch.GetElapsedTime(at)));
     }
 

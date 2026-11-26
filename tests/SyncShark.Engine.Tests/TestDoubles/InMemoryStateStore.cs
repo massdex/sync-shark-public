@@ -97,7 +97,7 @@ public sealed class InMemoryStateStore : IStore
         lock (pairs)
         {
             ValidateOwners(returnedScopes, pair.PairId, null);
-            pairs[pair.PairId] = committed = pair with { OwedScopes = pairs.GetValueOrDefault(pair.PairId)?.OwedScopes };
+            pairs[pair.PairId] = committed = pair with { OwedScopes = pairs.GetValueOrDefault(pair.PairId)?.OwedScopes, OwedScopesRevision = pairs.GetValueOrDefault(pair.PairId)?.OwedScopesRevision ?? 0 };
             PublishScopes(returnedScopes);
         }
         PairChanged?.Invoke(committed);
@@ -127,7 +127,7 @@ public sealed class InMemoryStateStore : IStore
         if (scopes==null) return;
         foreach(var group in scopes.GroupBy(x=>x.Owner))
         {
-            var pair=pairs[group.Key];pairs[group.Key]=pair with { OwedScopes=(pair.OwedScopes??[]).Union(group.Select(x=>x.Scope)).ToArray() };
+            var pair=pairs[group.Key];pairs[group.Key]=pair with { OwedScopes=(pair.OwedScopes??[]).Union(group.Select(x=>x.Scope)).ToArray(), OwedScopesRevision=pair.OwedScopesRevision+1 };
             var key=(group.Key,Side.Dropbox);var old=repairs.GetValueOrDefault(key);repairs[key]=(old.Revision+1,old.Reason);
         }
     }
@@ -244,7 +244,7 @@ public sealed class InMemoryStateStore : IStore
         lock(pairs)
         {
             var pair=pairs.GetValueOrDefault(pairId) ?? throw new InvalidDataException("Unknown pair");
-            pairs[pairId]=pair with { OwedScopes=(pair.OwedScopes??[]).Union([scope]).ToArray() };
+            pairs[pairId]=pair with { OwedScopes=(pair.OwedScopes??[]).Union([scope]).ToArray(), OwedScopesRevision=pair.OwedScopesRevision+1 };
             var key=(pairId,Side.Dropbox); var old=repairs.GetValueOrDefault(key); repairs[key]=(old.Revision+1,old.Reason);
         }
         return Task.CompletedTask;
@@ -259,8 +259,9 @@ public sealed class InMemoryStateStore : IStore
         ct.ThrowIfCancellationRequested();ArgumentException.ThrowIfNullOrWhiteSpace(completedRepairJson);
         lock(pairs)
         {
-            if(repairs.GetValueOrDefault((pairId,Side.Local)).Revision!=revisions.Local || repairs.GetValueOrDefault((pairId,Side.Dropbox)).Revision!=revisions.Dropbox) return Task.FromResult(false);
-            repairs[(pairId,Side.Local)]=(revisions.Local,null);repairs[(pairId,Side.Dropbox)]=(revisions.Dropbox,null);
+            var cloud=repairs.GetValueOrDefault((pairId,Side.Dropbox)).Revision;
+            if(repairs.GetValueOrDefault((pairId,Side.Local)).Revision!=revisions.Local || cloud-(pairs.GetValueOrDefault(pairId)?.OwedScopesRevision ?? 0)!=revisions.Dropbox) return Task.FromResult(false);
+            repairs[(pairId,Side.Local)]=(revisions.Local,null);repairs[(pairId,Side.Dropbox)]=(cloud,null);
             firstRepairDone.Add(pairId);summaries[pairId]=completedRepairJson;return Task.FromResult(true);
         }
     }

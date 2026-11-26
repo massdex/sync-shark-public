@@ -4,4 +4,5 @@ namespace Massdex.SyncShark.Engine;
 public sealed record PairConfig(string PairId, string Name, string LocalRoot, string DropboxRoot,
     string ConnectionId, IReadOnlyList<string> IgnoreRules, IReadOnlyList<Exclusion> Exclusions,
     FirstRunPolicy FirstRun, bool Enabled, DriveEvidence? Drive, RootIdentity? Roots = null,
-    [property: System.Text.Json.Serialization.JsonPropertyName("owed_scopes")] IReadOnlyList<Scope>? OwedScopes = null);
+    [property: System.Text.Json.Serialization.JsonPropertyName("owed_scopes")] IReadOnlyList<Scope>? OwedScopes = null,
+    [property: System.Text.Json.Serialization.JsonPropertyName("owed_scopes_revision")] long OwedScopesRevision = 0);

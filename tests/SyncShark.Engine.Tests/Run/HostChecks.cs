@@ -29,7 +29,7 @@ public static class HostChecks
         var stop=host.Stopping; await host.StopAsync(default); Check.Require(stop.IsCancellationRequested,"Host did not notify the pipe owner of stop");
         var errors=new List<string>();
         System.Runtime.ExceptionServices.ExceptionDispatchInfo? missing=null;
-        foreach(var check in new Func<Task>[]{IndependentBind,MemberRewind,ForeignCancellation,DisconnectedAdapter,ExplicitBind,PendingOuterScope,RemovingMember,ReleaseFailure,FailedFirstRead,OldPublicationFence,FailedExplicitRepairAsync,FailedNoticeWriteAsync,UnexpectedFailureLogged,StopAfterDrainFailure,NoticeStreamReleasesCommands,MalformedPairRemovable,OwedScopeIsolationAsync,OwedScopeHandOffAsync,OwedScopeReadFailureAsync,ExplicitRepairPartialInventoryWakesAsync,DirectSettlementFailureWakesAsync})
+        foreach(var check in new Func<Task>[]{IndependentBind,MemberRewind,ForeignCancellation,DisconnectedAdapter,ExplicitBind,PendingOuterScope,RemovingMember,ReleaseFailure,FailedFirstRead,OldPublicationFence,FailedExplicitRepairAsync,FailedNoticeWriteAsync,UnexpectedFailureLogged,StopAfterDrainFailure,NoticeStreamReleasesCommands,MalformedPairRemovable,OwedScopeIsolationAsync,OwedScopeHandOffAsync,OwedScopeReadFailureAsync,ExplicitRepairPartialInventoryWakesAsync,DirectSettlementFailureWakesAsync,FullRepairOwedScopeCompletesAsync})
             try { await check(); }
             catch(NotImplementedException e) {missing??=System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e);}
             catch(InvalidDataException e) {errors.Add($"{check.Method.Name}: {e}");}
@@ -145,10 +145,10 @@ public static class HostChecks
             await host.StartAsync(stop.Token);await boundary.Task.WaitAsync(stop.Token);
             var oneSignIn=store.OpenNotices.Count(n=>n.Kind==NoticeKind.Failure)==1 && store.OpenNotices.Any(n=>n.Cause==TextKey.SignInReturnRetry);
             var repair=host.RepairAsync(pair.PairId,stop.Token);await requested.Task.WaitAsync(stop.Token);
-            // The repair log opens immediately before it awaits the current acquisition. A stale boot would run the synchronous dirty check and finish.
+            // The startup retry is still blocked and its boot result unknown: the Repair does not wait for it, it lists both sides and finishes.
             await logs.RepairOpened.Task.WaitAsync(stop.Token);
-            try{await finished.Task.WaitAsync(TimeSpan.FromSeconds(1),stop.Token);}catch(TimeoutException){}
-            Check.Require(!finished.Task.IsCompleted,"Repair finished from the previous reader's startup result");
+            try{await finished.Task.WaitAsync(stop.Token);}catch(OperationCanceledException){}
+            Check.Require(finished.Task.IsCompleted && !release.Task.IsCompleted,"Repair waited for the blocked AutoSync startup retry");
             release.TrySetResult();await repair;
             await Task.WhenAny(seen.Task,ended.Task).WaitAsync(stop.Token);
             Check.Require(seen.Task.IsCompleted && !ended.Task.IsCompleted && lp.Local.Items.TryGetValue(item.Path,out var copy) && copy.Bytes.SequenceEqual(new byte[]{3}) && oneSignIn,"Failed member read ended live sync instead of retrying with one sign-in notice");
@@ -926,6 +926,35 @@ public static class HostChecks
             catch(TimeoutException e) { throw new InvalidDataException("A scope owed by an explicit partial-inventory Repair was not scheduled",e); }
             Check.Require(!((await raw.PairAsync(pair.PairId,ct))?.OwedScopes ?? []).Contains(new Scope("B","B")),"The newly owed scope was left behind");
             Check.Require(db.Items.ContainsKey("B/ok"),"The newly owed scope did not sync");
+        }
+        finally {stop.Cancel();try{await host.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));}catch(TimeoutException){}}
+    }
+    // A scope owed while a full Repair walks does not supersede it: the full run completes and the scope is still served after it.
+    private static async Task FullRepairOwedScopeCompletesAsync()
+    {
+        using var raw=new InMemoryStateStore();
+        var pair=Bound("full",@"T:\Full",1);
+        await raw.SavePairAsync(pair,default); await raw.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
+        await raw.OweRepairAsync(pair.PairId,Side.Local,"gap",default);
+        var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
+        var db=new FakeSide(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
+        pc.Seed(ItemChecks.File(Side.Local,"B",0,"pc-b",true),[]); pc.Seed(ItemChecks.File(Side.Local,"B/ok",1,"pc-bok"),[1]);
+        var owedOnce=new int[1]; var retired=Signal();
+        var store=AutoSyncChecks.Observation.Wrap<IStore>((m,args)=>{
+            if(m.Name==nameof(IDisposable.Dispose)) return null;
+            if(m.Name==nameof(IStore.AddScanAsync) && Interlocked.Exchange(ref owedOnce[0],1)==0) return OweThenAddScan(raw,pair.PairId,new Scope("B","B"),m,args);
+            if(m.Name==nameof(IStore.FinishRepairAsync) && args.Length==4 && args[1] is Scope s && s==new Scope("B","B") && AutoSyncChecks.Observation.Forward(raw,m,args) is Task<bool> fin) return Retire(fin,retired);
+            return AutoSyncChecks.Observation.Forward(raw,m,args);
+        });
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(store),(_,_,_,_,_)=>Task.FromResult((QuietSide(pc),QuietSide(db))),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
+        using var stop=new CancellationTokenSource(); var ct=stop.Token;
+        try
+        {
+            await host.StartAsync(ct);
+            try { await retired.Task.WaitAsync(TimeSpan.FromSeconds(10),ct); }
+            catch(TimeoutException e) { throw new InvalidDataException("A scope owed during a full Repair was not served after it",e); }
+            Check.Require(Volatile.Read(ref owedOnce[0])==1 && (await raw.ReadRepairAsync(pair.PairId,Side.Local,ct)).Reason==null,"A scope owed mid-run superseded the full Repair");
+            Check.Require(db.Items.ContainsKey("B/ok"),"The full Repair did not sync its file");
         }
         finally {stop.Cancel();try{await host.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));}catch(TimeoutException){}}
     }

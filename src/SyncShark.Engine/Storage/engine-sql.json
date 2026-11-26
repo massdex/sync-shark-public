@@ -11,7 +11,7 @@
   "PairTableOweScopes1": "UPDATE pair SET def_json=$json WHERE pair_id=$p",
   "PairTableEnroll1": "UPDATE pair SET def_json=$json WHERE pair_id=$p",
   "PairTableRevision": "coalesce((SELECT repair_revision FROM source_state WHERE pair_id=pair.id AND side=",
-  "PairTableFinishRepair1": "UPDATE pair SET first_repair_done=1,last_repair_json=$json WHERE pair_id=$p AND {PairTableRevision}0),0)=$local AND {PairTableRevision}1),0)=$cloud",
+  "PairTableFinishRepair1": "UPDATE pair SET first_repair_done=1,last_repair_json=$json WHERE pair_id=$p AND {PairTableRevision}0),0)=$local AND {PairTableRevision}1),0)-coalesce(def_json->>'$.owed_scopes_revision',0)=$cloud",
   "PairTableFinishRepair2": "UPDATE source_state SET repair_reason=NULL WHERE pair_id={PairTablePairKey}",
   "PairTableFinishRepair3": "UPDATE pair SET def_json=$json WHERE pair_id=$p AND {PairTableRevision}1),0)=$rev",
   "PairTableRepairState1": "SELECT first_repair_done,last_repair_json FROM pair WHERE pair_id=$p",

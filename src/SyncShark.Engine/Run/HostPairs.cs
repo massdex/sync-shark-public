@@ -43,7 +43,7 @@ internal sealed class HostPairs(Host host)
         try
         {
             var db=await host.Open(false,ct) ?? await host.Open(true,ct) ?? throw new EngineRequestException(TextKey.StatusUnavailable);
-            if(host.Members.ContainsKey(pair.PairId) || await db.PairAsync(pair.PairId,ct)!=null) throw new EngineRequestException(TextKey.ResolveStale);
+            if(host.Members.ContainsKey(pair.PairId) || await db.PairAsync(pair.PairId,ct)!=null) throw new EngineRequestException(TextKey.PairChangedDuringRequest);
             var m=host.Life.Attach(pair); m.Opening=CancellationTokenSource.CreateLinkedTokenSource(ct); var token=m.Opening.Token;
             m.Setup=Task.Run(async ()=>
             {
@@ -72,7 +72,7 @@ internal sealed class HostPairs(Host host)
             }
             await host.Command(async ()=>
             {
-                if(host.Stopped.IsCancellationRequested || !ReferenceEquals(before,host.PublishedPairs)) throw new EngineRequestException(TextKey.ResolveStale);
+                if(host.Stopped.IsCancellationRequested || !ReferenceEquals(before,host.PublishedPairs)) throw new EngineRequestException(TextKey.PairChangedDuringRequest);
                 if(!await commit()) return;
                 lock(host.Members) {host.PublishedPairs=pairs; foreach(var outer in parents) outer.Paths=new(outer.Pair,pairs,outer.Type,host.Settings.DefaultIgnoreRules);}
             },ct);
@@ -98,7 +98,7 @@ internal sealed class HostPairs(Host host)
                 owed.Add((owner.q.PairId,await Mapped(owner.q,side,owner.rel!,ct)));
             }
             var m=host.Members.TryGetValue(pairId,out var member)?member:host.Life.Attach(p);
-            if(Interlocked.Increment(ref m.Closing)!=1) {Interlocked.Decrement(ref m.Closing);throw new EngineRequestException(TextKey.ResolveStale);}
+            if(Interlocked.Increment(ref m.Closing)!=1) {Interlocked.Decrement(ref m.Closing);throw new EngineRequestException(TextKey.PairChangedDuringRequest);}
             bool committed=false;
             try {
                 await HostLifecycle.Drain(m);
@@ -176,7 +176,7 @@ internal sealed class HostPairs(Host host)
         await host.OutsideCommands(()=>m.Queue.PublishAsync(footprint==null ? [string.Empty] : [footprint.LocalPath,footprint.DropboxPath],()=>host.Command(async ()=>
         {
             if(!host.Members.TryGetValue(next.PairId,out var current) || current!=m || !ReferenceEquals(m.Pair,expected) || !ReferenceEquals(before,host.PublishedPairs))
-                throw new EngineRequestException(TextKey.ResolveStale);
+                throw new EngineRequestException(TextKey.PairChangedDuringRequest);
             // The store publishes the committed reset view through PairChanged; never overwrite it with this pre-commit snapshot (K04).
             await host.Store!.SavePairAsync(next,ct,owed,selected);
         },ct),ct));

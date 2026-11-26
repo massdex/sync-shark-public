@@ -424,4 +424,5 @@ public enum TextKey
     ConflictCollisionSuffix,
     CliHelpEffectLine,
     KeepRuleItemMissing,
+    PairChangedDuringRequest,
 }

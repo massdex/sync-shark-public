@@ -45,23 +45,23 @@ public sealed class PairTable
         {
             if(replacement.PairId!=pairId) throw new ArgumentException(nameof(replacement));
             var existing=await PairRaw(db,tx,pairId,ct);
-            if(selected is {KeptBy:null} && existing?.Exclusions.Contains(selected)!=true) throw new EngineRequestException(TextKey.ResolveStale);
+            if(selected is {KeptBy:null} && existing?.Exclusions.Contains(selected)!=true) throw new EngineRequestException(TextKey.PairChangedDuringRequest);
             var edited=replacement.Exclusions;
             if(existing?.Exclusions.Any(e=>e.RuleId!=null)==true || edited.Any(e=>e.RuleId!=null))
                 edited=edited.Where(e=>e.RuleId==null).Concat(existing?.Exclusions.Where(e=>e.RuleId!=null && e.Token!=selected?.Token) ?? []).ToArray();
-            var saved=replacement with { OwedScopes=existing?.OwedScopes, Exclusions=await KeepRows.Publish(db,tx,pairId,edited,ct,selected) };
+            var saved=replacement with { OwedScopes=existing?.OwedScopes, OwedScopesRevision=existing?.OwedScopesRevision ?? 0, Exclusions=await KeepRows.Publish(db,tx,pairId,edited,ct,selected) };
             await Write(db,tx,Sql.Get(SqlKey.PairTablePublish3),ct,("$p",pairId),("$json",JsonSerializer.Serialize(saved)));
         }
         foreach(var group in returnedScopes.GroupBy(s=>s.Owner)) await OweScopesAsync(tx,group.Key,group.Select(s=>s.Scope),ct);
         return null;
     }
-    /// <summary>Owe each scope at its stored pair, keeping any existing reason, and advance that pair's Dropbox revision in the caller's transaction.</summary>
+    /// <summary>Owe each scope at its stored pair, keeping any existing reason, and advance that pair's Dropbox revision and owed-scope count in the caller's transaction.</summary>
     public async Task OweScopesAsync(SqliteTransaction tx,string pairId,IEnumerable<Scope> owed,CancellationToken ct)
     {
         var db=tx.Connection!;
         var owner=await PairRaw(db,tx,pairId,ct) ?? throw new InvalidDataException();
         var scopes=(owner.OwedScopes ?? []).Concat(owed).Distinct().ToArray();
-        await Write(db,tx,Sql.Get(SqlKey.PairTableOweScopes1),ct,("$json",JsonSerializer.Serialize(owner with { OwedScopes=scopes })),("$p",pairId));
+        await Write(db,tx,Sql.Get(SqlKey.PairTableOweScopes1),ct,("$json",JsonSerializer.Serialize(owner with { OwedScopes=scopes, OwedScopesRevision=owner.OwedScopesRevision+1 })),("$p",pairId));
         await Advance(db,tx,pairId,Side.Dropbox,null,ct);
     }
     /// <summary>Attach any surviving configured KEEP path rules to their bound rows before a run can lose the old keys, without a config edit (K06).</summary>
@@ -72,7 +72,7 @@ public sealed class PairTable
         var saved=existing with { Exclusions=await KeepRows.Publish(db,tx,pair.PairId,existing.Exclusions,ct) };
         await Write(db,tx,Sql.Get(SqlKey.PairTableEnroll1),ct,("$p",pair.PairId),("$json",JsonSerializer.Serialize(saved)));
     }
-    /// <summary>Only a complete Repair matching both captured revisions publishes first_repair_done and its summary and clears both reasons.</summary>
+    /// <summary>Only a complete Repair matching both captured revisions publishes first_repair_done and its summary and clears both reasons. The Dropbox revision is net of owed-scope advances: owed scopes are served after a full run, so they never supersede it.</summary>
     public async Task<bool> FinishRepairAsync(SqliteTransaction tx,string pairId,(long Local,long Dropbox) revisions,string completedRepairJson,CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(completedRepairJson);
