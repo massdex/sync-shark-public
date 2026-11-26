@@ -21,7 +21,6 @@ internal sealed class RepairRun
     private readonly Scope selected, logical;
     private readonly PrefixSet unreadLocal=new(), unreadRemote=new();
     private readonly List<FolderMark> folders=new();
-    private readonly PrefixSet placeholders=new(); // online-only PC files seen by the compare loop, its own thread only
     private readonly List<(NoticeItem Member,bool Present)> linkWrites=new();
     private readonly HashSet<Exclusion> recreated=new(); // filled by the PC listing's one sequential enumerator
     internal readonly TaskCompletionSource discoveryEnded=new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -191,9 +190,6 @@ internal sealed class RepairRun
                 continue;
             }
             var row=raw;
-            // Nothing under an online-only PC file is compared on either side; rows arrive in key order, the file first.
-            if(row.Local is {IsFolder:false,Skip:nameof(TextKey.SkipOnlineOnly)}) placeholders.Add(row.Key);
-            else if(placeholders.Covers(row.Key)) continue;
             var parent=NearestPending(row.Key);
             if(parent!=null && row.Local is {} child)
             {

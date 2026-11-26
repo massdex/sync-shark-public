@@ -26,22 +26,24 @@ public static class RepairChecks
         pc.Seed(ItemChecks.File(Side.Local,"Parent",0,"p",true),[]); pc.Seed(ItemChecks.File(Side.Local,"Parent/Child",0,"c",true),[]); pc.Seed(ItemChecks.File(Side.Local,"Parent/Child/f",1,"f"),[1]);
         db.Seed(ItemChecks.File(Side.Dropbox,"Parent",0,"dp",true),[]); db.Seed(ItemChecks.File(Side.Dropbox,"Parent/Child",0,"dc",true),[]); db.Seed(ItemChecks.File(Side.Dropbox,"Parent/Child/f",1,"df"),[1]);
         await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,db,store,null,null,ct,caughtUp:true);
+        Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("Parent/Child/f"),ct) is {DropboxPath:"Parent/Child/f"},"The first Repair did not record the file");
         // Dropbox's listing keeps the parent's old case for its descendants.
         foreach(var path in new[]{"Parent/Child/f","Parent/Child"}) { var (entry,bytes)=db.Items[path]; db.Items.Remove(path); db.Seed(entry with {Path="parent"+path["Parent".Length..]},bytes); }
         string[] writes=[nameof(ISide.PublishAsync),nameof(ISide.MoveAsync),nameof(ISide.EnsureFolderAsync),nameof(ISide.DeleteAsync),nameof(ISide.CreateFolderExclusiveAsync)];
         long Writes()=>writes.Sum(w=>db.Requests[w]);
         long Reads()=>db.Requests[nameof(ISide.ReadOneAsync)]+db.Requests[nameof(ISide.ReadByIdAsync)]; // get_metadata
+        var trace=new List<string>();
         async Task<List<RunEvent>> RepairAsync()
         {
             var effects=new List<RunEvent>(); await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",ct);
-            await Repair.RunAsync(pair,ItemChecks.Settings,e=>{if(e.Kind==RunEventKind.Effect) lock(effects) effects.Add(e);},paths,queue,pc,db,store,null,null,ct,caughtUp:true);
+            await Repair.RunAsync(pair,ItemChecks.Settings,e=>{lock(trace) trace.Add($"{e.Kind}:{e.Action}:{e.Path}:{e.Cause}"); if(e.Kind==RunEventKind.Effect) lock(effects) effects.Add(e);},paths,queue,pc,db,store,null,null,ct,caughtUp:true);
             return effects;
         }
         long writesBefore=Writes(), readsBefore=Reads(), listings=db.Requests[nameof(ISide.ReadAllAsync)];
         var second=await RepairAsync();
         var saved=await store.FindAsync(pair.PairId,Side.Dropbox,PathNames.DropboxKey("parent/Child/f"),ct);
         Check.Require(second.Count!=0 && second.All(e=>e.Action==ActionKind.Record) && Writes()==writesBefore && Reads()==readsBefore && db.Requests[nameof(ISide.ReadAllAsync)]==listings+1 && saved?.DropboxPath=="parent/Child/f",
-            $"A parent's case did not save as a record only ({string.Join(",",second.Select(e=>e.Action))}; writes {Writes()-writesBefore}; reads {Reads()-readsBefore}; listings {db.Requests[nameof(ISide.ReadAllAsync)]-listings}; saved {saved?.DropboxPath}; pc file {pc.Items.ContainsKey("Parent/Child/f")}; records {string.Join(",",(await RecordsAsync()))}; notices {string.Join(",",(await NoticesAsync()))})");
+            $"A parent's case did not save as a record only ({string.Join(",",second.Select(e=>e.Action))}; writes {Writes()-writesBefore}; reads {Reads()-readsBefore}; listings {db.Requests[nameof(ISide.ReadAllAsync)]-listings}; saved {saved?.DropboxPath}; pc file {pc.Items.ContainsKey("Parent/Child/f")}; records {string.Join(",",(await RecordsAsync()))}; notices {string.Join(",",(await NoticesAsync()))}; events {string.Join(" | ",trace)})");
         async Task<List<string>> RecordsAsync() { var all=new List<string>(); foreach(var k in new[]{"Parent","Parent/Child","Parent/Child/f"}) if(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(k),ct) is {} r) all.Add(r.LocalPath+"|"+r.DropboxPath); return all; }
         async Task<List<string>> NoticesAsync() { var all=new List<string>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) all.Add(n.Cause+"@"+n.Path); return all; }
         var third=await RepairAsync();

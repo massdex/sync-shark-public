@@ -46,7 +46,6 @@ internal sealed class JournalRecordProjection
         if (hasPrior && (renaming || prior.BeforeOld && (flags&Delete)!=0))
         { p.old.Remove(record.FileId); p.paired?.Add(new(prior.Usn,record.Usn,record.FileId,renaming && folder?history:null)); }
         if(namedHop && NamedHop()) return Task.CompletedTask;
-        if(StubByName()) return Task.CompletedTask;
         if(Locate() is { } error) return LocateFailedAsync(error);
         var aliases=MatchPaths();
         if (!renaming && (flags&Delete)==0 && UnmovedChange(aliases)) return Task.CompletedTask;
@@ -96,19 +95,6 @@ internal sealed class JournalRecordProjection
         if(!IsStagePath(history!) && (affected || rows.Any(r=>PathNames.Same(r.LocalPath,prior.Path) && p.scope.KeepCovers(Side.Local,r.LocalKey)) || !(p.Excluded(history!,folder) && p.Excluded(prior.Path!,folder))))
             p.result.Add(new(Side.Local,ChangeKind.Renamed,history,prior.Path,id,item?.Id==id?item:null,dirty,false,record.Usn,p.volume,parent,record.Name,prior.Parent,prior.Name,p.from.JournalId));
         return !dirty || folder;
-    }
-
-    // An online-only file is classified from its parent listing and settled there; it is never opened by ID.
-    private bool StubByName()
-    {
-        if(affected || folder || namedHop || history==null || (flags&Delete)!=0 || !Placeholders.IsOnlineOnlyAttributes(record.Attributes) || rows.Any(r=>r.LocalPath!=history)) return false;
-        Entry? entry;
-        try { entry=p.m.Entry!(history); }
-        catch(Exception e) when(MetadataFailure(e) && !BoundRootChanged(e,p.pair)) { return false; }
-        if(entry is not {IsFolder:false,Skip:nameof(TextKey.SkipOnlineOnly)} || entry.Id!=id) return false;
-        if(!IsStagePath(history) && !p.Excluded(history,false))
-            p.result.Add(new(Side.Local,ChangeKind.Changed,history,null,id,entry,dirty,false,record.Usn,p.volume,parent,record.Name,JournalId:p.from.JournalId));
-        return true;
     }
 
     // A metadata failure is returned, not thrown: the caller retains it without a forwarding frame.
