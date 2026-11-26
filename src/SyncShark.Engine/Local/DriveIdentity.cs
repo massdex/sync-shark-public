@@ -1,0 +1,100 @@
+using System.ComponentModel;
+using System.Security.AccessControl;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+namespace Massdex.SyncShark.Engine.Local;
+/// <summary>Reads a supported local root's drive type and native directory identity.</summary>
+public static class DriveIdentity
+{
+    // The NTFS file-system format name DriveInfo.DriveFormat reports for a supported local root.
+    private const string NtfsFormat = "NTFS";
+    public static (DirectoryIdentity Identity, DriveType Type) Read(string root)
+    {
+        var full = Path.GetFullPath(root);
+        if (full.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ||
+            (full.StartsWith(@"\\", StringComparison.Ordinal) && !full.StartsWith(@"\\?\", StringComparison.Ordinal)))
+            throw new ItemFailedException(root, TextKey.RootLocalNetworkUnsupported, null);
+        var drive = new DriveInfo(Path.GetPathRoot(full)!);
+        var type = drive.DriveType;
+        if (type == DriveType.Network) throw new ItemFailedException(root, TextKey.RootLocalNetworkUnsupported, null);
+        if (!string.Equals(drive.DriveFormat,NtfsFormat,StringComparison.OrdinalIgnoreCase)) throw new ItemFailedException(root,TextKey.RootLocalFormatUnsupported,null);
+        using var handle=Open(root); return (FromHandle(handle),type);
+    }
+    // winbase.h FILE_FLAG_OPEN_NO_RECALL: do not recall an object that changed since its parent listed it.
+    internal const uint OpenNoRecall = 0x00100000;
+    /// <summary>Returns the fully qualified spelling for an absolute-path Win32 call, never for stored paths.</summary>
+    public static string ToExtendedWindowsPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        if (fullPath.StartsWith("\\\\?\\", StringComparison.Ordinal)) return fullPath;
+        return fullPath.StartsWith("\\\\", StringComparison.Ordinal)
+            ? "\\\\?\\UNC\\" + fullPath[2..]
+            : "\\\\?\\" + fullPath;
+    }
+
+    internal static SafeFileHandle Open(string path, bool list=false, DirectoryIdentity? expectedRoot=null)
+    {
+        SafeFileHandle? handle = null;
+        try
+        {
+            Placeholders.Expose();
+            handle = CreateFileW(ToExtendedWindowsPath(path), LocalNative.ReadAttributes | (list ? (uint)FileSystemRights.ListDirectory : 0u),
+                FileShare.ReadWrite | (expectedRoot is null ? FileShare.Delete : FileShare.None),
+                IntPtr.Zero, (uint)FileMode.Open, LocalNative.BackupSemantics | LocalNative.NoRecallAndOpenReparsePoint, IntPtr.Zero);
+            if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (expectedRoot is not null && FromHandle(handle) != expectedRoot) throw new ChangedUnderneathException(path);
+            var opened = handle;
+            handle = null; // Ownership transfers to the caller only after authentication succeeds.
+            return opened;
+        }
+        catch (Exception error) when (expectedRoot is not null && LocalErrors.IsFileFailure(error))
+        {
+            throw new ChangedUnderneathException(path, error);
+        }
+        finally { handle?.Dispose(); }
+    }
+    internal static DirectoryIdentity FromHandle(SafeFileHandle handle)
+    {
+        if(!GetFileInformationByHandleEx(handle,LocalNative.FileAttributeTagInfo,out AttributeTag tag,(uint)Marshal.SizeOf<AttributeTag>())) throw new Win32Exception();
+        if(!tag.Attributes.HasFlag(FileAttributes.Directory) || Placeholders.Skip(tag.Attributes,tag.Tag) is not null) throw new IOException(Text.Get(TextKey.RootLocalIdentityUnavailable));
+        if(GetFileInformationByHandleEx(handle,LocalNative.FileIdInfo,out FileIdInfoBuffer wide,(uint)Marshal.SizeOf<FileIdInfoBuffer>())) return new(wide.VolumeSerialNumber,wide.FileIdLow,wide.FileIdHigh);
+        var error=Marshal.GetLastWin32Error(); if(!LocalErrors.FileIdInfoUnsupported(error)) throw new Win32Exception(error);
+        var basic=Basic(handle); return new(basic.VolumeSerialNumber,((ulong)basic.FileIndexHigh<<32)|basic.FileIndexLow,null);
+    }
+    internal static bool SkipsHeld(SafeFileHandle handle)
+    {
+        if (!GetFileInformationByHandleEx(handle, LocalNative.FileAttributeTagInfo, out AttributeTag tag, (uint)Marshal.SizeOf<AttributeTag>())) throw new Win32Exception();
+        return Placeholders.Skip(tag.Attributes,tag.Tag) is not null;
+    }
+    internal static ByHandleFileInformation Basic(SafeFileHandle h) => GetFileInformationByHandle(h,out var b) ? b : throw new Win32Exception();
+    [StructLayout(LayoutKind.Sequential)] private struct AttributeTag { public FileAttributes Attributes; public uint Tag; }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)] private static extern SafeFileHandle CreateFileW(string path,uint access,FileShare share,IntPtr security,uint creation,uint flags,IntPtr template);
+    [DllImport("kernel32.dll",SetLastError=true)] private static extern bool GetFileInformationByHandle(SafeFileHandle h,out ByHandleFileInformation info);
+    [DllImport("kernel32.dll",SetLastError=true)] private static extern bool GetFileInformationByHandleEx(SafeFileHandle h,int kind,out AttributeTag tag,uint length);
+    internal struct ByHandleFileInformation
+    {
+        public FileAttributes FileAttributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    // FILE_ID_INFO: a 64-bit volume serial and a 128-bit file id (two unsigned 64-bit halves).
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileIdInfoBuffer
+    {
+        public ulong VolumeSerialNumber;
+        public ulong FileIdLow;
+        public ulong FileIdHigh;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle hFile, int fileInformationClass,
+        out FileIdInfoBuffer lpFileInformation, uint dwBufferSize);
+}
