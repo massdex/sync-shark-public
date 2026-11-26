@@ -106,8 +106,9 @@ public static class RepairChecks
         var first=new List<string>();
         await Repair.RunAsync(pair,ItemChecks.Settings,e=>{lock(first) first.Add($"{e.Kind}:{e.Action}:{e.Path}:{e.Cause}");},paths,queue,pc,db,store,null,null,ct,caughtUp:true);
         var firstNotices=new List<string>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) firstNotices.Add(n.Cause+"@"+n.Path);
-        Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("Parent/Child/f"),ct) is {DropboxPath:"Parent/Child/f"},
-            $"The first Repair did not record the file (events {string.Join(" | ",first)}; notices {string.Join(",",firstNotices)})");
+        Check.Require(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("Parent/Child/f"),ct) is {DropboxPath:"Parent/Child/f"} &&
+            await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("Parent/Child"),ct) is {DropboxPath:"Parent/Child"},
+            $"The first Repair did not record the folder and its file (events {string.Join(" | ",first)}; notices {string.Join(",",firstNotices)})");
         // Dropbox's listing keeps the parent's old case for its descendants.
         foreach(var path in new[]{"Parent/Child/f","Parent/Child"}) { var (entry,bytes)=db.Items[path]; db.Items.Remove(path); db.Seed(entry with {Path="parent"+path["Parent".Length..]},bytes); }
         string[] writes=[nameof(ISide.PublishAsync),nameof(ISide.MoveAsync),nameof(ISide.EnsureFolderAsync),nameof(ISide.DeleteAsync),nameof(ISide.CreateFolderExclusiveAsync)];

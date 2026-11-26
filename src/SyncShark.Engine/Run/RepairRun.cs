@@ -208,8 +208,8 @@ internal sealed class RepairRun
             {
                 if(notice.Kind==NoticeKind.PutBack) continue;
                 if(!covered || touched || member!=null && store.ScanTouched(id,scan,member.Side,member.Path,false)) continue;
-                // A skipped folder's notice closes once the same folder is listed.
-                if(notice.Cause==TextKey.SkipUnreadable && member!=null && row.EntryOn(member.Side) is {IsFolder:true,Skip:null} listed && listed.Id==member.Id) { await new Notices().CloseAsync(store,id,notice,ct); continue; }
+                // A skipped folder's notice closes once the same folder is listed and its PC side is no longer skipped.
+                if(notice.Cause==TextKey.SkipUnreadable && member!=null && row.Local?.Skip!=nameof(TextKey.SkipUnreadable) && row.EntryOn(member.Side) is {IsFolder:true,Skip:null} listed && listed.Id==member.Id) { await new Notices().CloseAsync(store,id,notice,ct); continue; }
                 if(!coveredChild && await retirement.RetiringFootprint(raw,notice,member,ct) is {} footprint)
                 {
                     if(raw.Local==null && raw.Dropbox==null && raw.Synced==null) await new Notices().CloseAsync(store,id,notice,ct);

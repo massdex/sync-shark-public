@@ -1,5 +1,9 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
+using Massdex.SyncShark.Engine.Executor;
 using Massdex.SyncShark.Engine.Run;
 using Massdex.SyncShark.Engine.Tests.Scenarios;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
@@ -484,9 +488,15 @@ public static class AutoSyncChecks
         var settled=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var bootJobsDone=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         int afterRecovery=0,independent=0; string? lookupStack=null;
+        var ownFlow=new AsyncLocal<StrongBox<bool>?>(); var ownLookups=new ConcurrentBag<(StrongBox<bool> ReadById,string Stack)>();
         var memory=Observation.Wrap<IStore>((m,args)=>{
             if(m.Name==nameof(IStore.CloseNoticeAsync) && args[1] is Notice {Kind:NoticeKind.PutBack}) Interlocked.Exchange(ref afterRecovery,1);
-            if(m.Name==nameof(IStore.NoticesAtAsync) && (string?)args[1]==PathNames.Key(path) && Volatile.Read(ref afterRecovery)!=0) {Interlocked.Increment(ref independent);Interlocked.CompareExchange(ref lookupStack,Environment.StackTrace,null);}
+            if(m.Name==nameof(IStore.NoticesAtAsync) && (string?)args[1]==PathNames.Key(path) && Volatile.Read(ref afterRecovery)!=0)
+            {
+                // The page's own reports of this file may self-run concurrently with the put-back Retry and settle against the restored revision.
+                if(new StackTrace().GetFrames().Any(f=>f.GetMethod() is {Name:nameof(ItemSync.ApplyAsync)} own && own.DeclaringType==typeof(ItemSync))) {var box=new StrongBox<bool>(); ownFlow.Value=box; ownLookups.Add((box,Environment.StackTrace));}
+                else {Interlocked.Increment(ref independent);Interlocked.CompareExchange(ref lookupStack,Environment.StackTrace,null);}
+            }
             var settledNow=m.Name==nameof(IStore.SaveCursorAsync) && (string?)args[1]=="after";
             if(settledNow) Interlocked.Exchange(ref afterRecovery,0);
             var result=Observation.Forward(store,m,args);
@@ -503,6 +513,8 @@ public static class AutoSyncChecks
             if(m.Name==nameof(ISide.BoundaryAsync)) return Task.FromResult(((string?)"after",(JournalPosition?)null));
             if(m.Name==nameof(ISide.ReadChangesAsync) && args.Length==3) return Idle((CancellationToken)args[2]!);
             if(m.Name==nameof(ISide.ReadChangesAsync) && (string?)args[0]=="held") admitted.TrySetResult();
+            // Of the page's reports only the id-less tombstone reads the bound file by id after its lookup; that one is not a same-file revision.
+            if(m.Name==nameof(ISide.ReadByIdAsync) && ownFlow.Value is {} read) read.Value=true;
             if(m.Name==nameof(ISide.RecoverAsync) && args[1] is Entry e && (e==first || e==last)) return Task.FromResult<Recovery?>(new Recovery.File(e,new MemoryStream(e==first ? new byte[]{1} : new byte[]{2},false)));
             return Observation.Forward(db,m,args);
         });
@@ -527,6 +539,7 @@ public static class AutoSyncChecks
             await host.ResolveAsync(pair.PairId,choice!.Id,choice.Reviewed!,ResolutionChoice.Retry,null,ct);
             await settled.Task.WaitAsync(ct);
             Check.Require(db.Requests[nameof(ISide.ReadJobAsync)]==jobReads+1,$"Manual Retry expected one more token read; observed {db.Requests[nameof(ISide.ReadJobAsync)]-jobReads}");
+            foreach(var (read,stack) in ownLookups) if(read.Value) {independent++;lookupStack??=stack;}
             Check.Require(independent==0,$"Observed {independent} child notice lookups after closing put-back and before cursor settlement\n{lookupStack}");
             Check.Require(await store.CursorAsync(pair.PairId,ct)=="after" && !store.OpenNotices.Any(n=>n.Kind==NoticeKind.PutBack),"Recovery failed to settle its cursor or notice");
             Check.Require(pc.Items[path].Bytes.SequenceEqual(new byte[]{2}) && db.Items[path].Bytes.SequenceEqual(new byte[]{2}),"Recovery lost the revision after the path-only tombstone");

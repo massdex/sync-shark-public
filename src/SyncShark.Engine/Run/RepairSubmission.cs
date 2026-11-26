@@ -142,7 +142,9 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
         var current=run.queue.CurrentScope(run.paths);
         bool touchedMove=candidates.Any(c=>run.store.ScanTouched(run.id,run.scan,c.Side,c.Moved.Path,c.Moved.IsFolder) || run.store.ScanTouched(run.id,run.scan,c.Side,c.Synced.PathOn(c.Side),c.Moved.IsFolder));
         // A blocked folder's only outcome is its failure notice; a touch under it, such as its unreadable child's own notice, cannot make it stale.
-        if(touchedMove || row!=null && row.Context.UnreadableCause==null && !(run.removal && row is {Local:null,Dropbox:null,Synced:not null}) && run.Touched(row,row.IsFolder()))
+        // An unbound folder on both sides is only recorded and its population rechecks each child, so a descendant's commit cannot make it stale.
+        if(touchedMove || row!=null && row.Context.UnreadableCause==null && !(run.removal && row is {Local:null,Dropbox:null,Synced:not null}) &&
+            run.Touched(row,row.IsFolder() && row is not {Synced:null,Local.IsFolder:true,Dropbox.IsFolder:true}))
         {
             if(run.ScanCleared) reobserve=true;
             if(touchedMove)
@@ -168,7 +170,8 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
         if(prepared!=null)
         {
             var (lp,dp)=Row.Paths(prepared);
-            if(reobserve)
+            // A folder the walk could not list stays skipped: reading its own entry again cannot prove its contents readable.
+            if(reobserve && prepared.Local is not {IsFolder:true,Skip:nameof(TextKey.SkipUnreadable)})
             {
                 var pc=run.local.ReadOneAsync(lp,token);var db=run.dropbox.ReadOneAsync(dp,token);
                 try {await Task.WhenAll(pc,db).ConfigureAwait(false);}
