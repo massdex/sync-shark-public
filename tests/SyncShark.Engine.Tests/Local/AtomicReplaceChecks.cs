@@ -37,6 +37,7 @@ public static class AtomicReplaceChecks
         var f=await OpenAsync([R(11,Old,Target),R(12,New,Target),R(13,New|Close,Target),R(14,Create|Close,Fresh)],moved:true,tmpGone:false); using var store=f.Store;
         var (_,revision,settled,uncertain)=await ReadAsync(f,14);
         Check.Require(revision==1 && uncertain!=0 && settled==11,"redacted rename of a bound file no longer goes to Repair");
+        Check.Require((await f.Reader.ReadPageAsync(f.Pair,null,null,f.Settings,default)).ContinuityLost,"the uncertain page did not wake Repair");
         // The full Repair relinks the binding to the new name and finishes; the host then rewinds the reader to its held position.
         var saved=(await store.FindAsync("a",Side.Local,PathNames.Key("dir/name"),default))!;
         await store.CommitAsync("a",saved,new(PathNames.Key("dir/renamed"),"dir/renamed","dir/renamed","dir/renamed",false,Target.ToString(),0,0,"c",""),null,null,default);
