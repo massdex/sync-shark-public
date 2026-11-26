@@ -9,9 +9,8 @@ public sealed class ItemFailedException(string path, TextKey cause, Exception? i
         if(entry is {Skip:nameof(TextKey.SkipUnreadable)}) throw new ItemFailedException(entry.Path,side==Side.Local?TextKey.ReadLocalFailed:TextKey.ReadDropboxFailed,null);
     }
 
-    /// <summary>The innermost cause's message, such as the provider's route and reason; empty when the failure has none.</summary>
-    internal static string Reason(ItemFailedException? error) =>
-        error?.GetBaseException() is { } inner && inner != error ? inner.Message : string.Empty;
+    /// <summary>Dropbox's refusal as safe facts only: the route, the HTTP status and Dropbox's error tag.</summary>
+    public string? Provider { get; init; }
 
     /// <summary>The pair-relative path of the failed item.</summary>
     public string Path { get; } = path;

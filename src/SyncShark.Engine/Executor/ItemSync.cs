@@ -45,7 +45,7 @@ public static class ItemSync
                 var actual=location.Location.Entry;
                 ItemFailedException.RequireReadable(Side.Dropbox,actual);
                 if(actual.Id!=saved!.DropboxId || actual.IsFolder!=saved.IsFolder) Retain(key,failed);
-                if(PathNames.SamePlace(Side.Dropbox,saved.DropboxPath,actual.Path)) return true;
+                if(PathNames.SamePlace(saved.DropboxPath,actual.Path)) return true;
                 return await RowExecution.ExecuteAsync(pair,settings,events,paths,null,[new(Side.Dropbox,location.Location.Entry,saved!)],false,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,false,coversThrough:coversThrough);
             }
             if(saved is {IsFolder:true} && selectedRemoval) return await RowExecution.RemoveBoundAsync(pair,settings,events,paths,saved,change.Side,local,dropbox,store,heldInput,populate,compareOldBinding,failed,ct,coversThrough,null);
@@ -202,12 +202,12 @@ public static class ItemSync
             if (original!=null && original.IdOn(change.Side)==moved.Id) candidates=[new(change.Side,moved,original)];
         }
         var incoming=row.EntryOn(change.Side);
-        if(candidates.Count==0 && change.Kind is ChangeKind.Changed or ChangeKind.Renamed && incoming!=null && incoming.Id==change.Id && (saved?.IdOn(change.Side)!=incoming.Id || !PathNames.SamePlace(change.Side,saved.PathOn(change.Side),incoming.Path)))
+        if(candidates.Count==0 && change.Kind is ChangeKind.Changed or ChangeKind.Renamed && incoming!=null && incoming.Id==change.Id && (saved?.IdOn(change.Side)!=incoming.Id || !PathNames.SamePlace(saved.PathOn(change.Side),incoming.Path)))
         {
             await foreach(var binding in store.ByIdAsync(pair.PairId,change.Side,incoming.Id,ct))
             {
                 if(candidates.Count!=0) Retain(key,failed);
-                if(!PathNames.SamePlace(change.Side,binding.PathOn(change.Side),incoming.Path)) candidates=[new(change.Side,incoming,binding)];
+                if(!PathNames.SamePlace(binding.PathOn(change.Side),incoming.Path)) candidates=[new(change.Side,incoming,binding)];
             }
         }
         return candidates;
@@ -260,8 +260,8 @@ public static class ItemSync
         var db=await b is {InScope:true} d?d.Location.Entry:null;
         if(pc!=null && pc.Id!=binding.LocalId || db!=null && db.Id!=binding.DropboxId) throw new ChangedUnderneathException(binding.LocalPath);
         List<RenameCandidate> moved=[];
-        if(pc!=null && pc.Path!=binding.LocalPath) moved.Add(new(Side.Local,pc,binding));
-        if(db!=null && db.Path!=binding.DropboxPath) moved.Add(new(Side.Dropbox,db,binding));
+        if(pc!=null && !PathNames.SamePlace(binding.LocalPath,pc.Path)) moved.Add(new(Side.Local,pc,binding));
+        if(db!=null && !PathNames.SamePlace(binding.DropboxPath,db.Path)) moved.Add(new(Side.Dropbox,db,binding));
         return (new Row(binding.LocalKey,pc,db,binding,[],null,RowContext.Neutral with {OutOfScope=paths.Excludes(pc?.Path??binding.LocalPath,db?.Path??binding.DropboxPath,binding.IsFolder)}),moved);
     }
 
@@ -281,7 +281,7 @@ public static class ItemSync
         var row=action.Row;
         if(action.Kind is ActionKind.DeleteLocal or ActionKind.DeleteDropbox) return row.EntryOn(action.WrittenSide())?.IsFolder==true;
         if(action.Kind==ActionKind.Record && row.Synced is {} old && row.Local is {IsFolder:true} pc && row.Dropbox is {IsFolder:true} db)
-            return !old.IsFolder || old.LocalPath!=pc.Path || old.DropboxPath!=db.Path;
+            return !old.IsFolder || !PathNames.SamePlace(old.LocalPath,pc.Path) || !PathNames.SamePlace(old.DropboxPath,db.Path);
         return (row.Local?.IsFolder==true || row.Dropbox?.IsFolder==true || row.Synced?.IsFolder==true) && action.Kind is (ActionKind.ReplaceKind or ActionKind.DeferFolder or ActionKind.MoveLocal or ActionKind.MoveDropbox or ActionKind.MoveUnlinked or ActionKind.KeepBoth);
     }
 
@@ -305,7 +305,7 @@ public static class ItemSync
         var original=new Notice(0,NoticeKind.Failure,error.Cause,error.Path,subject,DateTimeOffset.UtcNow,false);
         await new Notices().RaiseAsync(store,pair.PairId,original,ct);
         failedNotice?.Invoke(original);
-        events(new(RunEventKind.Failed,NoticeKind.Failure.ToString(),error.Path,ItemFailedException.Reason(error),NoticeKind.Failure.ToString()){Cause=error.Cause});
+        events(new(RunEventKind.Failed,NoticeKind.Failure.ToString(),error.Path,error.Message,NoticeKind.Failure.ToString()){Cause=error.Cause,Provider=error.Provider});
         failed?.Invoke(key,reproducible);
     }
 

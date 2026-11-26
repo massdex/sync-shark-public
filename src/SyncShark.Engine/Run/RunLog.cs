@@ -31,6 +31,7 @@ public sealed class RunLog : IDisposable
     private const string CountFact = "count";
     private const string TotalFact = "total";
     private const string SideFact = "side";
+    private const string ProviderFact = "provider";
     private const char FactSeparator = '=';
     private const string FactJoiner = "; ";
 
@@ -123,10 +124,10 @@ public sealed class RunLog : IDisposable
             value.Kind == RunEventKind.Failed && value.Cause.HasValue ? string.Empty : value.Detail;
         if (!preparedWait && value.Cause is { } reason)
         {
-            // A Failed line's Detail is its cause's {Message}: the provider's or the system's own reason.
-            var named = Text.Get(reason, (TextArg.Path, value.Path), (TextArg.Message, value.Kind == RunEventKind.Failed && value.Error is null ? value.Detail : string.Empty));
+            var named = Text.Get(reason, (TextArg.Path, value.Path), (TextArg.Message, string.Empty));
             detail = detail.Length == 0 ? named : named + FactJoiner + detail;
         }
+        if (value.Provider is { } provider) detail = AppendFact(detail, ProviderFact, provider);
         if (value.Count is { } count) detail = AppendFact(detail, CountFact, count.ToString(CultureInfo.InvariantCulture));
         if (value.Total is { } total) detail = AppendFact(detail, TotalFact, total.ToString(CultureInfo.InvariantCulture));
         var outcome = value.Error is null ? value.Outcome : string.Empty;

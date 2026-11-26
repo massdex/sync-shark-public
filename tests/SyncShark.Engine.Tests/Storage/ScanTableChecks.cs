@@ -256,8 +256,8 @@ public static class ScanTableChecks
     internal static async Task DropboxAncestorCaseAsync()
     {
         using var db=await DeletedNamesChecks.OpenAsync();using var cmd=db.CreateCommand();var scan=Guid.NewGuid();cmd.CommandText="""
-            INSERT INTO synced_entry(pair_id,local_path,is_folder,local_id,local_size,local_mtime,dropbox_id,dropbox_hash) VALUES(1,'Parent/Child/x.pdf',0,1,1,0,'d1',''),(1,'Parent/y.pdf',0,2,1,0,'d2','');
-            INSERT INTO scan_state.scan(pair_id,scan_id,side,path,is_folder,size,mtime,id,rev,hash) VALUES(1,$s,1,'parent/Child/x.pdf',0,1,0,'d1','',''),(1,$s,1,'Parent/Y.pdf',0,1,0,'d2','','');
+            INSERT INTO synced_entry(pair_id,local_path,is_folder,local_id,local_size,local_mtime,dropbox_id,dropbox_hash) VALUES(1,'Parent/Child/x.pdf',0,1,1,0,'d1',''),(1,'Parent/y.pdf',0,2,1,0,'d2',''),(1,'Parent/z.pdf',0,3,1,0,'d3','');
+            INSERT INTO scan_state.scan(pair_id,scan_id,side,path,is_folder,size,mtime,id,rev,hash) VALUES(1,$s,1,'parent/Child/x.pdf',0,1,0,'d1','',''),(1,$s,1,'Parent/Y.pdf',0,1,0,'d2','',''),(1,$s,0,'parent/z.pdf',0,1,0,3,'','');
             """;cmd.Parameters.AddWithValue("$s",scan.ToByteArray());await cmd.ExecuteNonQueryAsync();
         var moved=new List<string>();await foreach(var c in new ScanTable().RenamesAsync(db,"p",scan,null,10,default))moved.Add(c.Moved.Path);
         Check.Require(moved.SequenceEqual(new[]{"Parent/Y.pdf"}),$"Ancestor case became a move or a name case rename was lost: {string.Join(",",moved)}");

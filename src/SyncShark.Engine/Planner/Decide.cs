@@ -147,10 +147,9 @@ public static class Decide
     {
         var local = row.Local!;
         var dropbox = row.Dropbox!;
-        // Both contents are unchanged; refresh only the applicable saved facts.
-        var refresh = synced.IsFolder
-            ? local.Path != synced.LocalPath || dropbox.Path != synced.DropboxPath
-            : LocalStampDiffers(local, synced) || !DropboxIdentityHolds(dropbox, synced);
+        // Both contents are unchanged; refresh only the applicable saved facts, an ancestor's new case included.
+        var refresh = local.Path != synced.LocalPath || dropbox.Path != synced.DropboxPath ||
+            !synced.IsFolder && (LocalStampDiffers(local, synced) || !DropboxIdentityHolds(dropbox, synced));
         return refresh ? Record(row) : None(row, NoneReason.InSync);
     }
 

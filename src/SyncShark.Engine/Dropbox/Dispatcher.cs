@@ -106,7 +106,7 @@ public sealed class Dispatcher
         catch (ItemFailedException error) when (!receivedResponse)
         {
             foreach (var item in group) item.Done.TrySetException(new ItemFailedException(item.Member.Path, error.Cause, error)
-                { Disposition = error.Disposition, ProviderWait = error.ProviderWait, ProviderWaitStarted = error.ProviderWaitStarted });
+                { Disposition = error.Disposition, ProviderWait = error.ProviderWait, ProviderWaitStarted = error.ProviderWaitStarted, Provider = error.Provider });
         }
         catch (ChangedUnderneathException) { throw; } // Reobserve the local version and the possibly committed remote write.
         catch (Exception error) when (error is not NotImplementedException)
@@ -166,15 +166,16 @@ public sealed class Dispatcher
         if (body is not null) await body.StopAsync().ConfigureAwait(false);
         var refusal = await DropboxHttp.ReadErrorAsync(response, ct).ConfigureAwait(false);
         wait = DropboxProtocol.ProviderWait(wait, refusal);
+        var fact = DropboxErrors.Fact(route, response.StatusCode, DropboxErrors.Summary(refusal));
         foreach (var item in group)
         {
             var classified = Classify(response.StatusCode, refusal, route, single == DropboxProtocol.CreateFolder || (single == DropboxProtocol.Upload && item.Revision is null));
             if (ReferenceEquals(item, group[0])) api?.ReportBusy(response.StatusCode, classified, wait, received);
             if (classified.Disposition == FailureDisposition.TemporaryNoEffect)
-                item.Done.TrySetException(ItemFailure(item.Member.Path, classified, wait, received));
+                item.Done.TrySetException(ItemFailure(item.Member.Path, classified, wait, received, fact));
             else
                 await SettleAsync(pair, item, single, (null, classified.Cause, classified.Disposition), ct,
-                    SelectedIdAbsent(single == DropboxProtocol.Delete, group.Length > 1, item.Member, classified.Absent)).ConfigureAwait(false);
+                    SelectedIdAbsent(single == DropboxProtocol.Delete, group.Length > 1, item.Member, classified.Absent), fact).ConfigureAwait(false);
         }
     }
 
@@ -221,10 +222,10 @@ public sealed class Dispatcher
                     api?.ReportBusy(status, classified, wait, received);
                     reportedBusy = true;
                 }
-                item.Done.TrySetException(ItemFailure(item.Member.Path, classified, wait, received));
+                item.Done.TrySetException(ItemFailure(item.Member.Path, classified, wait, received, DropboxErrors.Fact(route, status, null)));
                 return Task.CompletedTask;
             }
-            return SettleAsync(pair, item, single, receipt, ct, projected.AbsentOrdinals.Contains(0));
+            return SettleAsync(pair, item, single, receipt, ct, projected.AbsentOrdinals.Contains(0), DropboxErrors.Fact(route, status, null));
         })).ConfigureAwait(false);
     }
 
@@ -270,7 +271,7 @@ public sealed class Dispatcher
     }
 
     private async Task SettleAsync(PairConfig? pair, Pending item, string route,
-        (Entry? Entry, TextKey? Cause, FailureDisposition? Failure) receipt, CancellationToken ct, bool absent = false)
+        (Entry? Entry, TextKey? Cause, FailureDisposition? Failure) receipt, CancellationToken ct, bool absent = false, string? refusal = null)
     {
         try
         {
@@ -291,7 +292,8 @@ public sealed class Dispatcher
                 if (!proven) receipt = (null, TextKey.FailDropboxOutcomeUnknown, FailureDisposition.UnknownEffect);
                 else if (route == DropboxProtocol.Upload && api is not null) api.TransferFinished(true);
             }
-            item.Done.TrySetResult((null, absent ? new JobReply.Terminal([receipt]) { AbsentOrdinals = SingletonAbsent } : new JobReply.Terminal([receipt])));
+            item.Done.TrySetResult((null, new JobReply.Terminal([receipt]) { AbsentOrdinals = absent ? SingletonAbsent : System.Collections.Frozen.FrozenSet<int>.Empty,
+                Refusal = receipt.Cause is null && receipt.Failure is null ? null : refusal }));
         }
         catch (Exception error) when (error is OperationCanceledException or NotImplementedException ||
             error is ItemFailedException { Disposition: FailureDisposition.TemporaryNoEffect } && route == DropboxProtocol.CreateFolder && receipt.Cause == TextKey.ClashNameTaken)
@@ -302,9 +304,9 @@ public sealed class Dispatcher
     internal static DropboxErrors.Classified Classify(HttpStatusCode status, JsonElement envelope, string route, bool create) =>
         new DropboxErrors().Classify(status, envelope, route, create,
             new(false, true, status == HttpStatusCode.TooManyRequests, status == HttpStatusCode.TooManyRequests));
-    internal static ItemFailedException ItemFailure(string path, DropboxErrors.Classified failure, TimeSpan? wait, long started) => new(path, failure.Cause, null)
+    internal static ItemFailedException ItemFailure(string path, DropboxErrors.Classified failure, TimeSpan? wait, long started, string? provider = null) => new(path, failure.Cause, null)
     {
-        Disposition=failure.Disposition, ProviderWait=wait, ProviderWaitStarted=wait is null ? null : started
+        Disposition=failure.Disposition, ProviderWait=wait, ProviderWaitStarted=wait is null ? null : started, Provider=provider
     };
 
     private sealed class Pending(JobMember member, string? revision, DropboxStaged? upload)

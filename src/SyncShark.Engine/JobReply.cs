@@ -9,5 +9,7 @@ public abstract record JobReply
     {
         /// <summary>Zero-based indices into Members whose selected ID was observed absent, not proof this request removed it. Reindex when projecting a subset.</summary>
         public IReadOnlySet<int> AbsentOrdinals { get; init; } = System.Collections.Frozen.FrozenSet<int>.Empty;
+        /// <summary>A refused member's safe provider facts (route, HTTP status, Dropbox's error tag), for its failure's log line.</summary>
+        public string? Refusal { get; init; }
     }
 }

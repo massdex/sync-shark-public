@@ -26,7 +26,7 @@ public static class Moves
         if (pc != null && cloud != null)
         {
             var path = observations.DropboxDestination ?? PathNames.SpellingOn(Side.Dropbox, pc.Moved.Path);
-            if (cloud.Moved.Path != path && PathNames.CaseOnly(pc.Moved.Path, saved.LocalPath) && PathNames.CaseOnly(cloud.Moved.Path, saved.DropboxPath))
+            if (!PathNames.SamePlace(path, cloud.Moved.Path) && PathNames.CaseOnly(pc.Moved.Path, saved.LocalPath) && PathNames.CaseOnly(cloud.Moved.Path, saved.DropboxPath))
                 return new(ActionKind.Record, row, InfoAfter: TextKey.InfoCapitalsDiffer);
             return PathNames.Same(cloud.Moved.Path, path) ? new(ActionKind.Record, row) : Split(row, TextKey.InfoMovedTwice);
         }

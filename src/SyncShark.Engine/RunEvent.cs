@@ -11,4 +11,6 @@ public readonly record struct RunEvent(RunEventKind Kind, string What, string Pa
     public NoticeKind? Notice { get; init; }
     public TextKey? Cause { get; init; }
     public Exception? Error { get; init; }
+    /// <summary>The provider's refusal as safe facts only: the route, the HTTP status and Dropbox's error tag.</summary>
+    public string? Provider { get; init; }
 }

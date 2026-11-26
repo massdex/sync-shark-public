@@ -116,11 +116,8 @@ public static class PathNames
     /// <summary>Whether the leaf names have identical spelling, ignoring ancestor spelling without allocating names.</summary>
     public static bool SameName(string left, string right) =>
         left.AsSpan(LastSeparator(left) + 1).SequenceEqual(right.AsSpan(LastSeparator(right) + 1));
-
-    /// <summary>Whether a seen path is the saved item's own place: exact, or on Dropbox the same name under ancestors whose
-    /// case Dropbox's listing may keep from when the item was created. A case rename of the item's own name still differs.</summary>
-    public static bool SamePlace(Side side, string saved, string seen) =>
-        saved == seen || side == Side.Dropbox && Same(saved, seen) && SameName(saved, seen);
+    /// <summary>The saved item's own place: same name, ancestors equal up to case (a listing may keep an old case); a case rename of the name still differs.</summary>
+    public static bool SamePlace(string saved, string seen) => saved == seen || Same(saved, seen) && SameName(saved, seen);
 
     /// <summary>The parent of a relative path; "" for a top-level path.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

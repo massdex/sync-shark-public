@@ -23,7 +23,6 @@ internal sealed class RepairRun
     private readonly List<FolderMark> folders=new();
     private readonly List<(NoticeItem Member,bool Present)> linkWrites=new();
     private readonly HashSet<Exclusion> recreated=new(); // filled by the PC listing's one sequential enumerator
-    internal readonly TaskCompletionSource discoveryEnded=new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly HashSet<Task> admitted=new();
     private readonly SemaphoreSlim slots; // discovery waits for the queue: at most one storage page of differences in memory
     private readonly Dictionary<string,int> effects=new(), issues=new();
@@ -236,8 +235,17 @@ internal sealed class RepairRun
             else if(!coveredChild) await Submit(row,[],retiring,coveredFolder:row.IsFolder() && row.Synced==null && coveredLocal && coveredRemote);
         }
         await FinishFolders(null);
-        discoveryEnded.TrySetResult();
         await Drain();
+        await RetryFailedAsync();
+    }
+    // The end-of-Repair turn: each row that still failed is retried once from its saved notice, read back page by page.
+    private async Task RetryFailedAsync()
+    {
+        var retries=new Retries(queue.Unfinished);
+        await foreach(var failed in store.ScanFailuresAsync(id,scan,ct))
+            if(await store.NoticeAsync(id,failed,ct) is {} notice)
+                try { await retries.RetryAsync(pair,settings,Log,paths,notice,local,dropbox,store,queue.Held,Populate,Hop,ct,queue.CoversHop); }
+                catch(Exception e) when(e is ItemFailedException or ChangedUnderneathException or PathOccupiedException) {} // the notice stays
     }
     private async IAsyncEnumerable<Listed> Inventory(ISide side,string path,Action<string>? cursor,[EnumeratorCancellation] CancellationToken token)
     {
@@ -267,7 +275,7 @@ internal sealed class RepairRun
     }
     internal async Task CleanupAsync()
     {
-        discoveryEnded.TrySetCanceled(); try {await Drain();} finally {Volatile.Write(ref scanCleared,true);await store.ClearScanAsync(id,scan,ct);}
+        try {await Drain();} finally {Volatile.Write(ref scanCleared,true);await store.ClearScanAsync(id,scan,ct);}
     }
 
     private async Task Finish()
@@ -334,18 +342,17 @@ internal sealed class RepairRun
         await slots.WaitAsync(ct).ConfigureAwait(false);
         Schedule(AdmitAsync(submission,row,candidates));
     }
-    // A row that still fails after its in-place retry is tried once more at the end of this Repair, then ends.
+    // A row that still fails after its in-place retry is saved to SQLite by its notice and leaves memory; RetryFailedAsync owns its end turn.
     private async Task AdmitAsync(RepairSubmission submission,Row? row,IReadOnlyList<RenameCandidate> candidates)
     {
-        bool owesEnd;
-        try { owesEnd=await TurnsAsync(submission,row,candidates).ConfigureAwait(false); }
-        finally { slots.Release(); } // a failed row's notice is saved; waiting for its end turn must not stall discovery
-        if(!owesEnd) return;
-        try {await discoveryEnded.Task.WaitAsync(ct).ConfigureAwait(false);} catch(OperationCanceledException) {return;} // a failed or cancelled scan leaves the notice
-        if(submission.Failed && await submission.EndAsync(ct).ConfigureAwait(false))
-            await queue.AdmitRepairAsync(pair,row,candidates,submission.Apply,ct,bypassNoEffect:true).ConfigureAwait(false);
+        try
+        {
+            if(await TurnsAsync(submission,row,candidates).ConfigureAwait(false) && submission.Own is {Id:>0} notice)
+                await store.AddScanFailureAsync(id,scan,notice.Id,ct).ConfigureAwait(false);
+        }
+        finally { slots.Release(); }
     }
-    // The first turn and its in-place retry; true when the row still failed and owes the end turn.
+    // The first turn and its in-place retry; true when the row still failed.
     private async Task<bool> TurnsAsync(RepairSubmission submission,Row? row,IReadOnlyList<RenameCandidate> candidates)
     {
         if(!await queue.AdmitRepairAsync(pair,row,candidates,submission.Apply,ct).ConfigureAwait(false))

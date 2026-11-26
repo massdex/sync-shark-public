@@ -15,7 +15,86 @@ public static class RepairChecks
         await BilateralNoticeAsync(); await RecoveryChecks.ClosedNoticeAsync(true); await RecoveryChecks.PutBackSurvivesRepairAsync(true);
         await RetainedAttemptAsync(); await SelectedStreamRaceAsync(); await ReplacedDuringRepairAsync();
         await CoveredFolderAsync(true); await CoveredFolderAsync(false);
-        await BoundedAdmissionAsync();
+        await BoundedAdmissionAsync(); await FailuresLeaveMemoryAsync(); await AncestorCaseRecordedOnceAsync();
+        await ObservedAncestorCaseAsync(); await BilateralCaseRenameAsync();
+    }
+
+    // Failed rows are saved to SQLite and leave memory: what is held at the end turn does not grow with the failure count.
+    private static async Task FailuresLeaveMemoryAsync()
+    {
+        async Task<long> HeldAsync(int count)
+        {
+            long held=0;
+            await WithRepairStore(async (store,pair,ct)=>
+            {
+                var pc=new FakeSide(Side.Local); var dbSide=new FakeSide(Side.Dropbox);
+                for(int i=0;i<count;i++) pc.Seed(ItemChecks.File(Side.Local,$"f{i:D4}",1,$"{i}"),[1]);
+                var remote=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.PublishAsync) && args[0] is IStaged staged ?
+                    Task.FromException<RemovalResult>(new ItemFailedException(staged.Path,TextKey.DropboxRefused,null){Disposition=FailureDisposition.Permanent}) : AutoSyncChecks.Observation.Forward(dbSide,m,args));
+                long before=0, at=0;
+                var observed=AutoSyncChecks.Observation.Wrap<IStore>((m,args)=>{
+                    if(m.Name==nameof(IStore.ScanFailuresAsync) && at==0) at=GC.GetTotalMemory(true);
+                    return AutoSyncChecks.Observation.Forward(store,m,args);
+                });
+                before=GC.GetTotalMemory(true);
+                await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(),pc,remote,observed,null,null,ct,caughtUp:true);
+                var open=0; await foreach(var n in store.NoticesAsync(pair.PairId,ct)) if(n.Kind==NoticeKind.Failure && !n.Dismissed) open++;
+                Check.Require(at!=0 && open==count,$"The end turn did not read the failures back from SQLite, or a failure lost its notice ({open}/{count})");
+                held=at-before;
+            });
+            return held;
+        }
+        const int small=50, large=450;
+        var growth=(await HeldAsync(large)-await HeldAsync(small))/(large-small);
+        Check.Require(growth<512,$"Memory held at the end turn grows by {growth} bytes per failed row");
+    }
+
+    // A parent's new case is saved with no Dropbox call and no subtree work; the next Repair finds no difference.
+    private static Task AncestorCaseRecordedOnceAsync() => WithRepairStore(async (store,pair,ct)=>
+    {
+        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); var paths=new PathScope(pair,[pair],DriveType.Fixed); var queue=new WorkQueue();
+        pc.Seed(ItemChecks.File(Side.Local,"Parent",0,"p",true),[]); pc.Seed(ItemChecks.File(Side.Local,"Parent/Child",0,"c",true),[]); pc.Seed(ItemChecks.File(Side.Local,"Parent/Child/f",1,"f"),[1]);
+        db.Seed(ItemChecks.File(Side.Dropbox,"Parent",0,"dp",true),[]); db.Seed(ItemChecks.File(Side.Dropbox,"Parent/Child",0,"dc",true),[]); db.Seed(ItemChecks.File(Side.Dropbox,"Parent/Child/f",1,"df"),[1]);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,db,store,null,null,ct,caughtUp:true);
+        // Dropbox's listing keeps the parent's old case for its descendants.
+        foreach(var path in new[]{"Parent/Child/f","Parent/Child"}) { var (entry,bytes)=db.Items[path]; db.Items.Remove(path); db.Seed(entry with {Path="parent"+path["Parent".Length..]},bytes); }
+        string[] writes=[nameof(ISide.PublishAsync),nameof(ISide.MoveAsync),nameof(ISide.EnsureFolderAsync),nameof(ISide.DeleteAsync),nameof(ISide.CreateFolderExclusiveAsync)];
+        long Writes()=>writes.Sum(w=>db.Requests[w]);
+        async Task<List<RunEvent>> RepairAsync()
+        {
+            var effects=new List<RunEvent>(); await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",ct);
+            await Repair.RunAsync(pair,ItemChecks.Settings,e=>{if(e.Kind==RunEventKind.Effect) lock(effects) effects.Add(e);},paths,queue,pc,db,store,null,null,ct,caughtUp:true);
+            return effects;
+        }
+        long writesBefore=Writes(), listings=db.Requests[nameof(ISide.ReadAllAsync)];
+        var second=await RepairAsync();
+        var saved=await store.FindAsync(pair.PairId,Side.Dropbox,PathNames.DropboxKey("parent/Child/f"),ct);
+        Check.Require(second.Count!=0 && second.All(e=>e.Action==ActionKind.Record) && Writes()==writesBefore && db.Requests[nameof(ISide.ReadAllAsync)]==listings+1 && saved?.DropboxPath=="parent/Child/f",
+            $"A parent's case did not save as a record only ({string.Join(",",second.Select(e=>e.Action))}; writes {Writes()-writesBefore}; listings {db.Requests[nameof(ISide.ReadAllAsync)]-listings}; saved {saved?.DropboxPath})");
+        var third=await RepairAsync();
+        Check.Require(third.Count==0 && Writes()==writesBefore,$"The next Repair found the parent's case again: {string.Join(",",third.Select(e=>e.Action))}");
+    });
+
+    // Reading a binding by ID returns the corrected ancestor case; only the item's own name can make it a move.
+    private static Task ObservedAncestorCaseAsync() => WithRepairStore(async (store,pair,ct)=>
+    {
+        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var l=ItemChecks.File(Side.Local,"Parent/Child/f",1,"l1"); var d=ItemChecks.File(Side.Dropbox,"Parent/Child/f",1,"d1"); pc.Seed(l,[1]); db.Seed(d,[1]);
+        var observe=typeof(ItemSync).GetMethod("ObserveBindingAsync",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Static)!;
+        async Task<int> Moved(SyncedEntry binding)=>(await (Task<(Row Row,IReadOnlyList<RenameCandidate> Group)>)observe.Invoke(null,[paths,binding,pc,db,ct])!).Group.Count;
+        var ancestor=await Moved(SyncedEntries.From(l with {Path="parent/Child/f"},d with {Path="parent/Child/f"}));
+        var leaf=await Moved(SyncedEntries.From(l with {Path="Parent/Child/F"},d));
+        Check.Require(ancestor==0 && leaf==1,$"By-ID observation: ancestor case gave {ancestor} moves, a leaf case rename gave {leaf}");
+    });
+
+    // The same case rename on both sides, with Dropbox keeping the parent's old case, is one name, not two.
+    private static Task BilateralCaseRenameAsync()
+    {
+        var saved=SyncedEntries.From(ItemChecks.File(Side.Local,"Parent/file",1,"l1"),ItemChecks.File(Side.Dropbox,"Parent/file",1,"d1"));
+        var action=Engine.Planner.Moves.For([new(Side.Local,ItemChecks.File(Side.Local,"Parent/File",1,"l1"),saved),new(Side.Dropbox,ItemChecks.File(Side.Dropbox,"parent/File",1,"d1"),saved)],
+            null,new Engine.Planner.Moves.Observations(null,null,false,false,false,false,null,null,null),false);
+        Check.Require(action is {Kind:ActionKind.Record,InfoAfter:null},$"A matching case rename on both sides gave {action.Kind} {action.InfoAfter}");
+        return Task.CompletedTask;
     }
 
     // Discovery waits for the work queue: while uploads stall, at most one storage page of differences is admitted.
@@ -23,17 +102,21 @@ public static class RepairChecks
     {
         var pc=new FakeSide(Side.Local); var dbSide=new FakeSide(Side.Dropbox); int page=ItemChecks.Settings.StoragePageSize, count=page+30;
         for(int i=0;i<count;i++) pc.Seed(ItemChecks.File(Side.Local,$"f{i:D4}",1,$"{i}"),[1]);
-        int inflight=0, most=0; var gate=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int inflight=0, most=0; var gate=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var fake=new object();
+        // The fake's dictionaries are not thread-safe and its calls finish synchronously: forward one call at a time.
+        object? Serialized(System.Reflection.MethodInfo m,object?[] args) { lock(fake) return AutoSyncChecks.Observation.Forward(dbSide,m,args); }
         async Task<RemovalResult> Stalled(System.Reflection.MethodInfo m,object?[] args)
         {
+            // The known boundary: a full page waits here, then the gate opens.
             var now=Interlocked.Increment(ref inflight); lock(gate) most=Math.Max(most,now);
+            if(now>=page) gate.TrySetResult();
             try { await gate.Task.WaitAsync(ct); } finally { Interlocked.Decrement(ref inflight); }
-            return await (Task<RemovalResult>)AutoSyncChecks.Observation.Forward(dbSide,m,args)!;
+            return await (Task<RemovalResult>)Serialized(m,args)!;
         }
-        var remote=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.PublishAsync) ? Stalled(m,args) : AutoSyncChecks.Observation.Forward(dbSide,m,args));
-        var opener=Task.Run(async()=>{ int last=-1; while(!gate.Task.IsCompleted){ await Task.Delay(200,ct); var now=Volatile.Read(ref inflight); if(now>0 && now==last) gate.TrySetResult(); last=now; } },ct);
+        var remote=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.PublishAsync) ? Stalled(m,args) : Serialized(m,args));
+
         await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(),pc,remote,store,null,null,ct,caughtUp:true);
-        gate.TrySetResult(); await opener;
+        gate.TrySetResult();
         Check.Require(most<=page && dbSide.Items.Count==count,$"Repair admitted {most} differences at once (page {page}) or lost uploads ({dbSide.Items.Count}/{count})");
     });
 

@@ -85,7 +85,7 @@ public sealed class Effects
         var (_,after,boundary,armed,proof,mergedSource) = step;
         if(collectCreate!=null) { collectCreate(after! with {LocalPublished=boundary}); return EffectOutcome.Applied; }
         var spent = row.Deletion is DeletionEvidence.DeletedFile or DeletionEvidence.DeletedPath ? PathNames.DropboxKey(row.Deletion.Path) : null;
-        bool movedFolder=after is {IsFolder:true} && saved is {IsFolder:true} && (saved.LocalPath!=after.LocalPath || saved.DropboxPath!=after.DropboxPath);
+        bool movedFolder=after is {IsFolder:true} && saved is {IsFolder:true} && (!PathNames.SamePlace(saved.LocalPath,after.LocalPath) || !PathNames.SamePlace(saved.DropboxPath,after.DropboxPath));
         if(movedFolder && spent==null && (paths.KeepOverlaps(Side.Local,saved!.LocalKey) || paths.KeepOverlaps(Side.Dropbox,saved.DropboxKey)))
             await store.FollowKeepAsync(pair.PairId,saved!,after!,null,ct);
         else
@@ -137,7 +137,7 @@ public sealed class Effects
         if (row.Local is not {} pc || row.Dropbox is not {} db) throw new ChangedUnderneathException(Row.Path(row));
         var after = saved != null && (saved.LocalPath != pc.Path || saved.DropboxPath != db.Path) ? SyncedEntries.Relink(saved,pc,db) : SyncedEntries.From(pc,db);
         if (pc.IsFolder && saved == null) await Populate(populate,local,dropbox,pc,db,ct);
-        else if (pc.IsFolder && saved != null && (saved.LocalPath != pc.Path || saved.DropboxPath != db.Path))
+        else if (pc.IsFolder && saved != null && (!PathNames.SamePlace(saved.LocalPath, pc.Path) || !PathNames.SamePlace(saved.DropboxPath, db.Path)))
             await compareOldBinding(saved,new(saved.LocalPath,saved.DropboxPath),new(pc.Path,db.Path),ct);
         return after;
     }
@@ -265,7 +265,7 @@ public sealed class Effects
         if(failure && captureFailure != null) { captureFailure(notice); return; } // the Repair row owns the single deduplicated save
         await store.SaveNoticeAsync(pair.PairId,notice,ct);
         if(failure) failedNotice?.Invoke(notice);
-        if(plannedFailure) events(new(RunEventKind.Failed,kind.ToString(),path,string.Empty,kind.ToString()){Cause=cause});
+        if(plannedFailure) events(new(RunEventKind.Failed,kind.ToString(),path,cause.ToString(),kind.ToString()){Cause=cause});
     }
 
 

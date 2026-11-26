@@ -5,15 +5,17 @@ namespace Massdex.SyncShark.Engine.Run;
 /// <summary>One Repair row or move group handed to the queue: one distinct turn per admission, its one notice and its end turn.</summary>
 internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<RenameCandidate> candidates,List<(Scope Footprint,Notice Notice)>? retiring,bool coveredFolder)
 {
-    private bool reobserve, final, settled, retained, uncertain;
+    private bool reobserve, settled, retained, uncertain;
     private Notice? own;
     private ItemFailedException? error; // the last turn's failure, for its logged reason
     private TimeSpan? floor; private long? floorStart; private TextKey floorCause;
 
     /// <summary>The first turn failed; the in-place reobservation is owed.</summary>
     internal bool OwesInPlace { get; private set; }
-    /// <summary>Failed after its in-place retry and owes one end-of-Repair attempt.</summary>
+    /// <summary>Failed after its in-place retry; its saved notice owes one end-of-Repair attempt.</summary>
     internal bool Failed { get; private set; }
+    /// <summary>The saved notice of this row's failure.</summary>
+    internal Notice? Own => own;
 
     /// <summary>The next admission is the in-place retry.</summary>
     internal void InPlace() => reobserve = true;
@@ -21,13 +23,12 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
     internal async Task Apply(CancellationToken token)
     {
         if(run.physicalHop!=null) {await HopAsync(token); return;} // a hop keeps today's single attempt and split
-        var since=DateTimeOffset.UtcNow; var endOwn=own;
         TextKey? cause; Notice? raised;
         if(FloorActive()) { cause=floorCause; raised=null; } // a provider floor refused this turn locally, without a send
         else
         {
             try { (cause,raised)=await OnceAsync(token).ConfigureAwait(false); }
-            catch(Exception error) when(own!=null && !final && error is not (OperationCanceledException or WorkQueue.Unsettled))
+            catch(Exception error) when(own!=null && error is not (OperationCanceledException or WorkQueue.Unsettled))
             {
                 await SaveAsync(own,token).ConfigureAwait(false); // an independent error stops the retry; the earlier item failure keeps its notice
                 throw;
@@ -38,9 +39,8 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
             if(settled)
             {
                 if(!reobserve && retiring!=null) await run.retirement.CloseSelected(retiring,token).ConfigureAwait(false);
-                if(final && endOwn!=null) await CloseAsync(endOwn,since,token).ConfigureAwait(false);
             }
-            else if(own!=null && !final) await SaveAsync(own,token).ConfigureAwait(false); // the retry could not reach the row: the earlier failure keeps its notice
+            else if(own!=null) await SaveAsync(own,token).ConfigureAwait(false); // the retry could not reach the row: the earlier failure keeps its notice
             Failed=false; OwesInPlace=false; return;
         }
         // A witnessed unknown effect keeps its specific notice and its footprint; Repair never resends it.
@@ -50,7 +50,6 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
             throw new WorkQueue.Unsettled();
         }
         own=raised ?? FallbackNotice(cause.Value);
-        if(final) return;                              // the end turn failed: the existing notice stays
         if(!reobserve) { OwesInPlace=true; return; }   // the first turn failed: the in-place reobservation is owed
         await SaveAsync(own,token).ConfigureAwait(false); Failed=true; return; // one deduplicated save, then the end turn is owed
     }
@@ -60,16 +59,6 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
         // A live identity or a changed binding belongs to its own input. Leave it and finish this removal.
         try { await Apply(run.ct); }
         catch(ChangedUnderneathException race) when(!PathNames.Same(race.Path,run.pair.LocalRoot) && !PathNames.Same(race.Path,run.pair.DropboxRoot)) {}
-    }
-
-    /// <summary>The end turn is owed only while this row's own notice is still open.</summary>
-    internal async Task<bool> EndAsync(CancellationToken token)
-    {
-        final=true; reobserve=true;
-        if(own==null) return false;
-        if(await Repair.CurrentRetryAsync(run.store,run.id,own,token).ConfigureAwait(false) is not {} current) return false;
-        own=current;
-        return true;
     }
 
     /// <summary>A declined admission gives this difference its own notice unless an open Failure already covers it.</summary>
@@ -150,7 +139,7 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
                 moves=await RemainingMoves(token).ConfigureAwait(false);
                 if(moves.Count==0) return (null,[],true);
             }
-            else if(!final && own==null && !reobserve) return (null,[],true);
+            else if(own==null && !reobserve) return (null,[],true);
         }
         var prepared=row;
         if(reobserve && moves.Count!=0)
@@ -201,7 +190,7 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
             foreach(var c in candidates)
             {
                 var carried=binding.PathOn(c.Side);
-                if(PathNames.SamePlace(c.Side,carried,c.Moved.Path)) continue;
+                if(PathNames.SamePlace(carried,c.Moved.Path)) continue;
                 (remaining??=[]).Add(c with {Synced=binding});
             }
             return remaining is null ? [] : remaining;
@@ -242,7 +231,7 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
     private async Task SaveAsync(Notice proposed,CancellationToken token)
     {
         await new Notices().RaiseAsync(run.store,run.id,proposed,token).ConfigureAwait(false);
-        run.Log(new(RunEventKind.Failed,nameof(NoticeKind.Failure),proposed.Path,error?.Cause==proposed.Cause ? ItemFailedException.Reason(error) : string.Empty,nameof(NoticeKind.Failure)){Cause=proposed.Cause});
+        run.Log(new(RunEventKind.Failed,nameof(NoticeKind.Failure),proposed.Path,string.Empty,nameof(NoticeKind.Failure)){Cause=proposed.Cause,Provider=error?.Cause==proposed.Cause ? error.Provider : null});
         own=await ResolveAsync(proposed,token).ConfigureAwait(false) ?? proposed;
     }
     // The stored winner by kind, cause, path and items; the store may keep an earlier At.
@@ -262,15 +251,6 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
                 if(n.Kind==NoticeKind.Failure && !n.Ignored && !n.Dismissed &&
                     n.Subject.Items.Any(i=>proposed.Subject.Items.Any(j=>j.Side==i.Side && j.Id.Length!=0 && j.Id==i.Id))) return true;
         return false;
-    }
-    // Only a positive Settled on the end attempt closes the still-current notice; a later At stays open.
-    private async Task CloseAsync(Notice expected,DateTimeOffset since,CancellationToken token)
-    {
-        foreach(var key in NoticeKeys(expected))
-            await foreach(var n in run.store.NoticesAtAsync(run.id,key,token))
-                if(n.Kind==NoticeKind.Failure && !n.Dismissed && n.At<=since && n.Cause==expected.Cause &&
-                    PathNames.Same(n.Path,expected.Path) && n.Subject.HasSameItems(expected.Subject))
-                    await new Notices().CloseAsync(run.store,run.id,n,token).ConfigureAwait(false);
     }
     private static IEnumerable<string> NoticeKeys(Notice n) =>
         n.Subject.Items.Select(i=>PathNames.KeyFor(i.Side,i.Path)).Append(PathNames.Key(n.Path)).Distinct(StringComparer.Ordinal);

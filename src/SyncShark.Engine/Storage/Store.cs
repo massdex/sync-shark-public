@@ -283,6 +283,8 @@ public sealed class Store : IStore
 
     /// <summary>Check whether a concurrent write touched this footprint.</summary>
     public bool ScanTouched(string pairId, Guid scanId, Side side, string path, bool descendants) => scan.Touched(pairId, scanId, side, path, descendants);
+    public Task AddScanFailureAsync(string pairId, Guid scanId, long noticeId, CancellationToken ct) => Locked(() => ScanTable.AddFailureAsync(scratch.Ensure(Connection), scanId, noticeId, ct), ct);
+    public IAsyncEnumerable<long> ScanFailuresAsync(string pairId, Guid scanId, CancellationToken ct) => scratch.Stream(db => ScanTable.FailuresAsync(db, scanId, settings.StoragePageSize, ct), true, ct);
 
     private Task KeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry? second, Notice notice, CancellationToken ct) => Locked(async () =>
     {
@@ -306,8 +308,10 @@ public sealed class Store : IStore
         bool sameFolder = before is {IsFolder:true, LocalId.Length:>0, DropboxId.Length:>0} && after is {IsFolder:true} &&
             before.LocalId==after.LocalId && before.DropboxId==after.DropboxId;
         bool localMoved=before?.LocalPath!=after?.LocalPath, remoteMoved=before?.DropboxPath!=after?.DropboxPath;
-        Mark(Side.Local, !(sameFolder && remoteMoved && !localMoved));
-        Mark(Side.Dropbox, !(sameFolder && localMoved && !remoteMoved));
+        // Only an ancestor's case changed: the descendants' scan facts stay current.
+        bool respelled=sameFolder && PathNames.SamePlace(before!.LocalPath,after!.LocalPath) && PathNames.SamePlace(before.DropboxPath,after.DropboxPath);
+        Mark(Side.Local, !respelled && !(sameFolder && remoteMoved && !localMoved));
+        Mark(Side.Dropbox, !respelled && !(sameFolder && localMoved && !remoteMoved));
         void Mark(Side side, bool descendants)
         {
             var old = before?.KeyOn(side);

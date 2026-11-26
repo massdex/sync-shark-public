@@ -98,4 +98,8 @@ public interface IStore : IDisposable
     void BeginScan(string pairId, Guid scanId) => throw new NotImplementedException();
     /// <summary>Check whether a concurrent write touched this footprint.</summary>
     bool ScanTouched(string pairId, Guid scanId, Side side, string path, bool descendants) => throw new NotImplementedException();
+    /// <summary>Save the notice of a row that failed in this scan, so its end-of-Repair turn need not hold the row.</summary>
+    Task AddScanFailureAsync(string pairId, Guid scanId, long noticeId, CancellationToken ct) => throw new NotImplementedException();
+    /// <summary>Stream this scan's saved failure notices, page by page, in ID order.</summary>
+    IAsyncEnumerable<long> ScanFailuresAsync(string pairId, Guid scanId, CancellationToken ct) => throw new NotImplementedException();
 }

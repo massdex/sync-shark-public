@@ -43,10 +43,7 @@ public sealed class DropboxWriter
                 PathNames.Same(member.Path, expected.Path) && !string.IsNullOrEmpty(member.Destination))
                 return Result(RemovalOutcome.NoEffect, expected, cause);
             if (cause == TextKey.ClashNameTaken) throw new PathOccupiedException(member.Destination ?? member.Path, Side.Dropbox);
-            // The member reply keeps only its cause; name the refused route.
-            var refusal = new HttpRequestException(Text.Get(TextKey.ProviderFailure, (TextArg.Name, route), (TextArg.Count, Text.Get(TextKey.HumanNotRecorded)),
-                (TextArg.Message, Text.Get(TextKey.ProviderReasonUnavailable))));
-            throw new ItemFailedException(member.Path, cause ?? TextKey.DropboxRefused, refusal) { Disposition = failure ?? FailureDisposition.Permanent };
+            throw new ItemFailedException(member.Path, cause ?? TextKey.DropboxRefused, null) { Disposition = failure ?? FailureDisposition.Permanent, Provider = terminal.Refusal };
         }
         if (entry is null || string.IsNullOrWhiteSpace(entry.Id) ||
             expected is not null && (entry.Id != expected.Id || entry.IsFolder != expected.IsFolder) ||

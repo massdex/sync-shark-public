@@ -145,6 +145,27 @@ public sealed class ScanTable
         put.ExecuteNonQuery();
     }
 
+    internal static async Task AddFailureAsync(SqliteConnection db, Guid scanId, long noticeId, CancellationToken ct)
+    {
+        using var cmd = StorageCommand.Create(db, null, Sql.Get(SqlKey.ScanTableAddFailure1), ("$s", scanId.ToByteArray()), ("$n", noticeId));
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One page at a time; each page's reader closes before its IDs are yielded.</summary>
+    internal static async IAsyncEnumerable<long> FailuresAsync(SqliteConnection db, Guid scanId, int pageSize, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        for (long after = 0; ; )
+        {
+            var page = new List<long>(pageSize);
+            using (var cmd = StorageCommand.Create(db, null, Sql.Get(SqlKey.ScanTableFailures1), ("$s", scanId.ToByteArray()), ("$after", after), ("$size", pageSize)))
+            using (var rows = await cmd.ExecuteReaderAsync(ct))
+                while (await rows.ReadAsync(ct)) page.Add(rows.GetInt64(0));
+            foreach (var id in page) yield return id;
+            if (page.Count < pageSize) yield break;
+            after = page[^1];
+        }
+    }
+
     /// <summary>Clear only this pair's acquisition rows, scratch names and pending terminal cursor.</summary>
     public async Task ClearScanAsync(SqliteConnection db, string pairId, Guid scanId, CancellationToken ct)
     {

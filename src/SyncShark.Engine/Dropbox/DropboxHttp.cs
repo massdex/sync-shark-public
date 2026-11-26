@@ -71,14 +71,12 @@ internal static class DropboxHttp
         if (route != DropboxProtocol.ListFolderLongpoll) api.ReportBusy(status, failure, providerWait, received);
         var wait = failure.Disposition == FailureDisposition.TemporaryNoEffect ? providerWait : null;
         if (readPath is not null && failure.Absent) return;
-        var summary = DropboxErrors.Summary(envelope);
-        var refusal = new HttpRequestException(Text.Get(TextKey.ProviderFailure, (TextArg.Name, route),
-            (TextArg.Count, ((int)status).ToString(System.Globalization.CultureInfo.InvariantCulture)),
-            (TextArg.Message, summary.Length != 0 ? summary : Text.Get(TextKey.ProviderReasonUnavailable))), null, status);
+        var refusal = new HttpRequestException(Text.Get(TextKey.DropboxRefused), null, status);
         if (failure.CursorReset) throw new ListingCursorResetException(refusal);
         throw new ItemFailedException(readPath ?? string.Empty, failure.Cause, refusal)
         {
-            Disposition = failure.Disposition, ProviderWait = wait, ProviderWaitStarted = wait.HasValue ? received : null
+            Disposition = failure.Disposition, ProviderWait = wait, ProviderWaitStarted = wait.HasValue ? received : null,
+            Provider = DropboxErrors.Fact(route, status, DropboxErrors.Summary(envelope))
         };
     }
 

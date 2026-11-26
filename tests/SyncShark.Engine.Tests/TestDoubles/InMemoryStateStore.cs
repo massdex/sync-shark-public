@@ -42,6 +42,15 @@ public sealed class InMemoryStateStore : IStore
             var marks=new ScanMarks();marks.Begin(pairId,scanId);tracking.Add((pairId,scanId),marks);
         }
     }
+    private readonly SortedSet<(Guid Scan,long Id)> failures=new();
+    public Task AddScanFailureAsync(string pairId,Guid scanId,long noticeId,CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested(); lock(pairs) failures.Add((scanId,noticeId)); return Task.CompletedTask;
+    }
+    public IAsyncEnumerable<long> ScanFailuresAsync(string pairId,Guid scanId,CancellationToken ct)
+    {
+        long[] ids; lock(pairs) ids=failures.Where(f=>f.Scan==scanId).Select(f=>f.Id).ToArray(); return Enumerate(ids,ct);
+    }
     public bool ScanTouched(string pairId,Guid scanId,Side side,string path,bool descendants)
     {
         lock(pairs) return !tracking.TryGetValue((pairId,scanId),out var marks) || marks.Touched(pairId,scanId,side,path,descendants);
@@ -352,7 +361,7 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested();
         foreach(var key in scan.Keys.Where(k=>k.Pair==pairId && k.Scan==scanId).ToArray()) scan.Remove(key);
-        lock(pairs) tracking.Remove((pairId,scanId));
+        lock(pairs) { tracking.Remove((pairId,scanId)); failures.RemoveWhere(f=>f.Scan==scanId); }
         scratchDeleted.RemoveWhere(k=>k.Pair==pairId && k.Scan==scanId); completedHistory.Remove((pairId,scanId));return Task.CompletedTask;
     }
     /// <summary>Dispose operation on the supplied facts.</summary>
@@ -451,7 +460,7 @@ public sealed class InMemoryStateStore : IStore
         ct.ThrowIfCancellationRequested();var observed=scan.Where(x=>x.Key.Pair==pairId && x.Key.Scan==scanId).Select(x=>(x.Key.Side,Entry:x.Value));
         var sides=Records.Where(x=>x.Key.Pair==pairId).SelectMany(x=>new[]{(Side:Side.Local,Saved:x.Value),(Side:Side.Dropbox,Saved:x.Value)});
         var matched=sides.Where(x=>scan.TryGetValue((pairId,scanId,x.Side,x.Saved.KeyOn(x.Side)),out var entry) &&
-                entry.Id==x.Saved.IdOn(x.Side) && entry.IsFolder==x.Saved.IsFolder && PathNames.SamePlace(x.Side,x.Saved.PathOn(x.Side),entry.Path))
+                entry.Id==x.Saved.IdOn(x.Side) && entry.IsFolder==x.Saved.IsFolder && PathNames.SamePlace(x.Saved.PathOn(x.Side),entry.Path))
             .Select(x=>(x.Side,x.Saved.KeyOn(x.Side))).ToHashSet();
         var bindings=sides.Where(x=>!matched.Contains((x.Side,x.Saved.KeyOn(x.Side))))
             .ToLookup(x=>(x.Side,x.Saved.IdOn(x.Side),x.Saved.IsFolder),x=>x.Saved);

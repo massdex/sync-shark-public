@@ -151,8 +151,7 @@ internal sealed class ScanCompare(ScanTable scan)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pageSize);
         db.CreateFunction<string, int>("plandepth", PathNames.Depth, isDeterministic: true);
-        db.CreateFunction<string, string, bool>("scansubtree", PathNames.IsSelfOrUnder, isDeterministic: true);
-        db.CreateFunction<int, string, string, bool>("sameplace", (side, saved, seen) => PathNames.SamePlace((Side)side, saved, seen), isDeterministic: true);
+        db.CreateFunction<string, string, bool>("scansubtree", PathNames.IsSelfOrUnder, isDeterministic: true); db.CreateFunction<string, string, bool>("sameplace", PathNames.SamePlace, isDeterministic: true);
         string Candidates(Side side)
         {
             bool local = side == Side.Local;
