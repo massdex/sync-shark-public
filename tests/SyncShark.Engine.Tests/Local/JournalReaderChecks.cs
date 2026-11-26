@@ -110,7 +110,7 @@ public static class JournalReaderChecks
     private static async Task ReviewCases()
     {
         var failures=new List<string>();
-        foreach(var test in new[]{"rename","rename-file","rename-keep","unreadable","settled-hops","reset-wrap","reset-id","root","skip","remove","skew","live-skew","early-write","child-hop","redacted-hop","locate-fails","entry-fails","join-reset","leave-reset","mismatch-fence","backlog16","backlog32","name-race","after-observation","alias-old","alias-new","alias-unbound","armed-child","link-race","link-unlink","wake-mixed","cold-high","stale-valid","member-bound","paused-alias-write","paused-alias-write-excluded","armed-missing","armed-substitute","reset-crash","settlement-surface","armed-delete","lookup-hold","entry-hold","failed-order","child-lookup-failed","child-exact-absent","child-exact-substitute","stage-lookup-failure","stage-entry-failure","armed-stage-entry-failure","retired-stage-create","retired-stage-delete"})
+        foreach(var test in new[]{"rename","rename-file","rename-keep","unreadable","settled-hops","reset-wrap","reset-id","root","skip","remove","skew","live-skew","early-write","child-hop","redacted-hop","locate-fails","entry-fails","join-reset","leave-reset","mismatch-fence","backlog16","backlog32","name-race","after-observation","alias-old","alias-new","alias-unbound","armed-child","link-race","link-unlink","cold-high","stale-valid","member-bound","paused-alias-write","paused-alias-write-excluded","armed-missing","armed-substitute","reset-crash","settlement-surface","armed-delete","lookup-hold","entry-hold","failed-order","child-lookup-failed","child-exact-absent","child-exact-substitute","stage-lookup-failure","stage-entry-failure","armed-stage-entry-failure","retired-stage-create","retired-stage-delete"})
         {
             try { await RunCase(test); }
             catch(Exception error) { failures.Add(test+": "+error.GetType().Name+" "+error.Message); }
@@ -177,16 +177,16 @@ public static class JournalReaderChecks
             var page=await Fetch(a,20); await reader.SettleAsync(a,page.Position!,store,default);
             Check.Require(await reader.SettledJournalAsync(a,default)==page.Position && await reader.SettledJournalAsync(b,default)==start && await store.PositionAsync("1",default)==start,"member settlement is not volume minimum or offered position");return;
         }
-        if(test is "wake-mixed" or "unreadable")
+        if(test=="unreadable")
         {
             await reader.Membership(b,false,true);
             bool resolved=false;
-            reader.Attach(a,actual,()=>scope,(id,_,_)=>id==91 && !resolved ? test=="unreadable" ? throw new IOException() : (null,null) : (Path.Join(root,id==91?"recovered":"independent"),null),
+            reader.Attach(a,actual,()=>scope,(id,_,_)=>id==91 && !resolved ? throw new IOException() : (Path.Join(root,id==91?"recovered":"independent"),null),
                 path=>new(path,false,1,DateTimeOffset.UnixEpoch,path=="recovered"?"91":"14","","",null));
             pages[10]=[R(11,0x100,null,91),R(12,1,"independent",14)];
             var ordinary=await Fetch(a,20); Check.Require(ordinary.Changes is [{Path:"independent",Usn:12}] && !ordinary.ContinuityLost,"mixed page dropped independent work");
             // The uncertain record reaches the run log once, naming its USN, file id and the branch that could not prove it.
-            var branch=test=="unreadable" ? "LocateFailedAsync IOException 0x"+new IOException().HResult.ToString("X8",System.Globalization.CultureInfo.InvariantCulture) : "RemainderAsync";
+            var branch="LocateFailedAsync IOException 0x"+new IOException().HResult.ToString("X8",System.Globalization.CultureInfo.InvariantCulture);
             Check.Require(ordinary.Uncertain is [{Kind:RunEventKind.Wait,Side:Side.Local} record] && record.Detail==Text.Get(TextKey.JournalUncertainRecord,(TextArg.Value,"11"),(TextArg.Id,"91"),(TextArg.Reason,branch)),"uncertain page did not write one run-log record naming its record and branch: "+string.Join(" | ",ordinary.Uncertain.Select(e=>e.Detail)));
             Check.Require(ordinary.Position==new JournalPosition(1,20) && ordinary.ProjectedThrough==new JournalPosition(1,11),"projection skipped failed record 11 without a rename hold");
             await reader.SettleAsync(a,ordinary.Position!,store,default);

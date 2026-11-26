@@ -1,9 +1,11 @@
 using Massdex.SyncShark.Engine.Local;
+using Massdex.SyncShark.Engine.Run;
+using Massdex.SyncShark.Engine.Tests.Scenarios;
 using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Local;
 
-/// <summary>An unelevated host reads a name-redacted journal: an unbound tmp renamed over a bound file is a change, a bound rename still owes Repair.</summary>
+/// <summary>An unelevated host reads a name-redacted journal: an unbound tmp renamed over a bound file is a change, a gone unbound id settles, a bound rename still owes Repair.</summary>
 public static class AtomicReplaceChecks
 {
     private sealed class Source : UsnJournal
@@ -35,7 +37,48 @@ public static class AtomicReplaceChecks
         Check.Require(revision==1 && uncertain!=0 && settled==11,"redacted rename of a bound file no longer goes to Repair");
     }
 
-    private static async Task<(List<Change> Changes,long Revision,ulong? Settled,int Uncertain)> Read(UsnRecord[] records,bool moved)
+    // Two saves before the reader catches up: the first tmp id is already retired when its records are projected.
+    public static async Task RedactedGoneTempAsync()
+    {
+        var (_,revision,settled,uncertain)=await Read([R(11,Create,Tmp),R(12,Create|Extend|Close,Tmp)],moved:false,tmpGone:true);
+        Check.Require(revision==0 && uncertain==0 && settled==13,"a redacted record of an unbound id that no longer exists owed Repair or held the journal position");
+    }
+
+    // End state of a PC rename a -> b during a's first upload: Dropbox has a and b, the store binds both to one PC file.
+    // The scope Repair the upload owes (a's folder, the root here) leaves only b, one binding, and a in Dropbox history.
+    public static async Task MovedFirstUploadRepairAsync()
+    {
+        var home=Directory.CreateTempSubdirectory();
+        try
+        {
+            var root=Directory.CreateDirectory(Path.Combine(home.FullName,"root")).FullName;
+            File.WriteAllText(Path.Combine(root,"b"),"content-v1");
+            var (volume,drive)=DriveIdentity.Read(root);
+            var pair=ItemChecks.Pair() with { LocalRoot=root, Roots=new(root,"/Pair A","test",volume,new("account","root","home","folder")) };
+            var paths=new PathScope(pair,[pair],drive);
+            using var store=new InMemoryStateStore();
+            await store.SavePairAsync(pair,default);
+            await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
+            await store.SavePositionAsync(volume.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),new JournalPosition(1,1),default);
+            var local=LocalSide.Factory()(pair,()=>paths,ItemChecks.Settings,store);
+            var dropbox=new FakeSide(Side.Dropbox);
+            var pcB=(await local.ReadOneAsync("b",default))!;
+            var bytes=File.ReadAllBytes(Path.Combine(root,"b"));
+            using var hash=new ContentHash(); hash.Append(bytes); var digest=hash.Finish();
+            var peerA=pcB with {Path="a",Id="db-a",Revision="r1",ContentHash=digest}; var peerB=pcB with {Id="db-b",Revision="r1",ContentHash=digest};
+            dropbox.Seed(peerA,bytes); dropbox.Seed(peerB,bytes);
+            await store.CommitAsync(pair.PairId,null,SyncedEntries.From(pcB with {Path="a"},peerA),null,null,default);
+            await store.CommitAsync(pair.PairId,null,SyncedEntries.From(pcB,peerB),null,null,default);
+            var queue=new WorkQueue();
+            await new PairRunner().CatchUpAsync(pair,(null,null),ItemChecks.Settings,_=>{},paths,queue,local,dropbox,store,static()=>{},default);
+            await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,dropbox,store,new Scope(string.Empty,string.Empty),null,default);
+            Check.Require(!dropbox.Items.ContainsKey("a") && dropbox.Items.ContainsKey("b") && dropbox.History.Any(v=>v.Entry.Id=="db-a"),"the stray Dropbox copy at the old name survived the owed Repair or lost its version");
+            Check.Require(store.Records.Values.Count(r=>r.LocalId==pcB.Id)==1 && File.Exists(Path.Combine(root,"b")) && store.OpenNotices.Count==0,"the owed Repair left two bindings for one PC file, touched the PC file or raised a notice");
+        }
+        finally { home.Delete(true); }
+    }
+
+    private static async Task<(List<Change> Changes,long Revision,ulong? Settled,int Uncertain)> Read(UsnRecord[] records,bool moved,bool tmpGone=false)
     {
         using var store=new InMemoryStateStore(); var src=new Source{Records=records}; var reader=new JournalReader(src);
         var root=Path.Join(Path.GetTempPath(),"Pair A"); var identity=new RootIdentity(root,"/a","test",new(1,Root,null),new("a","b","c","d"));
@@ -46,7 +89,7 @@ public static class AtomicReplaceChecks
         await store.CommitAsync("a",null,new(PathNames.Key("dir/name"),"dir/name","dir/name","dir/name",false,Target.ToString(),0,0,"c",""),null,null,default);
         await store.SavePairAsync(a,default);
         reader.Attach(a,store,()=>scope,(id,_,_)=>id switch {
-                Tmp=>(Path.Join(root,"dir","name"),null),
+                Tmp=>tmpGone ? (null,null) : (Path.Join(root,"dir","name"),null),
                 Target=>moved ? (Path.Join(root,"dir","renamed"),null) : (null,null),
                 Dir=>(Path.Join(root,"dir"),null), _=>(null,null)},
             p=>p=="dir/name" ? new(p,false,5,DateTimeOffset.UnixEpoch,Tmp.ToString(),"","",null) : p=="dir" ? new(p,true,0,DateTimeOffset.UnixEpoch,Dir.ToString(),"","",null) : null);

@@ -208,6 +208,8 @@ public static class CheckRegistry
             new("Local/JournalReaderChecks", Local.JournalReaderChecks.RunAsync),
             new("Local/redacted atomic replace", Local.AtomicReplaceChecks.RedactedAtomicReplaceAsync),
             new("Local/redacted bound rename", Local.AtomicReplaceChecks.RedactedBoundRenameAsync),
+            new("Local/redacted gone temp", Local.AtomicReplaceChecks.RedactedGoneTempAsync),
+            new("Local/moved first upload repair", Local.AtomicReplaceChecks.MovedFirstUploadRepairAsync),
             new("Local/LocalErrorsChecks", Local.LocalErrorsChecks.RunAsync),
             new("Local/late read failure", Local.LocalSideChecks.LateReadFailureAsync),
             new("Local/excluded first alias", Local.LocalSideChecks.ExcludedFirstAliasAsync),

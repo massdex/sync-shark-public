@@ -274,7 +274,8 @@ internal sealed class JournalRecordProjection
             (record.ParentId==p.root || (await p.BindingsAsync(parent).ConfigureAwait(false)).Count!=0))
         {
             if (p.firstOnly) p.result.Add(new(Side.Local,ChangeKind.Changed,null,null,id,null,false,false,record.Usn,p.volume,parent,JournalId:p.from.JournalId));
-            else p.Uncertain(record.Usn,id,record.Name,nameof(RemainderAsync));
+            // A retired id (no current path) has no lineage to lose; its successor's own records carry any later state.
+            else if (loc.Path!=null) p.Uncertain(record.Usn,id,record.Name,nameof(RemainderAsync));
         }
     }
 }
