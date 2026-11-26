@@ -225,14 +225,20 @@ public sealed class DropboxErrors
         failure.TryGetProperty(DropboxProtocol.Reason, out var reason) && DropboxErrorCauses.UnionTag(reason) == DropboxProtocol.TooManyWriteOperations &&
         (!failure.TryGetProperty(DropboxProtocol.RetryAfter, out var wait) || wait.ValueKind == JsonValueKind.Number && wait.TryGetUInt64(out _));
 
-    /// <summary>A refusal as safe log facts: the route constant, the HTTP status and Dropbox's error tag. Only the summary's
-    /// leading tag (before the first '/' or '.', letters and '_' only) is kept: the rest can name a private path.</summary>
+    /// <summary>A refusal as safe log facts: the route constant, the HTTP status and Dropbox's error tag. Only a known leading
+    /// tag (before the first '/' or '.') is kept: the rest can name a private path.</summary>
     public static string Fact(string route, HttpStatusCode? status, string? reason)
     {
         var tag = reason is null ? string.Empty : reason.IndexOfAny(['/', '.']) is var end and >= 0 ? reason[..end] : reason;
         return string.Join(' ', route, status is { } code ? ((int)code).ToString(System.Globalization.CultureInfo.InvariantCulture) : "-",
-            tag is { Length: > 0 and <= 200 } && tag.All(c => c is >= 'a' and <= 'z' or '_') ? tag : "-");
+            KnownTags.Contains(tag) ? tag : "-");
     }
+
+    // Only tags the engine itself names are logged; any other summary prefix could be private text.
+    private static readonly HashSet<string> KnownTags = typeof(DropboxProtocol)
+        .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+        .Where(f => f.IsLiteral && f.FieldType == typeof(string)).Select(f => (string)f.GetRawConstantValue()!)
+        .Where(v => v.Length > 0 && v.All(c => c is >= 'a' and <= 'z' or '_')).ToHashSet(StringComparer.Ordinal);
 
     /// <summary>The error_summary for an object reply that carries a string, else empty; never throws on shape.</summary>
     internal static string Summary(JsonElement body) =>

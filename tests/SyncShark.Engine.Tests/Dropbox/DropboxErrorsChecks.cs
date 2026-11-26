@@ -122,7 +122,8 @@ public static class DropboxErrorsChecks
         var fact = DropboxErrors.Fact("files/upload", HttpStatusCode.Conflict, "path/malformed_path/private/folder.txt");
         Check.Require(fact == "files/upload 409 path", $"The refusal fact kept more than the tag: {fact}");
         Check.Require(DropboxErrors.Fact("files/upload", null, "too_many_write_operations.") == "files/upload - too_many_write_operations" &&
-            DropboxErrors.Fact("files/upload", null, "Private Name/x") == "files/upload - -", "A refusal tag was not reduced to its leading lowercase tag");
+            DropboxErrors.Fact("files/upload", null, "Private Name/x") == "files/upload - -" &&
+            DropboxErrors.Fact("files/upload", null, "privatefolder/x") == "files/upload - -", "A refusal tag was not reduced to a known leading tag");
     }
 
     private static void RoundThree(DropboxErrors errors, DropboxErrors.RequestEvidence writeDispatched)
