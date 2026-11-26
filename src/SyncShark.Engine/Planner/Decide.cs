@@ -22,16 +22,11 @@ public static class Decide
             ? None(row, NoneReason.Held) : action;
     }
 
-    // Never read the placeholder. Its expected metadata stays on the ordinary download action.
+    // An online-only file is left alone on both sides: never read, downloaded or hydrated, whatever Dropbox holds there.
     private static SyncAction Placeholder(Row row, bool excludedLocal)
     {
         if (excludedLocal) return Notice(row, NoticeKind.Failure, TextKey.FailExcludeHoldsProtected);
-        return row.Dropbox switch
-        {
-            null => Notice(row, NoticeKind.Skipped, TextKey.SkipOnlineOnly),
-            { IsFolder: false, Skip: null } => Target(row, ActionKind.Download, row.Local!.Path),
-            _ => Notice(row, NoticeKind.Failure, TextKey.ReadDropboxFailed)
-        };
+        return row.Dropbox is null ? Notice(row, NoticeKind.Skipped, TextKey.SkipOnlineOnly) : None(row, NoneReason.Skipped);
     }
 
     private static SyncAction Ordinary(Row row, FirstRunPolicy policy, DateTimeOffset comparedAt, bool dirty) =>

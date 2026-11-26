@@ -133,10 +133,10 @@ public static class DecideChecks
         foreach (var skipped in new[] { false, true })
         {
             var stub = first with { Local = local with { Skip = nameof(TextKey.SkipOnlineOnly) }, Context = first.Context with { Skipped = skipped } };
-            Expect("readable stub counterpart", stub, ActionKind.Download, local.Path);
+            Expect("readable stub counterpart is left alone, never downloaded", stub, ActionKind.None, none: NoneReason.Skipped);
             Expect("absent stub counterpart", stub with { Dropbox = null }, ActionKind.Notice, notice: NoticeKind.Skipped, cause: TextKey.SkipOnlineOnly);
-            Expect("unreadable stub counterpart", stub with { Dropbox = cloud with { Skip = nameof(TextKey.SkipNotDownloadable) } }, ActionKind.Notice, notice: NoticeKind.Failure, cause: TextKey.ReadDropboxFailed);
-            Expect("folder is not a readable stub counterpart", stub with { Dropbox = cloud with { IsFolder = true } }, ActionKind.Notice, notice: NoticeKind.Failure, cause: TextKey.ReadDropboxFailed);
+            Expect("unreadable stub counterpart is left alone", stub with { Dropbox = cloud with { Skip = nameof(TextKey.SkipNotDownloadable) } }, ActionKind.None, none: NoneReason.Skipped);
+            Expect("folder stub counterpart is left alone", stub with { Dropbox = cloud with { IsFolder = true } }, ActionKind.None, none: NoneReason.Skipped);
             Expect("out-of-scope stub", stub with { Context = stub.Context with { OutOfScope = true } }, ActionKind.None, none: NoneReason.OutOfScope);
         }
         Check.Require(failures.Count == 0, string.Join("; ", failures));
