@@ -123,7 +123,7 @@ internal sealed class RepairRun
                 await local.SettleJournalAsync(position,ct);
             if ((await db).Cursor is {} cursor && await store.CursorAsync(id,ct)==null) await store.SaveCursorAsync(id,cursor,ct);
         }
-        var acquireHistory=full && (first || (await store.DeletedHistoryAsync(id,ct)).Owed) && (await store.DeletedHistoryAsync(id,scan,ct)).Owed;
+        var acquireHistory=full && first && (await store.DeletedHistoryAsync(id,scan,ct)).Owed;
         await Task.WhenAll(store.AddScanAsync(id,scan,Side.Local,Repair.Observe(Inventory(local,selected.LocalPath,null,ct),selected.LocalPath,logical.LocalPath,unreadLocal,ct),null,ct),
             store.AddScanAsync(id,scan,Side.Dropbox,Repair.Observe(Inventory(dropbox,selected.DropboxPath,acquireHistory?value=>terminal=value:null,ct),selected.DropboxPath,logical.DropboxPath,unreadRemote,ct),
                 acquireHistory?()=>terminal??throw new InvalidDataException(nameof(ListOptions.CursorAcquired)):null,ct));
@@ -154,6 +154,9 @@ internal sealed class RepairRun
             if(physicalHop is {} owner && raw.Local==null && raw.Dropbox==null && (owner.Binding is {} binding ? raw.Synced==binding : raw.Synced==null && PathNames.Same(Row.Path(raw),selected.DropboxPath))) continue;
             await FinishFolders(raw.Key);
             if(notices.Count==0 && !raw.Ambiguous && raw.Local is {Skip:null} pc && raw.Dropbox is {Skip:null} db && pc.IsFolder==db.IsFolder && raw.Synced is {} old && SyncedEntries.From(pc,db)==(old with {LocalPublished=null})) continue;
+            // A child listed before its folder's listing failed proves nothing and takes no effect.
+            if((raw.Local?.Path??raw.Synced?.LocalPath) is {} below && BelowUnread(unreadLocal,PathNames.Key(below)) ||
+                (raw.Dropbox?.Path??raw.Synced?.DropboxPath) is {} beneath && BelowUnread(unreadRemote,PathNames.Key(beneath))) continue;
             if(mapped)
             {
                 var left=raw.Local; var right=raw.Dropbox; var link=raw.Synced;
@@ -204,6 +207,8 @@ internal sealed class RepairRun
             {
                 if(notice.Kind==NoticeKind.PutBack) continue;
                 if(!covered || touched || member!=null && store.ScanTouched(id,scan,member.Side,member.Path,false)) continue;
+                // A skipped folder's notice closes once the same folder is listed.
+                if(notice.Cause==TextKey.SkipUnreadable && member!=null && row.EntryOn(member.Side) is {IsFolder:true,Skip:null} listed && listed.Id==member.Id) { await new Notices().CloseAsync(store,id,notice,ct); continue; }
                 if(!coveredChild && await retirement.RetiringFootprint(raw,notice,member,ct) is {} footprint)
                 {
                     if(raw.Local==null && raw.Dropbox==null && raw.Synced==null) await new Notices().CloseAsync(store,id,notice,ct);
@@ -247,8 +252,18 @@ internal sealed class RepairRun
         {
             // Descendant listings omit the scoped root and cannot distinguish a missing root from a failed listing.
             if(await side.ReadOneAsync(path,token) is not {} root) yield break;
-            yield return new(root.Path,root);
-            if(!root.IsFolder || root.Skip!=null) yield break;
+            if(!root.IsFolder || root.Skip!=null) { yield return new(root.Path,root); yield break; }
+            // A folder whose entry reads but whose listing is denied is skipped like any unreadable folder, not a pair-root failure.
+            IAsyncEnumerator<Listed>? items=null; var next=false;
+            try { items=Repair.ReadInventory(side.ReadAllAsync,path,Log,cursor,token).GetAsyncEnumerator(token); next=await items.MoveNextAsync(); }
+            catch(InventoryIncompleteException) when(side.Side==Side.Local) { root=root with {Skip=nameof(TextKey.SkipUnreadable)}; }
+            try
+            {
+                yield return new(root.Path,root);
+                for(;next;next=await items!.MoveNextAsync()) yield return items!.Current;
+            }
+            finally { if(items!=null) await items.DisposeAsync(); }
+            yield break;
         }
         else if(removal || physicalHop is {Binding:null})
         {
@@ -302,6 +317,7 @@ internal sealed class RepairRun
         var key=PathNames.KeyFor(side,path);
         return ((range.Length==0 || PathNames.IsSelfOrUnder(path,range)) && !paths.CoversKey(side,key) && !unread.Covers(key),false);
     }
+    private static bool BelowUnread(PrefixSet unread,string key) => unread.Keys.Any(folder=>PathNames.IsUnderKey(key,folder));
     private FolderMark? NearestPending(string key) => folders.FindLast(mark=>PathNames.IsUnderKey(key,mark.Row.Key));
     private async Task FinishFolders(string? next)
     {

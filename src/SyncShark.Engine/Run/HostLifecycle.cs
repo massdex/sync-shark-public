@@ -216,8 +216,8 @@ internal sealed class HostLifecycle(Host host)
             }
             if(full)
             {
-                try { await ManualRepair(m,token); m.RepairFailures=0; await CloseRepairRetry(m,token); }
-                catch(InventoryIncompleteException error) { await Failed(m,error,token,TextKey.RequiredRepairRetry); Rewake(error); }
+                try { await ManualRepair(m,token); m.RepairFailures=0; }
+                catch(InventoryIncompleteException error) { await Failed(m,error,token); Rewake(error); }
                 catch(Exception error) when(!token.IsCancellationRequested) { Rewake(error); throw; }
             }
             // A full run neither lists nor retires owed scopes; run those still owed now, including any it owed itself.
@@ -298,17 +298,11 @@ internal sealed class HostLifecycle(Host host)
         e is ItemFailedException {ProviderWait:{} wait} provider && wait>TimeSpan.Zero
             ? wait-(provider.ProviderWaitStarted is {} start ? host.Clock.GetElapsedTime(start) : TimeSpan.Zero)
             : host.Settings.Backoff.RetryDelay(failures),host.Clock,ct);
-    // Only a successful full Repair closes the pair's one retry notice.
-    private async Task CloseRepairRetry(HostMember m,CancellationToken ct)
-    {
-        await foreach(var notice in host.Store!.NoticesAtAsync(m.Pair.PairId,string.Empty,ct))
-            if(notice is {Kind:NoticeKind.Failure,Cause:TextKey.RequiredRepairRetry}) { await host.Store.CloseNoticeAsync(m.Pair.PairId,notice,ct); return; }
-    }
-    private async Task Failed(HostMember m,Exception e,CancellationToken ct,TextKey unattributed=TextKey.RootUnavailable)
+    private async Task Failed(HostMember m,Exception e,CancellationToken ct)
     {
         if(e is not (ItemFailedException or EngineRequestException)) m.Event(new(RunEventKind.Failed,nameof(Host),string.Empty,e.Message,string.Empty){Error=e});
         try { await host.Store!.SaveNoticeAsync(m.Pair.PairId,
-        new(0,NoticeKind.Failure,e switch {ItemFailedException i=>i.Cause,EngineRequestException request=>request.Key,_=>unattributed},e is ItemFailedException f ? f.Path : string.Empty,
+        new(0,NoticeKind.Failure,e switch {ItemFailedException i=>i.Cause,EngineRequestException request=>request.Key,_=>TextKey.RootUnavailable},e is ItemFailedException f ? f.Path : string.Empty,
             new([],null),host.Clock.GetUtcNow(),false),ct); }
         catch(OperationCanceledException) when(ct.IsCancellationRequested) { throw; }
         catch(Exception error) { m.Event(new(RunEventKind.Failed,nameof(IStore.SaveNoticeAsync),string.Empty,error.Message,string.Empty){Error=error}); }

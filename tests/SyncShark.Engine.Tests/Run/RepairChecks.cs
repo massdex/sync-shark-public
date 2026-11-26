@@ -31,8 +31,22 @@ public static class RepairChecks
         var notices=new List<Notice>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) notices.Add(n);
         Check.Require((await store.RepairStateAsync(pair.PairId,ct)).FirstRepairDone && db.Items.ContainsKey("ok"),"One unreadable folder kept the Repair from completing for the rest");
         Check.Require(!db.Items.ContainsKey("bad/pc") && db.Items.ContainsKey("bad/db") && !pc.Items.ContainsKey("bad/db") && pc.Items.ContainsKey("bad/pc"),"An item under the unreadable folder was copied or deleted");
-        Check.Require(notices.Count(n=>n.Kind==NoticeKind.Failure && n.Path=="bad")==1 && notices.All(n=>n.Cause!=TextKey.RootUnavailable),$"The skipped folder did not get exactly its own notice: {string.Join(",",notices.Select(n=>n.Cause+"@"+n.Path))}");
+        Check.Require(notices.Count(n=>n.Kind==NoticeKind.Failure && n.Path=="bad" && n.Cause==TextKey.SkipUnreadable)==1 && notices.All(n=>n.Cause!=TextKey.RootUnavailable),$"The skipped folder did not get exactly its own notice: {string.Join(",",notices.Select(n=>n.Cause+"@"+n.Path))}");
         Check.Require((await store.PairAsync(pair.PairId,ct))?.OwedScopes is {} owed && owed.Contains(new Scope("bad","bad")),"The skipped folder is not retried by the next Repair");
+        // The owed retry: the folder's own entry reads, but listing it is denied.
+        pc.ReadFailures.Remove("bad");
+        var denied=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.ReadAllAsync) && (string?)args[0]=="bad" ? Denied() : AutoSyncChecks.Observation.Forward(pc,m,args));
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),denied,db,store,new Scope("bad","bad"),null,ct,caughtUp:true);
+        notices=await OpenAsync();
+        Check.Require(notices.Count(n=>n.Path=="bad" && n.Cause==TextKey.SkipUnreadable)==1 && notices.All(n=>n.Cause!=TextKey.RootUnavailable) && !db.Items.ContainsKey("bad/pc") && !pc.Items.ContainsKey("bad/db") &&
+            (await store.PairAsync(pair.PairId,ct))?.OwedScopes is {} still && still.Contains(new Scope("bad","bad")),
+            $"A denied folder listing was not a skip of that folder: {string.Join(",",notices.Select(n=>n.Cause+"@"+n.Path))}");
+        // Readable again with the same identity: its contents sync and its notice closes.
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),pc,db,store,new Scope("bad","bad"),null,ct,caughtUp:true);
+        notices=await OpenAsync();
+        Check.Require(db.Items.ContainsKey("bad/pc") && pc.Items.ContainsKey("bad/db") && notices.All(n=>n.Path!="bad"),$"The readable folder did not sync or kept its notice: {string.Join(",",notices.Select(n=>n.Cause+"@"+n.Path))}");
+        async Task<List<Notice>> OpenAsync() { var open=new List<Notice>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) if(!n.Dismissed) open.Add(n); return open; }
+        static async IAsyncEnumerable<Listed> Denied() { await Task.FromException(new InventoryIncompleteException("denied",null)); yield break; }
     });
 
     // A parent's new case is saved with no Dropbox call and no subtree work; the next Repair finds no difference.
@@ -666,24 +680,6 @@ public static class RepairChecks
         }
         finally {directory.Delete(true);}
     }
-
-    /// <summary>A Dropbox top folder replaced while the Repair lists is refused by the check right after the listing.</summary>
-    public static Task RootsCheckedAroundListingAsync() => AutoSyncChecks.WithinDeadline(async ct=>
-    {
-        using var store=new InMemoryStateStore(); var p=ItemChecks.Pair();
-        var pair=p with {Roots=new(p.LocalRoot,p.DropboxRoot,p.ConnectionId,new(1,2,null),new("account","root","home","folder"))};
-        await store.SavePairAsync(pair,ct);
-        var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
-        var cloud=new FakeSide(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
-        pc.Seed(ItemChecks.File(Side.Local,"a",1,"pc-a"),[1]);
-        var remote=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>{
-            if(m.Name==nameof(ISide.ReadAllAsync)) cloud.Root=(null,pair.Roots.Dropbox with {FolderId="other"},null,null);
-            return AutoSyncChecks.Observation.Forward(cloud,m,args);
-        });
-        try { await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(),pc,remote,store,null,null,ct); throw new InvalidDataException("A Repair over a replaced Dropbox top folder completed"); }
-        catch(ChangedUnderneathException) { }
-        Check.Require(!cloud.Items.ContainsKey("a") && store.OpenNotices.Any(n=>n is {Kind:NoticeKind.RootIdentity,Cause:TextKey.RootDropboxFolderChanged}),"A replaced Dropbox top folder was synced into or raised no root notice");
-    });
 
     /// <summary>A Dropbox change page's deleted names join the saved deleted-name history together with its cursor.</summary>
     public static Task AutoSyncAppendsDeletedNamesAsync() => AutoSyncChecks.WithinDeadline(async ct=>

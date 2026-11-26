@@ -37,6 +37,7 @@ public static class RowExecution
     public static async Task<(bool Settled,EffectOutcome? Outcome,SyncAction Action)> ExecuteWithOutcomeAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,Row? row,IReadOnlyList<RenameCandidate> candidates,bool dirty,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry?,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,bool addOnly,Action<Notice>? failedNotice=null,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough=null,(Side Side,Entry? Occupant)? observedMissing=null,Action<Notice>? captureFailure=null)
     {
         if (row is null && candidates.Count==0) throw new ArgumentException(nameof(row));
+        if(row?.Local is {IsFolder:true,Skip:nameof(TextKey.SkipUnreadable)} skipped) throw new ItemFailedException(skipped.Path,TextKey.SkipUnreadable,null); // a skipped folder's own notice
         ItemFailedException.RequireReadable(Side.Local,row?.Local);
         ItemFailedException.RequireReadable(Side.Dropbox,row?.Dropbox);
         var now=DateTimeOffset.UtcNow;

@@ -92,6 +92,13 @@ public static class AutoSync
         }
     }
 
+    // A page's deleted names join the saved deleted-name history in its cursor's transaction; a page without any keeps the plain save.
+    private static Task SaveCursor(IStore store,PairConfig pair,ChangePage page,string cursor,CancellationToken ct)
+    {
+        var deleted=page.Changes.Where(c=>c.Kind==ChangeKind.Deleted && c.Path!=null).Select(c=>PathNames.Key(c.Path!)).ToArray();
+        return deleted.Length==0 ? store.SaveCursorAsync(pair.PairId,cursor,ct) : store.SaveCursorAsync(pair.PairId,cursor,deleted,ct);
+    }
+
     public static Task ApplyPageAsync(PairConfig pair, EngineSettings settings, Action<RunEvent> events, PathScope paths, WorkQueue queue, Side source, ChangePage page, ISide local, ISide dropbox, IStore store, CancellationToken ct) =>
         ApplyRegisteredPage(pair,settings,events,paths,queue,source,page,local,dropbox,store,ct,null);
 
@@ -140,7 +147,7 @@ public static class AutoSync
         }
         var settlement=queue.AdmitAsync(pair,page,Apply,
             source==Side.Local ? local.SettleJournalAsync : null,
-            source==Side.Dropbox ? (cursor,token)=>store.SaveCursorAsync(pair.PairId,cursor,page.Changes.Where(c=>c.Kind==ChangeKind.Deleted && c.Path!=null).Select(c=>PathNames.Key(c.Path!)).ToArray(),token) : null,
+            source==Side.Dropbox ? (cursor,token)=>SaveCursor(store,pair,page,cursor,token) : null,
             source==Side.Dropbox ? (change,token)=>queue.Unfinished.CheckAsync(pair,settings,events,paths,change,local,dropbox,store,queue.Held,Populate,Hop,token) : null,ct);
         if(!settlement.IsFaulted && !settlement.IsCanceled) Registered(); // Empty and prerequisite-blocked pages have no immediate callback.
         if(gained)

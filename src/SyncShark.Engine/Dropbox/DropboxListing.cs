@@ -165,8 +165,8 @@ public sealed class DropboxListing
             ct.ThrowIfCancellationRequested();
             DropboxPage page;
             try { page = await api.ReadPageAsync(route, JsonSerializer.Serialize(arg), pair, ct).ConfigureAwait(false); }
-            // A transient failure retries the same page with the same cursor, keeping the pages already read.
-            catch (Exception error) when (!ct.IsCancellationRequested && error is HttpRequestException or IOException or TimeoutException
+            // A transient Dropbox transport failure (never a local spool fault) retries the same page with the same cursor, keeping the pages already read.
+            catch (Exception error) when (!ct.IsCancellationRequested && error is HttpRequestException or HttpIOException or TimeoutException
                 or ItemFailedException { Disposition: FailureDisposition.TemporaryNoEffect })
             {
                 await api.WaitAsync(error is ItemFailedException provider && RemainingProviderWait(api, provider) is { } remaining ? remaining : api.RetryDelay(failures++), ct).ConfigureAwait(false);
