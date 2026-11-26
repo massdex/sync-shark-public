@@ -380,14 +380,18 @@ public sealed class WorkQueue
     }
 
     /// <summary>A failure on an ordering signal; one fresh marker per hop, because rethrowing one instance down a backlog grows its stack each time (O(N^2)).</summary>
-    private sealed class Relayed(Exception cause) : Exception(cause.Message, cause);
+    /// <remarks>The cause's trace is captured once, at the first hop; every caller rethrows that one capture, so no throw grows the next one's trace.</remarks>
+    private sealed class Relayed(System.Runtime.ExceptionServices.ExceptionDispatchInfo cause) : Exception(cause.SourceException.Message, cause.SourceException)
+    {
+        internal System.Runtime.ExceptionServices.ExceptionDispatchInfo Info { get; } = cause;
+    }
     /// <summary>The failure a relayed ordering signal refers to; the first-failure record and the queue's callers see only this.</summary>
-    public static Exception Cause(Exception error) => error is Relayed relayed ? relayed.InnerException! : error;
-    private static Exception Relay(Exception error) => new Relayed(Cause(error));
+    internal static Exception Cause(Exception error) => error is Relayed relayed ? relayed.Info.SourceException : error;
+    private static Exception Relay(Exception error) => new Relayed(error is Relayed relayed ? relayed.Info : System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error));
     private static async Task Unwrapped(Task work)
     {
         try { await work.ConfigureAwait(false); }
-        catch (Relayed relayed) { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(relayed.InnerException!); }
+        catch (Relayed relayed) { relayed.Info.Throw(); }
     }
 
     /// <summary>Mark the entire settled cohort before waking any dependent input.</summary>

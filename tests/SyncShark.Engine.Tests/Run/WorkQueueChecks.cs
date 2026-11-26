@@ -191,8 +191,31 @@ public static class WorkQueueChecks
         if(await Task.WhenAny(drained,Task.Delay(TimeSpan.FromSeconds(30)))!=drained) throw new InvalidDataException("A failed backlog did not drain");
         var allocated=GC.GetTotalAllocatedBytes(true)-before;
         Check.Require(settled==0,"A failed backlog settled a page past the failing item");
-        Check.Require(pages.All(p=>p.IsFaulted && WorkQueue.Cause(p.Exception!.InnerException!)==root),"A page behind the failure reported a different first cause");
+        // A later page carries the cause directly (the first-failure record unwraps one level); never a chain of wrappers.
+        Check.Require(pages.All(p=>p.Exception?.InnerException is {} e && (e==root || e.InnerException==root)),"A page behind the failure reported a different first cause");
         Check.Require(allocated<32L*1024*1024,$"A failed backlog of {count} pages allocated {allocated:N0} bytes");
+    }
+
+    // One failure seen by many callers in turn: each overlapping row admission behind it gets the original exception, and no throw grows the next one's stack.
+    public static async Task SharedFaultReachesEachCallerAsync()
+    {
+        const int count=1024;
+        var queue=new WorkQueue(); var pair=ItemChecks.Pair();
+        var gate=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var root=new InvalidDataException("head failure");
+        var entry=ItemChecks.File(Side.Local,"same",1,"pc"); var row=new Row(entry.Path,entry,null,null,[],null,null!);
+        int ran=0;
+        var callers=new Task[count];
+        callers[0]=queue.AdmitAsync(pair,row,[],async _=>{await gate.Task;throw root;},default);
+        for(int i=1;i<count;++i) callers[i]=queue.AdmitAsync(pair,row,[],_=>{Interlocked.Increment(ref ran);return Task.CompletedTask;},default);
+        var before=GC.GetTotalAllocatedBytes(true);
+        gate.SetResult();
+        var drained=Task.WhenAll(callers);
+        if(await Task.WhenAny(drained,Task.Delay(TimeSpan.FromSeconds(30)))!=drained) throw new InvalidDataException("Callers behind a failure did not drain");
+        var allocated=GC.GetTotalAllocatedBytes(true)-before;
+        Check.Require(ran==0,"An overlapping row ran past a failed one");
+        Check.Require(callers.All(c=>c.Exception?.InnerException is InvalidDataException {Message:"head failure"}),"A caller behind the failure got a different exception");
+        Check.Require(allocated<32L*1024*1024,$"{count} callers behind one failure allocated {allocated:N0} bytes");
     }
 
     public static async Task RunAsync()

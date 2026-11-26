@@ -298,6 +298,7 @@ public static class CheckRegistry
             new("Run/StopDrainsDeepBacklog", Run.WorkQueueChecks.StopDrainsDeepBacklogAsync),
             new("Run/FaultDrainsDeepBacklog", Run.WorkQueueChecks.FaultDrainsDeepBacklogAsync),
             new("Run/FaultDrainsOverlappingBacklog", Run.WorkQueueChecks.FaultDrainsOverlappingBacklogAsync),
+            new("Run/SharedFaultReachesEachCaller", Run.WorkQueueChecks.SharedFaultReachesEachCallerAsync),
             new("Run/HostChecks", Run.HostChecks.RunAsync),
             new("Run/LogTextChecks", Run.LogTextChecks.RunAsync),
             new("Run/LiveRecords", Run.LiveOutputChecks.StreamsRecordsAsync),
