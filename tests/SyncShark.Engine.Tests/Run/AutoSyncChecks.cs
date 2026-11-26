@@ -493,8 +493,8 @@ public static class AutoSyncChecks
             if(m.Name==nameof(IStore.CloseNoticeAsync) && args[1] is Notice {Kind:NoticeKind.PutBack}) Interlocked.Exchange(ref afterRecovery,1);
             if(m.Name==nameof(IStore.NoticesAtAsync) && (string?)args[1]==PathNames.Key(path) && Volatile.Read(ref afterRecovery)!=0)
             {
-                // The page's own reports of this file may self-run concurrently with the put-back Retry and settle against the restored revision.
-                if(new StackTrace().GetFrames().Any(f=>f.GetMethod() is {Name:nameof(ItemSync.ApplyAsync)} own && own.DeclaringType==typeof(ItemSync))) {var box=new StrongBox<bool>(); ownFlow.Value=box; ownLookups.Add((box,Environment.StackTrace));}
+                // The page's own reports of this file (applied directly or by the Retry finishing the held page) may self-run concurrently with the put-back Retry and settle against the restored revision.
+                if(new StackTrace().GetFrames().Any(f=>f.GetMethod() is {} own && (own.DeclaringType==typeof(ItemSync) && own.Name=="ChangeAsync" || own.DeclaringType?.DeclaringType==typeof(ItemSync) && own.DeclaringType.Name.StartsWith("<ChangeAsync>")))) {var box=new StrongBox<bool>(); ownFlow.Value=box; ownLookups.Add((box,Environment.StackTrace));}
                 else {Interlocked.Increment(ref independent);Interlocked.CompareExchange(ref lookupStack,Environment.StackTrace,null);}
             }
             var settledNow=m.Name==nameof(IStore.SaveCursorAsync) && (string?)args[1]=="after";
