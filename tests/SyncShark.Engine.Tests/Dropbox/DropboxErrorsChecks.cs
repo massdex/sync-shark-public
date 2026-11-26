@@ -111,10 +111,20 @@ public static class DropboxErrorsChecks
         TransientAndContention(errors, readTransient, readPreDispatchTransient, readPermanent, writeDispatched);
         BatchMembers(errors);
         RoundThree(errors, writeDispatched);
+        SafeFact();
         return Task.CompletedTask;
     }
 
     // Round-3 findings: every expectation is collected so one red run reports each wrong outcome it detects.
+    // A logged refusal keeps only the summary's leading tag, never the path or text after it.
+    private static void SafeFact()
+    {
+        var fact = DropboxErrors.Fact("files/upload", HttpStatusCode.Conflict, "path/malformed_path/private/folder.txt");
+        Check.Require(fact == "files/upload 409 path", $"The refusal fact kept more than the tag: {fact}");
+        Check.Require(DropboxErrors.Fact("files/upload", null, "too_many_write_operations.") == "files/upload - too_many_write_operations" &&
+            DropboxErrors.Fact("files/upload", null, "Private Name/x") == "files/upload - -", "A refusal tag was not reduced to its leading lowercase tag");
+    }
+
     private static void RoundThree(DropboxErrors errors, DropboxErrors.RequestEvidence writeDispatched)
     {
         var failures = new List<string>();

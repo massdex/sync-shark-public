@@ -225,11 +225,14 @@ public sealed class DropboxErrors
         failure.TryGetProperty(DropboxProtocol.Reason, out var reason) && DropboxErrorCauses.UnionTag(reason) == DropboxProtocol.TooManyWriteOperations &&
         (!failure.TryGetProperty(DropboxProtocol.RetryAfter, out var wait) || wait.ValueKind == JsonValueKind.Number && wait.TryGetUInt64(out _));
 
-    /// <summary>A refusal as safe log facts: the route constant, the HTTP status and Dropbox's error tag. A reason that is
-    /// not a plain tag (lowercase letters, digits, '_', '/', '.') is withheld, since provider text can carry private data.</summary>
-    internal static string Fact(string route, HttpStatusCode? status, string? reason) => string.Join(' ', route,
-        status is { } code ? ((int)code).ToString(System.Globalization.CultureInfo.InvariantCulture) : "-",
-        reason is { Length: > 0 and <= 200 } && reason.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '_' or '/' or '.') ? reason : "-");
+    /// <summary>A refusal as safe log facts: the route constant, the HTTP status and Dropbox's error tag. Only the summary's
+    /// leading tag (before the first '/' or '.', letters and '_' only) is kept: the rest can name a private path.</summary>
+    public static string Fact(string route, HttpStatusCode? status, string? reason)
+    {
+        var tag = reason is null ? string.Empty : reason.IndexOfAny(['/', '.']) is var end and >= 0 ? reason[..end] : reason;
+        return string.Join(' ', route, status is { } code ? ((int)code).ToString(System.Globalization.CultureInfo.InvariantCulture) : "-",
+            tag is { Length: > 0 and <= 200 } && tag.All(c => c is >= 'a' and <= 'z' or '_') ? tag : "-");
+    }
 
     /// <summary>The error_summary for an object reply that carries a string, else empty; never throws on shape.</summary>
     internal static string Summary(JsonElement body) =>

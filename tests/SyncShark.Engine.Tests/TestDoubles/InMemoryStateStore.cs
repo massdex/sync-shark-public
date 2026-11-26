@@ -42,15 +42,6 @@ public sealed class InMemoryStateStore : IStore
             var marks=new ScanMarks();marks.Begin(pairId,scanId);tracking.Add((pairId,scanId),marks);
         }
     }
-    private readonly SortedSet<(Guid Scan,long Id)> failures=new();
-    public Task AddScanFailureAsync(string pairId,Guid scanId,long noticeId,CancellationToken ct)
-    {
-        ct.ThrowIfCancellationRequested(); lock(pairs) failures.Add((scanId,noticeId)); return Task.CompletedTask;
-    }
-    public IAsyncEnumerable<long> ScanFailuresAsync(string pairId,Guid scanId,CancellationToken ct)
-    {
-        long[] ids; lock(pairs) ids=failures.Where(f=>f.Scan==scanId).Select(f=>f.Id).ToArray(); return Enumerate(ids,ct);
-    }
     public bool ScanTouched(string pairId,Guid scanId,Side side,string path,bool descendants)
     {
         lock(pairs) return !tracking.TryGetValue((pairId,scanId),out var marks) || marks.Touched(pairId,scanId,side,path,descendants);
@@ -361,7 +352,7 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested();
         foreach(var key in scan.Keys.Where(k=>k.Pair==pairId && k.Scan==scanId).ToArray()) scan.Remove(key);
-        lock(pairs) { tracking.Remove((pairId,scanId)); failures.RemoveWhere(f=>f.Scan==scanId); }
+        lock(pairs) tracking.Remove((pairId,scanId));
         scratchDeleted.RemoveWhere(k=>k.Pair==pairId && k.Scan==scanId); completedHistory.Remove((pairId,scanId));return Task.CompletedTask;
     }
     /// <summary>Dispose operation on the supplied facts.</summary>

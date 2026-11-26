@@ -203,7 +203,8 @@ public static class RowExecution
     private static async Task<(bool,EffectOutcome?)> ApplyLockedAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,SyncAction action,IReadOnlyList<RenameCandidate> candidates,(string Local,string Dropbox) endpoints,Entry? successor,Side? missing,SyncedEntry? incumbent,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry?,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,Action<Notice>? failedNotice,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough,(Side Side,Entry? Occupant)? observedMissing,Action<Notice>? captureFailure)
     {
         var row=action.Row;
-        var pcCheck=local.ReadOneAsync(endpoints.Local,ct); var dbCheck=dropbox.ReadOneAsync(endpoints.Dropbox,ct);
+        // A spelling-only Record keeps the scanned Dropbox entry: no per-item Dropbox read for an ancestor's case.
+        var pcCheck=local.ReadOneAsync(endpoints.Local,ct); var dbCheck=action.Kind==ActionKind.Record && Decide.SpellingOnly(row) ? Task.FromResult(row.Dropbox) : dropbox.ReadOneAsync(endpoints.Dropbox,ct);
         await Task.WhenAll(pcCheck,dbCheck);
         ItemFailedException.RequireReadable(Side.Local,await pcCheck); ItemFailedException.RequireReadable(Side.Dropbox,await dbCheck);
         if(row.Synced!=null && row.Local!=null && await pcCheck==null) ItemSync.Retain(row.Key,failed);

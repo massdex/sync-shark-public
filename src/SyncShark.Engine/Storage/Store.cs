@@ -283,8 +283,6 @@ public sealed class Store : IStore
 
     /// <summary>Check whether a concurrent write touched this footprint.</summary>
     public bool ScanTouched(string pairId, Guid scanId, Side side, string path, bool descendants) => scan.Touched(pairId, scanId, side, path, descendants);
-    public Task AddScanFailureAsync(string pairId, Guid scanId, long noticeId, CancellationToken ct) => Locked(() => ScanTable.AddFailureAsync(scratch.Ensure(Connection), scanId, noticeId, ct), ct);
-    public IAsyncEnumerable<long> ScanFailuresAsync(string pairId, Guid scanId, CancellationToken ct) => scratch.Stream(db => ScanTable.FailuresAsync(db, scanId, settings.StoragePageSize, ct), true, ct);
 
     private Task KeepBothAsync(string pairId, SyncedEntry? before, SyncedEntry first, SyncedEntry? second, Notice notice, CancellationToken ct) => Locked(async () =>
     {

@@ -230,7 +230,6 @@ public enum SqlKey
     ScanTableWriteDeletedName1,
     ScanTableWriteDeletedName2,
     ScanTableClearScan1,
-    ScanTableAddFailure1, ScanTableFailures1,
     SchemaUpgradeRebuilt1,
     SchemaUpgradeRebuilt2,
     SchemaUpgradeRebuilt3,
