@@ -130,7 +130,7 @@ public sealed class Store : IStore
     }, ct);
     /// <summary>Read the existing source revision and whole-pair reason before acquisition.</summary>
     public Task<(long Revision, string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct) => Locked(() => pairs.ReadRepairAsync(Connection, pairId, side, ct), ct);
-    /// <summary>Only the completion ending the entire two-sided Repair can publish its required summary and first_repair_done. Match both captured revisions and clear the observed reasons in the same transaction; a stale completion publishes nothing.</summary>
+    /// <summary>Only the completion ending the entire two-sided Repair can publish its required summary and first_repair_done. Match both captured revisions, the Dropbox one net of owed-scope advances, and clear the observed reasons in the same transaction; a stale completion publishes nothing.</summary>
     public Task<bool> FinishRepairAsync(string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct) => Locked(async () =>
     {
         using var tx=Connection.BeginTransaction(deferred:false);

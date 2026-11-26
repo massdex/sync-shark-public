@@ -233,11 +233,11 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
     public Task ResolveAsync(string pairId,long id,string reviewed,ResolutionChoice choice,string? name,CancellationToken ct) => Command(async () =>
     {
         var p=await Required(pairId,ct); var n=await store!.NoticeAsync(pairId,id,ct);
-        if (n==null || Project(n).Reviewed!=reviewed) throw Resolve.Stale(id);
+        if (n==null || Project(n).Reviewed!=reviewed) throw new EngineRequestException(TextKey.ResolveStale,(TextArg.Id,id.ToString()));
         if (!Resolutions.Choices(n).Contains(choice)) throw new EngineRequestException(TextKey.ResolveBadChoice,(TextArg.Id,id.ToString()),(TextArg.Choice,choice.ToString()));
         if (choice is ResolutionChoice.Ignore or ResolutionChoice.Unignore)
         {
-            if(!await store.UpdateNoticeVisibilityAsync(pairId,n,choice==ResolutionChoice.Ignore,ct)) throw Resolve.Stale(id);
+            if(!await store.UpdateNoticeVisibilityAsync(pairId,n,choice==ResolutionChoice.Ignore,ct)) throw new EngineRequestException(TextKey.ResolveStale,(TextArg.Id,id.ToString()));
             return;
         }
         if (n.Kind==NoticeKind.DriveChange && choice is ResolutionChoice.FirstSync or ResolutionChoice.SyncNormally) { await ResolveDriveChangeAsync(pairId,p,n,choice,ct); return; }
@@ -261,7 +261,7 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
         await HostLifecycle.Drain(member); var (roots,drive,_)=await Life.ReadRoots(member,ct,true);
         if (roots?.IsValid()!=true || drive==null || p.Roots==null || roots.Dropbox!=p.Roots.Dropbox) throw new EngineRequestException(TextKey.RootUnavailable);
         var updated=p with {Roots=roots,Drive=drive};
-        if (!await store!.ResolveDriveAsync(updated,n,choice,ct)) throw Resolve.Stale(n.Id);
+        if (!await store!.ResolveDriveAsync(updated,n,choice,ct)) throw new EngineRequestException(TextKey.ResolveStale,(TextArg.Id,n.Id.ToString()));
         // Use the committed reset view (PairChanged already reloaded it); the pre-reset snapshot still describes the old bindings (K04).
         member.Pair=await store!.PairAsync(pairId,ct) ?? await Required(pairId,ct);
         await Life.Membership(member,true,ct); member.Local=null!; member.Dropbox=null!; await Life.Observe(member,await Configurations(ct),ct); await Life.Membership(member,false,ct); Life.Start(member);
