@@ -5,7 +5,8 @@ using Massdex.SyncShark.Engine.Tests.TestDoubles;
 
 namespace Massdex.SyncShark.Engine.Tests.Local;
 
-/// <summary>An unelevated host reads a name-redacted journal: an unbound tmp renamed over a bound file is a change, a gone unbound id settles, a bound rename still owes Repair.</summary>
+/// <summary>An unelevated host reads a name-redacted journal: an unbound tmp renamed over a bound file is a change, a gone unbound id settles,
+/// a bound rename owes Repair once and its replay after that Repair settles.</summary>
 public static class AtomicReplaceChecks
 {
     private sealed class Source : UsnJournal
@@ -14,12 +15,12 @@ public static class AtomicReplaceChecks
         public override (ulong First,JournalPosition Tail) Retained(string root)=>(0,new(1,1000));
         public override Task<NtfsUsnPage> ReadAsync(string root,JournalPosition from,JournalPosition? end,int bytes,CancellationToken ct)
         {
-            var records=from.NextUsn==10 ? Records : [];
-            return Task.FromResult(new NtfsUsnPage(NtfsUsnPageStatus.Complete,records.Length==0 ? from.NextUsn+10 : records.Max(r=>r.Usn)+1,null,records));
+            var records=Records.Where(r=>r.Usn>=from.NextUsn && (end==null || r.Usn<end.NextUsn)).ToArray();
+            return Task.FromResult(new NtfsUsnPage(NtfsUsnPageStatus.Complete,records.Length==0 ? end?.NextUsn ?? from.NextUsn+10 : records.Max(r=>r.Usn)+1,null,records));
         }
     }
     const uint Extend=2, Create=0x100, Delete=0x200, Old=0x1000, New=0x2000, Close=0x80000000;
-    const ulong Root=11, Dir=40, Target=50, Tmp=60;
+    const ulong Root=11, Dir=40, Target=50, Tmp=60, Fresh=70;
 
     private static UsnRecord R(ulong usn,uint reason,ulong id)=>new(id,Dir,usn,reason,FileAttributes.Normal,null);
 
@@ -33,8 +34,18 @@ public static class AtomicReplaceChecks
 
     public static async Task RedactedBoundRenameAsync()
     {
-        var (_,revision,settled,uncertain)=await Read([R(11,Old,Target),R(12,New,Target),R(13,New|Close,Target)],moved:true);
+        var f=await OpenAsync([R(11,Old,Target),R(12,New,Target),R(13,New|Close,Target),R(14,Create|Close,Fresh)],moved:true,tmpGone:false); using var store=f.Store;
+        var (_,revision,settled,uncertain)=await ReadAsync(f,14);
         Check.Require(revision==1 && uncertain!=0 && settled==11,"redacted rename of a bound file no longer goes to Repair");
+        // The full Repair relinks the binding to the new name and finishes; the host then rewinds the reader to its held position.
+        var saved=(await store.FindAsync("a",Side.Local,PathNames.Key("dir/name"),default))!;
+        await store.CommitAsync("a",saved,new(PathNames.Key("dir/renamed"),"dir/renamed","dir/renamed","dir/renamed",false,Target.ToString(),0,0,"c",""),null,null,default);
+        await store.FinishRepairAsync("a",(revision,(await store.ReadRepairAsync("a",Side.Dropbox,default)).Revision),"{}",default);
+        await f.Reader.Membership(f.Pair,true); await f.Reader.Membership(f.Pair,false);
+        var (changes,_,replayed,again)=await ReadAsync(f,15);
+        var debt=await store.ReadRepairAsync("a",Side.Local,default);
+        Check.Require(again==0 && debt.Reason==null && debt.Revision==revision && replayed==15,"replay of a reconciled redacted rename owed Repair again or held the journal position");
+        Check.Require(changes.Any(c=>c is {Kind:ChangeKind.Changed,Id:"70",Path:"dir/new"}),"a PC change after the Repair was not delivered by the replay");
     }
 
     // Two saves before the reader catches up: the first tmp id is already retired when its records are projected.
@@ -80,7 +91,21 @@ public static class AtomicReplaceChecks
 
     private static async Task<(List<Change> Changes,long Revision,ulong? Settled,int Uncertain)> Read(UsnRecord[] records,bool moved,bool tmpGone=false)
     {
-        using var store=new InMemoryStateStore(); var src=new Source{Records=records}; var reader=new JournalReader(src);
+        var f=await OpenAsync(records,moved,tmpGone); using var store=f.Store;
+        return await ReadAsync(f,records.Max(r=>r.Usn)+1);
+    }
+
+    private static async Task<(List<Change> Changes,long Revision,ulong? Settled,int Uncertain)> ReadAsync((InMemoryStateStore Store,JournalReader Reader,PairConfig Pair,EngineSettings Settings) f,ulong end)
+    {
+        var page=await f.Reader.ReadPageAsync(f.Pair,new(1,10),new(1,end),f.Settings,default);
+        if(page.Position!=null) await f.Reader.SettleAsync(f.Pair,page.Position,f.Store,default);
+        var debt=await f.Store.ReadRepairAsync("a",Side.Local,default);
+        return (page.Changes.ToList(),debt.Revision,(await f.Reader.SettledJournalAsync(f.Pair,default))?.NextUsn,page.Uncertain.Count);
+    }
+
+    private static async Task<(InMemoryStateStore Store,JournalReader Reader,PairConfig Pair,EngineSettings Settings)> OpenAsync(UsnRecord[] records,bool moved,bool tmpGone)
+    {
+        var store=new InMemoryStateStore(); var src=new Source{Records=records}; var reader=new JournalReader(src);
         var root=Path.Join(Path.GetTempPath(),"Pair A"); var identity=new RootIdentity(root,"/a","test",new(1,Root,null),new("a","b","c","d"));
         var a=new PairConfig("a","Pair A",root,"/a","test",[],[],FirstRunPolicy.NewestWins,true,null,identity);
         var scope=new PathScope(a,[a],DriveType.Fixed); var settings=SettingsParser.Load();
@@ -91,11 +116,10 @@ public static class AtomicReplaceChecks
         reader.Attach(a,store,()=>scope,(id,_,_)=>id switch {
                 Tmp=>tmpGone ? (null,null) : (Path.Join(root,"dir","name"),null),
                 Target=>moved ? (Path.Join(root,"dir","renamed"),null) : (null,null),
+                Fresh=>(Path.Join(root,"dir","new"),null),
                 Dir=>(Path.Join(root,"dir"),null), _=>(null,null)},
-            p=>p=="dir/name" ? new(p,false,5,DateTimeOffset.UnixEpoch,Tmp.ToString(),"","",null) : p=="dir" ? new(p,true,0,DateTimeOffset.UnixEpoch,Dir.ToString(),"","",null) : null);
-        var page=await reader.ReadPageAsync(a,start,new(1,records.Max(r=>r.Usn)+1),settings,default);
-        if(page.Position!=null) await reader.SettleAsync(a,page.Position,store,default);
-        var debt=await store.ReadRepairAsync("a",Side.Local,default);
-        return (page.Changes.ToList(),debt.Revision,(await reader.SettledJournalAsync(a,default))?.NextUsn,page.Uncertain.Count);
+            p=>p switch { "dir/name"=>File(p,Tmp), "dir/renamed"=>File(p,Target), "dir/new"=>File(p,Fresh), "dir"=>new(p,true,0,DateTimeOffset.UnixEpoch,Dir.ToString(),"","",null), _=>null });
+        return (store,reader,a,settings);
+        static Entry File(string path,ulong id)=>new(path,false,5,DateTimeOffset.UnixEpoch,id.ToString(),"","",null);
     }
 }

@@ -42,7 +42,7 @@ internal sealed class JournalRecordProjection
         if(renaming && history==null && (hasPrior && (prior.Path!=null || folder) || rows.Count!=0))
         {
             outsideHop=record.Name!=null && OutsideHop();
-            if(!outsideHop) { UnclassifiedHop(); return Task.CompletedTask; }
+            if(!outsideHop && !AtBindings()) { UnclassifiedHop(); return Task.CompletedTask; }
         }
         if (hasPrior && (renaming || prior.BeforeOld && (flags&Delete)!=0))
         { p.old.Remove(record.FileId); p.paired?.Add(new(prior.Usn,record.Usn,record.FileId,renaming && folder?history:null)); }
@@ -74,6 +74,13 @@ internal sealed class JournalRecordProjection
             return parentLocation.Path!=null && !PathNames.Same(parentLocation.Path,p.pair.LocalRoot) && PathNames.RelativeUnderLocalRoot(p.pair.LocalRoot,parentLocation.Path)==null;
         }
         catch(Exception e) when(MetadataFailure(e) && !BoundRootChanged(e,p.pair)) { return false; /* An unproved hop goes to Repair. */ }
+    }
+
+    // A hop that already ends at exactly the id's saved names (a Repair relinked them) leaves nothing to reconstruct.
+    private bool AtBindings()
+    {
+        if (rows.Count==0 || Locate() is not null) return false;
+        var aliases=MatchPaths(); return aliases.Paths.SetEquals(aliases.Saved);
     }
 
     // A redacted intermediate destination cannot be reconstructed from today's final alias.
