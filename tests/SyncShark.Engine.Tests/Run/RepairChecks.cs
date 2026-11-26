@@ -63,7 +63,7 @@ public static class RepairChecks
         Check.Require(seen[At(TextKey.StageDropboxListing,true)].Count==1 && seen[At(TextKey.StageLocalWalk,true)].Count==0,"Listing ends did not count the rows listed");
         Check.Require(new[]{At(TextKey.StageLocalWalk,true),At(TextKey.StageDropboxListing,true)}.Max()<At(TextKey.StageRenames,false) && At(TextKey.StageRenames,true)<At(TextKey.StageRows,false)
             && At(TextKey.StageRows,true)<At(TextKey.StageExecution,false) && At(TextKey.StageExecution,true)<At(TextKey.StageFinish,false),"Repair phases were logged out of order");
-        Check.Require(At(TextKey.ResultRunCompleted,true) is var done && done>At(TextKey.StageFinish,false) && seen[done].Count==1 && EndText(TextKey.ResultRunCompleted) && seen[At(TextKey.StageExecution,true)].Count==1,"The completion line did not carry the one applied effect");
+        Check.Require(At(TextKey.ResultRunCompleted,true) is var done && done>At(TextKey.StageFinish,true) && done==seen.Count-1 && seen[done].Count==1 && EndText(TextKey.ResultRunCompleted) && seen[At(TextKey.StageExecution,true)].Count==1,"The completion line did not carry the one applied effect");
     });
 
     // An unreadable PC folder is skipped with its own notice: the Repair completes for the rest, nothing under it moves on either side, and it stays owed.

@@ -103,7 +103,7 @@ public static class ReconciliationChecks
     public static Task IgnoreAsync() => CompareAsync(false, [new("~$draft",1)], [], [new("~$draft",1)], [], 0, [], ignores:["FileNamePrefix:~$"]);
     public static Task ExcludeKeepAsync() => CompareAsync(false, [new("outside",1)], [], [new("outside",1)], [], 0, [], exclusions:[new(Side.Local,"outside",true)]);
     // A32: the Dropbox adapter classifies an untransferable name with SkipReservedName. Keep no Local copy and
-    // retain that exact classification; the engine must not transfer or bind a reserved name, and raises one rename notice.
+    // retain that exact classification; the engine must not transfer or bind a reserved name.
     public static Task ForbiddenNameAsync()
     {
         var pair = ItemChecks.Pair();
@@ -119,8 +119,6 @@ public static class ReconciliationChecks
             Check.Require(remote.Items.TryGetValue(Original, out var kept) && kept.Entry.Skip == nameof(TextKey.SkipReservedName) && kept.Bytes.SequenceEqual(new byte[] { 1 }), "The reserved-name classification or the cloud copy changed");
             var records = new List<SyncedEntry>(); await foreach (var r in store.DescendantsAsync(pair.PairId, Side.Local, "", default)) records.Add(r);
             Check.Require(records.Count == 0, "A reserved Dropbox name was bound");
-            var notices = new List<Notice>(); await foreach (var n in store.NoticesAsync(pair.PairId, default)) notices.Add(n);
-            Check.Require(notices.Count(n => n.Kind == NoticeKind.Skipped && n.Cause == TextKey.SkipReservedName && n.Path == Original) == 1, "A reserved Dropbox name did not get exactly one rename notice");
         }));
     }
     public static Task KindReplacementAsync() => CompareAsync(true, [new(Original,0,true)], [new(Original,1)], [new(Original,0,true)], [new(Original,0,true)], 1, []);

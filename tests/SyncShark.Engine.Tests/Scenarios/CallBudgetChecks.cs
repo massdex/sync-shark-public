@@ -1174,7 +1174,8 @@ public static class CallBudgetChecks
             // Each endpoint clears descendants and inserts each file, with BEGIN/COMMIT per batch.
             // A populated compare page reads keys, notices and entries in one read transaction.
             long extraSql = phase switch { "acquire" => 2 * (2 * size + 2 * batches), "compare" => 5 * pages, _ => 0 };
-            long extraRows = phase is "acquire" or "cleanup" ? 2L * size : 0;
+            // The last scan's cleanup releases the whole image instead of deleting its rows.
+            long extraRows = phase is "acquire" ? 2L * size : 0;
             Check.Require(baseline.Sql > 0 && observed.Sql > 0, $"No SQL observed during {phase}");
             AtMost(observed.Sql, baseline.Sql + extraSql, phase + " SQL statements");
             Exact(observed.Rows, baseline.Rows + extraRows, phase + " changed rows");
@@ -1226,6 +1227,7 @@ public static class CallBudgetChecks
             });
             await Repair.RunAsync(pair, ItemChecks.Settings, _ => { }, paths, queue, pc, cloud, observed, null, null, default);
             Sample("cleanup");
+            Check.Require(!File.Exists(image + ".scan"), "The last scan's cleanup kept the scan image");
             Check.Require(phases.Count == 5, "Expected all five full inventory comparison phases");
             return phases;
         }

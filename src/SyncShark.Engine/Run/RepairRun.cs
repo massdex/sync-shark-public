@@ -29,7 +29,7 @@ internal sealed class RepairRun
     private readonly SemaphoreSlim slots; // discovery waits for the queue: at most one storage page of differences in memory
     private readonly Dictionary<string,int> effects=new(), issues=new();
     private (long Revision,string? Reason) localDebt, remoteDebt;
-    private bool first, scanCleared;
+    private bool first, scanCleared; internal RunEvent? Completion; // written by Repair only after bookkeeping and cleanup return
     private string? terminal;
     private Exception? admissionError;
     internal readonly RepairRetirement retirement;
@@ -245,7 +245,7 @@ internal sealed class RepairRun
         }
         await FinishFolders(null);
         discoveryEnded.TrySetResult();
-        await Repair.Staged(Drain,physicalHop==null?events:null,TextKey.StageExecution,effects);
+        await Repair.Staged(Drain,physicalHop==null?events:null,TextKey.StageExecution,effects); // known limit: times only the final drain; effects committed during compare fall before it
     }
     private async IAsyncEnumerable<Listed> Inventory(ISide side,string path,Action<string>? cursor,[EnumeratorCancellation] CancellationToken token)
     {
@@ -295,7 +295,7 @@ internal sealed class RepairRun
         bool completed=scope==null ? await store.FinishRepairAsync(id,(localDebt.Revision,remoteDebt.Revision),JsonSerializer.Serialize(new {
             RunId=scan,Started=started,Finished=DateTimeOffset.UtcNow,Completed=true,FirstRun=first,Effects=effects,IssuesByKind=issues }),ct)
             : await store.FinishRepairAsync(id,scope,remoteDebt.Revision,ct);
-        if(!completed) Log(new(RunEventKind.Wait,nameof(Repair),"",Text.Get(TextKey.RepairSuperseded),"")); else events(Repair.Completed(effects,started));
+        if(!completed) Log(new(RunEventKind.Wait,nameof(Repair),"",Text.Get(TextKey.RepairSuperseded),"")); else Completion=Repair.Completed(effects,started);
         // Owed only after the matched finish, so the next owed Repair retries each skipped folder; nothing wakes it now.
         if(completed) foreach(var s in skipped) await store.OweScopeAsync(id,s,ct);
         if(completed && full)

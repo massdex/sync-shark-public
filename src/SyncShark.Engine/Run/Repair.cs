@@ -18,7 +18,7 @@ public static class Repair
         }
         var run=new RepairRun(pair,settings,events,paths,queue,local,dropbox,store,scope,physicalHop,ct,caughtUp,localRepaired);
         await run.PrepareAsync();
-        if(await run.FastPathAsync()) return;
+        if(await run.FastPathAsync()) { if(run.Completion is {} fast) events(fast); return; }
         store.BeginScan(pair.PairId,run.scan);
         try
         {
@@ -27,6 +27,7 @@ public static class Repair
             await Staged(run.BookkeepingAsync,physicalHop==null?events:null,TextKey.StageFinish,null);
         }
         finally { await run.CleanupAsync(); }
+        if(run.Completion is {} completion) events(completion);
     }
 
     /// <summary>Logs one phase's start, then its end with the number of items it passed; a null log keeps a hop's phases silent.</summary>
