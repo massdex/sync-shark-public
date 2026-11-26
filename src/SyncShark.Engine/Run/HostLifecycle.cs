@@ -327,9 +327,11 @@ internal sealed class HostLifecycle(Host host)
         }
         } finally {Interlocked.Decrement(ref m.Closing);}
     }
-    internal async Task ManualRepair(HostMember m,CancellationToken ct,TextWriter? live=null,bool showFiles=false)
+    /// <summary>A live view goes to <paramref name="opened"/>, whose owner drains it outside this member task, so a stalled reader never holds Stop or Pause.</summary>
+    internal async Task ManualRepair(HostMember m,CancellationToken ct,TextWriter? live=null,bool showFiles=false,Action<LiveOutput>? opened=null)
     {
         using var log=NewLog(m.Pair.PairId,out var view,live,showFiles);
+        if(view!=null) opened!(view);
         m.OperationLog.Value=log.Write;
         await Repair.RunAsync(m.Pair,host.Settings,log.Write,m.Paths,m.Queue,m.Local,m.Dropbox,host.Store!,null,null,ct,caughtUp:m.CaughtUp,localRepaired:()=>
         {

@@ -223,6 +223,43 @@ public static class HostChecks
             Check.Require(refused==1 && asked>=2 && finished.Task.IsCompleted,"The Repair did not ask its boundary again and complete after one temporary refusal");
         }finally{stop.Cancel();await host.StopAsync(default);}
     }
+    // A waiting Repair's output reaches it before the command returns; a reader that stops reading never holds Host Stop,
+    // and Stop's own pipe cancellation, not the reader, ends that held write.
+    public static async Task StalledRepairReaderStopsAsync()
+    {
+        using var store=new InMemoryStateStore();var pair=Bound("stalled",@"T:\Stalled",1);
+        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
+        var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;
+        var finished=Signal();tap.Finished=()=>finished.TrySetResult();
+        var local=QuietSide(new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)});
+        var remote=QuietSide(new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)});
+        var boot=Signal();
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_,_)=>Task.FromResult((local,remote)),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask,(_,_,_)=>{boot.TrySetResult();return Task.CompletedTask;});
+        using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(20));var token=stop.Token;
+        var held=new HeldReader(host.Stopping);
+        try{
+            await host.StartAsync(token);await boot.Task.WaitAsync(token);
+            var open=new StringWriter();
+            await host.RepairAsync(pair.PairId,token,open);
+            Check.Require(open.ToString().Contains(Text.Get(TextKey.HumanFinished,(TextArg.Name,Text.Get(TextKey.HumanTitleRepair)),(TextArg.Status,string.Empty),(TextArg.Suffix,string.Empty)),StringComparison.Ordinal),
+                "the Repair's output did not reach its command before it returned");
+            finished=Signal();
+            var repair=host.RepairAsync(pair.PairId,token,held);
+            await finished.Task.WaitAsync(token);await held.Entered.Task.WaitAsync(token);
+            try{await host.StopAsync(token).WaitAsync(token);}
+            catch(OperationCanceledException) when(token.IsCancellationRequested){throw new InvalidDataException("A stalled Repair reader held Host Stop");}
+            Check.Require(host.Stopping.IsCancellationRequested && !held.Gate.Task.IsCompleted,"Stop did not cancel the pipe while the reader stayed stalled");
+            await repair.WaitAsync(token);
+        }finally{held.Gate.TrySetResult();stop.Cancel();await host.StopAsync(default);}
+    }
+    // Stands in for the pipe writer: every write waits for the reader (the gate) or for the pipe's own cancellation.
+    private sealed class HeldReader(CancellationToken pipe):TextWriter
+    {
+        internal readonly TaskCompletionSource Gate=Signal(),Entered=Signal();
+        public override System.Text.Encoding Encoding=>System.Text.Encoding.UTF8;
+        public override void Write(char value)=>Write(value.ToString());
+        public override void Write(string? value){Entered.TrySetResult();Gate.Task.Wait(pipe);}
+    }
     public static Task FailedNoticeWriteAsync()=>FailureRecovery(false);
     private static Task UnexpectedFailureLogged()=>FailureRecovery(false,true);
     // An unexpected pair-loop failure (neither an item failure nor a request refusal) is logged with its type; its notice write succeeds.

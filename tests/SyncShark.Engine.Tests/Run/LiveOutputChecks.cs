@@ -10,7 +10,7 @@ public static class LiveOutputChecks
     public static Task StreamsRecordsAsync()
     {
         var output = new StringWriter();
-        using (var log = new RunLog(new HostChecks.MemoryLogs(), "live", ItemChecks.Settings, new LiveOutput(output, TimeProvider.System)))
+        using (var view = new LiveOutput(output, TimeProvider.System)) using (var log = new RunLog(new HostChecks.MemoryLogs(), "live", ItemChecks.Settings, view))
         {
             log.Write(new RunEvent(RunEventKind.Stage, nameof(TextKey.StageLocalWalk), string.Empty, string.Empty, string.Empty));
             log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha.txt", string.Empty, nameof(Side.Dropbox)) { Action = ActionKind.Upload });
@@ -28,7 +28,7 @@ public static class LiveOutputChecks
     public static Task QuietProgressAsync()
     {
         var output = new StringWriter(); var clock = new Ticks(); var logs = new HostChecks.MemoryLogs { Capture = new StringWriter() };
-        using (var log = new RunLog(logs, "live", ItemChecks.Settings, new LiveOutput(output, clock)))
+        using (var view = new LiveOutput(output, clock)) using (var log = new RunLog(logs, "live", ItemChecks.Settings, view))
         {
             log.Write(new RunEvent(RunEventKind.Stage, nameof(TextKey.StageRows), string.Empty, string.Empty, string.Empty));
             log.Write(new RunEvent(RunEventKind.Stage, nameof(TextKey.StageRows), "folder/current.txt", string.Empty, RunLog.InProgressOutcome) { Count = 7 });
@@ -50,7 +50,7 @@ public static class LiveOutputChecks
     public static Task CompletionLineAsync()
     {
         var output = new StringWriter();
-        using (var log = new RunLog(new HostChecks.MemoryLogs(), "live", ItemChecks.Settings, new LiveOutput(output, TimeProvider.System)))
+        using (var view = new LiveOutput(output, TimeProvider.System)) using (var log = new RunLog(new HostChecks.MemoryLogs(), "live", ItemChecks.Settings, view))
             log.Write(new RunEvent(RunEventKind.Stage, nameof(TextKey.ResultRunCompleted), string.Empty,
                 Repair.StageDetail(TextKey.ResultRunCompleted, true, 3, TimeSpan.FromSeconds(2)), string.Empty) { Ended = true, Count = 3 });
         var text = output.ToString();
@@ -67,7 +67,7 @@ public static class LiveOutputChecks
         var invocation = Engine.Edge.Cli.Parse(["repair", "--pair", "p1", "--show-files"]);
         Check.Require(invocation?.Flag("ShowFiles") == true, "repair did not accept --show-files");
         var output = new StringWriter();
-        using (var log = new RunLog(new HostChecks.MemoryLogs(), "live", ItemChecks.Settings, new LiveOutput(output, TimeProvider.System, perFile: true)))
+        using (var view = new LiveOutput(output, TimeProvider.System, perFile: true)) using (var log = new RunLog(new HostChecks.MemoryLogs(), "live", ItemChecks.Settings, view))
             log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha.txt", string.Empty, nameof(Side.Dropbox)) { Action = ActionKind.Upload });
         Check.Require(output.ToString().Contains("alpha.txt", StringComparison.Ordinal), "a per-file effect was not shown with the switch");
         return Task.CompletedTask;

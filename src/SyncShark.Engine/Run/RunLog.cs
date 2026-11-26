@@ -45,7 +45,7 @@ public sealed class RunLog : IDisposable
     private bool _disposed;
 
     /// <summary>Opens the run's log file through the writer seam with the configured buffer. A file that cannot be
-    /// opened stops logging without failing the run. A live view, when given, also shows each record to the waiting command.</summary>
+    /// opened stops logging without failing the run. A live view, when given, also shows each record to the waiting command; its caller owns and drains it.</summary>
     public RunLog(ILogFiles files, string path, EngineSettings settings, LiveOutput? live = null)
     {
         _path = path;
@@ -66,11 +66,12 @@ public sealed class RunLog : IDisposable
     /// <summary>Appends one canonical record and shows it live. A failed write stops further writes and never reaches the run.</summary>
     public void Write(RunEvent value)
     {
-        _live?.Accept(value);
-        if (value.Outcome == InProgressOutcome) return; // a phase's current file is shown live, never stored
         lock (_gate)
         {
-            if (_disposed || _failed || _writer is null) return;
+            if (_disposed) return;
+            _live?.Accept(value);
+            if (value.Outcome == InProgressOutcome) return; // a phase's current file is shown live, never stored
+            if (_failed || _writer is null) return;
             try
             {
                 _writer.WriteLine(FormatRecord(value));
@@ -89,10 +90,10 @@ public sealed class RunLog : IDisposable
     public static ILogFiles.ReadStatus Read(ILogFiles files, string path, Action<string, bool> record, int bufferBytes,
         CancellationToken ct, out bool trailing) => files.Read(path, record, bufferBytes, ct, out trailing);
 
-    /// <summary>Flushes and closes the buffered writer once; a failed write or flush still closes its handle.</summary>
+    /// <summary>Flushes and closes the buffered writer once; a failed write or flush still closes its handle. The live
+    /// view stops receiving records but is drained by its owner, so closing the file never waits on a reader.</summary>
     public void Dispose()
     {
-        _live?.Dispose();
         lock (_gate)
         {
             if (_disposed) return;

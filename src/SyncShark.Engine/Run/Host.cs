@@ -185,7 +185,7 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
     /// <summary>Run explicit Repair on the pair's shared queue; its run log is also shown live on the waiting command's output, per-file effects only when asked.</summary>
     public async Task RepairAsync(string pairId,CancellationToken ct,TextWriter? live=null,bool showFiles=false)
     {
-        Task run;
+        Task run; LiveOutput? view=null;
         await commands.WaitAsync(ct);
         try
         {
@@ -194,14 +194,15 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
             var m=await Life.Ready(p,ct);
             run=Life.ClaimRepair(m,ct,async token=>{
                 await store!.OweRepairAsync(pairId,Side.Dropbox,"requested",token);
-                try { await Life.ManualRepair(m,token,live,showFiles); }
+                try { await Life.ManualRepair(m,token,live,showFiles,shown=>view=shown); }
                 catch(InventoryIncompleteException) { await Life.HandOff(m,null,token); throw; } // keep the explicit failure, still wake a scope the scan owed
                 // The explicit path runs no scope pass; a scope an item commit owed during the full run still needs its own run.
                 await Life.HandOff(m,null,token);
             },true);
         }
         finally { commands.Release(); }
-        await run;
+        try { await run; }
+        finally { view?.Dispose(); } // the command, not the member task, waits for its output
     }
     /// <summary>Read stored status and any startup switch refusal or warning.</summary>
     public async Task<string> StatusAsync(string? pairId,CancellationToken ct)

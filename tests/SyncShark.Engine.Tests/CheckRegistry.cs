@@ -280,6 +280,7 @@ public static class CheckRegistry
             new("Run/FailedExplicitRepair", Run.HostChecks.FailedExplicitRepairAsync),
             new("Run/RepairOutlivesLiveFailure", Run.HostChecks.RepairOutlivesLiveFailureAsync),
             new("Run/RepairBoundaryRefusal", Run.HostChecks.RepairBoundaryRefusalAsync),
+            new("Run/StalledRepairReaderStops", Run.HostChecks.StalledRepairReaderStopsAsync),
             new("Run/FailedNoticeWrite", Run.HostChecks.FailedNoticeWriteAsync),
             new("Run/RepairHeldRowEnds", Run.WorkQueueChecks.RepairHeldRowEndsAsync),
             new("Run/RepairBehindHeldPage", Run.WorkQueueChecks.RepairBehindHeldPageAsync),

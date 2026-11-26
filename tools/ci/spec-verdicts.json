@@ -14192,6 +14192,87 @@
         "type:RepairRun.FolderMark"
       ],
       "verdict": "REASON-RECORDED"
+    },
+    {
+      "key": [
+        "src/SyncShark.Engine/Run/HostLifecycle.cs",
+        "class-size",
+        "SyncShark.Engine:Massdex.SyncShark.Engine.Run.HostLifecycle",
+        ""
+      ],
+      "hash": "1b1fd4adcba0~700b41bceac5~3c3fde2b9122~dde265738c37~63552daa2bb5~8edf",
+      "size": 339,
+      "members": [
+        "HostLifecycle:Adapters(HostMember,CancellationToken)",
+        "HostLifecycle:Attach(PairConfig)",
+        "HostLifecycle:BeginOwedRepair(HostMember,CancellationToken)",
+        "HostLifecycle:ClaimRepair(HostMember,CancellationToken,Func<CancellationToken, Task>,bool)",
+        "HostLifecycle:Failed(HostMember,Exception,CancellationToken)",
+        "HostLifecycle:FinishExclusion(HostMember,Scope,Exclusion,CancellationToken)",
+        "HostLifecycle:HandOff(HostMember,ISet<Scope>?,CancellationToken)",
+        "HostLifecycle:Launch(HostMember,IReadOnlyList<PairConfig>,CancellationToken)",
+        "HostLifecycle:ManualRepair(HostMember,CancellationToken,TextWriter?,bool,Action<LiveOutput>?)",
+        "HostLifecycle:Membership(HostMember,bool,CancellationToken)",
+        "HostLifecycle:NewLog(string,out LiveOutput?,TextWriter?,bool)",
+        "HostLifecycle:Observe(HostMember,IReadOnlyList<PairConfig>,CancellationToken,bool,bool)",
+        "HostLifecycle:ReadRoots(HostMember,CancellationToken,bool)",
+        "HostLifecycle:Ready(PairConfig,CancellationToken)",
+        "HostLifecycle:RecheckRoots(HostMember,CancellationToken)",
+        "HostLifecycle:ReleaseTrim(HostMember,bool)",
+        "HostLifecycle:ReplayJournal(HostMember,CancellationToken)",
+        "HostLifecycle:RetryDelay(Exception,int,CancellationToken)",
+        "HostLifecycle:Rewind(HostMember,CancellationToken)",
+        "HostLifecycle:RunMemberAsync(HostMember,CancellationTokenSource)",
+        "HostLifecycle:Start(HostMember)",
+        "HostLifecycle:WakeRepair(HostMember)",
+        "HostLifecycle:static Drain(HostMember)",
+        "HostLifecycle:static InScope(Scope,string)",
+        "HostLifecycle:static LogFolder",
+        "HostLifecycle:static NoKeepRoot(PairConfig,Scope)",
+        "HostLifecycle:static RootGone(Exception)"
+      ],
+      "verdict": "REASON-RECORDED"
+    },
+    {
+      "key": [
+        "src/SyncShark.Engine/Run/HostLifecycle.cs",
+        "file-size",
+        "",
+        ""
+      ],
+      "hash": "1677000fe4ce~eeaa9c13876e~96181c429ca4~5b5ce9eea910~822ab2f767f5~6524",
+      "size": 342,
+      "members": [
+        "HostLifecycle:Adapters(HostMember,CancellationToken)",
+        "HostLifecycle:Attach(PairConfig)",
+        "HostLifecycle:BeginOwedRepair(HostMember,CancellationToken)",
+        "HostLifecycle:ClaimRepair(HostMember,CancellationToken,Func<CancellationToken, Task>,bool)",
+        "HostLifecycle:Failed(HostMember,Exception,CancellationToken)",
+        "HostLifecycle:FinishExclusion(HostMember,Scope,Exclusion,CancellationToken)",
+        "HostLifecycle:HandOff(HostMember,ISet<Scope>?,CancellationToken)",
+        "HostLifecycle:Launch(HostMember,IReadOnlyList<PairConfig>,CancellationToken)",
+        "HostLifecycle:ManualRepair(HostMember,CancellationToken,TextWriter?,bool,Action<LiveOutput>?)",
+        "HostLifecycle:Membership(HostMember,bool,CancellationToken)",
+        "HostLifecycle:NewLog(string,out LiveOutput?,TextWriter?,bool)",
+        "HostLifecycle:Observe(HostMember,IReadOnlyList<PairConfig>,CancellationToken,bool,bool)",
+        "HostLifecycle:ReadRoots(HostMember,CancellationToken,bool)",
+        "HostLifecycle:Ready(PairConfig,CancellationToken)",
+        "HostLifecycle:RecheckRoots(HostMember,CancellationToken)",
+        "HostLifecycle:ReleaseTrim(HostMember,bool)",
+        "HostLifecycle:ReplayJournal(HostMember,CancellationToken)",
+        "HostLifecycle:RetryDelay(Exception,int,CancellationToken)",
+        "HostLifecycle:Rewind(HostMember,CancellationToken)",
+        "HostLifecycle:RunMemberAsync(HostMember,CancellationTokenSource)",
+        "HostLifecycle:Start(HostMember)",
+        "HostLifecycle:WakeRepair(HostMember)",
+        "HostLifecycle:static Drain(HostMember)",
+        "HostLifecycle:static InScope(Scope,string)",
+        "HostLifecycle:static LogFolder",
+        "HostLifecycle:static NoKeepRoot(PairConfig,Scope)",
+        "HostLifecycle:static RootGone(Exception)",
+        "type:HostLifecycle"
+      ],
+      "verdict": "REASON-RECORDED"
     }
   ],
   "register_reviews": [
