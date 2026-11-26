@@ -23,6 +23,7 @@ internal sealed class RepairRun
     private readonly List<FolderMark> folders=new();
     private readonly List<(NoticeItem Member,bool Present)> linkWrites=new();
     private readonly HashSet<Exclusion> recreated=new(); // filled by the PC listing's one sequential enumerator
+    private readonly List<Scope> skipped=new(); // unreadable folders, owed again after the finish
     internal readonly TaskCompletionSource discoveryEnded=new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly HashSet<Task> admitted=new();
     private readonly SemaphoreSlim slots; // discovery waits for the queue: at most one storage page of differences in memory
@@ -215,6 +216,7 @@ internal sealed class RepairRun
             var lp=row.Local?.Path??row.Synced?.LocalPath??row.Context.Destination;
             var dp=row.Dropbox?.Path??row.Synced?.DropboxPath??row.Context.Destination;
             lp??=await MissingPath(Side.Local,dp!); dp??=await MissingPath(Side.Dropbox,lp);
+            if(row.Local is {IsFolder:true,Skip:nameof(TextKey.SkipUnreadable)} || row.Dropbox is {IsFolder:true,Skip:nameof(TextKey.SkipUnreadable)}) skipped.Add(new(lp,dp));
             var coveredLocal=Evidence(Side.Local,lp).Covered; var coveredRemote=Evidence(Side.Dropbox,dp).Covered;
             if((row.Local==null && !coveredLocal) || (row.Dropbox==null && !coveredRemote)) continue;
             foreach(var side in new[]{Side.Local,Side.Dropbox})
@@ -261,7 +263,8 @@ internal sealed class RepairRun
     {
         // Apply scan bookkeeping after attempts so it cannot mask an outside change.
         foreach(var (member,present) in linkWrites) await store.UpdateLinkMemberAsync(id,member,present,ct);
-        if(unreadLocal.Keys.Concat(unreadRemote.Keys).FirstOrDefault() is {} unreadPath) throw new InventoryIncompleteException(Text.Get(TextKey.SkipUnreadable,(TextArg.Path,unreadPath)),null);
+        // A Repair skips an unreadable folder (its row raised its own notice and its subtree proved nothing); a hop's capture must be whole.
+        if(physicalHop!=null && unreadLocal.Keys.Concat(unreadRemote.Keys).FirstOrDefault() is {} unreadPath) throw new InventoryIncompleteException(Text.Get(TextKey.SkipUnreadable,(TextArg.Path,unreadPath)),null);
         if(physicalHop!=null) return;
         await Finish();
     }
@@ -277,7 +280,9 @@ internal sealed class RepairRun
             RunId=scan,Started=started,Finished=DateTimeOffset.UtcNow,Completed=true,FirstRun=first,Effects=effects,IssuesByKind=issues }),ct)
             : await store.FinishRepairAsync(id,scope,remoteDebt.Revision,ct);
         if(!completed) Log(new(RunEventKind.Wait,nameof(Repair),"",Text.Get(TextKey.RepairSuperseded),""));
-        else if(full)
+        // Owed only after the matched finish, so the next owed Repair retries each skipped folder; nothing wakes it now.
+        if(completed) foreach(var s in skipped) await store.OweScopeAsync(id,s,ct);
+        if(completed && full)
         {
             localRepaired?.Invoke();
             // Owe each present no-keep root only after the matched finish, so its revision cannot supersede this run.

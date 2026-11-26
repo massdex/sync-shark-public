@@ -267,6 +267,7 @@ public static class CheckRegistry
             new("Run/AutoSyncChecks.SourceRetryAsync", Run.AutoSyncChecks.SourceRetryAsync),
             new("Run/host retry", Run.HostChecks.RetryAtHostAsync),
             new("Run/host trim", Run.HostChecks.TrimAtHostAsync),
+            new("Run/LogsPrunedAtStart", Run.HostChecks.LogsPrunedAtStartAsync),
             new("Run/RewindDropsOlderAdmission", Run.HostChecks.RewindDropsOlderAdmissionAsync),
             new("Run/PublicationRetry", Run.HostChecks.PublicationRetryAsync),
             new("Run/ExclusionCause", Run.HostChecks.ExclusionCauseAsync),

@@ -236,7 +236,16 @@ public static class HostChecks
         public TextWriter Open(string path,int bufferCharacters){if(Capture!=null)return Capture;var n=Interlocked.Increment(ref opens);if(n==3)RepairOpened.TrySetResult();return n==2 && Closed is {} closed ? new Writer(closed) : new StringWriter();}
         public string? Resolve(string folder,string pairId,string runId)=>null;
         public ILogFiles.ReadStatus Read(string path,Action<string,bool> record,int bufferBytes,CancellationToken ct,out bool trailing){trailing=false;return ILogFiles.ReadStatus.NotFound;}
-        public void Prune(string folder,TimeSpan olderThan,DateTimeOffset now) { }
+        internal TimeSpan? PrunedOlderThan;
+        public void Prune(string folder,TimeSpan olderThan,DateTimeOffset now) => PrunedOlderThan=olderThan;
+    }
+    public static async Task LogsPrunedAtStartAsync()
+    {
+        var logs=new MemoryLogs();
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(null),(_,_,_,_)=>throw new InvalidOperationException(),ItemChecks.Settings,logs,TimeProvider.System,
+            _=>Task.FromResult("connection"),(_,_)=>Task.CompletedTask);
+        await host.StartAsync(default);
+        Check.Require(logs.PrunedOlderThan==TimeSpan.FromDays(ItemChecks.Settings.LogRetentionDays),"Host start did not prune run logs older than the retention");
     }
     public static async Task TrimAtHostAsync()
     {
@@ -713,7 +722,7 @@ public static class HostChecks
     {
         var ok=await fin; if(ok) retired.TrySetResult(); return ok;
     }
-    // An unreadable folder's inventory failure stays in its own scope; an unrelated owed scope still settles and a notice is raised.
+    // An unreadable folder is skipped: its scope settles, the folder itself stays owed, an unrelated owed scope settles and a notice is raised.
     private static async Task OwedScopeIsolationAsync()
     {
         using var raw=new InMemoryStateStore();
@@ -724,7 +733,7 @@ public static class HostChecks
         var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
         var db=new FakeSide(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
         pc.Seed(ItemChecks.File(Side.Local,"A",0,"pc-a",true),[]);
-        // An unreadable folder keeps its scope incomplete (an unreadable file is only its own item's failure).
+        // The unreadable folder alone stays owed (an unreadable file is only its own item's failure).
         pc.Seed(ItemChecks.File(Side.Local,"A/bad",0,"pc-bad",true),[]); pc.ReadFailures["A/bad"]=new ItemFailedException("A/bad",TextKey.ReadLocalFailed,null);
         pc.Seed(ItemChecks.File(Side.Local,"B",0,"pc-b",true),[]); pc.Seed(ItemChecks.File(Side.Local,"B/ok",1,"pc-bok"),[1]);
         var retired=Signal();
@@ -737,7 +746,7 @@ public static class HostChecks
             try { await retired.Task.WaitAsync(TimeSpan.FromSeconds(10),ct); }
             catch(TimeoutException e) { throw new InvalidDataException("An unreadable folder stranded an unrelated owed scope",e); }
             var owed=(await raw.PairAsync(pair.PairId,ct))?.OwedScopes ?? [];
-            Check.Require(owed.Contains(new Scope("A","A")) && !owed.Contains(new Scope("B","B")),"An unrelated owed scope did not settle beside an unreadable one");
+            Check.Require(owed.Contains(new Scope("A/bad","A/bad")) && !owed.Contains(new Scope("B","B")),"An unrelated owed scope did not settle beside an unreadable one, or the unreadable folder was not owed again");
             Check.Require(db.Items.ContainsKey("B/ok"),"The unrelated owed scope did not sync its file");
             Check.Require(raw.OpenNotices.Any(n=>n.Kind==NoticeKind.Failure),"The unreadable folder raised no failure notice");
         }
@@ -805,7 +814,7 @@ public static class HostChecks
         }
         finally {stop.Cancel();try{await host.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));}catch(TimeoutException){}}
     }
-    // An explicit Repair that commits a scope owe then fails partial inventory still wakes the newly owed scope.
+    // An explicit Repair that commits a scope owe and skips an unreadable folder completes and still wakes the newly owed scope.
     private static async Task ExplicitRepairPartialInventoryWakesAsync()
     {
         using var raw=new InMemoryStateStore();
@@ -814,7 +823,7 @@ public static class HostChecks
         var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)};
         var db=new FakeSide(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)};
         pc.Seed(ItemChecks.File(Side.Local,"B",0,"pc-b",true),[]); pc.Seed(ItemChecks.File(Side.Local,"B/ok",1,"pc-bok"),[1]);
-        // An unrelated unreadable folder makes the full Repair throw InventoryIncompleteException at Bookkeeping (an unreadable file is only its own item's failure).
+        // An unrelated unreadable folder is skipped: the explicit full Repair completes for the rest.
         pc.Seed(ItemChecks.File(Side.Local,"bad",0,"pc-bad",true),[]); pc.Seed(ItemChecks.File(Side.Local,"bad/x",0,"pc-badx",true),[]); pc.ReadFailures["bad/x"]=new ItemFailedException("bad/x",TextKey.ReadLocalFailed,null);
         var owedOnce=new int[1]; var bootedOnce=new int[1]; var booted=Signal(); var retired=Signal();
         var store=AutoSyncChecks.Observation.Wrap<IStore>((m,args)=>{
@@ -844,7 +853,7 @@ public static class HostChecks
             catch(TimeoutException e) { throw new InvalidDataException("Boot debt dispatch did not take its first snapshot",e); }
             bool threw=false;
             try { await host.RepairAsync(pair.PairId,ct); } catch(InventoryIncompleteException) { threw=true; }
-            Check.Require(threw,"Explicit Repair hid its partial-inventory failure");
+            Check.Require(!threw,"One unreadable folder failed the whole explicit Repair");
             try { await retired.Task.WaitAsync(TimeSpan.FromSeconds(10),ct); }
             catch(TimeoutException e) { throw new InvalidDataException("A scope owed by an explicit partial-inventory Repair was not scheduled",e); }
             Check.Require(!((await raw.PairAsync(pair.PairId,ct))?.OwedScopes ?? []).Contains(new Scope("B","B")),"The newly owed scope was left behind");

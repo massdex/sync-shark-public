@@ -3,7 +3,7 @@ namespace Massdex.SyncShark.Engine.Run;
 /// <summary>Admits, runs, rewinds and drains each host member's pair runner on the host's shared state.</summary>
 internal sealed class HostLifecycle(Host host)
 {
-    private static string LogFolder => ResourceNames.LogDirectory(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+    internal static string LogFolder => ResourceNames.LogDirectory(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
 
     internal void Launch(HostMember m,IReadOnlyList<PairConfig> pairs,CancellationToken ct)
     {
@@ -330,6 +330,9 @@ internal sealed class HostLifecycle(Host host)
         using var log=NewLog(m.Pair.PairId);
         m.OperationLog.Value=log.Write;
         await Repair.RunAsync(m.Pair,host.Settings,log.Write,m.Paths,m.Queue,m.Local,m.Dropbox,host.Store!,null,null,ct,caughtUp:await m.Boot.WaitAsync(ct),localRepaired:()=>
-        {lock(m) if(m.JournalWake!=null) (m.RepairFinished??=new()).Cancel();});
+        {
+            lock(m) if(m.JournalWake!=null) (m.RepairFinished??=new()).Cancel();
+            host.Logs.Prune(LogFolder,TimeSpan.FromDays(host.Settings.LogRetentionDays),host.Clock.GetUtcNow()); // a completed full Repair keeps run logs for the retention period
+        });
     }
 }

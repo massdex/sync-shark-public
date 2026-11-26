@@ -16,8 +16,24 @@ public static class RepairChecks
         await RetainedAttemptAsync(); await SelectedStreamRaceAsync(); await ReplacedDuringRepairAsync();
         await CoveredFolderAsync(true); await CoveredFolderAsync(false);
         await BoundedAdmissionAsync(); await AncestorCaseRecordedOnceAsync();
-        await ObservedAncestorCaseAsync(); await BilateralCaseRenameAsync();
+        await ObservedAncestorCaseAsync(); await BilateralCaseRenameAsync(); await UnreadableFolderSkippedAsync();
     }
+
+    // An unreadable PC folder is skipped with its own notice: the Repair completes for the rest, nothing under it moves on either side, and it stays owed.
+    private static Task UnreadableFolderSkippedAsync() => WithRepairStore(async (store,pair,ct)=>
+    {
+        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        pc.Seed(ItemChecks.File(Side.Local,"ok",1,"ok"),[1]);
+        pc.Seed(ItemChecks.File(Side.Local,"bad",0,"bad",true),[]); pc.Seed(ItemChecks.File(Side.Local,"bad/pc",2,"pc"),[2]);
+        pc.ReadFailures["bad"]=new ItemFailedException("bad",TextKey.ReadLocalFailed,null);
+        db.Seed(ItemChecks.File(Side.Dropbox,"bad",0,"dbad",true),[]); db.Seed(ItemChecks.File(Side.Dropbox,"bad/db",3,"db"),[3]);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),pc,db,store,null,null,ct,caughtUp:true);
+        var notices=new List<Notice>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) notices.Add(n);
+        Check.Require((await store.RepairStateAsync(pair.PairId,ct)).FirstRepairDone && db.Items.ContainsKey("ok"),"One unreadable folder kept the Repair from completing for the rest");
+        Check.Require(!db.Items.ContainsKey("bad/pc") && db.Items.ContainsKey("bad/db") && !pc.Items.ContainsKey("bad/db") && pc.Items.ContainsKey("bad/pc"),"An item under the unreadable folder was copied or deleted");
+        Check.Require(notices.Count(n=>n.Kind==NoticeKind.Failure && n.Path=="bad")==1 && notices.All(n=>n.Cause!=TextKey.RootUnavailable),$"The skipped folder did not get exactly its own notice: {string.Join(",",notices.Select(n=>n.Cause+"@"+n.Path))}");
+        Check.Require((await store.PairAsync(pair.PairId,ct))?.OwedScopes is {} owed && owed.Contains(new Scope("bad","bad")),"The skipped folder is not retried by the next Repair");
+    });
 
     // A parent's new case is saved with no Dropbox call and no subtree work; the next Repair finds no difference.
     private static Task AncestorCaseRecordedOnceAsync() => WithRepairStore(async (store,pair,ct)=>

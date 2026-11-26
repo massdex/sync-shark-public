@@ -68,6 +68,7 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
         await commands.WaitAsync(ct);
         try
         {
+            logs.Prune(HostLifecycle.LogFolder,TimeSpan.FromDays(settings.LogRetentionDays),clock.GetUtcNow());
             if (await Open(false,ct)==null) return;
             var pairs=await Configurations(ct);
             // Attach surviving configured KEEP rules to their bound rows before a restart's renames can lose the old keys (K06).

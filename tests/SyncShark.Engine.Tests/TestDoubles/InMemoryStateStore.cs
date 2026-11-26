@@ -55,8 +55,9 @@ public sealed class InMemoryStateStore : IStore
         bool sameFolder = before is {IsFolder:true, LocalId.Length:>0, DropboxId.Length:>0} && after is {IsFolder:true} &&
             before.LocalId==after.LocalId && before.DropboxId==after.DropboxId;
         bool localMoved=before?.LocalPath!=after?.LocalPath, remoteMoved=before?.DropboxPath!=after?.DropboxPath;
-        Mark(Side.Local, !(sameFolder && remoteMoved && !localMoved));
-        Mark(Side.Dropbox, !(sameFolder && localMoved && !remoteMoved));
+        bool recorded=before==null && second==null; // as the Store: a first binding leaves its descendants' scan facts current
+        Mark(Side.Local, !recorded && !(sameFolder && remoteMoved && !localMoved));
+        Mark(Side.Dropbox, !recorded && !(sameFolder && localMoved && !remoteMoved));
         void Mark(Side side, bool descendants)
         {
             var old = before?.KeyOn(side);

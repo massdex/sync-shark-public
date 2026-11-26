@@ -308,8 +308,10 @@ public sealed class Store : IStore
         bool localMoved=before?.LocalPath!=after?.LocalPath, remoteMoved=before?.DropboxPath!=after?.DropboxPath;
         // Only an ancestor's case changed: the descendants' scan facts stay current.
         bool respelled=sameFolder && PathNames.SamePlace(before!.LocalPath,after!.LocalPath) && PathNames.SamePlace(before.DropboxPath,after.DropboxPath);
-        Mark(Side.Local, !respelled && !(sameFolder && remoteMoved && !localMoved));
-        Mark(Side.Dropbox, !respelled && !(sameFolder && localMoved && !remoteMoved));
+        // A first binding records a folder already present on both sides; its descendants' scan facts stay current.
+        bool recorded=before==null && second==null;
+        Mark(Side.Local, !respelled && !recorded && !(sameFolder && remoteMoved && !localMoved));
+        Mark(Side.Dropbox, !respelled && !recorded && !(sameFolder && localMoved && !remoteMoved));
         void Mark(Side side, bool descendants)
         {
             var old = before?.KeyOn(side);
