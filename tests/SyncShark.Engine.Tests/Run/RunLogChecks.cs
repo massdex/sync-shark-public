@@ -49,7 +49,7 @@ public static class RunLogChecks
         var files = new FakeLogFiles();
         var log = new RunLog(files, "logs/pair-run.log", Settings(8192));
         log.Write(new RunEvent(RunEventKind.Effect, "Uploaded", "alpha/report.txt", "copied", "Dropbox"));
-        Check.Require(files.Written.Count == 0, "ordinary file effects remain buffered");
+        Check.Require(files.Written.Count == 1, "a committed effect line reaches the file at once");
         log.Write(new RunEvent(RunEventKind.Wait, "Waiting", string.Empty, string.Empty, string.Empty));
         log.Dispose();
 

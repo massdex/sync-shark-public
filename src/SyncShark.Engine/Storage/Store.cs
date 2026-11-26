@@ -164,7 +164,7 @@ public sealed class Store : IStore
     /// <remarks>The stream does not hold the writer.</remarks>
     public IAsyncEnumerable<(Row Row, IReadOnlyList<(Notice Notice, NoticeItem? Member, bool Covered, bool Touched)> Notices)> CompareAsync(string pairId, Guid scanId, Scope? scope, Func<Side,string,(bool Covered,bool Touched)> evidence, CancellationToken ct) => scratch.Stream(db => scan.CompareAsync(db, pairId, scanId, scope, evidence, settings.StoragePageSize, ct), true, ct);
     /// <summary>Discard the scan and its unpublished cursor.</summary>
-    public Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct) => Locked(async () => { await scan.ClearScanAsync(scratch.Ensure(Connection), pairId, scanId, CancellationToken.None); if (scan.Idle) scratch.Release(Connection); }, CancellationToken.None); // runs after a cancel: never skip the delete
+    public Task ClearScanAsync(string pairId, Guid scanId, CancellationToken ct) => Locked(async () => { if (!scan.Retire(pairId, scanId) || !scratch.Release(Connection)) await scan.ClearScanAsync(scratch.Ensure(Connection), pairId, scanId, CancellationToken.None); }, CancellationToken.None); // runs after a cancel; the last scan frees the image without a write
     /// <summary>Close the store connection.</summary>
     public void Dispose() => scratch.Close(Connection);
 

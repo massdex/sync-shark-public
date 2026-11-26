@@ -48,6 +48,24 @@ public static class RepairChecks
         Check.Require((await store.RepairStateAsync(p.PairId,ct)).FirstRepairDone && pc.Items.ContainsKey("ok"),"A malformed name under an ignore rule stopped the Repair");
     });
 
+    // A Repair logs a path-free start and counted end for each phase, in order, then one completion line with the effects applied.
+    public static Task StageLinesAsync() => WithRepairStore(async (store,pair,ct)=>
+    {
+        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); db.Seed(ItemChecks.File(Side.Dropbox,"new",1,"new"),[1]);
+        var seen=new List<RunEvent>();
+        await Repair.RunAsync(pair,ItemChecks.Settings,e=>{lock(seen) if(e.Kind==RunEventKind.Stage) seen.Add(e);},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(),pc,db,store,null,null,ct,caughtUp:true);
+        int At(TextKey key,bool ended)=>seen.FindIndex(e=>e.What==key.ToString() && e.Ended==ended);
+        // The 0.3.95 stage-end text: name, count, then the elapsed seconds since the paired start.
+        bool EndText(TextKey key)=>seen[At(key,true)] is var end && end.Detail.StartsWith(Text.Get(TextKey.StageEnded,(TextArg.Name,Text.Get(key)),
+            (TextArg.Count,end.Count?.ToString(System.Globalization.CultureInfo.InvariantCulture)??Text.Get(TextKey.CountUnavailable)),(TextArg.Seconds,"#")).Split('#')[0],StringComparison.Ordinal);
+        foreach(var key in new[]{TextKey.StageLocalWalk,TextKey.StageDropboxListing,TextKey.StageRenames,TextKey.StageRows,TextKey.StageExecution,TextKey.StageFinish})
+            Check.Require(At(key,false)>=0 && At(key,true)>At(key,false) && (key==TextKey.StageFinish || seen[At(key,true)].Count is not null) && EndText(key) && seen.All(e=>e.Path.Length==0),"Stage "+key+" lacks an ordered, counted, path-free start and end");
+        Check.Require(seen[At(TextKey.StageDropboxListing,true)].Count==1 && seen[At(TextKey.StageLocalWalk,true)].Count==0,"Listing ends did not count the rows listed");
+        Check.Require(new[]{At(TextKey.StageLocalWalk,true),At(TextKey.StageDropboxListing,true)}.Max()<At(TextKey.StageRenames,false) && At(TextKey.StageRenames,true)<At(TextKey.StageRows,false)
+            && At(TextKey.StageRows,true)<At(TextKey.StageExecution,false) && At(TextKey.StageExecution,true)<At(TextKey.StageFinish,false),"Repair phases were logged out of order");
+        Check.Require(At(TextKey.ResultRunCompleted,true) is var done && done>At(TextKey.StageFinish,false) && seen[done].Count==1 && EndText(TextKey.ResultRunCompleted) && seen[At(TextKey.StageExecution,true)].Count==1,"The completion line did not carry the one applied effect");
+    });
+
     // An unreadable PC folder is skipped with its own notice: the Repair completes for the rest, nothing under it moves on either side, and it stays owed.
     private static Task UnreadableFolderSkippedAsync() => WithRepairStore(async (store,pair,ct)=>
     {

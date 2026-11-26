@@ -847,7 +847,7 @@ public static class CallBudgetChecks
             var recorded = await ScratchPathsAsync(image);
             Check.Require(recorded.SequenceEqual(paths.Order(StringComparer.Ordinal)), "Scratch scan did not record one row per listed entry");
             await store.ClearScanAsync(pair.PairId, scan, default);
-            Check.Require((await ScratchPathsAsync(image)).Count == 0, "Scratch scan rows survived ClearScan");
+            Check.Require(!File.Exists(image + ".scan"), "The last scan's clear kept the scratch image");
         }
         finally { dir.Delete(true); }
 
@@ -1264,8 +1264,9 @@ public static class CallBudgetChecks
             if (scratch)
             {
                 Check.Require((await ScratchPathsAsync(image)).Count == size, "Scan image did not contain one row per file");
+                db.Dispose(); // the sampling connection would hold the image across the clear
                 await store.ClearScanAsync(pair.PairId, scan, default);
-                Check.Require((await ScratchPathsAsync(image)).Count == 0, "Scratch rows survived clear");
+                Check.Require(!File.Exists(image + ".scan"), "The last scan's clear kept the scratch image");
             }
             async Task Add(int start, int count)
             {

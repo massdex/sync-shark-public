@@ -17,12 +17,6 @@ public sealed class ScanTable
                 active.Add((pairId, scanId), [(new(StringComparer.Ordinal), new()), (new(StringComparer.Ordinal), new())]);
     }
 
-    /// <summary>Whether no scan of any pair is active, so the scan image holds nothing.</summary>
-    public bool Idle
-    {
-        get { lock (active) return active.Count == 0; }
-    }
-
     /// <summary>Whether a committed notice replacement needs its original footprints for an active scan.</summary>
     public bool HasActive(string pairId)
     {
@@ -158,9 +152,18 @@ public sealed class ScanTable
         using var cmd = StorageCommand.Create(db, tx, Sql.Get(SqlKey.ScanTableClearScan1), ("$p", pairId), ("$s", scanId.ToByteArray()), ("$n", DeletedNames.Token(pairId, scanId)), ("$r", DeletedNames.RestoredToken(pairId,scanId)));
         await cmd.ExecuteNonQueryAsync(ct);
         tx.Commit();
+        Retire(pairId, scanId);
+    }
+
+    // Ends the scan in memory; true when no scan of any pair stays active, so the whole image is disposable.
+    internal bool Retire(string pairId, Guid scanId)
+    {
         History.Cleared(pairId, scanId);
         lock (active)
+        {
             active.Remove((pairId, scanId));
+            return active.Count == 0;
+        }
     }
 
     /// <summary>Read pages of complete bindings, including notice-only rows and independently retained put-back notices.</summary>

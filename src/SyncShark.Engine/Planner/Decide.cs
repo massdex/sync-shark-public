@@ -12,7 +12,8 @@ public static class Decide
         var context = row.Context;
         if (context.OutOfScope && exclusion is null) return None(row, NoneReason.OutOfScope);
         var stub = row.Local is { IsFolder: false, Skip: nameof(TextKey.SkipOnlineOnly) };
-        if (context.Skipped && !stub) return None(row, NoneReason.Skipped);
+        if (context.Skipped && !stub) return row.Dropbox is { Skip: nameof(TextKey.SkipReservedName) }
+            ? Notice(row, NoticeKind.Skipped, TextKey.SkipReservedName) : None(row, NoneReason.Skipped);
         if (row.Ambiguous) return Notice(row, NoticeKind.NameClash, TextKey.ClashMappedNames);
         var action = stub ? Placeholder(row, exclusion?.Excluded == Side.Local)
             : exclusion is { } rule ? Excluded(row, rule.Excluded, rule.Owed, policy, comparedAt, localContentDirty)

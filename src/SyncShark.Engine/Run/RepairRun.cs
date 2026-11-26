@@ -125,8 +125,8 @@ internal sealed class RepairRun
             if ((await db).Cursor is {} cursor && await store.CursorAsync(id,ct)==null) await store.SaveCursorAsync(id,cursor,ct);
         }
         var acquireHistory=full && first && (await store.DeletedHistoryAsync(id,scan,ct)).Owed;
-        await Task.WhenAll(store.AddScanAsync(id,scan,Side.Local,Repair.Observe(Inventory(local,selected.LocalPath,null,ct),selected.LocalPath,logical.LocalPath,unreadLocal,ct),null,ct),
-            store.AddScanAsync(id,scan,Side.Dropbox,Repair.Observe(Inventory(dropbox,selected.DropboxPath,acquireHistory?value=>terminal=value:null,ct),selected.DropboxPath,logical.DropboxPath,unreadRemote,ct),
+        await Task.WhenAll(store.AddScanAsync(id,scan,Side.Local,Repair.Counted(Repair.Observe(Inventory(local,selected.LocalPath,null,ct),selected.LocalPath,logical.LocalPath,unreadLocal,ct),physicalHop==null?events:null,TextKey.StageLocalWalk,ct),null,ct),
+            store.AddScanAsync(id,scan,Side.Dropbox,Repair.Counted(Repair.Observe(Inventory(dropbox,selected.DropboxPath,acquireHistory?value=>terminal=value:null,ct),selected.DropboxPath,logical.DropboxPath,unreadRemote,ct),physicalHop==null?events:null,TextKey.StageDropboxListing,ct),
                 acquireHistory?()=>terminal??throw new InvalidDataException(nameof(ListOptions.CursorAcquired)):null,ct));
         if(acquireHistory) await store.PublishDeletedHistoryAsync(id,scan,ct);
     }
@@ -136,7 +136,7 @@ internal sealed class RepairRun
     {
         var moves=new List<RenameCandidate>();
         HashSet<(Side,string)>? movedNames=null;
-        await foreach(var move in store.RenamesAsync(id,scan,physicalHop!=null?logical:scope,ct))
+        await foreach(var move in Repair.Counted(store.RenamesAsync(id,scan,physicalHop!=null?logical:scope,ct),physicalHop==null?events:null,TextKey.StageRenames,ct))
         {
             if(mapped)
             {
@@ -149,7 +149,7 @@ internal sealed class RepairRun
             moves.Add(move);
         }
         if(moves.Count!=0) await Submit(null,moves);
-        await foreach(var (raw,notices) in store.CompareAsync(id,scan,physicalHop!=null?logical:scope,Evidence,ct))
+        await foreach(var (raw,notices) in Repair.Counted(store.CompareAsync(id,scan,physicalHop!=null?logical:scope,Evidence,ct),physicalHop==null?events:null,TextKey.StageRows,ct))
         {
             // Descendant listings omit the hop's own root; its caller owns that binding (Record, Relink or meeting).
             if(physicalHop is {} owner && raw.Local==null && raw.Dropbox==null && (owner.Binding is {} binding ? raw.Synced==binding : raw.Synced==null && PathNames.Same(Row.Path(raw),selected.DropboxPath))) continue;
@@ -245,7 +245,7 @@ internal sealed class RepairRun
         }
         await FinishFolders(null);
         discoveryEnded.TrySetResult();
-        await Drain();
+        await Repair.Staged(Drain,physicalHop==null?events:null,TextKey.StageExecution,effects);
     }
     private async IAsyncEnumerable<Listed> Inventory(ISide side,string path,Action<string>? cursor,[EnumeratorCancellation] CancellationToken token)
     {
@@ -295,7 +295,7 @@ internal sealed class RepairRun
         bool completed=scope==null ? await store.FinishRepairAsync(id,(localDebt.Revision,remoteDebt.Revision),JsonSerializer.Serialize(new {
             RunId=scan,Started=started,Finished=DateTimeOffset.UtcNow,Completed=true,FirstRun=first,Effects=effects,IssuesByKind=issues }),ct)
             : await store.FinishRepairAsync(id,scope,remoteDebt.Revision,ct);
-        if(!completed) Log(new(RunEventKind.Wait,nameof(Repair),"",Text.Get(TextKey.RepairSuperseded),""));
+        if(!completed) Log(new(RunEventKind.Wait,nameof(Repair),"",Text.Get(TextKey.RepairSuperseded),"")); else events(Repair.Completed(effects,started));
         // Owed only after the matched finish, so the next owed Repair retries each skipped folder; nothing wakes it now.
         if(completed) foreach(var s in skipped) await store.OweScopeAsync(id,s,ct);
         if(completed && full)

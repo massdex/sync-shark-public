@@ -306,6 +306,7 @@ public static class CheckRegistry
             new("Run/RepairChecks", Run.RepairChecks.RunAsync),
             new("Run/InvalidLocalName", Run.RepairChecks.InvalidLocalNameAsync),
             new("Run/MalformedIgnoredName", Run.RepairChecks.MalformedIgnoredNameAsync),
+            new("Run/RepairStageLines", Run.RepairChecks.StageLinesAsync),
             new("Run/RepairChecks/hard link edit through outside name", () => Run.AutoSyncChecks.WithinDeadline(Run.RepairChecks.HardLinkEditThroughOutsideNameAsync, "Run/RepairChecks/hard link edit through outside name")),
             new("Run/RepairChecks/unreadable linked file behaves as base", () => Run.AutoSyncChecks.WithinDeadline(Run.RepairChecks.UnreadableLinkedFileBehavesAsBaseAsync, "Run/RepairChecks/unreadable linked file behaves as base")),
             new("Run/RepairChecks/retry hard-link member", () => Run.AutoSyncChecks.WithinDeadline(Run.RepairChecks.RetryHardLinkMemberAsync, "Run/RepairChecks/retry hard-link member")),

@@ -21,15 +21,15 @@ internal sealed class ScanScratch
         path = fullPath + ".scan";
         connectionString = new SqliteConnectionStringBuilder { DataSource = fullPath, Pooling = false,
             Mode = readOnly ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite }.ToString();
-        if (!readOnly) DeleteLeftover();
+        if (!readOnly) _ = DeleteLeftover();
     }
 
     // No scan is active at open or after the last scan clears, so the image is disposable. A held file belongs to
     // a live scan: stop at the first failure, sidecars first, so the image is never kept without its write-ahead log.
-    private void DeleteLeftover()
+    private bool DeleteLeftover()
     {
-        try { foreach (var suffix in new[] { "-wal", "-shm", "" }) File.Delete(path + suffix); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        try { foreach (var suffix in new[] { "-wal", "-shm", "" }) File.Delete(path + suffix); return true; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
 
     internal SqliteConnection OpenWriter()
@@ -94,13 +94,16 @@ internal sealed class ScanScratch
     }
 
     // Called on the store writer under its gate once no scan is active; the next Ensure recreates the image.
-    internal void Release(SqliteConnection writer)
+    // False when the image may still hold rows, so the caller purges them instead.
+    internal bool Release(SqliteConnection writer)
     {
-        if (!attached) return;
-        using (var detach = StorageCommand.Create(writer, null, Sql.Get(SqlKey.ScanScratchEnsure2)))
-            try { detach.ExecuteNonQuery(); } catch (SqliteException) { return; }
-        attached = false;
-        DeleteLeftover();
+        if (attached)
+        {
+            using var detach = StorageCommand.Create(writer, null, Sql.Get(SqlKey.ScanScratchEnsure2));
+            try { detach.ExecuteNonQuery(); } catch (SqliteException) { return false; }
+            attached = false;
+        }
+        return DeleteLeftover();
     }
 
     internal void Attach(SqliteConnection db)
