@@ -24,7 +24,7 @@ internal sealed class ScanScratch
         if (!readOnly) DeleteLeftover();
     }
 
-    // No scan is active while the store opens, so an image left by a stopped run is disposable. A held file belongs to
+    // No scan is active at open or after the last scan clears, so the image is disposable. A held file belongs to
     // a live scan: stop at the first failure, sidecars first, so the image is never kept without its write-ahead log.
     private void DeleteLeftover()
     {
@@ -91,6 +91,16 @@ internal sealed class ScanScratch
             detach.ExecuteNonQuery();
             throw;
         }
+    }
+
+    // Called on the store writer under its gate once no scan is active; the next Ensure recreates the image.
+    internal void Release(SqliteConnection writer)
+    {
+        if (!attached) return;
+        using (var detach = StorageCommand.Create(writer, null, Sql.Get(SqlKey.ScanScratchEnsure2)))
+            try { detach.ExecuteNonQuery(); } catch (SqliteException) { return; }
+        attached = false;
+        DeleteLeftover();
     }
 
     internal void Attach(SqliteConnection db)

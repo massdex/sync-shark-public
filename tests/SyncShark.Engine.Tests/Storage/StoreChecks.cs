@@ -419,16 +419,25 @@ public static class StoreChecks
         Check.Require(await store.UpdateNoticeVisibilityAsync("p",saved,false,default) && store.ScanTouched("p",id,Side.Local,"member",false) && (await store.NoticeAsync("p",saved.Id,default))?.Ignored==false,"Unignore did not restore visibility and publish its mark");
     });
 
-    /// <summary>A cleanup reached after cancellation still removes its scan rows.</summary>
+    /// <summary>A cleanup reached after cancellation still removes its scan rows; the last cleanup removes the image and the next scan recreates it.</summary>
     public static Task CancelledScanCleanupAsync() => WithImage(async (store,sql) =>
     {
         var id=Guid.NewGuid(); store.BeginScan("p",id);
+        var other=Guid.NewGuid(); store.BeginScan("p",other); // keeps the image while its rows are counted
         await store.AddScanAsync("p",id,Side.Local,OneRow(),null,default);
         using var cancelled=new CancellationTokenSource(); cancelled.Cancel();
         await store.ClearScanAsync("p",id,cancelled.Token);
+        var image=sql.Connection!.DataSource;
         sql.CommandText="ATTACH $image AS left_scan; SELECT count(*) FROM left_scan.scan";
-        sql.Parameters.AddWithValue("$image",sql.Connection!.DataSource+".scan");
+        sql.Parameters.AddWithValue("$image",image+".scan");
         Check.Require(Convert.ToInt64(sql.ExecuteScalar())==0,"Cancelled cleanup left its scan rows behind");
+        sql.CommandText="DETACH left_scan"; sql.ExecuteNonQuery();
+        await store.ClearScanAsync("p",other,default);
+        Check.Require(!new[]{".scan",".scan-wal",".scan-shm"}.Any(suffix=>File.Exists(image+suffix)),"The last scan's cleanup kept the scan image");
+        var next=Guid.NewGuid(); store.BeginScan("p",next);
+        await store.AddScanAsync("p",next,Side.Local,OneRow(),null,default);
+        Check.Require(File.Exists(image+".scan"),"A new scan did not recreate the scan image");
+        await store.ClearScanAsync("p",next,default);
         static async IAsyncEnumerable<Listed> OneRow()
         {
             await Task.CompletedTask;

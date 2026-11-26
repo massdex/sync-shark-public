@@ -17,6 +17,12 @@ public sealed class ScanTable
                 active.Add((pairId, scanId), [(new(StringComparer.Ordinal), new()), (new(StringComparer.Ordinal), new())]);
     }
 
+    /// <summary>Whether no scan of any pair is active, so the scan image holds nothing.</summary>
+    public bool Idle
+    {
+        get { lock (active) return active.Count == 0; }
+    }
+
     /// <summary>Whether a committed notice replacement needs its original footprints for an active scan.</summary>
     public bool HasActive(string pairId)
     {
