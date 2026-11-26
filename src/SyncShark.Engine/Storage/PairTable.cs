@@ -206,9 +206,12 @@ public sealed class PairTable
     /// <summary>Advance the affected side's Repair revision and record its reason.</summary>
     public Task<long> OweRepairAsync(SqliteConnection db,string pairId,Side side,string reason,CancellationToken ct) => Advance(db,null,pairId,side,reason,ct);
     /// <summary>Read the side revision before acquisition, with zero for an untouched source.</summary>
-    public async Task<(long Revision,string? Reason)> ReadRepairAsync(SqliteConnection db,string pairId,Side side,CancellationToken ct)
+    public Task<(long Revision,string? Reason)> ReadRepairAsync(SqliteConnection db,string pairId,Side side,CancellationToken ct) => ReadDebt(db,SqlKey.PairTableReadRepair1,ct,("$p",pairId),("$s",(int)side));
+    /// <summary>Read the Dropbox revision net of owed-scope advances and its reason in one statement, the value only the full finish matches.</summary>
+    public Task<(long Revision,string? Reason)> ReadFullRepairAsync(SqliteConnection db,string pairId,CancellationToken ct) => ReadDebt(db,SqlKey.PairTableReadRepair2,ct,("$p",pairId));
+    private static async Task<(long Revision,string? Reason)> ReadDebt(SqliteConnection db,SqlKey key,CancellationToken ct,params (string,object?)[] args)
     {
-        using var cmd=StorageCommand.Create(db,null,Sql.Get(SqlKey.PairTableReadRepair1),("$p",pairId),("$s",(int)side)); using var rd=await cmd.ExecuteReaderAsync(ct);
+        using var cmd=StorageCommand.Create(db,null,Sql.Get(key),args); using var rd=await cmd.ExecuteReaderAsync(ct);
         return await rd.ReadAsync(ct)?(rd.GetInt64(0),rd.IsDBNull(1)?null:rd.GetString(1)):(0,null);
     }
     /// <summary>Consume the reviewed drive notice and publish its choice atomically; only FirstSync resets bindings.</summary>

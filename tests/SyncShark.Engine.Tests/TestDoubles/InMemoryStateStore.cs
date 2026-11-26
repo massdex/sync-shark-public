@@ -254,6 +254,11 @@ public sealed class InMemoryStateStore : IStore
     {
         ct.ThrowIfCancellationRequested(); lock(pairs) return Task.FromResult(repairs.GetValueOrDefault((pairId,side)));
     }
+    public Task<(long Revision,string? Reason)> ReadFullRepairAsync(string pairId, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        lock(pairs) { var debt=repairs.GetValueOrDefault((pairId,Side.Dropbox)); return Task.FromResult((debt.Revision-(pairs.GetValueOrDefault(pairId)?.OwedScopesRevision ?? 0),debt.Reason)); }
+    }
     public Task<bool> FinishRepairAsync(string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();ArgumentException.ThrowIfNullOrWhiteSpace(completedRepairJson);

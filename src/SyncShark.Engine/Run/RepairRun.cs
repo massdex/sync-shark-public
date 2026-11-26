@@ -29,7 +29,6 @@ internal sealed class RepairRun
     private readonly SemaphoreSlim slots; // discovery waits for the queue: at most one storage page of differences in memory
     private readonly Dictionary<string,int> effects=new(), issues=new();
     private (long Revision,string? Reason) localDebt, remoteDebt;
-    private long remoteFullDebt;
     private bool first, scanCleared; internal RunEvent? Completion; // written by Repair only after bookkeeping and cleanup return
     private string? terminal;
     private Exception? admissionError;
@@ -53,9 +52,9 @@ internal sealed class RepairRun
 
     internal async Task PrepareAsync()
     {
-        localDebt=await store.ReadRepairAsync(id,Side.Local,ct); remoteDebt=await store.ReadRepairAsync(id,Side.Dropbox,ct);
-        // A scope owed during this full run is served after it, so the full fence excludes owed-scope advances.
-        remoteFullDebt=remoteDebt.Revision-((await store.PairAsync(id,ct))?.OwedScopesRevision ?? 0);
+        localDebt=await store.ReadRepairAsync(id,Side.Local,ct);
+        // A scope owed during a full run is served after it, so the full fence reads the revision net of owed-scope advances.
+        remoteDebt=scope==null ? await store.ReadFullRepairAsync(id,ct) : await store.ReadRepairAsync(id,Side.Dropbox,ct);
         first=!(await store.RepairStateAsync(id,ct)).FirstRepairDone;
     }
 
@@ -293,7 +292,7 @@ internal sealed class RepairRun
     private async Task Finish()
     {
         if(full) await Notices.CheckKeepRulesAsync(pair,local,dropbox,store,ct);
-        bool completed=scope==null ? await store.FinishRepairAsync(id,(localDebt.Revision,remoteFullDebt),JsonSerializer.Serialize(new {
+        bool completed=scope==null ? await store.FinishRepairAsync(id,(localDebt.Revision,remoteDebt.Revision),JsonSerializer.Serialize(new {
             RunId=scan,Started=started,Finished=DateTimeOffset.UtcNow,Completed=true,FirstRun=first,Effects=effects,IssuesByKind=issues }),ct)
             : await store.FinishRepairAsync(id,scope,remoteDebt.Revision,ct);
         if(!completed) Log(new(RunEventKind.Wait,nameof(Repair),"",Text.Get(TextKey.RepairSuperseded),"")); else Completion=Repair.Completed(effects,started);

@@ -36,6 +36,7 @@ public enum SqlKey
     PairTableAppendDeleted1,
     PairTableAdvance1,
     PairTableReadRepair1,
+    PairTableReadRepair2,
     PairTableResolveDrive1,
     PairTableResolveDrive2,
     CommitterKeyOf,

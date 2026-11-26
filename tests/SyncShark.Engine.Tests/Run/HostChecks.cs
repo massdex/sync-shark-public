@@ -409,7 +409,7 @@ public static class HostChecks
             if(method.Name==nameof(IStore.FindAsync)){Lookup?.Invoke((string)args![2]!);if(OnFind!=null || FindAt!=null)return Find();}
             if(method.Name==nameof(IStore.SaveNoticeAsync) && NoticeFailure!=null)return Task.FromException(NoticeFailure);
             if(method.Name==nameof(IStore.SaveNoticeAsync) && NoticeSaved!=null)return SaveNotice();
-            if(method.Name==nameof(IStore.ReadRepairAsync) && ReadDropboxDebt!=null && (Side)args![1]! ==Side.Dropbox) return Debt();
+            if(ReadDropboxDebt!=null && (method.Name==nameof(IStore.ReadFullRepairAsync) || method.Name==nameof(IStore.ReadRepairAsync) && (Side)args![1]! ==Side.Dropbox)) return Debt();
             if(method.Name==nameof(IStore.OweRepairAsync) && Requested!=null){var result=Call();Requested();return result;}
             if(method.Name==nameof(IStore.SaveCursorAsync) && CursorSaved!=null) return Cursor();
             if(method.Name==nameof(IStore.SavePairAsync) && OnSave!=null) return Save();

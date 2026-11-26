@@ -39,6 +39,8 @@ public interface IStore : IDisposable
     Task OweScopeAsync(string pairId, Scope scope, CancellationToken ct);
     /// <summary>Read the existing source revision and whole-pair reason before acquisition.</summary>
     Task<(long Revision, string? Reason)> ReadRepairAsync(string pairId, Side side, CancellationToken ct);
+    /// <summary>Read the Dropbox revision net of owed-scope advances, with its reason, in one coherent read; only the full finish matches it.</summary>
+    Task<(long Revision, string? Reason)> ReadFullRepairAsync(string pairId, CancellationToken ct);
     /// <summary>Only the completion ending the entire two-sided Repair can publish its required summary and first_repair_done. Match both captured revisions, the Dropbox one net of owed-scope advances, and clear the observed reasons in the same transaction; a stale completion publishes nothing.</summary>
     Task<bool> FinishRepairAsync(string pairId, (long Local,long Dropbox) revisions, string completedRepairJson, CancellationToken ct);
     /// <summary>Retire only the matching mapped scope at the owner’s Dropbox revision. No first-run bit or full summary is published.</summary>

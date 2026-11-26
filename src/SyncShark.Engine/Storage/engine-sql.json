@@ -32,6 +32,7 @@
   "PairTableAppendDeleted1": "INSERT OR IGNORE INTO discovery_deleted_delta(pair_id,path_key) VALUES({PairTablePairKey},$k)",
   "PairTableAdvance1": "INSERT INTO source_state(pair_id,side,repair_reason,repair_revision) VALUES({PairTablePairKey},$side,$reason,1) ON CONFLICT(pair_id,side) DO UPDATE SET repair_revision=repair_revision+1,repair_reason=CASE WHEN excluded.repair_reason='requested' THEN coalesce(repair_reason,excluded.repair_reason) ELSE coalesce(excluded.repair_reason,repair_reason) END RETURNING repair_revision",
   "PairTableReadRepair1": "SELECT repair_revision,repair_reason FROM source_state WHERE pair_id={PairTablePairKey} AND side=$s",
+  "PairTableReadRepair2": "SELECT {PairTableRevision}1),0)-coalesce(def_json->>'$.owed_scopes_revision',0),(SELECT repair_reason FROM source_state WHERE pair_id=pair.id AND side=1) FROM pair WHERE pair_id=$p",
   "PairTableResolveDrive1": "UPDATE pair SET def_json=$json WHERE pair_id=$p",
   "PairTableResolveDrive2": "DELETE FROM synced_entry WHERE pair_id={PairTablePairKey}; UPDATE pair SET first_repair_done=0 WHERE pair_id=$p",
   "CommitterKeyOf": "pathkey(",

@@ -186,6 +186,26 @@ public static class RepairChecks
         Check.Require((await store.RepairStateAsync(p.PairId,ct)).FirstRepairDone,"A full Repair that found a present no-keep root superseded its own finish");
         Check.Require((await store.PairAsync(p.PairId,ct))?.OwedScopes is [{LocalPath:"dir"}] && db.Items.Count==0,"A full Repair did not owe exactly the present no-keep root to its owner, or synced under it itself");
     });
+    // The full run captures its Dropbox debt in one read, on the SQLite finish path. Scopes owed just before and just after
+    // that read leave it completed and still owed; a whole-pair debt right after it still supersedes the run.
+    public static Task FullCaptureScopeChurnAsync() => FullCaptureBoundaryAsync(false);
+    public static Task FullCaptureWholePairDebtAsync() => FullCaptureBoundaryAsync(true);
+    private static Task FullCaptureBoundaryAsync(bool wholePairDebt) => WithRepairStore(async (store,pair,ct)=>
+    {
+        async Task<(long Revision,string? Reason)> Capture(System.Reflection.MethodInfo method,object?[] args)
+        {
+            await store.OweScopeAsync(pair.PairId,new Scope("before","before"),ct);
+            var debt=await (Task<(long Revision,string? Reason)>)AutoSyncChecks.Observation.Forward(store,method,args)!;
+            await store.OweScopeAsync(pair.PairId,new Scope("after","after"),ct);
+            if(wholePairDebt) await store.OweRepairAsync(pair.PairId,Side.Dropbox,"gap",ct);
+            return debt;
+        }
+        var observed=AutoSyncChecks.Observation.Wrap<IStore>((method,args)=>method.Name==nameof(IStore.ReadFullRepairAsync) ? Capture(method,args) : AutoSyncChecks.Observation.Forward(store,method,args));
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},new PathScope(pair,[pair],DriveType.Fixed),new WorkQueue(),new FakeSide(Side.Local),new FakeSide(Side.Dropbox),observed,null,null,ct,caughtUp:true);
+        Check.Require((await store.RepairStateAsync(pair.PairId,ct)).FirstRepairDone!=wholePairDebt,
+            wholePairDebt ? "A whole-pair debt after the full capture did not supersede the run" : "Scopes owed at the full capture boundary superseded the full Repair");
+        Check.Require((await store.PairAsync(pair.PairId,ct))?.OwedScopes?.Count==2,"The full Repair retired or lost a scope owed at its capture");
+    });
     private static Task CheckScanCompletionAsync() => WithRepairStore(async (store,pair,ct)=>
     {
         var local=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox);
