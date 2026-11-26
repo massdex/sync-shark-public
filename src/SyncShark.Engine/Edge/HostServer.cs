@@ -129,7 +129,7 @@ public sealed class HostServer : IDisposable
         int code;
         try { code = await execute(args, output, error, CancellationToken.None); }
         catch (Exception failure) when (failure is not OutOfMemoryException) {
-            await error.WriteLineAsync(failure.GetType().Name + ": " + failure.Message);
+            await error.WriteLineAsync(Run.RunLog.FailureTag(failure));
             code = 1;
         }
         var exit = new byte[1 + sizeof(int)]; exit[0] = PipeFrame.Exit;

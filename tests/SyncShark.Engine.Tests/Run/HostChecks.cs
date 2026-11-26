@@ -155,24 +155,41 @@ public static class HostChecks
         }finally{stop.Cancel();await host.StopAsync(default);}
     }
     public static Task FailedExplicitRepairAsync()=>FailureRecovery(true);
-    // An AutoSync failure and the rewind after it leave a running explicit Repair to finish; only a lost root stops it.
-    public static async Task RepairOutlivesLiveFailureAsync()
+    // An AutoSync failure and the rewind after it leave a running explicit Repair to finish; a root that is gone at that rewind stops it.
+    public static async Task RepairOutlivesLiveFailureAsync() { await RepairAtRewind(false); await RepairAtRewind(true); }
+    private static async Task RepairAtRewind(bool rootGone)
     {
-        using var store=new InMemoryStateStore();var pair=Bound("survive",@"T:\Survive",1);
-        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
-        var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;
-        var local=QuietSide(new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)});
+        using var raw=new InMemoryStateStore();var pair=Bound("survive",@"T:\Survive",1);
+        await raw.SavePairAsync(pair,default);await raw.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
+        var boot=Signal();var failRead=Signal();var rewound=Signal();var entered=Signal();var release=Signal();var finished=Signal();int reads=0;bool gone=false;
+        // The full Repair waits at its finish on its own token, so a cancelled Repair surfaces instead of hanging.
+        var store=AutoSyncChecks.Observation.Wrap<IStore>((m,args)=>m.Name==nameof(IDisposable.Dispose) ? null
+            : m.Name==nameof(IStore.FinishRepairAsync) && args.Length==4 && args[1] is not Scope ? Gate(raw,m,args) : AutoSyncChecks.Observation.Forward(raw,m,args));
+        async Task<bool> Gate(IStore inner,System.Reflection.MethodInfo m,object?[] args)
+        {
+            entered.TrySetResult();await release.Task.WaitAsync((CancellationToken)args[3]!);
+            var ok=await (Task<bool>)AutoSyncChecks.Observation.Forward(inner,m,args)!;if(ok)finished.TrySetResult();return ok;
+        }
+        var local=QuietSide(new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)});var pc=(JournalProbe)(object)local;
+        pc.ReadRoot=()=>{if(Volatile.Read(ref gone))throw new ItemFailedException(pair.Name,TextKey.RootLocalIdentityUnavailable,new IOException("gone",unchecked((int)0x80070003)));};
         var remote=QuietSide(new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)});var cloud=(JournalProbe)(object)remote;
-        var boot=Signal();var failRead=Signal();var rewound=Signal();var entered=Signal();var release=Signal();var finished=Signal();int reads=0;
-        tap.BeforeFinish=()=>{entered.TrySetResult();return release.Task;};tap.Finished=()=>finished.TrySetResult();
         cloud.Feed=async (_,ct)=>{if(Interlocked.Increment(ref reads)==1){await failRead.Task.WaitAsync(ct);throw new ItemFailedException(string.Empty,TextKey.SignInReturnRetry,null);}
             rewound.TrySetResult();await Task.Delay(Timeout.Infinite,ct);throw new InvalidOperationException();};
-        var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_,_)=>Task.FromResult((local,remote)),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask,(_,_,_)=>{boot.TrySetResult();return Task.CompletedTask;});
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(store),(_,_,_,_,_)=>Task.FromResult((local,remote)),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask,(_,_,_)=>{boot.TrySetResult();return Task.CompletedTask;});
         using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(20));var token=stop.Token;
         try{
             await host.StartAsync(token);await boot.Task.WaitAsync(token);
             var repair=host.RepairAsync(pair.PairId,token);await entered.Task.WaitAsync(token);
-            failRead.SetResult();
+            Volatile.Write(ref gone,rootGone);failRead.SetResult();
+            if(rootGone)
+            {
+                bool stopped=false;
+                try{await repair.WaitAsync(TimeSpan.FromSeconds(10),token);}catch(OperationCanceledException) when(!token.IsCancellationRequested){stopped=true;}
+                catch(TimeoutException e){throw new InvalidDataException("A root that was gone at the rewind left the Repair running",e);}
+                Check.Require(stopped && !finished.Task.IsCompleted,"A Repair finished after its root was gone");
+                Check.Require(raw.OpenNotices.Any(n=>n.Cause==TextKey.RootLocalIdentityUnavailable),"A root that was gone raised no root notice");
+                return;
+            }
             try{await rewound.Task.WaitAsync(TimeSpan.FromSeconds(10),token);}
             catch(TimeoutException e){throw new InvalidDataException("AutoSync waited behind the running Repair instead of rewinding",e);}
             Check.Require(!repair.IsCompleted,"An AutoSync failure ended the running Repair");

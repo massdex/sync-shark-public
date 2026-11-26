@@ -54,12 +54,16 @@ internal sealed class HostLifecycle(Host host)
                 if(liveRootSignal && e is not (ItemFailedException or EngineRequestException)) await host.Store!.SaveNoticeAsync(m.Pair.PairId,new(0,NoticeKind.RootIdentity,
                     TextKey.RootUnavailable,string.Empty,new([],null),host.Clock.GetUtcNow(),false),ct);
                 else await Failed(m,e,ct);
-                if(!retryRead || e is EngineRequestException) return;
+                if(!retryRead || e is EngineRequestException || liveRootSignal && RootGone(e)) return;
                 await RetryDelay(e,failures,ct);
                 if(failures<int.MaxValue) ++failures;
             }
         }
     }
+    // A missing or replaced root is a definite refusal: admission fails (RecheckRoots stops the run). Other read faults retry.
+    private static bool RootGone(Exception e) => e is ChangedUnderneathException or ItemFailedException {Cause:TextKey.RootLocalIdentityChanged}
+        || e is ItemFailedException {InnerException:IOException io} && Local.LocalErrors.Missing(io.HResult)
+        || e is ItemFailedException {InnerException:System.ComponentModel.Win32Exception native} && Local.LocalErrors.Missing(native.NativeErrorCode);
     internal async Task<HostMember> Ready(PairConfig p,CancellationToken ct)
     {
         if (!host.Members.TryGetValue(p.PairId,out var m)) m=Attach(p);
@@ -282,7 +286,7 @@ internal sealed class HostLifecycle(Host host)
                     await RecheckRoots(m,token);
                     if(explicitRequest) throw;
                 }
-                catch(Exception error) when(explicitRequest) { m.Event(new(RunEventKind.Failed,nameof(Repair),string.Empty,string.Empty,string.Empty){Error=error}); throw; }
+                catch(Exception error) when(explicitRequest) { m.Event(new(RunEventKind.Failed,nameof(Repair),string.Empty,RunLog.FailureTag(error),string.Empty)); throw; }
                 catch(Exception error) when(!token.IsCancellationRequested) { await Failed(m,error,token); }
             },token);
             m.Manual=run.ContinueWith(static _=>{},CancellationToken.None,TaskContinuationOptions.ExecuteSynchronously,TaskScheduler.Default);

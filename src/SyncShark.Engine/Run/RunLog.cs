@@ -149,6 +149,14 @@ public sealed class RunLog : IDisposable
         or nameof(Executor.EffectOutcome.Applied) or nameof(RemovalOutcome.Published) or nameof(RemovalOutcome.Removed);
 
     // Exceptions may contain credentials, headers or response bodies. Only typed facts cross the log boundary.
+    /// <summary>The exception type and a path-free cause key or HRESULT; never Message or an item path.</summary>
+    internal static string FailureTag(Exception error) => error.GetType().Name + FactJoiner + (error switch
+    {
+        ItemFailedException item => item.Cause.ToString(),
+        EngineRequestException request => request.Key.ToString(),
+        _ => error.HResult.ToString(CultureInfo.InvariantCulture)
+    });
+
     private static string FailureReason(Exception error)
     {
         for (Exception? current = error; current is not null; current = current.InnerException)
