@@ -16,11 +16,11 @@ public static class RepairChecks
         await RetainedAttemptAsync(); await SelectedStreamRaceAsync(); await ReplacedDuringRepairAsync();
         await CoveredFolderAsync(true); await CoveredFolderAsync(false);
         await BoundedAdmissionAsync(); await AncestorCaseRecordedOnceAsync();
-        await ObservedAncestorCaseAsync(); await BilateralCaseRenameAsync(); await UnreadableFolderSkippedAsync(); await InvalidLocalNameAsync();
+        await ObservedAncestorCaseAsync(); await BilateralCaseRenameAsync(); await UnreadableFolderSkippedAsync();
     }
 
     // A Dropbox name Windows cannot use fails at the local side's path check: one notice for that item, and the Repair completes for the rest.
-    private static Task InvalidLocalNameAsync() => WithRepairStore(async (store,pair,ct)=>
+    public static Task InvalidLocalNameAsync() => WithRepairStore(async (store,pair,ct)=>
     {
         var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); var paths=new PathScope(pair,[pair],DriveType.Fixed);
         db.Seed(ItemChecks.File(Side.Dropbox,"ok",1,"ok"),[1]); db.Seed(ItemChecks.File(Side.Dropbox,"bad.",2,"bad"),[2]);

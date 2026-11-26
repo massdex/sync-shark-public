@@ -157,9 +157,18 @@ public sealed class RunLog : IDisposable
         _ => error.HResult.ToString(CultureInfo.InvariantCulture) + Frames(error)
     });
 
-    // The first three throwing frames as Type.Method names only, so an escaped fault names its thrower without paths or text.
-    private static string Frames(Exception error) => FactJoiner + string.Join(">", (new System.Diagnostics.StackTrace(error).GetFrames() ?? [])
-        .Take(3).Select(f => f.GetMethod() is { } m ? m.DeclaringType?.Name + "." + m.Name : "?"));
+    // The throwing frames up to the first one outside System, as Type.Method names only, so an escaped fault names its thrower without paths or text.
+    private static string Frames(Exception error)
+    {
+        var names = new List<string>();
+        foreach (var frame in new System.Diagnostics.StackTrace(error).GetFrames())
+        {
+            var method = frame.GetMethod(); var type = method?.DeclaringType;
+            names.Add(type?.Name + "." + method?.Name);
+            if (type?.Namespace?.StartsWith(nameof(System), StringComparison.Ordinal) != true) break;
+        }
+        return FactJoiner + string.Join(">", names);
+    }
 
     // Exceptions may contain credentials, headers or response bodies. Only typed facts cross the log boundary.
     private static string FailureReason(Exception error)
