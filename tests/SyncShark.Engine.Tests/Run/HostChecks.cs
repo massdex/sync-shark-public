@@ -198,6 +198,31 @@ public static class HostChecks
             Check.Require(finished.Task.IsCompleted,"The Repair did not run to completion after an AutoSync failure");
         }finally{release.TrySetResult();stop.Cancel();await host.StopAsync(default);}
     }
+    // A temporary Dropbox refusal on the Repair's boundary read waits the provider time and asks again; the explicit Repair completes.
+    public static async Task RepairBoundaryRefusalAsync()
+    {
+        using var store=new InMemoryStateStore();var pair=Bound("refused",@"T:\Refused",1);
+        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
+        var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;
+        var finished=Signal();tap.Finished=()=>finished.TrySetResult();
+        var local=QuietSide(new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed)});
+        var remote=QuietSide(new(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null)});var cloud=(JournalProbe)(object)remote;
+        var boot=Signal();int armed=0,refused=0,asked=0;
+        cloud.Boundary=_=>{
+            if(Volatile.Read(ref armed)!=0) Interlocked.Increment(ref asked);
+            if(Volatile.Read(ref armed)!=0 && Interlocked.Exchange(ref refused,1)==0)
+                throw new ItemFailedException(string.Empty,TextKey.DropboxRefused,null){Disposition=FailureDisposition.TemporaryNoEffect,Provider="files/list_folder/get_latest_cursor 429 -",ProviderWait=TimeSpan.FromMilliseconds(1)};
+            return Task.FromResult<(string?,JournalPosition?)>((null,null));};
+        var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_,_)=>Task.FromResult((local,remote)),ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask,(_,_,_)=>{boot.TrySetResult();return Task.CompletedTask;});
+        using var stop=new CancellationTokenSource(TimeSpan.FromSeconds(20));var token=stop.Token;
+        try{
+            await host.StartAsync(token);await boot.Task.WaitAsync(token);
+            Volatile.Write(ref armed,1);
+            try{await host.RepairAsync(pair.PairId,token);}
+            catch(ItemFailedException e){throw new InvalidDataException("A temporary refusal on the Repair's boundary read failed the Repair",e);}
+            Check.Require(refused==1 && asked>=2 && finished.Task.IsCompleted,"The Repair did not ask its boundary again and complete after one temporary refusal");
+        }finally{stop.Cancel();await host.StopAsync(default);}
+    }
     public static Task FailedNoticeWriteAsync()=>FailureRecovery(false);
     private static Task UnexpectedFailureLogged()=>FailureRecovery(false,true);
     // An unexpected pair-loop failure (neither an item failure nor a request refusal) is logged with its type; its notice write succeeds.

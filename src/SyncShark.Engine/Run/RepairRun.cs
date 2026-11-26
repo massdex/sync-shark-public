@@ -118,7 +118,8 @@ internal sealed class RepairRun
     {
         if (full)
         {
-            var pc=local.BoundaryAsync(ct); var db=dropbox.BoundaryAsync(ct); await Task.WhenAll(pc,db);
+            // The cancellable Repair waits out a temporary Dropbox refusal on its boundary with the source retry; other boundary callers stay single-attempt.
+            var pc=local.BoundaryAsync(ct); var db=AutoSync.ReadPageAsync(dropbox.BoundaryAsync,Side.Dropbox,settings,events,ct); await Task.WhenAll(pc,db);
             if ((await pc).Position is {} position && pair.Roots?.LocalVolumeKey() is {} volume && await store.PositionAsync(volume,ct)==null)
                 await local.SettleJournalAsync(position,ct);
             if ((await db).Cursor is {} cursor && await store.CursorAsync(id,ct)==null) await store.SaveCursorAsync(id,cursor,ct);

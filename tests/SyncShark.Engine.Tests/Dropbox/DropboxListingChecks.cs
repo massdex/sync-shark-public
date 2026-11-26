@@ -155,21 +155,17 @@ public static class DropboxListingChecks
         wire.Done();
     }
 
-    // The Repair's boundary read (DropboxSide.BoundaryAsync) waits out a 429's Retry-After and asks again instead of failing the run.
+    // Cursor capture stays single-attempt: a proof or settlement caller (which may hold the host command gate) gets the refusal back at once.
     private static async Task CheckCaptureRetryAsync(DropboxListing listing, PairConfig pair)
     {
         const string route = "files/list_folder/get_latest_cursor";
-        const int retryAfter = 300;
         using var wire = new DropboxStubHandler();
-        var clock = new TestDoubles.FakeTimeProvider(DateTimeOffset.UnixEpoch);
-        var api = wire.Client(clock, _ => { });
-        wire.Add(route, pair.DropboxRoot, "{}", HttpStatusCode.TooManyRequests, retryAfter);
-        wire.Add(route, pair.DropboxRoot, """{"cursor":"after-wait"}""");
+        var api = wire.Client(new TestDoubles.FakeTimeProvider(DateTimeOffset.UnixEpoch), _ => { });
+        wire.Add(route, pair.DropboxRoot, "{}", HttpStatusCode.TooManyRequests, 300);
         var capture = listing.CaptureCursorAsync(api, pair, new ListOptions(true, false, true), CancellationToken.None);
-        Check.Require(!capture.IsCompleted && clock.ScheduledDelay == TimeSpan.FromSeconds(retryAfter),
-            "Cursor capture did not wait for the provider's Retry-After after a 429.");
-        clock.ElapseScheduledDelay();
-        Check.Require(await capture == "after-wait", "Cursor capture did not ask again after the provider's wait.");
+        try { await capture.WaitAsync(TimeSpan.FromSeconds(10)); Check.Require(false, "A refused cursor capture returned a cursor."); }
+        catch (TimeoutException e) { throw new InvalidDataException("Cursor capture waited after one refusal instead of returning it", e); }
+        catch (ItemFailedException error) when (error.Disposition == FailureDisposition.TemporaryNoEffect && error.ProviderWait == TimeSpan.FromSeconds(300)) { }
         wire.Done();
     }
 

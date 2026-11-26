@@ -90,26 +90,11 @@ public sealed class DropboxListing
         ArgumentNullException.ThrowIfNull(api);
         ArgumentNullException.ThrowIfNull(pair);
         ArgumentNullException.ThrowIfNull(options);
-        string cursor;
-        var failures = 0;
-        while (true)
+        var (_, cursor) = await ReadReplyAsync(api, DropboxProtocol.ListFolderGetLatestCursor, pair.DropboxRoot, new
         {
-            try
-            {
-                (_, cursor) = await ReadReplyAsync(api, DropboxProtocol.ListFolderGetLatestCursor, pair.DropboxRoot, new
-                {
-                    path = DropboxPaths.Remote(pair, ""), recursive = options.Recursive, include_deleted = options.IncludeDeleted,
-                    include_mounted_folders = true, include_non_downloadable_files = true
-                }, DropboxReplyShapes.Cursor(), ct);
-                break;
-            }
-            // A temporary Dropbox refusal waits the time Dropbox gives (or the backoff) and asks again, as the page loop does.
-            // A transport failure keeps its existing transient projection to the caller.
-            catch (ItemFailedException error) when (!ct.IsCancellationRequested && error is { Disposition: FailureDisposition.TemporaryNoEffect, Provider: not null })
-            {
-                await api.WaitAsync(RemainingProviderWait(api, error) ?? api.RetryDelay(failures++), ct).ConfigureAwait(false);
-            }
-        }
+            path = DropboxPaths.Remote(pair, ""), recursive = options.Recursive, include_deleted = options.IncludeDeleted,
+            include_mounted_folders = true, include_non_downloadable_files = true
+        }, DropboxReplyShapes.Cursor(), ct);
         if (string.IsNullOrWhiteSpace(cursor)) throw UnreadPage(pair.DropboxRoot);
         return cursor;
     }

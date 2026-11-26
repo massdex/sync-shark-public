@@ -64,8 +64,8 @@ public static class AutoSync
         finally {await drain();}
     }
 
-    /// <summary>Retry only acquisition of this source page. The caller's continuation is unchanged until it returns.</summary>
-    public static async Task<ChangePage> ReadPageAsync(Func<CancellationToken,Task<ChangePage>> read,Side source,EngineSettings settings,Action<RunEvent> events,CancellationToken ct)
+    /// <summary>Retry only acquisition of this source read (a page, or the Repair's boundary). The caller's continuation is unchanged until it returns.</summary>
+    public static async Task<T> ReadPageAsync<T>(Func<CancellationToken,Task<T>> read,Side source,EngineSettings settings,Action<RunEvent> events,CancellationToken ct)
     {
         if(source==Side.Local) return await read(ct); // The volume reader owns restart from its committed prefix.
         int consecutiveFailures=0;
