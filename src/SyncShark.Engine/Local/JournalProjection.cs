@@ -27,6 +27,7 @@ internal sealed class JournalProjection
     internal readonly Dictionary<ulong,string> movedParents=new();
     internal RemovalProof? victim;
     internal ulong? failedUsn;
+    internal readonly List<RunEvent> uncertain=new();
 
     private JournalProjection(PairConfig pair,JournalReader.Member m,JournalPosition from,string volume,ImmutableDictionary<ulong,JournalReader.Half>.Builder old,
         ImmutableDictionary<ulong,JournalReader.Hop> physical,CancellationToken ct,bool firstOnly,List<JournalReader.Hop>? paired,List<ulong>? starts,Action<ulong,ulong>? defer)
@@ -37,7 +38,7 @@ internal sealed class JournalProjection
     }
 
     /// <summary>Project the records before end. A first-only probe stops at the first relevant change and keeps no half, hold or failure.</summary>
-    internal static async Task<(List<Change> Changes,bool Uncertain,ulong? FailedUsn)> Project(PairConfig pair,JournalReader.Member m,JournalPosition from,string volume,IReadOnlyList<UsnRecord> records,ulong end,
+    internal static async Task<(List<Change> Changes,bool Uncertain,ulong? FailedUsn,List<RunEvent> Records)> Project(PairConfig pair,JournalReader.Member m,JournalPosition from,string volume,IReadOnlyList<UsnRecord> records,ulong end,
         ImmutableDictionary<ulong,JournalReader.Half>.Builder old,ImmutableDictionary<ulong,JournalReader.Hop> physical,CancellationToken ct,bool firstOnly=false,List<JournalReader.Hop>? paired=null,List<ulong>? starts=null,Action<ulong,ulong>? defer=null)
     {
         var page=new JournalProjection(pair,m,from,volume,old,physical,ct,firstOnly,paired,starts,defer);
@@ -65,8 +66,18 @@ internal sealed class JournalProjection
             }
             await new JournalRecordProjection(page,record,id,parent,rows,history).ProjectAsync().ConfigureAwait(false);
         }
-        return (page.result,page.failedUsn.HasValue,page.failedUsn);
+        return (page.result,page.failedUsn.HasValue,page.failedUsn,page.uncertain);
     }
+
+    /// <summary>Hold the page at this record and keep one run-log record naming it and the branch that could not prove it.</summary>
+    internal void Uncertain(ulong usn,string id,string? where,string branch)
+    {
+        failedUsn=Math.Min(failedUsn ?? usn,usn);
+        uncertain.Add(Record(usn,id,where,branch));
+    }
+    internal static RunEvent Record(ulong usn,string id,string? where,string branch) =>
+        new(RunEventKind.Wait,nameof(JournalReader),where ?? string.Empty,Text.Get(TextKey.JournalUncertainRecord,
+            (TextArg.Value,usn.ToString(System.Globalization.CultureInfo.InvariantCulture)),(TextArg.Id,id),(TextArg.Reason,branch)),string.Empty){Side=Side.Local};
 
     internal static bool MetadataFailure(Exception e) => e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception or ChangedUnderneathException or ItemFailedException;
     internal static bool BoundRootChanged(Exception error,PairConfig pair) => error is ChangedUnderneathException changed && PathNames.Same(changed.Path,pair.LocalRoot);

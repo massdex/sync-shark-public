@@ -185,6 +185,9 @@ public static class JournalReaderChecks
                 path=>new(path,false,1,DateTimeOffset.UnixEpoch,path=="recovered"?"91":"14","","",null));
             pages[10]=[R(11,0x100,null,91),R(12,1,"independent",14)];
             var ordinary=await Fetch(a,20); Check.Require(ordinary.Changes is [{Path:"independent",Usn:12}] && !ordinary.ContinuityLost,"mixed page dropped independent work");
+            // The uncertain record reaches the run log once, naming its USN, file id and the branch that could not prove it.
+            var branch=test=="unreadable" ? "LocateFailedAsync IOException 0x"+new IOException().HResult.ToString("X8",System.Globalization.CultureInfo.InvariantCulture) : "RemainderAsync";
+            Check.Require(ordinary.Uncertain is [{Kind:RunEventKind.Wait,Side:Side.Local} record] && record.Detail==Text.Get(TextKey.JournalUncertainRecord,(TextArg.Value,"11"),(TextArg.Id,"91"),(TextArg.Reason,branch)),"uncertain page did not write one run-log record naming its record and branch: "+string.Join(" | ",ordinary.Uncertain.Select(e=>e.Detail)));
             Check.Require(ordinary.Position==new JournalPosition(1,20) && ordinary.ProjectedThrough==new JournalPosition(1,11),"projection skipped failed record 11 without a rename hold");
             await reader.SettleAsync(a,ordinary.Position!,store,default);
             Check.Require(await reader.SettledJournalAsync(a,default)==new JournalPosition(1,11) && await store.PositionAsync("1",default)==new JournalPosition(1,11),"acknowledging independent work skipped the unclassified USN");

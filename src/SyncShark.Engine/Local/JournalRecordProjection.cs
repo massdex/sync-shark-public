@@ -38,7 +38,8 @@ internal sealed class JournalRecordProjection
     public Task ProjectAsync()
     {
         if (oldOnly) return OldNameAsync();
-        if(renaming && history==null && (hasPrior || rows.Count!=0))
+        // An unbound file whose OLD half has no path has no lineage to lose: its rename is a change at its current path (tmp renamed over name).
+        if(renaming && history==null && (hasPrior && (prior.Path!=null || folder) || rows.Count!=0))
         {
             outsideHop=record.Name!=null && OutsideHop();
             if(!outsideHop) { UnclassifiedHop(); return Task.CompletedTask; }
@@ -81,7 +82,7 @@ internal sealed class JournalRecordProjection
         if(p.firstOnly) { p.result.Add(new(Side.Local,ChangeKind.Renamed,null,prior.Path,id,null,false,false,record.Usn,JournalId:p.from.JournalId)); return; }
         // A later acknowledgement cannot reconstruct the OLD half of an unclassified hop.
         var origin=hasPrior ? prior.Usn : record.Usn;
-        p.failedUsn=Math.Min(p.failedUsn ?? origin,origin);
+        p.Uncertain(origin,id,prior.Path ?? record.Name,nameof(UnclassifiedHop));
         p.old.Remove(record.FileId);
     }
 
@@ -123,7 +124,7 @@ internal sealed class JournalRecordProjection
         {
             if (affected) RecoveryEvidence(absent:false,incomplete:true);
             else if (p.firstOnly) p.result.Add(new(Side.Local,ChangeKind.Changed,null,null,id,null,false,false,record.Usn,JournalId:p.from.JournalId));
-            if(!p.firstOnly) p.failedUsn??=record.Usn;
+            if(!p.firstOnly) p.Uncertain(record.Usn,id,history ?? record.Name,Failure(nameof(LocateFailedAsync),error));
         }
     }
 
@@ -136,11 +137,14 @@ internal sealed class JournalRecordProjection
         p.result.Add(new(Side.Local,pathlessKind,path,null,id,null,dirty,false,
             record.Usn,p.volume,parent,record.Name,JournalId:p.from.JournalId));
         if(p.firstOnly) return Task.CompletedTask;
-        p.failedUsn??=record.Usn;
+        p.Uncertain(record.Usn,id,path,Failure(nameof(RetainFailure),error));
         var cause=error is ItemFailedException item ? item.Cause : TextKey.ReadLocalFailed;
         return p.store.SaveNoticeAsync(p.pair.PairId,new(0,NoticeKind.Failure,cause,path,
             new([new(Side.Local,path,id)],Side.Local),DateTimeOffset.UtcNow,false),p.ct);
     }
+
+    // The branch and the lookup error's type and code, for the uncertain record's run-log line.
+    private static string Failure(string branch,Exception error) => branch+" "+error.GetType().Name+" 0x"+error.HResult.ToString("X8",System.Globalization.CultureInfo.InvariantCulture);
 
     private void RecoveryEvidence(bool absent,bool incomplete)
     {
@@ -148,7 +152,7 @@ internal sealed class JournalRecordProjection
         p.result.Add(new Change(Side.Local,pathlessKind,null,null,id,null,(flags&Content)!=0,
             pathlessKind==ChangeKind.Deleted && absent,record.Usn,p.volume,parent,record.Name,JournalId:p.from.JournalId)
             { AffectedPath=p.victim!.Expected.Path });
-        if(incomplete && !p.firstOnly) p.failedUsn??=record.Usn;
+        if(incomplete && !p.firstOnly) p.Uncertain(record.Usn,id,record.Name,nameof(RecoveryEvidence));
     }
 
     // Exact surviving aliases cannot be the predecessor of a different new link.
@@ -270,7 +274,7 @@ internal sealed class JournalRecordProjection
             (record.ParentId==p.root || (await p.BindingsAsync(parent).ConfigureAwait(false)).Count!=0))
         {
             if (p.firstOnly) p.result.Add(new(Side.Local,ChangeKind.Changed,null,null,id,null,false,false,record.Usn,p.volume,parent,JournalId:p.from.JournalId));
-            else p.failedUsn??=record.Usn;
+            else p.Uncertain(record.Usn,id,record.Name,nameof(RemainderAsync));
         }
     }
 }

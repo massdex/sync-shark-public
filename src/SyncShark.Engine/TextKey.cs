@@ -203,6 +203,7 @@ public enum TextKey
     StatusUnavailable,
     JournalSourceFailed,
     JournalRepairRequired,
+    JournalUncertainRecord,
     FailDropboxDeleteJobInvalid,
     FailFirstSyncCheckWaiting,
     RootLocalNetworkUnsupported,

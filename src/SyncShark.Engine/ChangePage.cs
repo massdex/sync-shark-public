@@ -9,4 +9,6 @@ public sealed record ChangePage(IReadOnlyList<Change> Changes, string? Cursor, J
     public JournalPosition? ProjectedThrough { get; init; }
     /// <summary>This acquisition reached its captured finite boundary; live arrivals do not extend it.</summary>
     public bool CaughtUp { get; init; }
+    /// <summary>One run-log record per local journal record this page could not prove; each one owes the Local Repair.</summary>
+    public IReadOnlyList<RunEvent> Uncertain { get; init; } = [];
 }

@@ -69,11 +69,17 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
         return true;
     }
 
-    /// <summary>A declined admission owes the end turn under its own notice, or under the open Failure that already covers it.</summary>
+    /// <summary>A declined admission owes the end turn under its own notice, or under the open Failure that already covers it when this row re-checks all of that notice's work.</summary>
     internal async Task DeclinedAsync(CancellationToken token)
     {
         var proposed=FallbackNotice(TextKey.WaitItemRetry);
-        if(await CoveredAsync(proposed,token).ConfigureAwait(false) is {} covering) own=covering; else await SaveAsync(proposed,token).ConfigureAwait(false);
+        if(await CoveredAsync(proposed,token).ConfigureAwait(false) is {} covering)
+        {
+            // A move or a wider notice names work beyond this row; it keeps its own retry.
+            if(!covering.Subject.HasItemsWithin(proposed.Subject)) return;
+            own=covering;
+        }
+        else await SaveAsync(proposed,token).ConfigureAwait(false);
         Failed=true;
     }
 

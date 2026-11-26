@@ -97,6 +97,7 @@ internal sealed class AutoSyncRead
                         position=await wake.Rewind(token) ?? position;
                         continue;
                     }
+                    foreach(var uncertain in page.Uncertain) read.events(uncertain);
                     if (page.ContinuityLost) { if(await ResetAsync(page)) continue; break; }
                     if (!Register(page)) break;
                     if (through!=null && page.CaughtUp && !await BeginLive()) break;

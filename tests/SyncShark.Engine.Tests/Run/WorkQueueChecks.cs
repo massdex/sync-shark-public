@@ -103,7 +103,10 @@ public static class WorkQueueChecks
     }
 
     // A row declined behind held work whose item already has an open Failure from an earlier run still gets its end turn under that notice, which then closes.
-    public static async Task CoveredDeclineEndsAsync()
+    public static Task CoveredDeclineEndsAsync()=>CoveredDecline(false);
+    // An open unknown-move notice on the row's Dropbox item names work the row's end turn does not re-check, so it stays open and the move stays owed.
+    public static Task CoveredMoveStaysOwedAsync()=>CoveredDecline(true);
+    private static async Task CoveredDecline(bool move)
     {
         using var store=new InMemoryStateStore();
         var pair=ItemChecks.Pair(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
@@ -115,10 +118,14 @@ public static class WorkQueueChecks
         var rename=new Change(Side.Dropbox,ChangeKind.Renamed,"y","x","x",null,false,false);
         var page=queue.AdmitAsync(pair,new([rename],null,new(1,1)),(_,_)=>Task.CompletedTask,(_,_)=>Task.CompletedTask,default);
         var file=ItemChecks.File(Side.Local,"y",1,"y"); pc.Seed(file,[1]);
-        await store.SaveNoticeAsync(pair.PairId,new Notice(0,NoticeKind.Failure,TextKey.WaitItemRetry,"y",new([new(Side.Local,"y",file.Id)],Side.Local),DateTimeOffset.UnixEpoch,false),default);
+        var remote=ItemChecks.File(Side.Dropbox,"y",1,"dy"); if(move) cloud.Seed(remote,[1]);
+        var covering=move ? new Notice(0,NoticeKind.Failure,TextKey.FailDropboxOutcomeUnknown,"y",new([new(Side.Dropbox,"y",remote.Id)],Side.Dropbox){Move=new(remote.Id,"y","target",null,false)},DateTimeOffset.UnixEpoch,false)
+            : new Notice(0,NoticeKind.Failure,TextKey.WaitItemRetry,"y",new([new(Side.Local,"y",file.Id)],Side.Local),DateTimeOffset.UnixEpoch,false);
+        await store.SaveNoticeAsync(pair.PairId,covering,default);
         using var end=new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,cloud,store,null,null,end.Token).WaitAsync(end.Token);
-        Check.Require(cloud.Items.ContainsKey("y") && !store.OpenNotices.Any(n=>n.Kind==NoticeKind.Failure && PathNames.Same(n.Path,"y")),"A declined row covered by an earlier notice got no end turn, or its notice stayed open");
+        if(move) Check.Require(store.OpenNotices.Any(n=>n.Subject.Move?.Destination=="target"),"A covered decline closed an unresolved move it never re-checked");
+        else Check.Require(cloud.Items.ContainsKey("y") && !store.OpenNotices.Any(n=>n.Kind==NoticeKind.Failure && PathNames.Same(n.Path,"y")),"A declined row covered by an earlier notice got no end turn, or its notice stayed open");
         released=true; await queue.RetryHeldAsync(null,end.Token);
         await page.WaitAsync(end.Token);
     }

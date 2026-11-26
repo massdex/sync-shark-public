@@ -193,8 +193,8 @@ public sealed class JournalReader
                 var next=NextPosition(raw,from,end);
                 var paired=new List<Hop>(); var starts=new List<ulong>(); JournalPosition? fence=null;
                 void Defer(ulong id,ulong usn) { fence??=journal.Current(pair.LocalRoot); deferred=deferred.Enqueue((id,usn,fence)); }
-                var (changes,uncertain,failedUsn)=await JournalProjection.Project(pair,m,from,key,raw.Records!,next.NextUsn,old,physical,ct,paired:paired,starts:starts,defer:Defer).ConfigureAwait(false);
-                if (ExpireFences(ref deferred,old,next) is { } expired) { failedUsn=Math.Min(failedUsn ?? expired,expired); uncertain=true; }
+                var (changes,uncertain,failedUsn,records)=await JournalProjection.Project(pair,m,from,key,raw.Records!,next.NextUsn,old,physical,ct,paired:paired,starts:starts,defer:Defer).ConfigureAwait(false);
+                if (ExpireFences(ref deferred,old,next,records) is { } expired) { failedUsn=Math.Min(failedUsn ?? expired,expired); uncertain=true; }
                 if(uncertain) await store.OweRepairAsync(pair.PairId,Side.Local,Text.Get(TextKey.JournalRepairRequired),ct).ConfigureAwait(false);
                 foreach(var other in PausedAt(v,from))
                 {
@@ -203,7 +203,7 @@ public sealed class JournalReader
                     catch(Exception error) when (JournalProjection.MetadataFailure(error)) { /* Unproved range remains in NTFS. */ }
                     lock(gate) if (other.Paused && other.Read==from) other.Read=other.Settled=new JournalPosition(from.JournalId,passed);
                 }
-                return PublishPage(pair,v,m,from,end,next,raw,old,deferred,paired,starts,changes,uncertain,failedUsn,ct);
+                return PublishPage(pair,v,m,from,end,next,raw,old,deferred,paired,starts,changes,uncertain,failedUsn,ct) with {Uncertain=records};
             }
         }
         finally { v.Read.Release(); }
@@ -314,7 +314,7 @@ public sealed class JournalReader
 
     // Dequeue the fences this page passed and drop their unpaired halves. The fence requests Repair; it does not settle
     // the original mismatch. Returns the lowest expired origin, if any.
-    private static ulong? ExpireFences(ref ImmutableQueue<(ulong Id,ulong Start,JournalPosition Until)> deferred,ImmutableDictionary<ulong,Half>.Builder old,JournalPosition next)
+    private static ulong? ExpireFences(ref ImmutableQueue<(ulong Id,ulong Start,JournalPosition Until)> deferred,ImmutableDictionary<ulong,Half>.Builder old,JournalPosition next,List<RunEvent> records)
     {
         ulong? expired=null;
         while(!deferred.IsEmpty && deferred.Peek().Until.JournalId==next.JournalId && deferred.Peek().Until.NextUsn<=next.NextUsn)
@@ -322,6 +322,7 @@ public sealed class JournalReader
             deferred=deferred.Dequeue(out var due);
             if (!old.TryGetValue(due.Id,out var half) || !half.BeforeOld || half.Usn!=due.Start) continue;
             old.Remove(due.Id); expired=Math.Min(expired ?? half.Usn,half.Usn);
+            records.Add(JournalProjection.Record(half.Usn,LocalIdentity.FileIdText(due.Id),half.Path ?? half.Name,nameof(ExpireFences)));
         }
         return expired;
     }
