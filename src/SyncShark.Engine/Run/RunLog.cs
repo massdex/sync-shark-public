@@ -154,7 +154,6 @@ public sealed class RunLog : IDisposable
         ItemFailedException item => item.Cause.ToString(),
         EngineRequestException request => request.Key.ToString(),
         InsufficientSpaceException => Text.Get(TextKey.RepairStoppedNoSpace),
-        Microsoft.Data.Sqlite.SqliteException sqlite => sqlite.SqliteErrorCode.ToString(CultureInfo.InvariantCulture) + "/" + sqlite.SqliteExtendedErrorCode.ToString(CultureInfo.InvariantCulture) + Frames(error),
         _ => error.HResult.ToString(CultureInfo.InvariantCulture) + Frames(error)
     });
 

@@ -110,19 +110,7 @@ internal sealed class RepairSubmission(RepairRun run,Row? row,IReadOnlyList<Rena
             return (error.Cause,BuildNotice(error));
         }
         catch(InventoryIncompleteException) when(retained) { return (TextKey.WaitItemRetry,null); }
-        catch(Exception unexpected) when(!token.IsCancellationRequested && ItemFault(unexpected))
-        {
-            var error=this.error=new ItemFailedException(PathOf(),TextKey.FailChanged,unexpected); // an unknown blocker is this row's failure, never the run's
-            own=null;
-            return (error.Cause,BuildNotice(error));
-        }
     }
-
-    // Cancellation, store and space failures, a lost root or sign-in, network and file-system faults and an owned effect still end the run.
-    private static bool ItemFault(Exception error) => error is not (OperationCanceledException or WorkQueue.Unsettled or InsufficientSpaceException
-        or Microsoft.Data.Sqlite.SqliteException or ChangedUnderneathException or InventoryIncompleteException or ListingCursorResetException
-        or Local.JournalSourceException or Dropbox.DropboxCredentialUnavailableException or HttpRequestException
-        or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception);
 
     private async Task<(bool Settled,EffectOutcome? Outcome,Notice? Raised)> ExecAsync(CancellationToken token)
     {

@@ -16,19 +16,26 @@ public static class RepairChecks
         await RetainedAttemptAsync(); await SelectedStreamRaceAsync(); await ReplacedDuringRepairAsync();
         await CoveredFolderAsync(true); await CoveredFolderAsync(false);
         await BoundedAdmissionAsync(); await AncestorCaseRecordedOnceAsync();
-        await ObservedAncestorCaseAsync(); await BilateralCaseRenameAsync(); await UnreadableFolderSkippedAsync(); await UnexpectedRowFaultAsync();
+        await ObservedAncestorCaseAsync(); await BilateralCaseRenameAsync(); await UnreadableFolderSkippedAsync(); await InvalidLocalNameAsync();
     }
 
-    // An unexpected fault inside one row fails only that item: the Repair completes for the rest with one notice for it.
-    private static Task UnexpectedRowFaultAsync() => WithRepairStore(async (store,pair,ct)=>
+    // A Dropbox name Windows cannot use fails at the local side's path check: one notice for that item, and the Repair completes for the rest.
+    private static Task InvalidLocalNameAsync() => WithRepairStore(async (store,pair,ct)=>
     {
         var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); var paths=new PathScope(pair,[pair],DriveType.Fixed);
-        pc.Seed(ItemChecks.File(Side.Local,"ok",1,"ok"),[1]); pc.Seed(ItemChecks.File(Side.Local,"odd",2,"odd"),[2]);
-        db.PublishFailures["odd"]=new ArgumentException("unexpected");
-        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),pc,db,store,null,null,ct,caughtUp:true);
+        db.Seed(ItemChecks.File(Side.Dropbox,"ok",1,"ok"),[1]); db.Seed(ItemChecks.File(Side.Dropbox,"bad.",2,"bad"),[2]);
+        // Every local path operation first resolves its name the way the real local side does, through a real side's read.
+        var home=Directory.CreateTempSubdirectory(); using var bound=new TestDoubles.InMemoryStateStore(); var real=Local.LocalSideChecks.BoundSide(home.FullName,bound);
+        var local=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>
+        {
+            if(m.Name is nameof(ISide.ReadOneAsync) or nameof(ISide.StageAsync) or nameof(ISide.EnsureFolderAsync) && args[0] is string path) real.ReadOneAsync(path,ct);
+            return AutoSyncChecks.Observation.Forward(pc,m,args);
+        });
+        try { await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,new WorkQueue(),local,db,store,null,null,ct,caughtUp:true); }
+        finally { home.Delete(true); }
         var notices=new List<Notice>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) notices.Add(n);
-        Check.Require((await store.RepairStateAsync(pair.PairId,ct)).FirstRepairDone && db.Items.ContainsKey("ok") && !db.Items.ContainsKey("odd"),"One row's unexpected fault stopped the Repair");
-        Check.Require(notices.Count(n=>n.Kind==NoticeKind.Failure && n.Path=="odd")==1,$"The faulted item did not get exactly one notice: {string.Join(",",notices.Select(n=>n.Cause+"@"+n.Path))}");
+        Check.Require((await store.RepairStateAsync(pair.PairId,ct)).FirstRepairDone && pc.Items.ContainsKey("ok") && !pc.Items.ContainsKey("bad."),"One invalid local name stopped the Repair");
+        Check.Require(notices.Count(n=>n.Kind==NoticeKind.Failure && n.Path=="bad." && n.Cause==TextKey.LocalNameInvalid)==1,$"The invalid name did not get exactly one notice: {string.Join(",",notices.Select(n=>n.Cause+"@"+n.Path))}");
     });
 
     // An unreadable PC folder is skipped with its own notice: the Repair completes for the rest, nothing under it moves on either side, and it stays owed.
