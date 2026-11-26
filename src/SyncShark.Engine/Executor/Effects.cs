@@ -77,7 +77,6 @@ public sealed class Effects
                     if (clash == null && published == null) throw;
                 }
                 step = clash is {} stopped ? Stop(stopped) : Published(written,source,target,published!,step.Armed,null);
-                if (step.Done==null) await OweMovedSourceAsync(pair,from,source,store,ct);
                 break;
             }
             default: throw new ArgumentOutOfRangeException(nameof(action));
@@ -282,16 +281,6 @@ public sealed class Effects
         var row=new Row(PathNames.Key(scope.LocalPath),pc,db,saved,[],hash,RowContext.Neutral);
         var kind=hash!=null && !db.IsFolder && StringComparer.OrdinalIgnoreCase.Equals(hash,db.ContentHash)?ActionKind.Record:ActionKind.KeepBoth;
         return await ApplyAsync(pair,settings,events,paths,new(kind,row),local,dropbox,store,populate,compareOldBinding,ct);
-    }
-
-    // A PC file moved while its first upload ran leaves the copy at the old name: owe that folder (the root scope at the root) so Repair settles it.
-    private static async Task OweMovedSourceAsync(PairConfig pair,ISide from,Entry source,IStore store,CancellationToken ct)
-    {
-        if (from.Side!=Side.Local) return;
-        try { if ((await from.ReadOneAsync(source.Path,ct))?.Id==source.Id) return; }
-        catch (ItemFailedException) { /* An unreadable name does not prove the file stayed. */ }
-        var at=PathNames.Parent(source.Path);
-        await store.OweScopeAsync(pair.PairId,at.Length==0?new Scope(string.Empty,string.Empty):new Scope(at,await ItemSync.CounterpartAsync(pair,Side.Local,at,store,ct)),ct);
     }
 
     internal static async Task<Entry?> ReadOneAsync(ISide endpoint,string path,CancellationToken ct)

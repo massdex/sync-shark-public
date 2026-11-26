@@ -15598,67 +15598,6 @@
         "type:TextKey"
       ],
       "verdict": "REASON-RECORDED"
-    },
-    {
-      "key": [
-        "src/SyncShark.Engine/Executor/Effects.cs",
-        "class-size",
-        "SyncShark.Engine:Massdex.SyncShark.Engine.Executor.Effects",
-        ""
-      ],
-      "hash": "ecdf780a5d73~23d733e4de42~6a2bbb1e97e6~42e52d99a62f~2c0fe23437f1~a20f",
-      "size": 302,
-      "members": [
-        "Effects:ApplyAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,ISide,ISide,IStore,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken,Func<Scope, IEnumerable<Change>>?,Func<(JournalPosition?Local, string?Dropbox), bool>?,Action<Notice>?,bool,SyncedEntry?,Action<SyncedEntry>?,Action<Notice>?)",
-        "Effects:MoveAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,Side,ISide,Entry?,Entry?,string,ISide,ISide,IStore,Func<Scope, IEnumerable<Change>>,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,Func<(JournalPosition?Local, string?Dropbox), bool>?,SyncedEntry?,CancellationToken)",
-        "Effects:PublishReplacementAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,Side,ISide,Entry,Entry,string,IStaged,ISide,ISide,IStore,Func<Scope, IEnumerable<Change>>,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,Func<(JournalPosition?Local, string?Dropbox), bool>?,bool,CancellationToken)",
-        "Effects:RecoverConflictAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,Scope,Side,Entry,ISide,ISide,IStore,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken)",
-        "Effects:SplitAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,ISide,ISide,IStore,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken)",
-        "Effects:TransferFolderAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,Side,ISide,ISide,Entry?,Entry,string,ISide,ISide,IStore,Func<Scope, IEnumerable<Change>>,Func<Scope, IEnumerable<Change>>?,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,Func<(JournalPosition?Local, string?Dropbox), bool>?,bool,CancellationToken)",
-        "Effects:static Admitted(Entry?,Entry?,string)",
-        "Effects:static Held(Func<Scope, IEnumerable<Change>>?)",
-        "Effects:static MoveUnlinkedAsync(EngineSettings,Action<RunEvent>,SyncAction,ISide,Entry?,string,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken)",
-        "Effects:static OpenReadAsync(ISide,Entry,CancellationToken)",
-        "Effects:static OweMovedSourceAsync(PairConfig,ISide,Entry,IStore,CancellationToken)",
-        "Effects:static Populate(Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,ISide,ISide,Entry,Entry,CancellationToken)",
-        "Effects:static Published(Side,Entry,string,RemovalResult,RemovalSelection?,StageProof?)",
-        "Effects:static Raise(PairConfig,IStore,Action<RunEvent>,SyncAction,Action<Notice>?,Action<Notice>?,NoticeKind,TextKey,CancellationToken)",
-        "Effects:static ReadOneAsync(ISide,string,CancellationToken)",
-        "Effects:static RecordAsync(Row,ISide,ISide,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken)",
-        "Effects:static Stop(EffectOutcome)"
-      ],
-      "verdict": "REASON-RECORDED"
-    },
-    {
-      "key": [
-        "src/SyncShark.Engine/Executor/Effects.cs",
-        "file-size",
-        "",
-        ""
-      ],
-      "hash": "e776c194ddd8~9f2771709c12~4ea475593c27~4ba7d4b9316d~fca932602af0~dd8b",
-      "size": 308,
-      "members": [
-        "Effects:ApplyAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,ISide,ISide,IStore,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken,Func<Scope, IEnumerable<Change>>?,Func<(JournalPosition?Local, string?Dropbox), bool>?,Action<Notice>?,bool,SyncedEntry?,Action<SyncedEntry>?,Action<Notice>?)",
-        "Effects:MoveAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,Side,ISide,Entry?,Entry?,string,ISide,ISide,IStore,Func<Scope, IEnumerable<Change>>,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,Func<(JournalPosition?Local, string?Dropbox), bool>?,SyncedEntry?,CancellationToken)",
-        "Effects:PublishReplacementAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,Side,ISide,Entry,Entry,string,IStaged,ISide,ISide,IStore,Func<Scope, IEnumerable<Change>>,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,Func<(JournalPosition?Local, string?Dropbox), bool>?,bool,CancellationToken)",
-        "Effects:RecoverConflictAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,Scope,Side,Entry,ISide,ISide,IStore,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken)",
-        "Effects:SplitAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,ISide,ISide,IStore,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken)",
-        "Effects:TransferFolderAsync(PairConfig,EngineSettings,Action<RunEvent>,PathScope,SyncAction,Side,ISide,ISide,Entry?,Entry,string,ISide,ISide,IStore,Func<Scope, IEnumerable<Change>>,Func<Scope, IEnumerable<Change>>?,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,Func<(JournalPosition?Local, string?Dropbox), bool>?,bool,CancellationToken)",
-        "Effects:static Admitted(Entry?,Entry?,string)",
-        "Effects:static Held(Func<Scope, IEnumerable<Change>>?)",
-        "Effects:static MoveUnlinkedAsync(EngineSettings,Action<RunEvent>,SyncAction,ISide,Entry?,string,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken)",
-        "Effects:static OpenReadAsync(ISide,Entry,CancellationToken)",
-        "Effects:static OweMovedSourceAsync(PairConfig,ISide,Entry,IStore,CancellationToken)",
-        "Effects:static Populate(Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,ISide,ISide,Entry,Entry,CancellationToken)",
-        "Effects:static Published(Side,Entry,string,RemovalResult,RemovalSelection?,StageProof?)",
-        "Effects:static Raise(PairConfig,IStore,Action<RunEvent>,SyncAction,Action<Notice>?,Action<Notice>?,NoticeKind,TextKey,CancellationToken)",
-        "Effects:static ReadOneAsync(ISide,string,CancellationToken)",
-        "Effects:static RecordAsync(Row,ISide,ISide,Func<Scope, Side, Recovery.Folder, CancellationToken, Task>,Func<SyncedEntry?, Scope, Scope?, CancellationToken, Task>,CancellationToken)",
-        "Effects:static Stop(EffectOutcome)",
-        "type:Effects"
-      ],
-      "verdict": "REASON-RECORDED"
     }
   ],
   "register_reviews": [
