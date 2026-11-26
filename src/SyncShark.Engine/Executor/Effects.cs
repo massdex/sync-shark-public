@@ -108,6 +108,9 @@ public sealed class Effects
         var senders=new[]{local,dropbox};
         var links=new List<SyncedEntry>(senders.Length);
         var members=new List<NoticeItem>(senders.Length);
+        // A skipped item (an online-only PC file) at either mapped target suppresses the whole split before any source opens.
+        foreach(var sender in senders)
+            if(row.EntryOn(sender.Side) is {} leg && await ReadOneAsync(sender==local?dropbox:local,await ItemSync.CounterpartAsync(pair,sender.Side,leg.Path,store,ct),ct) is {Skip:not null}) return EffectOutcome.Pending;
         foreach(var sender in senders)
         {
             if(row.EntryOn(sender.Side) is not {} original) continue;
@@ -165,8 +168,11 @@ public sealed class Effects
         if (!competing)
         {
             var before = written == Side.Local ? new Scope(expected.Path,source?.Path ?? saved?.DropboxPath ?? target) : new Scope(source?.Path ?? saved?.LocalPath ?? target,expected.Path);
-            result = await new CaseRename().MoveAsync(to,expected,target,settings.CaseRenameSuffix,saved,before,compareOldBinding,ct,events);
-            if (result is {Outcome:RemovalOutcome.NoEffect,Cause:TextKey.ClashNameTaken or TextKey.FailDropboxTooManyFiles})
+            var stubs = expected.IsFolder && !PathNames.CaseOnly(expected.Path,target) ? await PlaceholdersUnderAsync(local,written==Side.Local?expected.Path:source?.Path,ct) : [];
+            paths = paths.WithPlaceholders(stubs);
+            // A folder holding an online-only PC file never moves whole: the merge moves its free branches and keeps the protected names.
+            result = stubs.Count != 0 ? new(RemovalOutcome.NoEffect,expected,TextKey.FailExcludeHoldsProtected) : await new CaseRename().MoveAsync(to,expected,target,settings.CaseRenameSuffix,saved,before,compareOldBinding,ct,events);
+            if (result is {Outcome:RemovalOutcome.NoEffect,Cause:TextKey.ClashNameTaken or TextKey.FailDropboxTooManyFiles or TextKey.FailExcludeHoldsProtected})
             {
                 EffectOutcome? renamed;
                 (renamed,expected,incumbent,competing) = await CaseRename.ResolveRefusalAsync(settings,written,to,expected,target,incumbent,result,ct);
@@ -186,6 +192,15 @@ public sealed class Effects
         if (source == null) throw new ChangedUnderneathException(target);
         var after = saved == null ? SyncedEntries.From(written,moved,source) : SyncedEntries.Relink(saved,written == Side.Local ? moved : source,written == Side.Dropbox ? moved : source);
         return (null,after,null,null,null,mergedSource);
+    }
+
+    private static async Task<IReadOnlyCollection<string>> PlaceholdersUnderAsync(ISide local,string? folder,CancellationToken ct)
+    {
+        var found=new List<string>();
+        if(folder==null) return found;
+        await foreach(var listed in local.ReadAllAsync(folder,new(true,false),ct))
+            if(listed.Entry is {IsFolder:false,Skip:nameof(TextKey.SkipOnlineOnly)} stub) found.Add(stub.Path);
+        return found;
     }
 
     // The selected source must still be there, and an existing target must be at the planned name.

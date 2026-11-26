@@ -274,6 +274,8 @@ public static class RowExecution
         var highest=await FolderDelete.HighestMissingAsync(pair,paths,folder,source,store,ct);
         if(highest is null) { ItemSync.Retain(folder.KeyOn(deleted),failed); return false; }
         folder=highest;
+        // An online-only file now at the PC folder's name is out of scope on both sides: the Dropbox folder stays.
+        if(deleted==Side.Local && await local.ReadOneAsync(folder.LocalPath,ct) is {IsFolder:false,Skip:nameof(TextKey.SkipOnlineOnly)}) return true;
         if(paths.ExcludesBinding(folder)) return false; // excluded: no effect, as for an excluded file; the binding stays for re-inclusion
         var row=new Row(folder.KeyOn(deleted),null,null,folder,[],null,RowContext.Neutral);
         Entry? movedPeer=null;

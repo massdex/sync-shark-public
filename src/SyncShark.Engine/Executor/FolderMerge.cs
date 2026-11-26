@@ -22,7 +22,7 @@ public sealed class FolderMerge
             bool retained=false; RemovalResult? unfinished=null;ItemFailedException? deferred=null;
             await foreach(var listed in Writer.ReadAllAsync(moved.Path,new(false,true),ct))
             {
-                if(listed.Entry is not {} child || child.Skip is nameof(TextKey.SkipUnreadable) or nameof(TextKey.SkipLink)) {retained=true;continue;}
+                if(listed.Entry is not {} child || child.Skip is nameof(TextKey.SkipUnreadable) or nameof(TextKey.SkipLink) or nameof(TextKey.SkipOnlineOnly)) {retained=true;continue;}
                 try
                 {
                     var result=await MergeChildAsync(child,destination.Path,sourceParent,destParent);

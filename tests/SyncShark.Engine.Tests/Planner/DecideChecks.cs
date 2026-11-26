@@ -255,7 +255,7 @@ public static class DecideChecks
             Dropbox = cloud with { IsFolder = true }, Synced = null, Context = saved.Context with { Skipped = true } };
         Expect("kept PC junction is not a preserved folder", junction, ActionKind.None, none: NoneReason.Skipped, exclusion: (Side.Dropbox, false));
         var stub = saved with { Local = local with { Skip = nameof(TextKey.SkipOnlineOnly) }, Context = saved.Context with { Skipped = true } };
-        Expect("settled source replaces kept PC stub", stub, ActionKind.Download, local.Path, exclusion: (Side.Dropbox, false));
+        Expect("settled source leaves kept PC stub alone", stub, ActionKind.None, none: NoneReason.Skipped, exclusion: (Side.Dropbox, false));
         Expect("excluded PC stub protected", stub, ActionKind.Notice, notice: NoticeKind.Failure, cause: TextKey.FailExcludeHoldsProtected, exclusion: (Side.Local, false));
         foreach (var excluded in new[] { Side.Local, Side.Dropbox })
         {

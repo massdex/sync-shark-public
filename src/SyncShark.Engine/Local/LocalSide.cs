@@ -64,7 +64,7 @@ public sealed class LocalSide : ISide
             return DirectoryListing.One(root,path);
         }
         catch(IOException e) when(LocalErrors.Missing(e.HResult)) { return null; }
-        catch(ChangedUnderneathException) when((DriveIdentity.Basic(pins.Last).FileAttributes & (FileAttributes.Directory|FileAttributes.ReparsePoint))==0) { return null; }
+        catch(ChangedUnderneathException) when(DriveIdentity.Basic(pins.Last).FileAttributes is var a && (a & (FileAttributes.Directory|FileAttributes.ReparsePoint))==0 && !Placeholders.IsOnlineOnlyAttributes(a)) { return null; }
     }
     public Task<(DirectoryIdentity? Local,DropboxRootIdentity? Dropbox,DriveEvidence? Drive,DriveType? LocalDriveType)> RootAsync(CancellationToken ct)
     {

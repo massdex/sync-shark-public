@@ -147,6 +147,12 @@ public sealed class PathScope
         pair with { Exclusions = pair.Exclusions.Where(exclusion => exclusion != e).ToArray() }, allPairs,
         localDriveType, defaultIgnoreRules);
 
+    /// <summary>This scope with each observed online-only PC file out of scope on both sides, as a two-sided KEEP
+    /// exclusion at its path: nothing at or under it, on either side, is moved, merged or removed with its folder.</summary>
+    internal PathScope WithPlaceholders(IReadOnlyCollection<string> localPaths) => localPaths.Count == 0 ? this :
+        new(pair with { Exclusions = pair.Exclusions.Concat(localPaths.Select(p => new Exclusion(Side.Local, p, true))).ToArray() },
+            allPairs, localDriveType, defaultIgnoreRules);
+
     // A lost race builds an identical immutable value once; the scope's inputs never change after construction.
     private PathScope? configured;
 

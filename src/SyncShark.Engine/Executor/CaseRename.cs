@@ -52,7 +52,8 @@ public sealed class CaseRename
             }
             competing = true;
         }
-        if (written==Side.Dropbox && expected.IsFolder && !PathNames.CaseOnly(expected.Path,target) && result is {Outcome:RemovalOutcome.NoEffect,Cause:TextKey.FailDropboxTooManyFiles})
+        if (expected.IsFolder && !PathNames.CaseOnly(expected.Path,target) && result is {Outcome:RemovalOutcome.NoEffect} &&
+            (written==Side.Dropbox && result.Cause==TextKey.FailDropboxTooManyFiles || result.Cause==TextKey.FailExcludeHoldsProtected))
         {
             try
             {

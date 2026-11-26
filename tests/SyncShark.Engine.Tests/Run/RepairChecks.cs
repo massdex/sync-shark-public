@@ -41,7 +41,9 @@ public static class RepairChecks
         var second=await RepairAsync();
         var saved=await store.FindAsync(pair.PairId,Side.Dropbox,PathNames.DropboxKey("parent/Child/f"),ct);
         Check.Require(second.Count!=0 && second.All(e=>e.Action==ActionKind.Record) && Writes()==writesBefore && Reads()==readsBefore && db.Requests[nameof(ISide.ReadAllAsync)]==listings+1 && saved?.DropboxPath=="parent/Child/f",
-            $"A parent's case did not save as a record only ({string.Join(",",second.Select(e=>e.Action))}; writes {Writes()-writesBefore}; reads {Reads()-readsBefore}; listings {db.Requests[nameof(ISide.ReadAllAsync)]-listings}; saved {saved?.DropboxPath})");
+            $"A parent's case did not save as a record only ({string.Join(",",second.Select(e=>e.Action))}; writes {Writes()-writesBefore}; reads {Reads()-readsBefore}; listings {db.Requests[nameof(ISide.ReadAllAsync)]-listings}; saved {saved?.DropboxPath}; pc file {pc.Items.ContainsKey("Parent/Child/f")}; records {string.Join(",",(await RecordsAsync()))}; notices {string.Join(",",(await NoticesAsync()))})");
+        async Task<List<string>> RecordsAsync() { var all=new List<string>(); foreach(var k in new[]{"Parent","Parent/Child","Parent/Child/f"}) if(await store.FindAsync(pair.PairId,Side.Local,PathNames.Key(k),ct) is {} r) all.Add(r.LocalPath+"|"+r.DropboxPath); return all; }
+        async Task<List<string>> NoticesAsync() { var all=new List<string>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) all.Add(n.Cause+"@"+n.Path); return all; }
         var third=await RepairAsync();
         Check.Require(third.Count==0 && Writes()==writesBefore,$"The next Repair found the parent's case again: {string.Join(",",third.Select(e=>e.Action))}");
     });

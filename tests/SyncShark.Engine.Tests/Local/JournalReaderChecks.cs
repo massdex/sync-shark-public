@@ -110,7 +110,7 @@ public static class JournalReaderChecks
     private static async Task ReviewCases()
     {
         var failures=new List<string>();
-        foreach(var test in new[]{"rename","rename-file","rename-keep","unreadable","settled-hops","reset-wrap","reset-id","root","skip","remove","skew","live-skew","early-write","child-hop","redacted-hop","locate-fails","entry-fails","join-reset","leave-reset","mismatch-fence","backlog16","backlog32","name-race","after-observation","alias-old","alias-new","alias-unbound","armed-child","link-race","link-unlink","wake-mixed","cold-high","stale-valid","member-bound","paused-alias-write","paused-alias-write-excluded","armed-missing","armed-substitute","reset-crash","settlement-surface","armed-delete","lookup-hold","entry-hold","failed-order","child-lookup-failed","child-exact-absent","child-exact-substitute","stage-lookup-failure","stage-entry-failure","armed-stage-entry-failure","retired-stage-create","retired-stage-delete"})
+        foreach(var test in new[]{"rename","rename-file","rename-keep","unreadable","settled-hops","reset-wrap","reset-id","root","skip","skip-no-open","remove","skew","live-skew","early-write","child-hop","redacted-hop","locate-fails","entry-fails","join-reset","leave-reset","mismatch-fence","backlog16","backlog32","name-race","after-observation","alias-old","alias-new","alias-unbound","armed-child","link-race","link-unlink","wake-mixed","cold-high","stale-valid","member-bound","paused-alias-write","paused-alias-write-excluded","armed-missing","armed-substitute","reset-crash","settlement-surface","armed-delete","lookup-hold","entry-hold","failed-order","child-lookup-failed","child-exact-absent","child-exact-substitute","stage-lookup-failure","stage-entry-failure","armed-stage-entry-failure","retired-stage-create","retired-stage-delete"})
         {
             try { await RunCase(test); }
             catch(Exception error) { failures.Add(test+": "+error.GetType().Name+" "+error.Message); }
@@ -141,9 +141,9 @@ public static class JournalReaderChecks
         }
         bool failRead=false;
         void Attach(PairConfig pair)=>reader.Attach(pair,actual,()=>scope,(id,force,ct)=>
-            test=="unreadable" || test=="locate-fails" && failRead && id==12 ? throw new IOException() : id switch {
+            test=="unreadable" || test=="skip-no-open" || test=="locate-fails" && failRead && id==12 ? throw new IOException() : id switch {
                 12=>(Path.Join(root,"END"),null),13 when test=="child-hop"=>(Path.Join(root,"END","child"),null),14=>(Path.Join(root,"independent"),null),_=>(null,null)},
-            p=>test=="entry-fails" && failRead && p=="END" ? throw new IOException() : new(p,false,1,DateTimeOffset.UnixEpoch,p=="independent"?"14":p.EndsWith("child",StringComparison.Ordinal)?"13":"12","","",test=="skip"?nameof(TextKey.SkipOnlineOnly):null));
+            p=>test=="entry-fails" && failRead && p=="END" ? throw new IOException() : new(p,false,1,DateTimeOffset.UnixEpoch,p=="independent"?"14":p.EndsWith("child",StringComparison.Ordinal)?"13":"12","","",test is "skip" or "skip-no-open"?nameof(TextKey.SkipOnlineOnly):null));
         foreach(var pair in new[]{a,b}) {await store.SavePairAsync(pair,default); Attach(pair);}
         Task<ChangePage> Fetch(PairConfig pair,ulong n)=>reader.ReadPageAsync(pair,start,new(1,n),settings,default);
         if(test is "cold-high" or "stale-valid")
@@ -424,6 +424,7 @@ public static class JournalReaderChecks
         }
         if(test=="root") {pages[10]=[R(11,0x200,null,11)];try {await Fetch(a,20);}catch(JournalRootChangedException){Check.Require(await store.PositionAsync("1",default)==start,"root event advanced position");return;}throw new InvalidDataException("root signal missing");}
         if(test=="skip") {pages[10]=[R(11,0x100,"END")];var page=await Fetch(a,20);Check.Require(page.Changes.SingleOrDefault()?.Observed?.Skip==nameof(TextKey.SkipOnlineOnly),"eligible skip discarded");return;}
+        if(test=="skip-no-open") {pages[10]=[new(12,11,11,0x100,FileAttributes.Offline|FileAttributes.ReparsePoint,"END")];var page=await Fetch(a,20);Check.Require(page.Changes.SingleOrDefault() is {Path:"END",Observed.Skip:nameof(TextKey.SkipOnlineOnly)},"an online-only record was opened by ID or lost");return;}
         if(test=="remove") {var page=await Fetch(a,20);await reader.SettleAsync(a,page.Position!,store,default);await reader.Membership(b,false,true);Check.Require(await store.PositionAsync("1",default)==page.Position,"removal left obsolete hold");return;}
         if(test=="live-skew")
         {

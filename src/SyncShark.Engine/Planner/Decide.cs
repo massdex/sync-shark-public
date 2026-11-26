@@ -193,7 +193,7 @@ public static class Decide
         dropbox.IsFolder == saved.IsFolder && dropbox.Id == saved.DropboxId && !DropboxChanged(dropbox, saved);
 
     /// <summary>Only a saved spelling differs: the same kinds, identities, contents and places on both sides.</summary>
-    internal static bool SpellingOnly(Row row) => row is {Synced:{} s, Local:{} l, Dropbox:{} d} && l.IsFolder==s.IsFolder && d.IsFolder==s.IsFolder &&
+    public static bool SpellingOnly(Row row) => row is {Synced:{} s, Local:{} l, Dropbox:{} d} && l.IsFolder==s.IsFolder && d.IsFolder==s.IsFolder &&
         l.Id==s.LocalId && d.Id==s.DropboxId && (s.IsFolder || l.Size==s.LocalSize && l.Modified.UtcTicks==s.LocalModifiedTicks && !DropboxChanged(d,s)) &&
         PathNames.SamePlace(s.LocalPath,l.Path) && PathNames.SamePlace(s.DropboxPath,d.Path);
 
