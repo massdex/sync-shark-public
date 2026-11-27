@@ -1,7 +1,7 @@
 # Structure debt register
 
 ## src/SyncShark.Engine/Dropbox/DropboxApi.cs
-<!-- spec-source: fb42f2da727e~cd8273ea7348~e442001ca6fc~0954f732face~6325c02e223a~5eee -->
+<!-- spec-source: 4ee9a6fa56b1~8417e7807aed~827992a4494e~9ec5f0848786~ba2e8a844f67~8ae1 -->
 
 ## src/SyncShark.Engine/Dropbox/ReplyTokens.cs
 <!-- spec-source: c3833db0e134~169c326fb6e3~8e776ff898ca~9be0c62c0b88~7d6c278f8e94~9a57 -->
@@ -19,10 +19,10 @@
 <!-- spec-source: 90c675c86387~ec8d7c432421~87d3312040ee~4c1c4d0b78b4~5d07851f7ebb~f8d4 -->
 
 ## src/SyncShark.Engine/Dropbox/Dispatcher.cs
-<!-- spec-source: c077b43bf043~75d94f61a09a~45952fc1bf68~34c9651c21bf~e0b2c5424029~0df5 -->
+<!-- spec-source: 23ca8d911ee1~44aaf5a3af8d~35987bcc9441~4b6e64e6a736~684d5e3cea80~9d44 -->
 
 ## src/SyncShark.Engine/Dropbox/UploadContent.cs
-<!-- spec-source: a155c7f8a229~6b1739527836~07648d73562d~0524dd5602ba~f8c224873ebe~a2bf -->
+<!-- spec-source: 27407b85f7ce~4dda56b524d2~c7927a5bf4bd~855f55a11c08~94ef24bc79b6~779c -->
 
 ## src/SyncShark.Engine/Executor/ItemSync.cs
 <!-- spec-source: be45f809f61d~a8721cc6eace~24a416d8b84e~ca928121f991~862448b50180~3c88 -->

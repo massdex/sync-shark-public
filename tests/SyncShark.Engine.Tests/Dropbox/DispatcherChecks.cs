@@ -364,6 +364,8 @@ public static class DispatcherChecks
         await MixedBatchThrottleAsync();
         await EnsureLookupThrottleAsync();
         await CheckThrottleAsync(false);
+        // An unreadable error_summary (a lone surrogate escape) is no pause evidence, never a fatal staging error.
+        await CheckThrottleAsync(false, """{"error_summary":"\uD800","error":{}}""");
     }
 
     public static Task BodyWaitAsync() => CheckThrottleAsync(true);
@@ -386,14 +388,14 @@ public static class DispatcherChecks
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,CancellationToken ct)
         {var response=await send(request,ct);clock.Headers();return response;}
     }
-    private static async Task CheckThrottleAsync(bool bodyOnly)
+    private static async Task CheckThrottleAsync(bool bodyOnly, string? body = null)
     {
         var delay = TimeSpan.FromSeconds(7);
         var routes = new List<string>();
         Task<HttpResponseMessage> Busy(HttpRequestMessage request, CancellationToken ct)
         {
             routes.Add(request.RequestUri!.AbsolutePath);
-            var reply = new HttpResponseMessage(HttpStatusCode.TooManyRequests) { Content = new StringContent(bodyOnly ? """{"error":{"reason":{".tag":"too_many_write_operations"},"retry_after":7}}""" : "busy") };
+            var reply = new HttpResponseMessage(HttpStatusCode.TooManyRequests) { Content = new StringContent(bodyOnly ? """{"error":{"reason":{".tag":"too_many_write_operations"},"retry_after":7}}""" : body ?? "busy") };
             if (!bodyOnly) reply.Headers.RetryAfter = new(delay);
             return Task.FromResult(reply);
         }
@@ -401,7 +403,8 @@ public static class DispatcherChecks
         var f = Scenarios.ItemChecks.File(Side.Local,"item",42,"source");
         using var bytes = new MemoryStream([42]);
         var upload = new global::Massdex.SyncShark.Engine.Dropbox.UploadContent();
-        foreach (var name in new[]{"stage", "submit"})
+        // Malformed bodies cover staging only: the dispatcher's existing provider-fact read of the summary predates them.
+        foreach (var name in body is null ? new[]{"stage", "submit"} : ["stage"])
         {
             var clock=new ReceiptClock(); using var http=new HttpClient(new ReceiptWire(Busy,clock));
             var api=new global::Massdex.SyncShark.Engine.Dropbox.DropboxApi(http,clock,Scenarios.ItemChecks.Settings,_=>{},_=>ValueTask.FromResult<string?>("synthetic"),"test-namespace");

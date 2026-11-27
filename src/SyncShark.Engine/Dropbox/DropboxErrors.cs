@@ -219,12 +219,19 @@ public sealed class DropboxErrors
     private static bool IsJobCheckRoute(string route) => route is
         DropboxProtocol.DeleteBatchCheck or DropboxProtocol.MoveBatchCheck or DropboxProtocol.CreateFolderBatchCheck;
 
-    /// <summary>True when the refusal names too_many_requests: its error.reason tag or its error_summary tag.</summary>
+    /// <summary>True when the refusal names too_many_requests: its error.reason tag or its error_summary tag. A field that
+    /// cannot be read as a string (such as a lone surrogate escape) is no evidence; the other field is still read.</summary>
     internal static bool TooManyRequests(JsonElement body) =>
-        Prefixed(Summary(body), DropboxProtocol.TooManyRequests) ||
-        body.ValueKind == JsonValueKind.Object && body.TryGetProperty(DropboxProtocol.Error, out var failure) &&
-        failure.ValueKind == JsonValueKind.Object && failure.TryGetProperty(DropboxProtocol.Reason, out var reason) &&
-        DropboxErrorCauses.UnionTag(reason) == DropboxProtocol.TooManyRequests;
+        Readable(() => Prefixed(Summary(body), DropboxProtocol.TooManyRequests)) ||
+        Readable(() => body.ValueKind == JsonValueKind.Object && body.TryGetProperty(DropboxProtocol.Error, out var failure) &&
+            failure.ValueKind == JsonValueKind.Object && failure.TryGetProperty(DropboxProtocol.Reason, out var reason) &&
+            DropboxErrorCauses.UnionTag(reason) == DropboxProtocol.TooManyRequests);
+
+    private static bool Readable(Func<bool> read)
+    {
+        try { return read(); }
+        catch (InvalidOperationException) { return false; } // JsonElement.GetString on a string it cannot unescape
+    }
 
     private static bool IsRateLimitContention(JsonElement failure) =>
         failure.ValueKind == JsonValueKind.Object && !failure.TryGetProperty(DropboxProtocol.Tag, out _) &&
