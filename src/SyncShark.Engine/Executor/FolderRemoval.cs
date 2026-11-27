@@ -90,6 +90,8 @@ internal sealed class FolderRemoval(PairConfig pair,PathScope paths,Entry folder
                     var parent=PathNames.KeyFor(deleting,PathNames.Parent(row.Path));frozenChildren![parent]=frozenChildren!.GetValueOrDefault(parent)+1;
                 }
                 if(child.Skip==nameof(TextKey.SkipLink)) await Protect(deleting,row.Path);
+                // Edit beats delete: a bound PC file whose size, ID or modified time left its binding may hold the only copy of its version.
+                else if(deleting==Side.Local && !userSelected && !child.IsFolder && await store.FindAsync(pair.PairId,Side.Local,PathNames.KeyFor(Side.Local,row.Path),ct) is {IsFolder:false} bound && Planner.Decide.LocalChanged(child,bound,null,false)!=false) await Protect(Side.Local,row.Path);
             }
         }
         return null;
@@ -163,6 +165,8 @@ internal sealed class FolderRemoval(PairConfig pair,PathScope paths,Entry folder
             try
             {
                 if(frozen!=null && frozen.GetValueOrDefault(PathNames.KeyFor(deleting,child.Path))!=child) return new(RemovalOutcome.Retained,entry,TextKey.FailChanged);
+                // The PC adapter can neither hash nor send a lone skipped file (only online-only), so it stays with its protected parent.
+                if(deleting==Side.Local && !child.IsFolder && child.Skip is not (null or nameof(TextKey.SkipOnlineOnly))) { protectedPaths.Add(PathNames.KeyFor(deleting,child.Path)); continue; }
                 var part=await Remove(child,await store.FindAsync(pair.PairId,deleting,PathNames.KeyFor(deleting,child.Path),ct));
                 if(part.Outcome is RemovalOutcome.Unknown or RemovalOutcome.Pending) return part; // an unresolved child outranks any sibling refusal
                 if(part.Outcome!=RemovalOutcome.Removed && !(partial && part.Outcome==RemovalOutcome.Retained && protectedPaths.Overlaps(PathNames.KeyFor(deleting,child.Path)))) unsettled??=part;

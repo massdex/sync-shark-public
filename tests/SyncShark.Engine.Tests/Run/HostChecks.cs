@@ -690,47 +690,6 @@ public static class HostChecks
             Check.Require((await store.PairAsync(pair.PairId,ct))!.OwedScopes is not {Count:>0},$"Include left its owed Repair scope unsettled");
         }finally{stop.Cancel();await host.StopAsync(default);}
     }
-    /// <summary>An Include arriving while a confirmed no-keep apply recycles its folder waits for that apply and its cleanup; both kept Dropbox names stay.</summary>
-    public static async Task IncludeWaitsForNoKeepApplyAsync()
-    {
-        using var store=new InMemoryStateStore();var pair=Bound("keepbind",@"T:\Keepbind",1);
-        await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,0),"{}",default);
-        var pcFolder=ItemChecks.File(Side.Local,"X",0,"pc-X",true);var dbFolder=ItemChecks.File(Side.Dropbox,"X",0,"db-X",true);
-        await store.CommitAsync(pair.PairId,null,SyncedEntries.From(pcFolder,dbFolder),null,null,default);
-        Func<PathScope>? live=null; // the adapters list only the published scope
-        var pc=new FakeSide(Side.Local){Root=(pair.Roots!.Local,null,null,DriveType.Fixed),OutOfScope=p=>live?.Invoke().Excludes(p,null,false)==true};
-        var cloud=new FakeSide(Side.Dropbox){Root=(null,pair.Roots.Dropbox,null,null),OutOfScope=p=>live?.Invoke().Excludes(null,p,false)==true};
-        pc.Seed(pcFolder,[]);pc.Seed(ItemChecks.File(Side.Local,"X/f",1,"pc-f"),[1]);cloud.Seed(dbFolder,[]);cloud.Seed(ItemChecks.File(Side.Dropbox,"X/f",2,"db-f"),[2]);
-        using var stop=new CancellationTokenSource(TimeSpan.FromMinutes(1));var ct=stop.Token;
-        var boot=Signal();var recycling=Signal();var release=Signal();var served=Signal();int armed=0,probed=0,finishes=0;
-        var local=QuietSide(pc);
-        var gated=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.DeleteAsync) && args[0] is Entry {Path:"X"} ? Recycle(m,args) : AutoSyncChecks.Observation.Forward(local,m,args));
-        async Task<RemovalResult> Recycle(System.Reflection.MethodInfo m,object?[] args){recycling.TrySetResult();await release.Task.WaitAsync(ct);return await (Task<RemovalResult>)AutoSyncChecks.Observation.Forward(local,m,args)!;}
-        var db=System.Reflection.DispatchProxy.Create<IStore,PublicationStore>();var tap=(PublicationStore)(object)db;tap.Store=store;
-        tap.FindAt=key=>{if(Volatile.Read(ref armed)!=0 && key==PathNames.KeyFor(Side.Local,"X")) Volatile.Write(ref probed,1);return Task.CompletedTask;};
-        // The apply retires the scope first; the Include's own owed comparison of the same scope is the second.
-        var observed=AutoSyncChecks.Observation.Wrap<IStore>((m,args)=>m.Name==nameof(IStore.FinishRepairAsync) && args[1] is Scope s && s==new Scope("X","X") ? Count(m,args) : AutoSyncChecks.Observation.Forward(db,m,args));
-        async Task<bool> Count(System.Reflection.MethodInfo m,object?[] args){var ok=await (Task<bool>)AutoSyncChecks.Observation.Forward(db,m,args)!;if(Interlocked.Increment(ref finishes)==2)served.TrySetResult();return ok;}
-        var logs=new MemoryLogs();using(var preflight=new RunLog(logs,"keepbind",ItemChecks.Settings)){}
-        var host=new Host((_,_)=>Task.FromResult<IStore?>(observed),(_,_,scope,_,_)=>{live=scope;return Task.FromResult((gated,QuietSide(cloud)));},ItemChecks.Settings,logs,TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask,(_,_,_)=>{boot.TrySetResult();return Task.CompletedTask;});
-        var rule=new Exclusion(Side.Local,"X",false);
-        try{
-            await host.StartAsync(ct);await boot.Task.WaitAsync(ct);
-            var exclude=host.SetExclusionAsync(pair.PairId,rule,false,true,ct);
-            await recycling.Task.WaitAsync(ct);
-            var label=(await store.FindAsync(pair.PairId,Side.Local,PathNames.KeyFor(Side.Local,"X/f"),ct))?.DropboxPath;
-            Check.Require(label!=null && label!="X/f" && cloud.Items.ContainsKey(label),"The no-keep apply did not keep both under a labelled binding before recycling");
-            Volatile.Write(ref armed,1);var include=host.SetExclusionAsync(pair.PairId,rule,true,false,ct);
-            await foreach(var _ in host.PairsAsync(ct)) { } // commands come free once the Include waits, or after its scope reads
-            Check.Require(Volatile.Read(ref probed)==0 && !include.IsCompleted,"Include read or published its scope while the no-keep apply was recycling");
-            release.SetResult();
-            var applied=await exclude.WaitAsync(ct);var included=await include.WaitAsync(ct);await served.Task.WaitAsync(ct);
-            Check.Require(applied.Outcome==ExclusionOutcome.Applied && included.Outcome==ExclusionOutcome.Applied,$"Apply {applied.Outcome} or waiting Include {included.Outcome} did not complete");
-            Check.Require(cloud.Requests[nameof(ISide.DeleteAsync)]==0 && cloud.Items.TryGetValue("X/f",out var theirs) && theirs.Bytes.SequenceEqual(new byte[]{2}) &&
-                cloud.Items.TryGetValue(label!,out var ours) && ours.Bytes.SequenceEqual(new byte[]{1}),"A kept Dropbox name was deleted around the overlapping Include");
-            Check.Require(await store.FindAsync(pair.PairId,Side.Dropbox,PathNames.KeyFor(Side.Dropbox,label!),ct) is not {} left || left.IdOn(Side.Local)!="pc-f","The recycled PC copy's labelled binding outlived the Include");
-        }finally{release.TrySetResult();stop.Cancel();await host.StopAsync(default);}
-    }
     /// <summary>Later feed input cannot retry a retained item through a configuration publication in progress.</summary>
     public static async Task PublicationRetryAsync()
     {

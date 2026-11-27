@@ -80,10 +80,11 @@ public static class FolderChecks
             await queue.AdmitAsync(pair,deletion,async (_,ct)=>
             {
                 var editedPage=await ItemChecks.ReadPrefixAsync(pc,ItemChecks.Journal([edit],11),ct);
-                held = queue.AdmitAsync(pair,editedPage,(_,_)=>throw new InvalidOperationException("Recovered edit ran independently"),pc.SettleJournalAsync,ct);
                 var coverage=RemovalCoverage(pc,cloud,Side.Local,a,editedPage,deletion,ct,out var verified,live);
+                held = queue.AdmitAsync(pair,editedPage,(input,token)=>ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,input,pc,cloud,store,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),token,queue.Held,coversThrough:coverage),pc.SettleJournalAsync,ct); // the kept edit runs as its own input after the folder settles
                 await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,parent,Side.Dropbox,pc,cloud,store,queue.Held,ItemChecks.Population(pair,paths,pc,cloud,store),ItemChecks.Hop(pair,paths,queue,pc,cloud,store),ct,coversThrough:coverage);
-                Check.Require(verified(),"Missing selected parent/child receipts or bounded recycle echo");
+                // The edited bound child is kept in place, so the folder is never sent and no recycle echo is owed.
+                Check.Require(!verified() && !pc.History.Any(v=>v.Entry.Id==a.Id || v.Entry.Id==live.Id),"The folder holding the edit was sent instead of kept");
             },null,default);
             Check.Require(held!=null,"Parent never admitted the held child");
             await held!;
@@ -512,6 +513,18 @@ public static class FolderChecks
         Check.Require(run.Db.Items.TryGetValue("item", out var dbAt) && dbAt.Entry.IsFolder, "The stale staged finish displaced the recovered folder");
         Check.Require(run.Pc.Items.TryGetValue("item", out var pcAt) && !pcAt.Entry.IsFolder && pcAt.Bytes.SequenceEqual(new byte[] { 3 }), "The PC file was overwritten instead of kept");
         Check.Require(run.Store.OpenNotices.Any(n => n.Kind == NoticeKind.Info && n.Cause == TextKey.InfoKeptBoth), "The competing folder did not take keep-both");
+    }
+    /// <summary>A PC edit seen only by Repair's listing, under a folder deleted on Dropbox: the edited child stays and uploads, the unchanged sibling goes to the bin.</summary>
+    public static async Task A14RepairListingOnlyEditKeptAsync()
+    {
+        var run = await StartAsync(baseline: true);
+        foreach (var (path, value) in new[] { ("d", (byte)0), ("d/c", (byte)1), ("d/s", (byte)2) })
+            await run.Store.CommitAsync(run.Pair.PairId, null, SyncedEntries.From(Seed(run.Pc, path, value, path == "d"), Seed(run.Db, path, value, path == "d")), null, null, default);
+        run.Pc.Items["d/c"] = (ItemChecks.File(Side.Local, "d/c", 3, "Local:d/c"), [3]); // same size and ID, new modified time; no journal input
+        foreach (var path in new[] { "d", "d/c", "d/s" }) run.Db.Items.Remove(path);
+        await RepairWithProofAsync(run);
+        Check.Require(Is(run.Pc, "d/c", false, 3) && Is(run.Db, "d/c", false, 3), "The listing-only edit was not kept and uploaded");
+        Check.Require(!run.Pc.Items.ContainsKey("d/s") && run.Pc.History.Any(v => v.Entry.Id == "Local:d/s") && !run.Pc.Mutations.Contains("Local:d/c"), "The unchanged sibling was kept or the edit was sent");
     }
     public static Task A14NestedRootSurvivorAsync() => DeleteAsync(nested: true);
     public static Task A14EditedLooseFileBesideExclusionAsync() => DeleteAsync(excluded: true, edited: true);
