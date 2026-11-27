@@ -32,6 +32,7 @@ internal static class SchemaUpgrade
         UpgradeV17(db, ct);
     }
 
+    // Retain one job: one ordered, inseparable schema conversion and proof in the private stage; SQL and shape model are already separate.
     private static void UpgradeV17(SqliteConnection db, CancellationToken ct)
     {
         Execute(db, Sql.Get(SqlKey.SchemaUpgradeUpgrade1));

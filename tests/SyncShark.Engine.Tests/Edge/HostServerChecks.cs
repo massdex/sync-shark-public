@@ -370,17 +370,21 @@ public static class HostServerChecks
     private static Task BrokenAcceptDuringOutageAsync() => FixtureAsync("broken accept during outage", async (server, ct, serving) => {
         var renewal = new Renewal(server);
         var trusted = 0;
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using (var gone = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.CurrentUserOnly))
             await Within(Task.Run(() => gone.Connect(0)), "The early client connect did not finish");
-        serving.Add(Serve(server, OneLine, renewal.Listen, renewal.WaitAsync, pipe => { Interlocked.Increment(ref trusted); return new MemoryStream(); }, ct));
+        var serve = Serve(server, OneLine, renewal.Listen, renewal.WaitAsync, pipe => { Interlocked.Increment(ref trusted); return new MemoryStream(); }, stop.Token);
+        serving.Add(serve);
         await Within(renewal.Waiting.Task, "A broken accept did not renew the listener");
-        // The broken-accept branch never dispatches, so trust is never asked.
-        Check.Require(Volatile.Read(ref trusted) == 0, "A broken accept took the connected-dispatch route");
         using (var contender = new HostServer()) Check.Require(await Refused(contender), "A contender claimed during the outage");
         Check.Require(await BusyAsync(), "A new client reached the host during the broken-accept outage");
         renewal.Recover();
         using var next = await ConnectAsync();
         Check.Require((await Within(ExchangeAsync(next, "x"), "The recovered listener did not serve")).Code == 0, "Recovered reply");
+        // Counted after serving joins, so every handler has run: trust only for the recovery exchange, never for the early disconnect.
+        await CancelAsync(stop);
+        await Within(serve, "Serving did not stop after cancellation");
+        Check.Require(Volatile.Read(ref trusted) == 1, "A broken accept took the connected-dispatch route");
     });
 
     // A completed reply is never disconnected, even while no successor holds the name.

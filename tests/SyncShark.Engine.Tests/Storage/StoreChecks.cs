@@ -525,10 +525,22 @@ public static class StoreChecks
             async Task<bool> Linked(string name)=>await store.FindAsync("p",Side.Local,PathNames.Key(name),default)!=null;
             static (IReadOnlyList<Notice> Tokens,Func<bool> Free) Closing(Notice n,Func<bool>? free=null)=>([n],free ?? (()=>true));
             // The writer is held inside a real write (its trigger blocks) so later calls wait at the gate.
+            // Every wait is bounded; a hold that ends before its trigger fails the check; cleanup always frees and joins the holder.
             async Task<T> Held<T>(Func<Task<T>> queued,Action whileWaiting)
             {
-                var hold=Task.Run(()=>store.CommitAsync("p",null,null,null,"HOLD",default));await entered.WaitAsync();
-                var task=queued();whileWaiting();release.Release();await hold;return await task;
+                var hold=Task.Run(()=>store.CommitAsync("p",null,null,null,"HOLD",default));var inside=false;
+                try
+                {
+                    using(var cut=new CancellationTokenSource())
+                    {
+                        var gate=entered.WaitAsync(cut.Token);
+                        if(await Edge.HostServerChecks.Within(Task.WhenAny(gate,hold),"The held commit neither reached its trigger nor ended")!=gate)
+                        { cut.Cancel();await hold;throw new InvalidDataException("The held commit ended before reaching its trigger"); }
+                    }
+                    inside=true;var task=queued();whileWaiting();inside=false;release.Release();
+                    await Edge.HostServerChecks.Within(hold,"The released holder did not finish");return await Edge.HostServerChecks.Within(task,"The queued call did not finish");
+                }
+                finally { if(inside) release.Release();await Task.WhenAny(hold,Task.Delay(Edge.HostServerChecks.Bound)); }
             }
             var wrong=new List<string>();
             var exact=await Raise("c","c");await store.CommitAsync("p",null,Bound("c"),null,null,default,closing:Closing(exact));
@@ -546,11 +558,10 @@ public static class StoreChecks
             var direct=await Raise("g","g");
             if(await Held(()=>store.CloseNoticeAsync("p",direct,default,()=>!held),()=>held=true) || !await Open(direct)) wrong.Add("A direct close decided its guard before the writer gate");
             held=false;var guardCalls=0;var retried=await Raise("h","h");var faulted=await Raise("i","i");
-            var hold=Task.Run(()=>store.CommitAsync("p",null,null,null,"HOLD",default));await entered.WaitAsync();
-            var good=store.CommitAsync("p",null,Bound("h"),null,null,default,closing:Closing(retried,()=>{guardCalls++;return true;}));
-            var bad=store.CommitAsync("p",null,Bound("i"),null,"BAD",default,closing:Closing(faulted));
-            release.Release();await hold;await good;
-            try { await bad;wrong.Add("The failing group member reported success"); } catch(SqliteException e) when(e.SqliteErrorCode==19) { }
+            var (good,bad)=await Held(()=>Task.FromResult((store.CommitAsync("p",null,Bound("h"),null,null,default,closing:Closing(retried,()=>{guardCalls++;return true;})),
+                store.CommitAsync("p",null,Bound("i"),null,"BAD",default,closing:Closing(faulted)))),()=>{});
+            await Edge.HostServerChecks.Within(good,"The group's good member did not finish");
+            try { await Edge.HostServerChecks.Within(bad,"The group's failing member did not finish");wrong.Add("The failing group member reported success"); } catch(SqliteException e) when(e.SqliteErrorCode==19) { }
             if(!await Linked("h") || await Open(retried) || guardCalls!=2) wrong.Add($"The rolled-back group did not retry the close with its guard ({guardCalls} guard calls)");
             if(await Linked("i") || !await Open(faulted)) wrong.Add("A faulted commit kept its binding or closed its token");
             using(var stop=new CancellationTokenSource())
@@ -560,7 +571,7 @@ public static class StoreChecks
                 if(await Linked("j") || !await Open(cancelled)) wrong.Add("A cancelled commit wrote its binding or closed its token");
             }
             Check.Require(wrong.Count==0,string.Join("; ",wrong));
-        },(db,opening)=>{if(opening) db.CreateFunction("hold",()=>{entered.Release();release.Wait();return 1;});});
+        },(db,opening)=>{if(opening) db.CreateFunction("hold",()=>{entered.Release();if(!release.Wait(Edge.HostServerChecks.Bound)) throw new TimeoutException("The held trigger was never released");return 1;});});
     }
 
     private static Task PausedNoticeReaderAllowsCheckpointAsync() => WithImage(async (store, sql) =>

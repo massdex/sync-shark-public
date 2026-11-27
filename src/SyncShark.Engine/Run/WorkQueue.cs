@@ -131,6 +131,7 @@ public sealed class WorkQueue
         var publish=publishPosition[source];await publish.WaitAsync(ct);
         try {if(admitted>resetAt[source]) await write();} finally {publish.Release();}
     }
+    // Retain one job: received callbacks, predecessor, item results and position publication are one page's ordered settlement; the growth adds early fault delivery without removing a join.
     private async Task FinishPage(ChangePage page,WorkInput[] entries,WorkInput[] opportunities,Task previous,TaskCompletionSource completed,int source,long admitted,
         Func<Change,CancellationToken,Task> apply,Func<JournalPosition,CancellationToken,Task>? settleJournal,Func<string,CancellationToken,Task>? settleCursor,
         Func<Change,CancellationToken,Task>? received,CancellationToken ct,Action<Exception>? fault)

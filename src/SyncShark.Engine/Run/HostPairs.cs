@@ -139,10 +139,12 @@ internal sealed class HostPairs(Host host)
     {
         try { if (Path.IsPathRooted(exclusion.Path)) throw new ArgumentException(); exclusion=exclusion with {Path=PathNames.NormalizeRelative(exclusion.Path)}; }
         catch (ArgumentException e) { throw new EngineRequestException(TextKey.ExclusionPathInvalid,(TextArg.Path,exclusion.Path),(TextArg.Message,e.Message)); }
-        await host.Commands.WaitAsync(ct);
+        await host.Commands.WaitAsync(ct); TaskCompletionSource? slot=null;
         try
         {
             var p=await host.Required(pairId,ct);
+            // A no-keep apply and its cleanup run in the pair's Manual slot: an Include of that rule waits for it, then holds the slot through its reads and publication.
+            if(include && p.Exclusions.Any(e=>!e.Keep && e.Side==exclusion.Side && PathNames.Same(e.Path,exclusion.Path))) { slot=await HoldSlot(await host.Life.Ready(p,ct),ct); p=await host.Required(pairId,ct); }
             HostMember m;
             if (!include && !exclusion.Keep && !confirmed)
             {
@@ -177,7 +179,14 @@ internal sealed class HostPairs(Host host)
             }
             await Change(m,next,include ? [mapped] : [],ct,mapped,selected:selected); return (ExclusionOutcome.Applied,0,0,0,0,null,null);
         }
-        finally { host.Commands.Release(); }
+        finally { slot?.TrySetResult(); host.Commands.Release(); }
+    }
+    // Under Commands: wait for the slot outside them, then claim it; Drain or the caller's cancellation still frees it.
+    private async Task<TaskCompletionSource> HoldSlot(HostMember m,CancellationToken ct)
+    {
+        var mine=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        while(host.Life.ClaimRepair(m,ct,token=>mine.Task.WaitAsync(token),false)==null) { Task busy; lock(m) busy=m.Manual; await host.OutsideCommands(()=>busy.WaitAsync(ct)); }
+        return mine;
     }
     private async Task Change(HostMember m,PairConfig next,IReadOnlyList<Scope> returned,CancellationToken ct,Scope? footprint=null,bool excluding=false,Exclusion? selected=null)
     {

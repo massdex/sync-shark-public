@@ -159,6 +159,7 @@ public sealed class Committer
         if (await cmd.ExecuteNonQueryAsync(ct) != 1) throw new ChangedUnderneathException(before.LocalPath);
     }
 
+    // Retain one job: validates and installs one binding, maintaining its exact path key and any alias debt in the same transaction; no second public owner.
     internal static async Task<bool> WriteAsync(SqliteTransaction tx, string pairId, SyncedEntry? before, SyncedEntry entry,
         JournalPosition? publication, CancellationToken ct, bool replacing,string? keep=null)
     {

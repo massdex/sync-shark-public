@@ -297,6 +297,7 @@ public static class CheckRegistry
             new("Run/RewindDropsOlderAdmission", Run.HostChecks.RewindDropsOlderAdmissionAsync),
             new("Run/PublicationRetry", Run.HostChecks.PublicationRetryAsync),
             new("Run/ExclusionCause", Run.HostChecks.ExclusionCauseAsync),
+            new("Run/IncludeWaitsForNoKeepApply", Run.HostChecks.IncludeWaitsForNoKeepApplyAsync),
             new("Run/PutBackAtHost", Run.HostChecks.PutBackAtHostAsync),
             new("Run/RepairReplaysJournal", Run.HostChecks.RepairReplaysJournalAsync),
             new("Run/FailedMemberRead", Run.HostChecks.FailedMemberReadAsync),

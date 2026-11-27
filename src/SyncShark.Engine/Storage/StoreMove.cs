@@ -171,6 +171,7 @@ public sealed class StoreMove
         return Path.TrimEndingDirectorySeparator(Path.GetFullPath(lines[0]));
     }
 
+    // Retain one job: one precedence matrix for published, external, local and fallback stores; sharing raw vs logical versions explicitly avoids two competing source selectors.
     private static SourceLocation? LocateSource(string root, string target, string backup, string pointer, bool hasPointer, Func<string,string,IReadOnlyList<string>,Action?> verifyConnections)
     {
         var sourceRoot = PointerRoot(root, pointer, hasPointer);

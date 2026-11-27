@@ -34,6 +34,7 @@ public static class RowExecution
     internal static async Task<bool> ExecuteAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,Row? row,IReadOnlyList<RenameCandidate> candidates,bool dirty,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry?,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,bool addOnly,Action<Notice>? failedNotice=null,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough=null,(Side Side,Entry? Occupant)? observedMissing=null,Action<Notice>? captureFailure=null)
         => (await ExecuteWithOutcomeAsync(pair,settings,events,paths,row,candidates,dirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,addOnly,failedNotice,coversThrough,observedMissing,captureFailure)).Settled;
 
+    // Retain one job: the new flag only threads the existing proof decision into the locked owner; no separate planner or effect path is introduced here.
     public static async Task<(bool Settled,EffectOutcome? Outcome,SyncAction Action)> ExecuteWithOutcomeAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,Row? row,IReadOnlyList<RenameCandidate> candidates,bool dirty,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry?,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,bool addOnly,Action<Notice>? failedNotice=null,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough=null,(Side Side,Entry? Occupant)? observedMissing=null,Action<Notice>? captureFailure=null,bool confirmedCleanup=false)
     {
         if (row is null && candidates.Count==0) throw new ArgumentException(nameof(row));
@@ -201,6 +202,7 @@ public static class RowExecution
         return keys;
     }
 
+    // Retain one job: binding freshness, exact victim and root proof must precede the effect under the same grant.
     private static async Task<(bool,EffectOutcome?)> ApplyLockedAsync(PairConfig pair,EngineSettings settings,Action<RunEvent> events,PathScope paths,SyncAction action,IReadOnlyList<RenameCandidate> candidates,(string Local,string Dropbox) endpoints,Entry? successor,Side? missing,SyncedEntry? incumbent,ISide local,ISide dropbox,IStore store,Func<Scope,Side,Recovery.Folder,CancellationToken,Task> populate,Func<SyncedEntry?,Scope,Scope?,CancellationToken,Task> compareOldBinding,CancellationToken ct,Func<Scope,IEnumerable<Change>>? heldInput,Action<string,bool>? failed,Action<Notice>? failedNotice,Func<(JournalPosition? Local,string? Dropbox),bool>? coversThrough,(Side Side,Entry? Occupant)? observedMissing,Action<Notice>? captureFailure,bool confirmedCleanup)
     {
         var row=action.Row;
