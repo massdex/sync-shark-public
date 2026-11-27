@@ -76,6 +76,9 @@ public static class ByIdAliasChecks
         var what=edited?"Edited case rename":"Case rename";
         var temporary=PathNames.CaseRenamePath("File",ItemChecks.Settings.CaseRenameSuffix);
         Check.Require(f.Db.Requests[nameof(ISide.MoveAsync)]-moves==2 && hops.SequenceEqual([("D",temporary),("D","File")]),$"{what}: the Dropbox copy did not take both case hops on its own id");
+        // SELECTOR T2: "ordered hop destinations/ids plus CaseRename:29's source/destination event"
+        var moved=events.Where(e=>e is {Kind:RunEventKind.Effect,What:nameof(ISide.MoveAsync),Side:Side.Dropbox}).Select(e=>(e.Detail,e.Path,e.Outcome)).ToList();
+        Check.Require(moved.SequenceEqual([("file",temporary,nameof(RemovalOutcome.Published)),(temporary,"File",nameof(RemovalOutcome.Published))]),$"{what}: the case hops did not report each source and destination in order");
         Check.Require(f.Db.Requests[nameof(ISide.PublishAsync)]-publishes==(edited?1:0),$"{what}: wrong number of publications");
         Check.Require(f.Db.Items.TryGetValue("File",out var now) && now.Entry.Path=="File" && now.Entry.Id=="D" && now.Bytes.SequenceEqual(new[]{value}) && !f.Db.Items.ContainsKey(temporary),$"{what}: Dropbox does not hold the file's bytes at the new spelling on its own id");
         Check.Require(await BoundAsync(f,"File") is {} bound && bound with {LocalPublished=null}==SyncedEntries.From(f.Pc.Items["File"].Entry,now.Entry),$"{what}: the binding is not at the new spelling with the current stamps");
@@ -143,7 +146,8 @@ public static class ByIdAliasChecks
             await PageAsync(f,queue,e=>{ lock(events) events.Add(e); },new Change(Side.Local,ChangeKind.Renamed,"B","A",Id,b,false,false,1,JournalId:1),what);
             Check.Require(f.Db.Requests[nameof(ISide.MoveAsync)]-moves==1 && hops.SequenceEqual([("D","B")]) && !f.Db.Items.ContainsKey("A"),$"{what}: the Dropbox copy did not move once from the old name");
             Check.Require(await BoundAsync(f,"B") is {DropboxPath:"B",DropboxId:"D"} && await BoundAsync(f,"C")==bindC && f.Db.Items["C"].Entry==dbC,$"{what}: wrong bindings or the other name changed");
-            Check.Require(events.Count(RetryWait)<=(bFirst?0:1),$"{what}: more retry waits than the other-name-first replay allows");
+            // SELECTOR T6: "run 1 seeds B before C (no post-commit Retain), run 2 seeds C first with exactly one allowed WaitItemRetry"
+            Check.Require(events.Count(RetryWait)==(bFirst?0:1),$"{what}: not the exact retry-wait count of its read order");
             Settled(f,what);
         }
     }

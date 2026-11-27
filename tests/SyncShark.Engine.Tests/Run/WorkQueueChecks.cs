@@ -407,6 +407,7 @@ public static class WorkQueueChecks
         await Task.WhenAll(rowWork,retainedPage);
         Check.Require(regressions.Count==0,string.Join("; ",regressions));
         await FailedPublicationReleasesHeldInputAsync();
+        await FailedStorePublicationReleasesHeldInputAsync();
         await TombstoneWaitingForProofNoticeAsync();
     }
 
@@ -435,6 +436,59 @@ public static class WorkQueueChecks
             catch(Exception e) when(e==failure || e is OperationCanceledException && !end.IsCancellationRequested) { }
             await page.WaitAsync(end.Token); if(retry!=null) await retry.WaitAsync(end.Token);
             Check.Require(runs==1,$"The input behind a failed publication (cancelled={cancelled}, held={held}) did not run exactly once");
+        }
+    }
+
+    // T4 through the store: a scope publication whose store save fails or is cancelled before commit leaves the scope in force.
+    // L15 R5 2A: "(a) and (b) run in both timing orders (P's fault before and after the dependant is claimed), through the real failing
+    // store publication, with no scope update observed"; "the dependant re-reads CurrentScope (unchanged) at its run; A's retry runs once
+    // and settles; both pages publish".
+    private static async Task FailedStorePublicationReleasesHeldInputAsync()
+    {
+        var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+        var publish=typeof(WorkQueue).GetMethod("PublishAsync",flags) ?? throw new InvalidOperationException("WorkQueue.PublishAsync seam missing");
+        var scopeNow=typeof(WorkQueue).GetProperty("ScopeNow",flags) ?? throw new InvalidOperationException("WorkQueue.ScopeNow seam missing");
+        foreach(var cancelled in new[]{false,true}) foreach(var held in new[]{false,true}) foreach(var faultFirst in new[]{false,true})
+        {
+            var name=$"cancelled={cancelled}, held={held}, faultFirst={faultFirst}";
+            using var end=new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var store=new InMemoryStateStore(); var pair=ItemChecks.Pair(); await store.SavePairAsync(pair,default);
+            // As Host.OnPairChanged: the live scope changes only when the store publishes a committed pair.
+            var before=new PathScope(pair,[pair],DriveType.Fixed); var current=before;
+            store.PairChanged=p=>Volatile.Write(ref current,new PathScope(p,[p],DriveType.Fixed));
+            var queue=new WorkQueue(); scopeNow.SetValue(queue,(Func<PathScope>)(()=>Volatile.Read(ref current)));
+            var fallback=new PathScope(pair,[pair],DriveType.Fixed);
+            var seen=new List<PathScope>(); var settled=new List<JournalPosition>(); var ready=!held;
+            var change=new Change(Side.Local,ChangeKind.Changed,"a",null,"id:a",null,false,false);
+            Task Apply(Change _,CancellationToken __) { if(!Volatile.Read(ref ready)) throw new WorkQueue.Unsettled(); lock(seen) seen.Add(queue.CurrentScope(fallback)); return Task.CompletedTask; }
+            Task Settle(JournalPosition at,CancellationToken _) { lock(settled) settled.Add(at); return Task.CompletedTask; }
+            // Held: A parks before the publication, so the publication becomes A's prerequisite.
+            var first=held ? queue.AdmitAsync(pair,new([change],null,new(1,1)),Apply,Settle,end.Token) : Task.CompletedTask;
+            Volatile.Write(ref ready,true);
+            var gate=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var command=new CancellationTokenSource(); if(cancelled) command.Cancel();
+            Exception? thrown=null;
+            var publication=(Task)publish.Invoke(queue,[new[]{"a"},(Func<Task>)(async ()=>{
+                await gate.Task;
+                // The store refuses before commit: a returned scope with an unknown owner, or the command's cancellation.
+                try { await store.SavePairAsync(pair with {IgnoreRules=["*.tmp"]},command.Token,[("absent-owner",new Scope("a","a"))]); }
+                catch(Exception e) { thrown=e; throw; }
+            }),end.Token])!;
+            Task Next()=>queue.AdmitAsync(pair,new([change],null,new(1,2)),Apply,Settle,end.Token);
+            // Not fault first: the next page is admitted, so a held A's retry waits in Claim behind the publication.
+            var next=faultFirst ? null : Next();
+            lock(seen) Check.Require(seen.Count==0 && !publication.IsCompleted && (next==null || !next.IsCompleted),$"{name}: an input ran before the publication it follows ended");
+            gate.SetResult();
+            try { await publication.WaitAsync(end.Token); throw new InvalidDataException($"{name}: a failed store publication reported success to its caller"); }
+            catch(Exception e) when(thrown!=null && (e==thrown || cancelled && e is OperationCanceledException && !end.IsCancellationRequested)) { }
+            Check.Require(thrown is var t && (cancelled ? t is OperationCanceledException : t is InvalidDataException),$"{name}: the store did not refuse the publication");
+            next??=Next();
+            try { await Task.WhenAll(first,next).WaitAsync(end.Token); }
+            catch(OperationCanceledException) when(end.IsCancellationRequested) { throw new InvalidDataException($"{name}: the input behind a failed store publication never settled"); }
+            lock(seen) Check.Require(seen.Count==(held?2:1) && seen.All(s=>ReferenceEquals(s,before)),$"{name}: an input did not run exactly once under the unchanged live scope");
+            lock(settled) Check.Require(settled.SequenceEqual(held ? new JournalPosition[]{new(1,1),new(1,2)} : new JournalPosition[]{new(1,2)}),$"{name}: a page behind the failed publication did not publish");
+            Check.Require(ReferenceEquals(Volatile.Read(ref current),before) && (await store.PairAsync(pair.PairId,default))!.IgnoreRules.SequenceEqual(pair.IgnoreRules),
+                $"{name}: a failed store publication changed the scope");
         }
     }
 

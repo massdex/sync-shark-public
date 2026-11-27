@@ -1273,6 +1273,8 @@ public static class CallBudgetChecks
             await Add(0, half); var first = Sample(half); await Add(half, size - half); var last = Sample(size);
             var page = await StoragePageSizeAsync(measured);
             Check.Require(first > empty && last > first, "Storage image did not grow at both workloads");
+            // Each B-tree may end a half on a partly filled leaf or gain a root level: one page per B-tree in the image (sqlite_schema itself included).
+            using (var schema = db.CreateCommand()) { schema.CommandText = "SELECT count(*)+1 FROM sqlite_schema WHERE rootpage>0"; page *= Convert.ToInt64(schema.ExecuteScalar()); }
             AtMost(last - first, (first - empty) * (size - half) / half + page, "marginal storage bytes per additional item");
             if (scratch)
             {
@@ -1286,16 +1288,16 @@ public static class CallBudgetChecks
                 if (scratch) { await store.AddScanAsync(pair.PairId, scan, Side.Local, Rows(start, count), null, default); return; }
                 foreach (var chunk in Enumerable.Range(start, count).Chunk(ItemChecks.Settings.StoreBatchRows))
                     await Task.WhenAll(chunk.Select(i => { string path = Realistic(i);
-                        return store.CommitAsync(pair.PairId, null, SyncedEntries.From(ItemChecks.File(Side.Local,path,1,$"l-{i}"), ItemChecks.File(Side.Dropbox,path,1,$"d-{i}")), null, null, default); }));
+                        return store.CommitAsync(pair.PairId, null, SyncedEntries.From(ItemChecks.File(Side.Local,path,1,$"l-{i:D19}"), ItemChecks.File(Side.Dropbox,path,1,$"d-{i:D19}")), null, null, default); }));
             }
         }
         finally { dir.Delete(true); }
         static async IAsyncEnumerable<Listed> Rows(int start, int count)
         {
             await Task.CompletedTask;
-            foreach (var i in Enumerable.Range(start, count)) { string path = Realistic(i); yield return new(path, ItemChecks.File(Side.Local, path, 1, $"l-{i}")); }
+            foreach (var i in Enumerable.Range(start, count)) { string path = Realistic(i); yield return new(path, ItemChecks.File(Side.Local, path, 1, $"l-{i:D19}")); }
         }
-        // Realistic shape: a 125-character folder, a 19-character name, 10 items per folder.
+        // Realistic shape: a 125-character folder, a 19-character name, 10 items per folder; ids are fixed width like real file ids, so per-item bytes stay constant.
         static string Realistic(int i) => $"{i / 10:D125}/{i:D19}";
     }
     internal static async Task CreateStoreImageAsync(string image)

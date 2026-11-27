@@ -12,7 +12,7 @@ public static class FolderDeleteChecks
     public static async Task RunAsync()
     {
         var failures=new List<string>();var missing=new List<string>();
-        foreach(var test in new Func<Task>[]{()=>SelectedCloudWindowAsync(["latest"]),()=>SelectedCloudWindowAsync(["unverified"]),()=>SelectedCloudWindowAsync(["moved"]),()=>SelectedCloudWindowAsync(["missing"]),SelectedChildrenAsync,DefiniteNoEffectAsync,SameIdRetryAsync,MovedOutEvidenceAsync,LocatedFileRetryAsync,ExcludedPhysicalAsync,IgnoredPhysicalAsync,NestedPhysicalAsync,AncestorAsync,()=>OutsideFolderAsync(true),()=>OutsideFolderAsync(false),RemovalHopLeavesLiveDescendant,ArmedSiblingsAsync,ImmediateBoundaryAsync,SupersededRevisionAsync,RecoveryAsync,PartialAsync,OutsideAsync,TombstoneAsync,ForeignTombstoneAsync,ExcludedAsync,UnreadableAsync,CostAsync,NamespaceAsync,MappedAsync,FolderRetryAsync,ReceiptOrderAsync,LateMergeAsync,CrashAfterFirstAsync,LostReplyAsync,NewerAsync,KeptTreeAsync,CoveredAsync,ConflictAsync,ReceiptCoverageAsync,ConflictingLiveAsync,SubstituteAsync,StrandedAsync,SubFolderAsync,QuietAsync,RecycleBeforeReaderSeesItAsync,RootProofAsync,UnreadableVetoAsync})
+        foreach(var test in new Func<Task>[]{()=>SelectedCloudWindowAsync(["latest"]),()=>SelectedCloudWindowAsync(["unverified"]),()=>SelectedCloudWindowAsync(["moved"]),()=>SelectedCloudWindowAsync(["missing"]),SelectedChildrenAsync,DefiniteNoEffectAsync,SameIdRetryAsync,MovedOutEvidenceAsync,LocatedFileRetryAsync,ExcludedPhysicalAsync,IgnoredPhysicalAsync,NestedPhysicalAsync,AncestorAsync,()=>OutsideFolderAsync(true),()=>OutsideFolderAsync(false),RemovalHopLeavesLiveDescendant,ArmedSiblingsAsync,ImmediateBoundaryAsync,SupersededRevisionAsync,RecoveryAsync,PartialAsync,OutsideAsync,TombstoneAsync,ForeignTombstoneAsync,ExcludedAsync,UnreadableAsync,CostAsync,NamespaceAsync,MappedAsync,FolderRetryAsync,ReceiptOrderAsync,LateMergeAsync,CrashAfterFirstAsync,LostReplyAsync,NewerAsync,KeptTreeAsync,CoveredAsync,ConflictAsync,ReceiptCoverageAsync,ConflictingLiveAsync,SubstituteAsync,StrandedAsync,SubFolderAsync,QuietAsync,RecycleBeforeReaderSeesItAsync,RootProofAsync,UnreadableVetoAsync,RecycleBeforeReaderSplitAsync,RemovalCommitCloseAsync,NoTokenZeroWorkAsync})
         {
             try {await test();}
             catch(NotImplementedException) {missing.Add(test.Method.Name);}
@@ -34,6 +34,77 @@ public static class FolderDeleteChecks
         var result=await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),root,saved,Side.Local,ActionKind.DeleteLocal,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,coversThrough:Covers);
         Check.Require(result.Outcome==RemovalOutcome.Pending && result.Cause==null && store.OpenNotices.Count==0 && store.Records.Values.Contains(saved) && pc.History.Any(v=>v.Entry.Id==root.Id),
             "A folder recycle not yet read by the reader raised a Failure or settled instead of waiting");
+    }
+
+    /// <summary>Split variant: a child whose post-send check is behind keeps Retained, the next independent child is still attempted, and the first sibling's cause is the folder's.</summary>
+    internal static async Task RecycleBeforeReaderSplitAsync()
+    {
+        foreach(var refusedFirst in new[]{false,true})
+        {
+            var pair=ItemChecks.Pair() with {Exclusions=[new(Side.Local,"p/kept",true)]};using var store=new InMemoryStateStore();var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);
+            var root=ItemChecks.File(Side.Local,"p",0,"root",true);var a=ItemChecks.File(Side.Local,"p/a",1,"a");var b=ItemChecks.File(Side.Local,"p/b",2,"b");var kept=ItemChecks.File(Side.Local,"p/kept",3,"kept");
+            pc.Seed(root,[]);pc.Seed(a,[1]);pc.Seed(b,[2]);pc.Seed(kept,[3]);
+            var saved=SyncedEntries.From(root,root with {Id="gone"});await store.CommitAsync(pair.PairId,null,saved,null,null,default);
+            if(refusedFirst) pc.RecycleRefusals[a.Path]=new ItemFailedException(a.Path,TextKey.FailChanged,null);
+            // a refused: a's send never reaches a check, so b's post-send check is the behind one; otherwise a's is.
+            var admitted=Admitted(pc,db);int checks=0;int behind=refusedFirst?3:2;
+            bool Covers((JournalPosition? Local,string? Dropbox) fence)=>admitted(fence) && ++checks!=behind;
+            var result=await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),root,saved,Side.Local,ActionKind.DeleteLocal,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,coversThrough:Covers);
+            // "Split variant: two independent children, the first child's post-send check behind -> the second child is still attempted this turn; an earlier sibling refusal's cause is the folder's cause."
+            Check.Require(result.Outcome==RemovalOutcome.Retained && result.Cause==(refusedFirst?TextKey.FailChanged:TextKey.RetryRecoveryRequired) && pc.Mutations.Contains(b.Id) && pc.History.Any(v=>v.Entry.Id==b.Id && v.Bytes.SequenceEqual(new byte[]{2})),
+                $"A split child's behind check stopped its sibling or replaced the first cause (refusedFirst={refusedFirst}): {result.Outcome}/{result.Cause}");
+            // No version ends up nowhere: each child is either in place or in the bin, the kept child and the folder binding stay.
+            Check.Require(pc.Items[root.Path].Entry==root && pc.Items[kept.Path].Bytes.SequenceEqual(new byte[]{3}) && store.Records.Values.Contains(saved) && (refusedFirst?pc.Items[a.Path].Bytes.SequenceEqual(new byte[]{1}):pc.History.Any(v=>v.Entry.Id==a.Id && v.Bytes.SequenceEqual(new byte[]{1}))),
+                $"A split removal lost a child version or its folder binding (refusedFirst={refusedFirst})");
+        }
+    }
+
+    /// <summary>The removal commit closes its own exact earlier Failure only when no held input arrived before the close, also while the commit waits on the store.</summary>
+    internal static async Task RemovalCommitCloseAsync()
+    {
+        foreach(var arm in new[]{"none","queued","admitted"})
+        {
+            var pair=BoundPair();using var store=new InMemoryStateStore();var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);
+            var root=ItemChecks.File(Side.Local,"p",0,"root",true);var child=ItemChecks.File(Side.Local,"p/c",1,"c");pc.Seed(root,[]);pc.Seed(child,[1]);
+            var saved=SyncedEntries.From(root,root with {Id="gone"});await store.CommitAsync(pair.PairId,null,saved,null,null,default);
+            await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,TextKey.FailChanged,root.Path,new([new(Side.Local,root.Path,root.Id)],Side.Local),DateTimeOffset.UnixEpoch,false),default);
+            var held=new List<Change>();var late=new Change(Side.Local,ChangeKind.Changed,"p/late",null,"late",ItemChecks.File(Side.Local,"p/late",2,"late"),true,false);
+            // (c2') input admitted while the commit waits on the store gate: added inside the commit call, before the guard runs.
+            var gated=Observe.Wrap<IStore>(store,(op,args)=>{if(arm=="admitted" && op==nameof(IStore.CommitAsync) && args[7]!=null) held.Add(late);return null;});
+            var result=await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),root,saved,Side.Local,ActionKind.DeleteLocal,pc,db,gated,_=>held.ToArray(),(_,_,_,_)=>Task.CompletedTask,
+                (_,_,_,_)=>{if(arm=="queued") held.Add(late);return Task.CompletedTask;},default,coversThrough:Admitted(pc,db)); // (c) queued after the recovered cohort, before the close
+            // "removal child (FolderRemoval:302): (c) held input queued before the close -> open; (c2') ... -> binding committed, open; (e) none -> closed."
+            Check.Require(result.Outcome==RemovalOutcome.Removed && !store.Records.Values.Contains(saved) && store.OpenNotices.Count==(arm=="none"?0:1),$"Removal commit close ({arm}): {result.Outcome}, open={store.OpenNotices.Count}");
+            Check.Require(pc.History.Any(v=>v.Entry.Id==root.Id) && pc.History.Any(v=>v.Entry.Id==child.Id && v.Bytes.SequenceEqual(new byte[]{1})),$"Removal commit close ({arm}) lost a recycled version");
+        }
+    }
+
+    /// <summary>The removal commit's close costs the same at two tree sizes for the same sparse notices, and nothing without them.</summary>
+    internal static async Task NoTokenZeroWorkAsync()
+    {
+        var work=new Dictionary<(bool Noticed,int Size),(int Lookups,int Closings,int Tokens,int Open)>();
+        foreach(var noticed in new[]{false,true}) foreach(var size in new[]{1,3})
+        {
+            var pair=BoundPair();using var store=new InMemoryStateStore();var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);
+            var root=ItemChecks.File(Side.Local,"p",0,"root",true);pc.Seed(root,[]);
+            for(int i=0;i<size;i++){var c=ItemChecks.File(Side.Local,$"p/c{i}",(byte)(i+1),"c"+i);pc.Seed(c,[(byte)(i+1)]);await store.CommitAsync(pair.PairId,null,SyncedEntries.From(c,c with {Id="gone-c"+i}),null,null,default);}
+            var saved=SyncedEntries.From(root,root with {Id="gone"});await store.CommitAsync(pair.PairId,null,saved,null,null,default);
+            if(noticed) await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Failure,TextKey.FailChanged,root.Path,new([new(Side.Local,root.Path,root.Id)],Side.Local),DateTimeOffset.UnixEpoch,false),default);
+            int lookups=0,closings=0,tokens=0;
+            var counted=Observe.Wrap<IStore>(store,(op,args)=>
+            {
+                if(op is nameof(IStore.NoticesUnderAsync) or nameof(IStore.NoticesAtAsync)) lookups++;
+                if(op==nameof(IStore.CommitAsync) && args[7] is ValueTuple<IReadOnlyList<Notice>,Func<bool>> closing) {closings++;tokens+=closing.Item1.Count;}
+                return null;
+            });
+            var result=await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),root,saved,Side.Local,ActionKind.DeleteLocal,pc,db,counted,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,coversThrough:Admitted(pc,db));
+            Check.Require(result.Outcome==RemovalOutcome.Removed && pc.History.Count(v=>!v.Entry.IsFolder)==size,$"Counted removal did not recycle every child (size {size})");
+            work[(noticed,size)]=(lookups,closings,tokens,store.OpenNotices.Count);
+        }
+        // "NoTokenZeroWork: counted at FolderRemoval:302 only. Two total sizes, same sparse notice set -> identical lookups and closes; an empty `tokens` passes closing:null."
+        Check.Require(work[(false,1)].Closings==0 && work[(false,3)].Closings==0,"A removal with no closable notice passed a close to its commit");
+        Check.Require(work[(true,1)]==work[(true,3)] && work[(false,1)].Lookups==work[(false,3)].Lookups && work[(true,1)] is {Closings:1,Tokens:1,Open:0},
+            "Removal close work grew with the tree: "+string.Join(",",work.Select(x=>$"{x.Key}={x.Value}")));
     }
 
     /// <summary>A Dropbox-absence folder effect acts only under the proved saved Dropbox root; the proof does not grow with the tree.</summary>
@@ -373,7 +444,7 @@ public static class FolderDeleteChecks
         if(mode is not ("legacy-mapped" or "legacy-failure" or "folder-grant")) subject=subject with {DropboxVersion=new(ns,PathNames.RootedDropboxPath(pair.DropboxRoot,v.Path),v)};
         await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.PutBack,TextKey.FailChanged,v.Path,subject,DateTimeOffset.UnixEpoch,false),default);
         var notice=store.OpenNotices.Single();var r3=ItemChecks.File(Side.Dropbox,v.Path,3,v.Id) with {Modified=v.Modified};
-        var edit=new Change(Side.Dropbox,ChangeKind.Changed,v.Path,null,v.Id,v,false,false);var tomb=edit with {Kind=ChangeKind.Deleted,Id=null,Observed=null};
+        var edit=new Change(Side.Dropbox,ChangeKind.Changed,v.Path,null,v.Id,v,false,false);int echoAcks=0;var tomb=edit with {Kind=ChangeKind.Deleted,Id=null,Observed=null,ConsumeHeld=()=>echoAcks++};
         db.Recoverable[(v.Id,v.Revision,v.ContentHash)]=new Recovery.File(v,new MemoryStream([2]));
         db.DeletedHistory[v.Path]=new DeletionEvidence.DeletedFile(v.Path,ns,v.Id,r3.Revision,DateTimeOffset.UnixEpoch,null,r3.ContentHash,null);
         if(mode=="moved-away") db.Seed(v with {Path="elsewhere/c"},[2]);
@@ -385,7 +456,7 @@ public static class FolderDeleteChecks
         });
         if(mode=="stale-echo") r3=ItemChecks.File(Side.Dropbox,v.Path,1,v.Id);
         if(mode=="stale-echo") db.DeletedHistory[v.Path]=new DeletionEvidence.DeletedFile(v.Path,ns,v.Id,v.Revision,DateTimeOffset.UnixEpoch,null,v.ContentHash,null);
-        bool entered=false;IEnumerable<Change> Held(Scope _) {entered=true;return mode is "backdated" or "stale-echo"?[edit with {Observed=r3},tomb,tomb,tomb]:[edit];}
+        bool entered=false;IEnumerable<Change> Held(Scope _) {entered=true;return mode is "backdated" or "stale-echo"?[edit with {Observed=r3},tomb,tomb,tomb,edit]:[edit];} // CONTRACT 4.2: "append the pinned report after the echoes, for both modes"
         var newer=notice with {At=DateTimeOffset.UnixEpoch.AddTicks(1),Subject=subject with {DropboxVersion=new(ns,PathNames.RootedDropboxPath(pair.DropboxRoot,v.Path),r3)}};
         bool populated=false;
         var targetStore=Observe.Wrap<IStore>(store,(op,args)=>{
@@ -407,7 +478,7 @@ public static class FolderDeleteChecks
             Task<bool> pending;try{pending=Retry();Check.Require(!populated && !pending.IsCompleted,"Folder populated under a held receiving child");}finally{release.SetResult(true);await holder;}
             Check.Require(await pending && populated,"Folder did not populate after child release");return;
         }
-        if(mode=="backdated"){Check.Require(!await Retry() && pc.Items.Count==0 && db.Items.Count==0 && store.OpenNotices.Contains(notice) && db.Requests[nameof(ISide.DeletedAsync)]==1,"Backdated independent deletion was reversed");return;}
+        if(mode=="backdated"){Check.Require(!await Retry() && pc.Items.Count==0 && db.Items.Count==0 && store.OpenNotices.Contains(notice) && db.Requests[nameof(ISide.DeletedAsync)]==1,"Backdated independent deletion was reversed");Check.Require(echoAcks==0,"A history-corroborated tombstone was acknowledged as an echo");return;} // "backdated ... requires echoAcks==0"
         if(mode=="moved-away"){Check.Require(!await Retry() && pc.Items.Count==0 && db.Items.Count==1 && db.Items.ContainsKey("elsewhere/c") && store.OpenNotices.Any(n=>n.Subject.DropboxVersion==subject.DropboxVersion),"Live moved ID was published again");return;}
         if(mode=="legacy-failure"){Check.Require(!await Retry() && attempted && store.OpenNotices.Single().Subject.DropboxVersion?.Entry==v && store.OpenNotices.Single().At==notice.At,"Legacy recovery failed before its exact checkpoint");return;}
         Task<bool> retry;
@@ -421,6 +492,7 @@ public static class FolderDeleteChecks
         else retry=Retry();
         Check.Require(await retry && pc.Items.TryGetValue("mapped/c",out var a) && a.Bytes.SequenceEqual(new byte[]{2}) && db.Items[v.Path].Bytes.SequenceEqual(new byte[]{2}),"Mapped held edit did not recover after grant release");
         if(mode=="stale-echo") Check.Require(db.Requests[nameof(ISide.DeletedAsync)]==1,"Repeated stale echoes read history more than once");
+        if(mode=="stale-echo") Check.Require(echoAcks==3,"Superseded path-only echoes were not each acknowledged: "+echoAcks); // "stale-echo requires echoAcks==3 (positive)"
     }
     private static Task PartialAsync()=>Replay(0);
     private static Task OutsideAsync()=>Replay(1);

@@ -765,6 +765,14 @@ public static class ReconciliationChecks
                 Check.Require(new PathScope(p1, [p1, p2], type).NestedRoots(Side.Local).Count == 0 &&
                     new PathScope(p2, [p1, p2], type).NestedRoots(Side.Local).Count == 0,
                     "A pair whose local root is the same volume root was held as a nested root");
+            // L20 R2 3.4: "the bin item is never read by either pair (no listing request under it, no upload)". The local listing
+            // prunes every name its scope excludes (DirectoryListing.ListEntry), so on a removable volume root both scopes must hold
+            // out the bin folder and what is under it; on a fixed volume there is no bin boundary.
+            foreach (var type in new[] { DriveType.Removable, DriveType.Fixed })
+                foreach (var scope in new[] { new PathScope(p1, [p1, p2], type), new PathScope(p2, [p1, p2], type) })
+                    Check.Require(scope.Excludes("Recycle Bin", null, true) == (type == DriveType.Removable) &&
+                        scope.Excludes("Recycle Bin/old", null, false) == (type == DriveType.Removable) && !scope.Excludes("u", null, false),
+                        $"A {type} volume-root scope did not prune exactly the volume bin");
             var local = new FakeSide(Side.Local); var x = new FakeSide(Side.Dropbox); var y = new FakeSide(Side.Dropbox);
             var d = ItemChecks.File(Side.Local, "d", 1, "pc-d"); var u = ItemChecks.File(Side.Local, "u", 2, "pc-u");
             var e = ItemChecks.File(Side.Local, "e", 3, "pc-e"); var bin = ItemChecks.File(Side.Local, "Recycle Bin/old", 4, "bin-old");

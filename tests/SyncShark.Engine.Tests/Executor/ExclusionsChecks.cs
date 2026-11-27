@@ -438,16 +438,17 @@ public static class ExclusionsChecks
     private static async Task NoKeepKeepBothAsync()
     {
         var exclusion = new Exclusion(Side.Local, "X", false);
-        var pair = Scenarios.ItemChecks.Pair() with { Exclusions = [exclusion] };
-        // A fresh apply owes its path: unowed is the re-created-item case, where newest wins instead of keep both.
-        using var store = new TestDoubles.InMemoryStateStore(); await store.SavePairAsync(pair, default, [(pair.PairId, new Scope("X", "X"))]);
-        pair = (await store.PairAsync(pair.PairId, default))!;
-        var paths = new PathScope(pair, [pair], DriveType.Fixed);
-        var pc = new TestDoubles.FakeSide(Side.Local) { OutOfScope = p => PathNames.IsSelfOrUnder(p, "X") };
-        var db = new TestDoubles.FakeSide(Side.Dropbox);
-        db.Seed(Scenarios.ItemChecks.File(Side.Dropbox, "X", 0, "db-X", true), []); db.Seed(Scenarios.ItemChecks.File(Side.Dropbox, "X/f", 2, "db-f"), [2]);
         foreach (byte version in new byte[] { 1, 3 })
         {
+            // Each version starts unbound: the earlier apply's keep-both link would otherwise make this one a bound edit.
+            var pair = Scenarios.ItemChecks.Pair() with { Exclusions = [exclusion] };
+            // A fresh apply owes its path: unowed is the re-created-item case, where newest wins instead of keep both.
+            using var store = new TestDoubles.InMemoryStateStore(); await store.SavePairAsync(pair, default, [(pair.PairId, new Scope("X", "X"))]);
+            pair = (await store.PairAsync(pair.PairId, default))!;
+            var paths = new PathScope(pair, [pair], DriveType.Fixed);
+            var pc = new TestDoubles.FakeSide(Side.Local) { OutOfScope = p => PathNames.IsSelfOrUnder(p, "X") };
+            var db = new TestDoubles.FakeSide(Side.Dropbox);
+            db.Seed(Scenarios.ItemChecks.File(Side.Dropbox, "X", 0, "db-X", true), []); db.Seed(Scenarios.ItemChecks.File(Side.Dropbox, "X/f", 2, "db-f"), [2]);
             pc.Seed(Scenarios.ItemChecks.File(Side.Local, "X", 0, "pc-X" + version, true), []); pc.Seed(Scenarios.ItemChecks.File(Side.Local, "X/f", version, "pc-f" + version), [version]);
             var infos = store.OpenNotices.Count(n => n.Cause == TextKey.InfoKeptBoth);
             var result = await new Exclusions().ApplyAsync(pair, Scenarios.ItemChecks.Settings, _ => { }, paths, exclusion, pc, db, store,

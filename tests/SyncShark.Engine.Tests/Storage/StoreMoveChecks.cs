@@ -457,7 +457,8 @@ public static class StoreMoveChecks
         async Task Aborts(string step,Func<Task> write)
         {
             var snapshot=Snapshot();
-            try { await write();wrong.Add(step+": the colliding write committed"); } catch(Exception e) when(e is SqliteException or ChangedUnderneathException) { }
+            // Only a constraint abort or the guarded write's refusal counts; any other failure is not the collision under test.
+            try { await write();wrong.Add(step+": the colliding write committed"); } catch(SqliteException e) when(e.SqliteErrorCode==19) { } catch(ChangedUnderneathException) { }
             if(Snapshot()!=snapshot) wrong.Add(step+": the aborted write changed bindings or keys");
         }
         static string K(string path)=>PathNames.Key(path);
@@ -476,10 +477,31 @@ public static class StoreMoveChecks
         await Write("bound target",null,E("K/c","k"));
         await Write("folder rename onto a bound child",E("H","f",folder:true),E("K","f",folder:true));
         await Aborts("rebase onto a bound key",()=>committer.ProjectSubtreeAsync(db,"p",new("H","H"),new("K","K"),default));
+        // T5: "Rebase success with local-only, remote-only and mixed rows, including KEEP rows on both sides and an explicit row whose Dropbox side collides with a local name"
+        await Write("keep folder",null,E("P","pf",folder:true));await Write("mixed",null,E("P/m","m"));await Write("local-only",null,E("P/s","s","Y/s"));
+        await Write("explicit on a local name",null,E("Q/x","x","P/s"),("x",$"Q/|x|'{K("P/s")}'|'P/s'|{K("Q/x")}"));await Write("remote-only",null,E("G/q","q","P/q"));
+        Fx.Exec(db,"UPDATE synced_entry SET keep='[\"a\"]' WHERE local_id='s';UPDATE synced_entry SET keep='[\"b\"]' WHERE local_id='q'");
+        string Derive()
+        {
+            using var cmd=db.CreateCommand();cmd.CommandText=Sql.Get(SqlKey.KeepRowsDerive);cmd.Parameters.AddWithValue("$p","p");using var rd=cmd.ExecuteReader();var rows=new List<string>();
+            while(rd.Read()) rows.Add(string.Join("|",new[]{0,1,2,5,6,7}.Select(rd.GetValue)));
+            return string.Join(";",rows);
+        }
+        var s=Fx.Scalar(db,"SELECT id FROM synced_entry WHERE local_id='s'");var q=Fx.Scalar(db,"SELECT id FROM synced_entry WHERE local_id='q'");
+        // T5: "KEEP: the ordered Derive list (id, local path, Dropbox path, key, type, value) equals a literal before and after the rebase"
+        if(Derive() is var kept && kept!=$"{s}|P/s|Y/s|0|text|a;{q}|G/q|P/q|0|text|b") wrong.Add("KEEP legs before the rebase: "+kept);
+        await Write("keep folder rename",E("P","pf",folder:true),E("T","pf",folder:true));
+        await Project("keep rebase","P","T",("m",$"T/|m|NULL|NULL|{K("T/m")}"),("s",$"T/|s|'{K("Y/s")}'|'Y/s'|{K("T/s")}"),("x",$"Q/|x|'{K("T/s")}'|'T/s'|{K("Q/x")}"),("q",$"G/|q|'{K("T/q")}'|'T/q'|{K("G/q")}"));
+        if(Derive() is var moved && moved!=$"{s}|T/s|Y/s|0|text|a;{q}|G/q|T/q|0|text|b") wrong.Add("KEEP legs after the rebase: "+moved);
         Fx.Exec(db,"DELETE FROM pair WHERE pair_id='p'");
         if(Snapshot()!="#") wrong.Add("pair removal left bindings or keys: "+Snapshot());
         Fx.Exec(db,"INSERT INTO pair(pair_id,def_json) VALUES('p','{}')");
         await Write("re-created pair",null,E("H/c","c2"),("c2",$"H/|c|NULL|NULL|{K("H/c")}"));
+        // T5: "Writes: ... ResolveDrive delete-all"; another pair's binding at the same key keeps its row and key.
+        Fx.Exec(db,"INSERT INTO pair(pair_id,def_json) VALUES('q','{}')");await committer.CommitAsync(db,"q",null,E("H/c","cq"),null,null,default);
+        using(var resolve=db.CreateCommand()){resolve.CommandText=Sql.Get(SqlKey.PairTableResolveDrive2);resolve.Parameters.AddWithValue("$p","p");resolve.ExecuteNonQuery();}
+        Keys("resolve drive");
+        if(Row("c2")!="absent" || Row("cq")!=$"H/|c|NULL|NULL|{K("H/c")}") wrong.Add($"resolve drive: p kept {Row("c2")}, q has {Row("cq")}");
         Check.Require(wrong.Count==0,string.Join("; ",wrong));
     }
 
@@ -494,6 +516,8 @@ public static class StoreMoveChecks
             texts.Clear();await committer.CommitAsync(db,"p",before,after,null,null,default);
             var n=texts.Count(t=>System.Text.RegularExpressions.Regex.IsMatch(t,@"\bINSERT\s+(?:OR\s+\w+\s+)?INTO\s+folder\b",System.Text.RegularExpressions.RegexOptions.IgnoreCase));
             if(n!=expected) wrong.Add($"{step}: {n} folder intern statements");
+            // T7: "content-only update and same-folder rename issue no INSERT INTO folder and bind NULL $parent" (legacy trace text carries bound values).
+            if(before!=null && texts.FirstOrDefault(t=>t.StartsWith("UPDATE synced_entry SET folder_id=iif(")) is var update && update?.Contains("iif(NULL IS NULL")!=(expected==0)) wrong.Add($"{step}: $parent in {update ?? "no update"}");
         }
         await Interns("insert",null,E("A/x","a"),1);
         await Interns("content-only update",E("A/x","a"),E("A/x","a",size:2),0);

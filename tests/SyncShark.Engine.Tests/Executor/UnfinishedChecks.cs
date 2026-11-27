@@ -20,7 +20,7 @@ public static class UnfinishedChecks
         foreach(var mode in new[]{"lease","legacy-mapped","backdated","stale-echo","moved-away","legacy-failure","stage-race","folder-grant"}) await Run(mode,()=>FolderDeleteChecks.MappedRetryAsync(mode),true);
         await Run("older-snapshot",()=>FolderDeleteChecks.RecoveryAsync(true),true);
         await Run(nameof(FolderDeleteChecks.RecoveryAsync),FolderDeleteChecks.RecoveryAsync,true);
-        foreach(var test in new Func<Task>[]{ArmedHopDeleteRetiresProjectedBindingAsync,TwoChildDeletesDuringMoveAsync,MovedPeerAsync,ReviewedJobsAsync,InterruptedRestoreAsync,PublishedCommitAsync,UnboundMoveAsync,DeletedStageAsync,TerminalAsync,MixedAsync,PendingParentAsync,UnknownAsync,ThirdPathAsync,AbsentMoveAsync,MissingOriginAsync,PolicyAsync,PlainRecycleAsync,UnboundStageAsync,ComparedFolderAsync,JobCheckRefusalReturnsAsync}) await Run(test.Method.Name,test);
+        foreach(var test in new Func<Task>[]{ArmedHopDeleteRetiresProjectedBindingAsync,TwoChildDeletesDuringMoveAsync,MovedPeerAsync,ReviewedJobsAsync,InterruptedRestoreAsync,PublishedCommitAsync,UnboundMoveAsync,DeletedStageAsync,TerminalAsync,MixedAsync,PendingParentAsync,UnknownAsync,ThirdPathAsync,AbsentMoveAsync,MissingOriginAsync,PolicyAsync,PlainRecycleAsync,UnboundStageAsync,ComparedFolderAsync,JobCheckRefusalReturnsAsync,JobRefusalFallbackAsync,JobRefusalLaterReadAsync}) await Run(test.Method.Name,test);
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
         var owner=new Unfinished();var change=new Change(Side.Dropbox,ChangeKind.Deleted,"else",null,null,null,false,false){AffectedPath="new/child"};
         Task Visit(Change? c)=>owner.CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),c,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
@@ -481,6 +481,88 @@ public static class UnfinishedChecks
         try {await Visit(cancel.Token);} catch(OperationCanceledException e) {thrown=e;}
         replies.Enqueue(()=>new JobReply.Running());var before=reads;await Visit();
         Check.Require(thrown is OperationCanceledException && reads==before+1,"A cancelled job check did not propagate or kept the check owned");
+    }
+
+    /// <summary>T1 (c): an unstated refusal waits Backoff.RetryDelay(refusals so far) exactly; a fresh status reply resets the count.</summary>
+    private static async Task JobRefusalFallbackAsync()
+    {
+        var clock=new TestDoubles.FakeTimeProvider(DateTimeOffset.UnixEpoch);var settings=ItemChecks.Settings with {Clock=clock,Backoff=ItemChecks.Settings.Backoff with {BackoffJitter=0}};
+        var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local){IdleBoundary=new([],null,new(1,1))};var db=new TestDoubles.FakeSide(Side.Dropbox){IdleBoundary=new([],"cursor",null)};
+        var root=ItemChecks.File(Side.Dropbox,"p",0,"selected",true);var saved=SyncedEntries.From(root with {Id="local"},root);
+        await store.CommitAsync(pair.PairId,null,saved,null,null,default);
+        await store.SaveJobAsync(new AcceptedJob(pair.PairId,"files/delete_batch","fallback",[new(root.Id,root.Path,null)]),default);
+        var replies=new Queue<Func<JobReply>>();int reads=0;var refusals=new List<ItemFailedException>();var owner=new Unfinished{AcquiredThrough=_=>true};
+        static ItemFailedException Unstated()=>new("p",TextKey.WaitTooManyWrites,null){Disposition=FailureDisposition.TemporaryNoEffect};
+        var cloud=FolderDeleteChecks.Observe.On(db,(op,_)=>{if(op!=nameof(ISide.ReadJobAsync))return null;reads++;return Task.FromResult(replies.Dequeue()());});
+        Task Visit()=>owner.CheckAsync(pair,settings,_=>{},new(pair,[pair],DriveType.Fixed),null,pc,cloud,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,refused:refusals.Add);
+        // Exactly one read at the recorded wait, none one tick before it.
+        async Task Waits(TimeSpan wait,Func<JobReply> next,string what)
+        {
+            var before=reads;clock.Advance(wait-TimeSpan.FromTicks(1));await Visit();
+            Check.Require(reads==before,what+": a job check inside the recorded wait read the job");
+            clock.Advance(TimeSpan.FromTicks(1));replies.Enqueue(next);await Visit();
+            Check.Require(reads==before+1,what+": the recorded wait did not admit exactly one read");
+        }
+        replies.Enqueue(()=>throw Unstated());await Visit();
+        Check.Require(reads==1 && refusals.Count==1 && store.OpenNotices.Count==0,"An unstated refusal did not return with the job kept");
+        // "(c) at the deadline: one read; refused again: Refusals=2, the recorded wait equals Backoff.RetryDelay(1) exactly"
+        await Waits(settings.Backoff.RetryDelay(0),()=>throw Unstated(),"first unstated refusal");
+        await Waits(settings.Backoff.RetryDelay(1),()=>new JobReply.Running(),"second unstated refusal");
+        // "then Running: one read, entry cleared; a later refusal starts at Refusals=1"
+        replies.Enqueue(()=>throw Unstated());await Visit();
+        Check.Require(reads==4 && refusals.Count==3,"A Running reply did not clear the recorded wait");
+        await Waits(settings.Backoff.RetryDelay(0),()=>new JobReply.Terminal([(root,null,null)]),"refusal after Running");
+        // "then terminal success settles and retires"
+        await foreach(var _ in store.JobsAsync(pair.PairId,default)) throw new InvalidOperationException("A job answered after its fallback wait stayed open");
+        Check.Require(db.Mutations.Count==0 && pc.Mutations.Count==0 && refusals.Count==3,"A refused job check mutated an endpoint");
+    }
+
+    /// <summary>T1 (d)-(f): a refusal at a later read of a job check (boundary, settlement by-ID read, create clash read) returns with the job's not-before; after it the check finishes once.</summary>
+    private static async Task JobRefusalLaterReadAsync()
+    {
+        var failures=new List<string>();
+        foreach(var arm in new[]{"boundary","settle-read","create-clash"})
+        {
+            var clock=new TestDoubles.FakeTimeProvider(DateTimeOffset.UnixEpoch);var settings=ItemChecks.Settings with {Clock=clock};
+            var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local){IdleBoundary=new([],null,new(1,1))};var db=new TestDoubles.FakeSide(Side.Dropbox){IdleBoundary=new([],"cursor",null)};
+            var root=ItemChecks.File(Side.Dropbox,"p",0,"selected",true);var saved=SyncedEntries.From(root with {Id="local"},root);
+            await store.CommitAsync(pair.PairId,null,saved,null,null,default);
+            if(arm=="settle-read") db.Seed(root,[]); // the refused delete left the folder: it must stay, bound
+            var job=arm=="create-clash"?new AcceptedJob(pair.PairId,"files/create_folder_batch",arm,[new(null,root.Path,null)]):new AcceptedJob(pair.PairId,"files/delete_batch",arm,[new(root.Id,root.Path,null)]);
+            await store.SaveJobAsync(job,default);
+            JobReply.Terminal terminal=arm switch {"boundary"=>new([(root,null,null)]),"settle-read"=>new([(null,TextKey.DropboxRefused,FailureDisposition.Permanent)]),_=>new([(null,TextKey.ClashNameTaken,FailureDisposition.Permanent)])};
+            int reads=0,localBounds=0,cloudBounds=0,byId=0,clash=0;var refusals=new List<ItemFailedException>();var owner=new Unfinished{AcquiredThrough=_=>true};
+            ItemFailedException Refusal()=>new("p",TextKey.WaitTooManyWrites,null){Disposition=FailureDisposition.TemporaryNoEffect,ProviderWait=TimeSpan.FromSeconds(60),ProviderWaitStarted=clock.GetTimestamp()};
+            var local=FolderDeleteChecks.Observe.On(pc,(op,_)=>{if(op==nameof(ISide.BoundaryAsync))localBounds++;return null;});
+            var cloud=FolderDeleteChecks.Observe.On(db,(op,_)=>
+            {
+                switch(op)
+                {
+                    case nameof(ISide.ReadJobAsync): reads++;return Task.FromResult<JobReply>(terminal);
+                    case nameof(ISide.BoundaryAsync): if(++cloudBounds==1 && arm=="boundary") throw Refusal();return null;
+                    case nameof(ISide.ReadByIdAsync): if(++byId==1 && arm=="settle-read") throw Refusal();return null;
+                    case nameof(ISide.ResolveCreateClashAsync): return ++clash==1?Task.FromException<JobReply.Terminal>(Refusal()):Task.FromResult(new JobReply.Terminal([(root,null,null)]));
+                    default: return null;
+                }
+            });
+            Task Visit()=>owner.CheckAsync(pair,settings,_=>{},new(pair,[pair],DriveType.Fixed),null,local,cloud,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,refused:refusals.Add);
+            async Task<int> Open(){int n=0;await foreach(var _ in store.JobsAsync(pair.PairId,default))n++;return n;}
+            await Visit();
+            bool returned=refusals.Count==1 && await Open()==1 && owner.CoversOpenJob(new("p","p")) && store.Records.Values.Contains(saved) && store.OpenNotices.Count==0;
+            var first=(reads,localBounds,cloudBounds,byId,clash);
+            clock.Advance(TimeSpan.FromSeconds(60)-TimeSpan.FromTicks(1));await Visit();
+            bool waited=(reads,localBounds,cloudBounds,byId,clash)==first;
+            clock.Advance(TimeSpan.FromTicks(1));await Visit();
+            // "(d) ... after it one status read, one boundary pair, settles; no mutation"; (e)/(f) resume from the cached terminal reply without a status read.
+            bool resumed=await Open()==0 && refusals.Count==1 && db.Mutations.Count==0 && pc.Mutations.Count==0 && arm switch
+            {
+                "boundary" => reads==2 && localBounds==2 && cloudBounds==2,
+                "settle-read" => reads==1 && localBounds==1 && cloudBounds==1 && byId==2 && db.Items[root.Path].Entry==root && store.Records.Values.Contains(saved) && store.OpenNotices.Any(n=>n is {Kind:NoticeKind.Failure,Cause:TextKey.DropboxRefused,Path:"p"}),
+                _ => reads==1 && clash==2
+            };
+            if(!returned || !waited || !resumed) failures.Add($"{arm}: returned={returned} waited={waited} resumed={resumed} reads={reads} bounds={localBounds}/{cloudBounds} byId={byId} clash={clash}");
+        }
+        Check.Require(failures.Count==0,"Later job read refusal: "+string.Join("; ",failures));
     }
 
     private static async Task MissingOriginAsync()

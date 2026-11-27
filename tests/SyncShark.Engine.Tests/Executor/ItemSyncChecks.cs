@@ -860,7 +860,7 @@ public static class ItemSyncChecks
     public static async Task HardLinkAliasAsync()
     {
         var failures=new List<string>();
-        foreach(var arm in new[]{"live-alias","renamed-unbound","true-move","mixed-group","excluded-name","own-key-rename"})
+        foreach(var arm in new[]{"live-alias","renamed-unbound","true-move","mixed-group","excluded-name","own-key-rename","held-decision"})
         {
             var pair=ItemChecks.Pair() with {Exclusions=arm=="excluded-name"?[new Exclusion(Side.Local,"B",true)]:[]};var paths=new PathScope(pair,[pair],DriveType.Fixed);
             var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);using var store=new InMemoryStateStore();
@@ -877,6 +877,8 @@ public static class ItemSyncChecks
                 await store.CommitAsync(pair.PairId,null,SyncedEntries.From(second,secondPeer),null,null,default);
             }
             pc.LinkNames["shared"]=pc.Items.Values.Where(v=>v.Entry.Id=="shared").Select(v=>v.Entry.Path).ToArray();
+            // "a decision other than None/OutOfScope (None/Held)": a tie at the bound name holds the move decision, so no fallback execution and no effect.
+            if(arm=="held-decision") await store.SaveNoticeAsync(pair.PairId,new(0,NoticeKind.Tie,TextKey.TieEqualTimes,bound.Path,new([new(Side.Local,bound.Path,bound.Id),new(Side.Dropbox,peer.Path,peer.Id)],null),DateTimeOffset.UnixEpoch,false),default);
             var change=arm switch
             {
                 "renamed-unbound"=>new Change(Side.Local,ChangeKind.Renamed,name,"Old/f","shared",alias,false,false),
@@ -893,6 +895,7 @@ public static class ItemSyncChecks
                 "live-alias" or "renamed-unbound" => uploaded && originalKept && db.Requests[nameof(ISide.MoveAsync)]==0 && db.Requests[nameof(ISide.DeleteAsync)]==0,
                 "true-move" => db.Items.TryGetValue(name,out var moved) && moved.Entry.Id==peer.Id && !db.Items.ContainsKey("A/f") && db.Requests[nameof(ISide.PublishAsync)]==0,
                 "mixed-group" => retained && db.Mutations.Count==0 && db.Requests[nameof(ISide.PublishAsync)]==0,
+                "held-decision" => db.Mutations.Count==0 && pc.Mutations.Count==0 && db.Requests[nameof(ISide.PublishAsync)]==0 && originalKept && pc.Items[name].Entry==alias && pc.Items[bound.Path].Entry==bound && store.OpenNotices.Any(n=>n.Kind==NoticeKind.Tie),
                 _ => db.Mutations.Count==0 && db.Requests[nameof(ISide.PublishAsync)]==0 && originalKept
             };
             if(!ok) failures.Add($"{arm}: uploaded={uploaded} kept={originalKept} retained={retained} publish={db.Requests[nameof(ISide.PublishAsync)]} move={db.Requests[nameof(ISide.MoveAsync)]}");

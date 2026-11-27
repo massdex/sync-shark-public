@@ -61,6 +61,7 @@ public static class HostClientChecks
         using var signal = new EventWaitHandle(false, EventResetMode.ManualReset, release);
         using var started = new EventWaitHandle(false, EventResetMode.ManualReset, release + ".started");
         Process? child = null;
+        Exception? fault = null;
         try {
             var start = HostClient.StartAsync(exe, $"{self}{EofChild} \"{pidFile}\" {release}", default);
             // Hold the child's handle before waiting on StartAsync, so the finally reaps it on every path.
@@ -68,12 +69,25 @@ public static class HostClientChecks
             child = Process.GetProcessById(int.Parse(File.ReadAllText(pidFile)));
             Check.Require(await Within(start, "StartAsync waited for the child after readiness EOF") == 1, "Readiness EOF did not return 1");
             Check.Require(!child.HasExited, "The child exited before StartAsync returned, so EOF was not proven independent of exit");
-        } finally {
+        } catch (Exception e) { fault = e; throw; }
+        finally {
+            // L13 R5 0.3: "the test then sets the event and reaps the child (also on failure)".
             signal.Set();
-            if (child is { } running && !running.WaitForExit(Bound)) { running.Kill(); running.WaitForExit(Bound); }
+            // A child that published its PID before a failed wait is still reaped; the image name guards against a reused PID.
+            try {
+                if (child == null && int.TryParse(File.Exists(pidFile) ? File.ReadAllText(pidFile) : "", out var pid)) {
+                    var published = Process.GetProcessById(pid);
+                    if (published.ProcessName == Path.GetFileNameWithoutExtension(exe)) child = published; else published.Dispose();
+                }
+            } catch (Exception e) when (e is ArgumentException or IOException) { /* It already exited, or never finished publishing. */ }
+            var reaped = child is not { } running || running.WaitForExit(Bound) || Kill(running);
             child?.Dispose();
             File.Delete(pidFile);
+            // Report a leaked child, keeping the primary failure as the first cause.
+            if (!reaped) throw fault is null ? new InvalidDataException("The readiness child was not reaped")
+                : new AggregateException("The readiness child was not reaped after a failure", fault);
         }
+        static bool Kill(Process running) { running.Kill(); return running.WaitForExit(Bound); }
     }
 
     private static async Task BusyMutationNotSentOrStartedAsync()

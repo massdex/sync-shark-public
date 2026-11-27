@@ -225,17 +225,23 @@ public static class DropboxListingChecks
             wire.Add(route, key, null);
             wire.Add(route, key, "{}", HttpStatusCode.TooManyRequests, 7);
             wire.Add(route, key, DropboxStubHandler.Page("end", false, child));
-            await using var rows = (full ? listing.ReadAsync(api, pair, () => scope, string.Empty, options, default)
-                : listing.ReadFolderAsync(api, pair, folderId, options, default)).GetAsyncEnumerator();
-            var first = rows.MoveNextAsync();
-            Check.Require(!first.IsCompleted && calls.SequenceEqual(new[] { true }), "A same-page retry did not raise the page wait first.");
-            clock.ElapseScheduledDelay();
-            await clock.Registered.WaitAsync(TimeSpan.FromSeconds(10)); // the provider wait of the second refusal
-            Check.Require(!first.IsCompleted && calls.Count == 1, "A second retry of the same page raised the wait again.");
-            clock.ElapseScheduledDelay();
-            Check.Require(await first && rows.Current.Entry?.Id == childId && calls.SequenceEqual(new[] { true, false }),
-                "The accepted page did not end the wait before its rows.");
-            Check.Require(!await rows.MoveNextAsync() && calls.Count == 2, "The finished listing changed the wait again.");
+            using var stop = new CancellationTokenSource();
+            await using var rows = (full ? listing.ReadAsync(api, pair, () => scope, string.Empty, options, stop.Token)
+                : listing.ReadFolderAsync(api, pair, folderId, options, stop.Token)).GetAsyncEnumerator();
+            var move = rows.MoveNextAsync().AsTask();
+            try
+            {
+                Check.Require(!move.IsCompleted && calls.SequenceEqual(new[] { true }), "A same-page retry did not raise the page wait first.");
+                clock.ElapseScheduledDelay();
+                await clock.Registered.WaitAsync(PageBound); // the provider wait of the second refusal
+                Check.Require(!move.IsCompleted && calls.Count == 1, "A second retry of the same page raised the wait again.");
+                clock.ElapseScheduledDelay();
+                Check.Require(await Bounded(move, "The accepted page") && rows.Current.Entry?.Id == childId && calls.SequenceEqual(new[] { true, false }),
+                    "The accepted page did not end the wait before its rows.");
+                move = rows.MoveNextAsync().AsTask();
+                Check.Require(!await Bounded(move, "The listing end") && calls.Count == 2, "The finished listing changed the wait again.");
+            }
+            finally { await JoinAsync(stop, move); }
             wire.Done();
         }
         // Each other end of a waiting read leaves the wait: cancellation, a permanent refusal, an unusable page.
@@ -253,16 +259,33 @@ public static class DropboxListingChecks
             var failed = false;
             await using (var rows = listing.ReadFolderAsync(api, pair, folderId, options, stop.Token).GetAsyncEnumerator())
             {
-                var next = rows.MoveNextAsync();
-                Check.Require(!next.IsCompleted && calls.SequenceEqual(new[] { true }), "A same-page retry did not raise the page wait.");
-                if (end == "cancel") stop.Cancel(); else clock.ElapseScheduledDelay();
-                try { await next; }
-                catch (OperationCanceledException) when (end == "cancel") { failed = true; }
-                catch (Exception error) when (end != "cancel" && error is ItemFailedException or InventoryIncompleteException) { failed = true; }
+                var next = rows.MoveNextAsync().AsTask();
+                try
+                {
+                    Check.Require(!next.IsCompleted && calls.SequenceEqual(new[] { true }), "A same-page retry did not raise the page wait.");
+                    if (end == "cancel") stop.Cancel(); else clock.ElapseScheduledDelay();
+                    try { await Bounded(next, "A waiting read that ended (" + end + ")"); }
+                    catch (OperationCanceledException) when (end == "cancel") { failed = true; }
+                    catch (Exception error) when (end != "cancel" && error is ItemFailedException or InventoryIncompleteException) { failed = true; }
+                }
+                finally { await JoinAsync(stop, next); }
             }
             Check.Require(failed && calls.SequenceEqual(new[] { true, false }), "A waiting read that ended (" + end + ") left its page wait open.");
             wire.Done();
         }
+    }
+
+    private static readonly TimeSpan PageBound = TimeSpan.FromSeconds(10);
+    private static async Task<bool> Bounded(Task<bool> move, string what)
+    {
+        Check.Require(await Task.WhenAny(move, Task.Delay(PageBound)) == move, what + " did not finish within its bound.");
+        return await move;
+    }
+    // A failed assertion can leave a page move outstanding: cancel and join it (bounded) so disposal does not mask that failure.
+    private static async Task JoinAsync(CancellationTokenSource stop, Task move)
+    {
+        stop.Cancel();
+        try { await move.WaitAsync(PageBound); } catch (Exception) { } // its outcome was already asserted, or the assertion that failed is reported
     }
 
     // Only an isolating listing yields a decodable-path, file-tag, id-bearing entry whose other fields fail as SkipUnreadable.

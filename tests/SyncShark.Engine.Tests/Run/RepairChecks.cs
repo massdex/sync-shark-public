@@ -763,7 +763,7 @@ public static class RepairChecks
     // A fake endpoint whose top folder still has the pair's saved identity.
     private static FakeSide Rooted(FakeSide side,PairConfig pair) { side.Root=side.Side==Side.Local ? (pair.Roots!.Local,null,null,DriveType.Fixed) : (null,pair.Roots!.Dropbox,null,null); return side; }
     // A healthy, already-synced pair whose next Repair replays the journal instead of listing.
-    private static async Task<(PairConfig Pair,FakeSide Pc,FakeSide Db,PathScope Paths)> SteadyAsync(IStore store,PairConfig pair,CancellationToken ct)
+    internal static async Task<(PairConfig Pair,FakeSide Pc,FakeSide Db,PathScope Paths)> SteadyAsync(IStore store,PairConfig pair,CancellationToken ct)
     {
         pair=Bound(pair); await store.SavePairAsync(pair,ct); var pc=Rooted(new FakeSide(Side.Local),pair); var db=Rooted(new FakeSide(Side.Dropbox),pair);
         var steady=new JournalPosition(1,2); await store.FinishRepairAsync(pair.PairId,(0,0),"{}",ct);
@@ -996,7 +996,7 @@ public static class RepairChecks
         }
     }
 
-    private static async Task<(PairConfig Pair,FakeSide Pc,FakeSide Db,WorkQueue Queue)> CoveredQueueAsync(IStore store,PairConfig pair,CancellationToken token)
+    internal static async Task<(PairConfig Pair,FakeSide Pc,FakeSide Db,WorkQueue Queue)> CoveredQueueAsync(IStore store,PairConfig pair,CancellationToken token)
     {
         pair=pair with {Roots=ItemChecks.SavedRoots};
         await store.SavePairAsync(pair,token);

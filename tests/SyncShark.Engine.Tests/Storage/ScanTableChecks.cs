@@ -221,7 +221,8 @@ public static class ScanTableChecks
         {
             var l=large[name];
             Console.WriteLine($"Folder-store counted work {name}: 200 steps={s.Steps} calls={s.Calls} statements={s.Statements}; 400 steps={l.Steps} calls={l.Calls} statements={l.Statements}");
-            if(l.Steps>s.Steps+s.Steps/4 || l.Calls!=s.Calls || l.Statements!=s.Statements) failure.Add($"{name} {s.Steps}/{s.Calls}/{s.Statements}->{l.Steps}/{l.Calls}/{l.Statements}");
+            // T9: "a fixed involved scope costs the same while unrelated rows grow (T9 200 -> 400)".
+            if(l.Steps!=s.Steps || l.Calls!=s.Calls || l.Statements!=s.Statements) failure.Add($"{name} {s.Steps}/{s.Calls}/{s.Statements}->{l.Steps}/{l.Calls}/{l.Statements}");
         }
         Check.Require(failure.Count==0,"Fixed-scope folder-store work grew with unrelated bindings: "+string.Join(", ",failure));
     }
@@ -271,7 +272,15 @@ public static class ScanTableChecks
         await Count("same-folder rename",()=>committer.CommitAsync(db,"p",E("in/new",2),E("in/new2",2),null,null,default));
         await Count("cross-folder move",()=>committer.CommitAsync(db,"p",E("in/new2",2),E("in2/new2",2),null,null,default));
         await Count("remove",()=>committer.CommitAsync(db,"p",E("in2/new2",2),null,null,null,default));
-        await Count("constraint abort",async()=>{ try { await committer.CommitAsync(db,"p",null,E("in/a"),null,null,default); } catch(Exception e) when(e is Microsoft.Data.Sqlite.SqliteException or ChangedUnderneathException) { } });
+        // T9: "a constraint abort counted to the abort": only a constraint error or the guarded write's refusal is the abort; no abort, no sample.
+        await Count("constraint abort",async()=>
+        {
+            var aborted=false;
+            try { await committer.CommitAsync(db,"p",null,E("in/a"),null,null,default); }
+            catch(Microsoft.Data.Sqlite.SqliteException e) when(e.SqliteErrorCode==19) { aborted=true; }
+            catch(ChangedUnderneathException) { aborted=true; }
+            Check.Require(aborted,"The colliding insert committed instead of aborting");
+        });
         GC.KeepAlive(trace);
         return result;
     }
