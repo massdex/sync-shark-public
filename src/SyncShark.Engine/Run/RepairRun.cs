@@ -65,7 +65,7 @@ internal sealed class RepairRun
     // The pair's one page-wait notice for this Repair's own listing; closed by its exact receipt. Never throws: a store or log fault is logged once and the wait goes on.
     private async Task PageWait(bool waiting)
     {
-        try { if(waiting) pageWait=await store.SaveNoticeAsync(id,new(0,NoticeKind.Failure,TextKey.RequiredRepairRetry,string.Empty,new([],null),DateTimeOffset.UtcNow,false),CancellationToken.None);
+        try { if(waiting) pageWait=await store.SaveNoticeAsync(id,new(default,NoticeKind.Failure,TextKey.RequiredRepairRetry,string.Empty,new([],null),DateTimeOffset.UtcNow,false),CancellationToken.None);
               else if(pageWait is {} open) { pageWait=null; await new Notices().CloseAsync(store,id,open,CancellationToken.None); } }
         catch(Exception error) { try { Log(new(RunEventKind.Failed,nameof(IStore.SaveNoticeAsync),string.Empty,error.Message,string.Empty){Error=error}); } catch(Exception) { } }
     }

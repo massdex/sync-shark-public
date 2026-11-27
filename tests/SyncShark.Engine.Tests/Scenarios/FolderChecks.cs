@@ -56,7 +56,7 @@ public static class FolderChecks
         var pair=ItemChecks.Pair() with { IgnoreRules=ignored?["FileName:child"]:[], Exclusions=excluded?[new(Side.Local,child,true)]:[] };
         var pc=new FakeSide(Side.Local);var cloud=new FakeSide(Side.Dropbox);using var store=new InMemoryStateStore();
         await store.SavePairAsync(pair,default);await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
-        var inner=pair with { PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"folder","child"),DropboxRoot=pair.DropboxRoot+"/folder/child" };
+        var inner=pair with { PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"folder","child"),DropboxRoot=pair.DropboxRoot+"/folder/child", Roots=null };
         if(nested) await store.SavePairAsync(inner,default);
         var paths=new PathScope(pair,nested?[pair,inner]:[pair],DriveType.Fixed);var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,cloud,store);
         var a=ItemChecks.File(Side.Local,root,0,"parent-a",true);var b=ItemChecks.File(Side.Dropbox,root,0,"parent-b",true);
@@ -1064,7 +1064,7 @@ public static class FolderChecks
     public static async Task A36NestedRootChildAsync()
     {
         var pair = ItemChecks.Pair();
-        var inner = pair with { PairId = "inner", LocalRoot = Path.Combine(pair.LocalRoot, "item", "inner"), DropboxRoot = pair.DropboxRoot + "/item/inner" };
+        var inner = pair with { PairId = "inner", LocalRoot = Path.Combine(pair.LocalRoot, "item", "inner"), DropboxRoot = pair.DropboxRoot + "/item/inner", Roots = null };
         var run = await DeletedFolderRunAsync(pair, [inner], "item");
         Seed(run.Pc, "item", 0, folder: true);
         Seed(run.Pc, "item/inner", 0, folder: true);
@@ -1928,7 +1928,7 @@ public static class FolderChecks
     private static string ManagedVolume(string full) => Identity(full).VolumeSerialNumber.ToString(CultureInfo.InvariantCulture);
     private static RemovalSelection ManagedProofFile(Entry entry, string volumeId) => new(new RemovalProof(entry, volumeId, entry.ContentHash), null);
     private static PairConfig NestedPair(PairConfig outer, string innerRoot) =>
-        outer with { PairId = "inner", LocalRoot = Path.Combine(outer.LocalRoot, innerRoot), DropboxRoot = outer.DropboxRoot + "/" + innerRoot };
+        outer with { PairId = "inner", LocalRoot = Path.Combine(outer.LocalRoot, innerRoot), DropboxRoot = outer.DropboxRoot + "/" + innerRoot, Roots = null };
 
     /// <summary>A new inner pair's root is skipped by the outer pair before its next entry and its records are kept.</summary>
     public static async Task A50NewInnerRootEffectiveBeforeNextEntryAsync()

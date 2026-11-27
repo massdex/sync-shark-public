@@ -74,7 +74,7 @@ public static class AtomicReplaceChecks
             Check.Require((await store.RepairStateAsync(pair.PairId,default)).FirstRepairDone,"The pair's first Repair did not complete");
             await store.SavePositionAsync(volume.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),new JournalPosition(1,1),default);
             var local=LocalSide.Factory()(pair,()=>paths,ItemChecks.Settings,store);
-            var dropbox=new FakeSide(Side.Dropbox);
+            var dropbox=Executor.FolderDeleteChecks.Rooted(new FakeSide(Side.Dropbox),pair);
             var pcB=(await local.ReadOneAsync("b",default))!;
             var bytes=File.ReadAllBytes(Path.Combine(root,"b"));
             using var hash=new ContentHash(); hash.Append(bytes); var digest=hash.Finish();
@@ -103,7 +103,7 @@ public static class AtomicReplaceChecks
         using var digest=new ContentHash();digest.Append([5]);var hash=digest.Finish();
         var wrong=new List<string>();
         foreach(var (name,links,rules,armed,owes) in new (string,string[],Exclusion[],bool,bool)[]{
-            ("ignored hard link",["dir/renamed","dir/x"],[new(Side.Local,"dir/x",false)],false,false),
+            ("ignored hard link",["dir/renamed","dir/x"],[new(Side.Local,"dir/x",true)],false,false),
             ("eligible unbound link",["dir/renamed","dir/c"],[],false,true),
             ("rename into an ignored name",["dir/x"],[new(Side.Local,"dir/x",false)],false,true),
             ("KEEP-bound saved name missing",["dir/x"],[new(Side.Local,"dir/renamed",true),new(Side.Local,"dir/x",false)],false,true),

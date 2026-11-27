@@ -128,12 +128,12 @@ public static class AutoSyncChecks
         var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,db,store);
         var item=ItemChecks.File(Side.Local,"a",1,"old");var saved=SyncedEntries.From(item,ItemChecks.File(Side.Dropbox,"a",1,"old-peer"));
         await store.CommitAsync(pair.PairId,null,saved,null,null,ct);pc.Seed(item,[1]);
-        var victim=new RemovalSelection(new(item,"volume",item.ContentHash),saved);
+        var victim=new RemovalSelection(new(item,FakeSide.Volume,item.ContentHash),saved);
         Check.Require(await store.ArmAsync(pair.PairId,victim,null,ct),"Fixture could not arm the recycle");await pc.DeleteAsync(item,victim,ct);
         var pages=System.Threading.Channels.Channel.CreateUnbounded<ChangePage>();
         var acquired=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);var last=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);int reads=0,hashes=0;
-        var c=item with {Path="c",Id="c"};var second=new RemovalSelection(new(c,"volume",c.ContentHash),null);
+        var c=item with {Path="c",Id="c"};var second=new RemovalSelection(new(c,FakeSide.Volume,c.ContentHash),null);
         var settled=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         async Task Disarm(RemovalSelection v,CancellationToken token)
         {
@@ -145,7 +145,7 @@ public static class AutoSyncChecks
         async Task<(IdentityLocation,bool)?> Locate(string id,CancellationToken token)
         {
             if(id==item.Id){Interlocked.Increment(ref reads);await release.Task.WaitAsync(token);}
-            var entry=id==item.Id?item:c;return (new("volume",entry.Path,entry with {ContentHash=""}),false);
+            var entry=id==item.Id?item:c;return (new(FakeSide.Volume,entry.Path,entry with {ContentHash=""}),false);
         }
         Task<Recovery?> Hash(){Interlocked.Increment(ref hashes);return Task.FromResult<Recovery?>(new Recovery.File(item,new MemoryStream([1],false)));}
         Task<ChangePage> Journal(JournalPosition? prior,CancellationToken token){if(prior?.NextUsn==5) last.TrySetResult();return pages.Reader.ReadAsync(token).AsTask();}
@@ -194,7 +194,7 @@ public static class AutoSyncChecks
             nameof(ISide.DeleteAsync)=>Recycle((Entry)args[0]!, (RemovalSelection)args[1]!, (CancellationToken)args[^1]!),
             nameof(ISide.ReadChangesAsync)=>ReadJournal((JournalPosition?)args[1],(CancellationToken)args[^1]!),
             nameof(ISide.BoundaryAsync)=>Task.FromResult(((string?)null,(JournalPosition?)new JournalPosition(1,(ulong)usn))),
-            nameof(ISide.ReadByIdAsync) when pc.Items.TryGetValue((string)args[0]!,out var hit) && hit.Entry.Id==(string)args[0]! =>Task.FromResult<(IdentityLocation,bool)?>((new("volume",hit.Entry.Path,hit.Entry),true)),
+            nameof(ISide.ReadByIdAsync) when pc.Items.TryGetValue((string)args[0]!,out var hit) && hit.Entry.Id==(string)args[0]! =>Task.FromResult<(IdentityLocation,bool)?>((new(FakeSide.Volume,hit.Entry.Path,hit.Entry),true)),
             _=>Observation.Forward(pc,m,args)});
         Task<ChangePage> ReadCloud(string? prior,CancellationToken token){if(prior!=null && next.TryGetValue(prior,out var gate)) gate.TrySetResult();return cloud.Reader.ReadAsync(token).AsTask();}
         var remote=Observation.Wrap<ISide>((m,args)=>m.Name switch {
@@ -379,7 +379,13 @@ public static class AutoSyncChecks
             Check.Require(count==0 && (await store.ReadRepairAsync(pair.PairId,Side.Dropbox,ct)).Reason!=null && await store.CursorAsync(pair.PairId,ct)=="fresh" && queue.Held(new("held","held")).Any(c=>c.Observed==edit),"Reset lost its held edit, omitted its debt, or reported an unfinished source as attempted");
             allowLocal.SetResult();
             if(await Task.WhenAny(signal.Task,intake).WaitAsync(ct)==intake) {await intake;throw new InvalidDataException("Finite reset skipped its actual attempt signal");}
-            if(continuous) Check.Require(await live.Task.WaitAsync(ct)=="fresh" && await localLive.Task.WaitAsync(ct)==end && !saved.Task.IsCompleted,"Live reader lost its acquired continuation or settled past a held finite page");
+            if(continuous)
+            {
+                var from=await live.Task.WaitAsync(ct); var localFrom=await localLive.Task.WaitAsync(ct);
+                Check.Require(from=="fresh",$"Live Dropbox reader did not continue from the reset cursor (read from {from ?? "null"})");
+                Check.Require(localFrom==end,$"Live PC reader did not continue from the finite end (read from {localFrom?.ToString() ?? "null"})");
+                Check.Require(!saved.Task.IsCompleted,"Live reader settled past a held finite page");
+            }
             Check.Require(count==1 && pc.Pages.Count==0 && !intake.IsCompleted,"Finite reset waited for settlement or abandoned the other source");
         }
         catch(OperationCanceledException) when(ct.IsCancellationRequested) {throw new InvalidDataException("Held page prevented publication of verified reset and Repair debt");}

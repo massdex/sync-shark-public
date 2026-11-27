@@ -442,8 +442,8 @@ public static class WorkQueueChecks
     private static async Task TombstoneWaitingForProofNoticeAsync()
     {
         using var store=new InMemoryStateStore();
-        var pair=ItemChecks.Pair(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
-        var pc=new FakeSide(Side.Local); var cloud=new FakeSide(Side.Dropbox);
+        var pair=Executor.FolderDeleteChecks.BoundPair(); var paths=new PathScope(pair,[pair],DriveType.Fixed); // an absence-authorized delete checks the saved Dropbox root first
+        var pc=Executor.FolderDeleteChecks.Rooted(new FakeSide(Side.Local),pair); var cloud=Executor.FolderDeleteChecks.Rooted(new FakeSide(Side.Dropbox),pair);
         await store.SavePairAsync(pair,default);
         var file=ItemChecks.File(Side.Local,"f",1,"pc-f"); pc.Seed(file,[1]);
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(file,ItemChecks.File(Side.Dropbox,"f",1,"db-f")),null,null,default);

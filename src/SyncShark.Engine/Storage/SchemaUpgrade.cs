@@ -54,7 +54,7 @@ internal static class SchemaUpgrade
                 cmd.Transaction = tx;
                 cmd.CommandText = Sql.Get(SqlKey.SchemaUpgradeCount);
                 using var rd = cmd.ExecuteReader();
-                n = rd.Read() ? new[] { rd.GetInt64(0), rd.GetInt64(1), rd.GetInt64(2) } : new long[] { -1, 0, 0 };
+                n = rd.Read() ? new[] { rd.GetInt64(rd.GetOrdinal("old_rows")), rd.GetInt64(rd.GetOrdinal("entry_rows")), rd.GetInt64(rd.GetOrdinal("key_rows")) } : new long[] { -1, 0, 0 };
             }
             if (n[0] != n[1] || n[0] != n[2] || !Equals(Scalar(db, Sql.Get(SqlKey.SchemaUpgradeRoundTrip), tx), n[0]))
                 throw new InvalidDataException(Text.Get(TextKey.FailStoreMutation, (TextArg.Path, db.DataSource)));

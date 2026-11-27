@@ -193,8 +193,11 @@ public static class HostServerChecks
             faults = 3;
             for (var fault = 0; fault < 3; fault++) {
                 using var faulted = await ConnectAsync();
-                await SendAsync(faulted, "x");
-                Check.Require(await Within(EndedAsync(faulted), "A faulted handler left its client open"), "A faulted handler replied");
+                // The server may close a faulted client before reading it, so a broken send also means the exchange ended.
+                var ended = true;
+                try { await SendAsync(faulted, "x"); ended = await Within(EndedAsync(faulted), "A faulted handler left its client open"); }
+                catch (IOException) { /* Closed before the request was read. */ }
+                Check.Require(ended, "A faulted handler replied");
             }
             Check.Require(sink.Entries == 0, "A handler fault wrote to stderr");
             await stop.CancelAsync();

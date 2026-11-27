@@ -244,7 +244,7 @@ internal sealed class HostLifecycle(Host host)
     private static bool Owns(HostMember m,CancellationToken life) => m.Stop is {IsCancellationRequested:false} stop && stop.Token==life; // under lock(m): only the live issuing lifetime publishes
     // Instants from one clock sample, rounded up (saturating, so an unbounded provider wait stays unbounded); Left is the time to one in whole ms rounded up, at most one timer chunk.
     private long Due(long now,TimeSpan delay) { var ticks=Math.Ceiling(delay.Ticks*(double)host.Clock.TimestampFrequency/TimeSpan.TicksPerSecond); return ticks>=long.MaxValue-now ? long.MaxValue : now+(long)ticks; }
-    private TimeSpan Left(long at) { var now=host.Clock.GetTimestamp(); return at<=now ? TimeSpan.Zero : TimeSpan.FromMilliseconds(Math.Min(Math.Ceiling((at-now)*1000.0/host.Clock.TimestampFrequency),EngineSettings.BackoffSettings.MaximumTimerMilliseconds)); }
+    private TimeSpan Left(long at) { var now=host.Clock.GetTimestamp(); return at<=now ? TimeSpan.Zero : TimeSpan.FromMilliseconds(Math.Min(Math.Ceiling(host.Clock.GetElapsedTime(now,at).TotalMilliseconds),EngineSettings.BackoffSettings.MaximumTimerMilliseconds)); }
     /// <summary>A failure's request for the member's one automatic Repair retry. True when it armed it or moved it later.</summary>
     internal bool Rewake(HostMember m,Exception error,CancellationToken life)
     {
@@ -293,7 +293,7 @@ internal sealed class HostLifecycle(Host host)
                 if(local.Reason!=null) m.Queue.LoseCoverage(Side.Local);
                 if(remote.Reason!=null) m.Queue.LoseCoverage(Side.Dropbox);
                 if(!full && scopes is not {Count:>0}) return true;
-                if(m.FloorAt>host.Clock.GetTimestamp()) { Retry(m,ct,0,false); return true; } // no automatic owed pass before a live provider floor
+                if(m.FloorAt>host.Clock.GetTimestamp()) { Retry(m,ct,m.FloorAt.Value,false); return true; } // no automatic owed pass before a live provider floor
                 return ClaimRepair(m,ct,Run,false)!=null;
             }
         }

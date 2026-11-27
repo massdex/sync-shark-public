@@ -22,7 +22,7 @@ public static class IdentityPathsChecks
             Check.Require(links is not null && links.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals([path,alias]),"Did not resolve all live hard-link names");
             var denied=Path.Combine(root,"aaa-excluded"); var winner=Path.Combine(root,"bbb-eligible");
             if(!CreateHardLinkW(denied,path,IntPtr.Zero) || !CreateHardLinkW(winner,path,IntPtr.Zero)) throw new System.ComponentModel.Win32Exception();
-            var pair=Scenarios.ItemChecks.Pair() with {LocalRoot=root,Exclusions=[new(Side.Local,"aaa-excluded",true)]};
+            var pair=Scenarios.ItemChecks.Pair() with {LocalRoot=root,Exclusions=[new(Side.Local,"aaa-excluded",true)],Roots=null};
             var scoped=await reader.LocateInScopeAsync(root,expected,id,new PathScope(pair,[pair],DriveType.Fixed),default);
             Check.Require(scoped is { InScope:true } && scoped.Value.Location.NativePath==winner,"Lookup did not select the ordinal-first eligible alias");
             File.Delete(denied); File.Delete(winner);
@@ -36,7 +36,7 @@ public static class IdentityPathsChecks
             // that hides the singleton (force enumeration off) returns null and fails here.
             var solo=Directory.CreateDirectory(Path.Combine(root,"solo"));
             var soloRoot=L.DriveIdentity.Read(solo.FullName).Identity;
-            var soloPair=Scenarios.ItemChecks.Pair() with {LocalRoot=solo.FullName};
+            var soloPair=Scenarios.ItemChecks.Pair() with {LocalRoot=solo.FullName,Roots=null};
             var soloScope=new PathScope(soloPair,[soloPair],DriveType.Fixed);
             var kept=Path.Combine(solo.FullName,"kept"); var gone=Path.Combine(solo.FullName,"gone");
             File.WriteAllText(kept,"solo");

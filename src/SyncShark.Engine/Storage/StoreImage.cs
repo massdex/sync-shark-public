@@ -84,8 +84,9 @@ internal static class StoreImage
         cmd.CommandText = Sql.Get(SqlKey.StoreImageValidateShape2);
         using var rd = cmd.ExecuteReader();
         var rows = new List<(string, string, string?)>();
+        int type = rd.GetOrdinal("type"), name = rd.GetOrdinal("name"), sql = rd.GetOrdinal("sql");
         while (rd.Read())
-            rows.Add((rd.GetString(0), rd.GetString(1), rd.IsDBNull(2) ? null : rd.GetString(2)));
+            rows.Add((rd.GetString(type), rd.GetString(name), rd.IsDBNull(sql) ? null : rd.GetString(sql)));
         return rows;
     }
 

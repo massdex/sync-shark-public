@@ -26,7 +26,7 @@ public static class PlaceholdersChecks
                 Guid.NewGuid().TryWriteBytes(data.AsSpan(8));
                 if(!DeviceIoControl(handle,0x000900a4,data,data.Length,IntPtr.Zero,0,out _,IntPtr.Zero)) throw new System.ComponentModel.Win32Exception();
             }
-            var pair=Scenarios.ItemChecks.Pair() with {LocalRoot=root.FullName}; var expected=L.DriveIdentity.Read(root.FullName).Identity;
+            var pair=Scenarios.ItemChecks.Pair() with {LocalRoot=root.FullName,Roots=null}; var expected=L.DriveIdentity.Read(root.FullName).Identity;
             var scope=new PathScope(pair,[pair],DriveType.Fixed); var seen=new List<Listed>();
             await foreach(var row in L.DirectoryListing.ReadAsync(root.FullName,expected,scope,"",new(true,false),default)) seen.Add(row);
             Check.Require(seen.Any(row => row is {Path:"unknown",Entry:{IsFolder:true,Skip:nameof(TextKey.SkipUnreadable)}}),

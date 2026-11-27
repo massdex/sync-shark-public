@@ -50,7 +50,7 @@ public static class CommitterChecks
         Task Admit(SyncedEntry? prior,SyncedEntry? next,string? key,Action<bool>? notify=null,string pair="p")
         {
             var named=new Dictionary<string,object?>{["db"]=db,["gate"]=gate,["batchSize"]=window,["pairId"]=pair,["before"]=prior,["after"]=next,["publication"]=null,
-                ["spentDeletedKey"]=key,["spentDeletedAt"]=null,["published"]=notify ?? (_=>{}),["ct"]=CancellationToken.None};
+                ["spentDeletedKey"]=key,["spentDeletedAt"]=null,["closing"]=null,["published"]=notify ?? (_=>{}),["ct"]=CancellationToken.None};
             return (Task)queue.Invoke(commits,queue.GetParameters().Select(p=>named.TryGetValue(p.Name!,out var v)?v:p.DefaultValue).ToArray())!;
         }
         var pending=typeof(Committer).GetField("pending",System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance)!.GetValue(commits)!;

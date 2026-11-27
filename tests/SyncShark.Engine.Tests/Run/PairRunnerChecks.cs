@@ -49,8 +49,8 @@ public static class PairRunnerChecks
     {
         using var db=new InMemoryStateStore();var pair=ItemChecks.Pair();
         var host=new Host((_,_)=>Task.FromResult<IStore?>(db),(_,_,_,_)=>throw new InvalidOperationException(),ItemChecks.Settings,new HostChecks.MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);
-        var owner=pair with {PairId="outer",LocalRoot=@"T:\Outer",DropboxRoot="/Outer"};
-        var inner=pair with {PairId="inner",LocalRoot=@"T:\Outer\Parent\Inner",DropboxRoot="/Elsewhere"};
+        var owner=pair with {PairId="outer",LocalRoot=@"T:\Outer",DropboxRoot="/Outer",Roots=null};
+        var inner=pair with {PairId="inner",LocalRoot=@"T:\Outer\Parent\Inner",DropboxRoot="/Elsewhere",Roots=null};
         await db.SavePairAsync(owner,default); await db.SavePairAsync(inner,default);
         var pc=ItemChecks.File(Side.Local,"Parent",0,"local-parent",true);var cloud=ItemChecks.File(Side.Dropbox,"Mapped",0,"db-parent",true);
         await db.CommitAsync(owner.PairId,null,SyncedEntries.From(pc,cloud),null,null,default);

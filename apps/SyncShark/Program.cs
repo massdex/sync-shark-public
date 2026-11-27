@@ -63,7 +63,7 @@ public static class Program
             }
             catch (Exception e) when (e is not OperationCanceledException) { startupMessage=e.Message; refused=true; }
             if (startupMessage != null) host.SetStartupMessage(startupMessage,refused);   // Status carries it; a console write here could block startup
-            var serving = server.ServeAsync(host, lifetime.Token);
+            var serving = server.ServeAsync(host, (failures,ct) => settings.Backoff.WaitAsync(settings.Backoff.RetryDelay(failures),clock,ct), lifetime.Token);
             HostServer.Ready(args);
             try {
                 if (refused) { await serving; return 1; }

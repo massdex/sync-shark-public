@@ -222,7 +222,7 @@ public static class ItemSyncChecks
 
     public static async Task DeliberateRefusalIsNotRetained()
     {
-        var pair=ItemChecks.Pair(); var inner=pair with {PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"top/nested"),DropboxRoot=pair.DropboxRoot+"/top/nested"};
+        var pair=ItemChecks.Pair(); var inner=pair with {PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"top/nested"),DropboxRoot=pair.DropboxRoot+"/top/nested",Roots=null};
         var paths=new PathScope(pair,[pair,inner],DriveType.Fixed); var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); using var store=new InMemoryStateStore();
         var old=ItemChecks.File(Side.Local,"top",0,"local",true); var peer=ItemChecks.File(Side.Dropbox,"top",0,"peer",true);
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(old,peer),null,null,default); var moved=old with {Path="moved"}; pc.Seed(moved,[]); db.Seed(peer,[]);

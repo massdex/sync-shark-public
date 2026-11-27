@@ -126,7 +126,7 @@ public static class RecoveryChecks
         await using var staged=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{3}),altered,previous,default);
         x.Pc.History.Add((previous,new byte[]{1}));
         var actual=staged.Proof!;
-        await x.Store.ArmAsync(x.Pair.PairId,new(new(previous,"volume",previous.ContentHash),saved),new(actual.Path,actual.VolumeId,actual.FileId,actual.Size,incoming.ContentHash),default);
+        await x.Store.ArmAsync(x.Pair.PairId,new(new(previous,FakeSide.Volume,previous.ContentHash),saved),new(actual.Path,actual.VolumeId,actual.FileId,actual.Size,incoming.ContentHash),default);
         await x.Queue.Unfinished.CheckAsync(x.Pair,ItemChecks.Settings,_=>{},x.Paths,null,x.Pc,x.Cloud,x.Store,x.Queue.Held,ItemChecks.Population(x.Pair,x.Paths,x.Pc,x.Cloud,x.Store),ItemChecks.Hop(x.Pair,x.Paths,x.Queue,x.Pc,x.Cloud,x.Store),default);
         Check.Require(x.Pc.Requests[nameof(ISide.ReopenStageAsync)]>0 && (await x.Store.ArmedAsync(x.Pair.PairId,default)!=null || x.Store.OpenNotices.Any(n=>n.Kind==NoticeKind.Failure)),"Altered stage was neither verified nor retained for recovery");
         Check.Require(!x.Pc.Items.Values.Any(v=>v.Entry.Path=="item" && v.Bytes.SequenceEqual(new byte[]{3})) && x.Cloud.Items["item"].Bytes.SequenceEqual(new byte[]{2}),"Altered stage published or incoming bytes destroyed");
@@ -623,7 +623,7 @@ public static class RecoveryChecks
         var old=x.Pc.Items["item"].Entry;var source=ItemChecks.File(Side.Dropbox,saved.DropboxPath,2,saved.DropboxId);
         x.Cloud.Items[source.Path]=(source,[2]);
         await using var staged=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{2}),source,old,default);
-        var victim=new RemovalSelection(new(old,"volume",old.ContentHash),saved);
+        var victim=new RemovalSelection(new(old,FakeSide.Volume,old.ContentHash),saved);
         var abandoned=await x.Pc.StageAsync("item",new MemoryStream(new byte[]{9}),source,old,default);var unused=abandoned.Proof!;
         Check.Require(await x.Pc.ReadOneAsync(unused.Path,default)==null,"Unarmed stage visible as a user file");
         await abandoned.DisposeAsync();

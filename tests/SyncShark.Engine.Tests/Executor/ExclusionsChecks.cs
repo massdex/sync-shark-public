@@ -256,7 +256,7 @@ public static class ExclusionsChecks
     {
         var exclusion = new Exclusion(Side.Local, "P/Sub", false);
         var pair = Scenarios.ItemChecks.Pair() with { Exclusions = [exclusion] };
-        var nested = pair with { PairId = "nested", LocalRoot = @"T:\Separate", DropboxRoot = pair.DropboxRoot + "/Q/Sub/Inside" };
+        var nested = pair with { PairId = "nested", LocalRoot = @"T:\Separate", DropboxRoot = pair.DropboxRoot + "/Q/Sub/Inside", Roots = null };
         var scope = new PathScope(pair, [pair, nested], DriveType.Fixed);
         using var store = new TestDoubles.InMemoryStateStore();
         var parent = SyncedEntries.From(Scenarios.ItemChecks.File(Side.Local, "P", 0, "pc-parent", true),

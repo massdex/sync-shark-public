@@ -226,7 +226,7 @@ public sealed class Host(Func<bool,CancellationToken,Task<IStore?>> openStore,
                 try { await Life.ManualRepair(m,token,live,showFiles,shown=>view=shown); }
                 catch(Exception error) when(!token.IsCancellationRequested && !ChangedUnderneathException.RootLost(m.Pair,error)) { if(await Life.OwedFailed(m,token)) Life.Rewake(m,error,life); try { await Life.HandOff(m,null,token); } catch(Exception missed) { Life.Rewake(m,missed,life); } throw; } // owed work re-woken; a scope owed during the run is woken, or given the one retry when that wake read fails; the original error is rethrown and logged once by ClaimRepair
                 // The explicit path runs no scope pass; a scope an item commit owed during the full run still needs its own run.
-                try { await Life.HandOff(m,null,token); } catch(Exception missed) { Life.Rewake(m,missed,life); throw; } // a failed wake read keeps the one retry; the command's result is unchanged
+                if(!token.IsCancellationRequested) try { await Life.HandOff(m,null,token); } catch(Exception missed) { Life.Rewake(m,missed,life); throw; } // a failed wake read keeps the one retry; a stopped member reads owed scopes at its next start, so a finished Repair stays finished
             },true)!;
         }
         finally { commands.Release(); }

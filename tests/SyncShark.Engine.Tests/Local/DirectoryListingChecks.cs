@@ -10,7 +10,7 @@ public static class DirectoryListingChecks
         try
         {
             var root=dir.CreateSubdirectory("selected").FullName;var other=dir.CreateSubdirectory("replacement").FullName;File.WriteAllText(Path.Combine(other,"occupant"),"other");
-            var expected=global::Massdex.SyncShark.Engine.Local.DriveIdentity.Read(root).Identity;var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root, Exclusions=[new(Side.Local,"excluded",true)] };var paths=new PathScope(pair,[pair],DriveType.Fixed);
+            var expected=global::Massdex.SyncShark.Engine.Local.DriveIdentity.Read(root).Identity;var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root, Exclusions=[new(Side.Local,"excluded",true)], Roots=null };var paths=new PathScope(pair,[pair],DriveType.Fixed);
             File.WriteAllText(Path.Combine(root,"selected-file"),"selected");
             var excluded=Directory.CreateDirectory(Path.Combine(root,"excluded")); File.WriteAllText(Path.Combine(excluded.FullName,"hidden"),"excluded");
             // Deny list access: filtering after opening would fail even if neither rows nor callbacks escaped.
@@ -81,7 +81,7 @@ public static class DirectoryListingChecks
         other=dir.CreateSubdirectory("replacement").FullName;
         File.WriteAllText(Path.Combine(other,"occupant"),"other");
         expected=global::Massdex.SyncShark.Engine.Local.DriveIdentity.Read(root).Identity;
-        pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root, Exclusions=[new(Side.Local,"excluded",true)] };
+        pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root, Exclusions=[new(Side.Local,"excluded",true)], Roots=null };
         paths=new PathScope(pair,[pair],DriveType.Fixed);
         return dir;
     }
@@ -182,7 +182,7 @@ public static class DirectoryListingChecks
             // More than one 64 KiB native page (each name alone exceeds 300 bytes).
             for (var n=0;n<256;n++) File.WriteAllBytes(Path.Combine(root,new string('x',160)+n),[]);
             var expected=global::Massdex.SyncShark.Engine.Local.DriveIdentity.Read(root).Identity;
-            var pair=Scenarios.ItemChecks.Pair() with {LocalRoot=root}; var paths=new PathScope(pair,[pair],DriveType.Fixed);
+            var pair=Scenarios.ItemChecks.Pair() with {LocalRoot=root,Roots=null}; var paths=new PathScope(pair,[pair],DriveType.Fixed);
             await using var rows=global::Massdex.SyncShark.Engine.Local.DirectoryListing.ReadAsync(root,expected,paths,"",new(true,false),default).GetAsyncEnumerator();
             Check.Require(await rows.MoveNextAsync() && rows.Current.Entry is {IsFolder:false},"Root must yield a real file before detach");
             // The image's volume root is distinct from the selected pair root; the deny rule must not inherit.
@@ -383,7 +383,7 @@ public static class DirectoryListingChecks
             File.WriteAllText(Path.Combine(root,"plain"),"p");
             File.CreateSymbolicLink(Path.Combine(root,"file-link"),Path.Combine(root,"plain"));
             var expected=global::Massdex.SyncShark.Engine.Local.DriveIdentity.Read(root).Identity;
-            var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root };
+            var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root, Roots=null };
             var paths=new PathScope(pair,[pair],DriveType.Fixed);
             int changes=0; var thread=Environment.CurrentManagedThreadId;
             void Saw(object? sender,System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs e)
@@ -410,7 +410,7 @@ public static class DirectoryListingChecks
             File.WriteAllText(a,"A"); File.WriteAllText(b,"BBBB");
             var old=global::Massdex.SyncShark.Engine.Local.DirectoryListing.One(root,"b") ?? throw new InvalidDataException("missing fixture b");
             var expected=global::Massdex.SyncShark.Engine.Local.DriveIdentity.Read(root).Identity;
-            var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root };
+            var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root, Roots=null };
             var paths=new PathScope(pair,[pair],DriveType.Fixed);
             bool paused=false, pausedBeforeB=false; Entry? seen=null;
             await foreach(var row in global::Massdex.SyncShark.Engine.Local.DirectoryListing.ReadAsync(root,expected,paths,"",new(true,false),default))
@@ -510,7 +510,7 @@ public static class DirectoryListingChecks
             foreach(var name in new[]{"a","b"}) File.WriteAllText(Path.Combine(big.FullName,name),name);
             big.CreateSubdirectory("Sub");
             var expected=global::Massdex.SyncShark.Engine.Local.DriveIdentity.Read(root).Identity;
-            var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root };
+            var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root, Roots=null };
             var paths=new PathScope(pair,[pair],DriveType.Fixed);
             var walked=new List<string>(); var moved=false;
             await foreach(var row in global::Massdex.SyncShark.Engine.Local.DirectoryListing.ReadAsync(root,expected,paths,"Big",new(true,false),default))
@@ -532,7 +532,7 @@ public static class DirectoryListingChecks
     internal static async Task<Entry?> WalkOneAsync(string root,string name)
     {
         var expected=global::Massdex.SyncShark.Engine.Local.DriveIdentity.Read(root).Identity;
-        var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root };
+        var pair=Scenarios.ItemChecks.Pair() with { LocalRoot=root, Roots=null };
         var paths=new PathScope(pair,[pair],DriveType.Fixed);
         Entry? found=null;
         await foreach(var row in global::Massdex.SyncShark.Engine.Local.DirectoryListing.ReadAsync(root,expected,paths,"",new(true,false),default))

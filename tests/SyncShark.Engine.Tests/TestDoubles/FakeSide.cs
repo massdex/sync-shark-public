@@ -127,7 +127,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
             else
             {
                 var id=$"stage-{++nextId}";var at=path+"."+id;using var hash=new ContentHash();hash.Append(bytes);
-                var proof=new StageProof(at,"volume",id,bytes.LongLength,hash.Finish());
+                var proof=new StageProof(at,Volume,id,bytes.LongLength,hash.Finish());
                 var stamped=source with {Path=at,Id=id,Size=bytes.LongLength,ContentHash=proof.ContentHash,Revision=string.Empty};
                 staged=new Stage(path,bytes,stamped,DiscardUnarmedAsync){Proof=proof};
                 stages.Add(at,staged);
@@ -200,8 +200,8 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReadByIdAsync)); var hit = Items.Values.FirstOrDefault(v => v.Entry.Id == id).Entry;
         if(hit is null && Side==Side.Local && History.LastOrDefault(v=>v.Entry.Id==id).Entry is {} victim)
-            return Task.FromResult<(IdentityLocation Location,bool InScope)?>((new("volume",victim.Path,victim),false));
-        return Task.FromResult<(IdentityLocation Location,bool InScope)?>(hit is null ? null : (new(Side.ToString(), hit.Path, hit), OutOfScope?.Invoke(hit.Path)!=true));
+            return Task.FromResult<(IdentityLocation Location,bool InScope)?>((new(Volume,victim.Path,victim),false));
+        return Task.FromResult<(IdentityLocation Location,bool InScope)?>(hit is null ? null : (new(Side==Side.Local?Volume:Side.ToString(), hit.Path, hit), OutOfScope?.Invoke(hit.Path)!=true));
     }
     /// <summary>Seeded in-scope names per file identity; a one-name case must be seeded, never derived from the item map.</summary>
     public Dictionary<string,IReadOnlyList<string>> LinkNames { get; } = new(StringComparer.Ordinal);
@@ -230,7 +230,7 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Task<Recovery?> RecoverAsync(IdentityLocation actual, Entry version, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(RecoverAsync));
-        if(Side==Side.Local && actual.Domain=="volume" && actual.Entry==version && History.LastOrDefault(v=>v.Entry==version) is { Entry:not null } retained && !version.IsFolder)
+        if(Side==Side.Local && actual.Domain==Volume && actual.Entry==version && History.LastOrDefault(v=>v.Entry==version) is { Entry:not null } retained && !version.IsFolder)
             return Task.FromResult<Recovery?>(new Recovery.File(version,new MemoryStream(retained.Bytes,false)));
         var scripted = Recoverable.GetValueOrDefault((actual.Entry.Id,version.Revision,version.ContentHash));
         return Task.FromResult(scripted is Recovery.File file
@@ -257,14 +257,17 @@ public sealed class FakeSide(Side side, Func<StageProof,Task<bool>>? noteOwns = 
     public Task<IStaged> ReopenStageAsync(RemovalSelection armedVictim, StageProof expected, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested(); Requests.Count(nameof(ReopenStageAsync));
-        if(Side!=Side.Local || expected.VolumeId!="volume" || !stages.TryGetValue(expected.Path,out var held) || held.Source.IsFolder || held.Proof?.FileId!=expected.FileId || held.Bytes.LongLength!=expected.Size)
+        if(Side!=Side.Local || expected.VolumeId!=Volume || !stages.TryGetValue(expected.Path,out var held) || held.Source.IsFolder || held.Proof?.FileId!=expected.FileId || held.Bytes.LongLength!=expected.Size)
             throw new ChangedUnderneathException(expected.Path);
         using var hash=new ContentHash();hash.Append(held.Bytes);
         if(hash.Finish()!=expected.ContentHash)throw new ChangedUnderneathException(expected.Path);
         return Task.FromResult<IStaged>(new Stage(armedVictim.Proof.Expected.Path,held.Bytes.ToArray(),held.Source,DiscardUnarmedAsync){Proof=expected});
     }
     public Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType)> RootAsync(CancellationToken ct) => Task.FromResult(Root);
-    public (DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType) Root { get; set; }
+    public (DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType) Root { get; set; } =
+        side==Side.Local ? (Scenarios.ItemChecks.SavedRoots.Local,null,null,DriveType.Fixed) : (null,Scenarios.ItemChecks.SavedRoots.Dropbox,null,null);
+    /// <summary>The Local journal domain: the default saved root's volume key, as the adapters report it.</summary>
+    internal const string Volume = "1";
     /// <inheritdoc/>
     public Task<DeletionEvidence> DeletedAsync(string path, bool folder, CancellationToken ct)
     {

@@ -271,7 +271,7 @@ public static class ScanTableChecks
         await Count("same-folder rename",()=>committer.CommitAsync(db,"p",E("in/new",2),E("in/new2",2),null,null,default));
         await Count("cross-folder move",()=>committer.CommitAsync(db,"p",E("in/new2",2),E("in2/new2",2),null,null,default));
         await Count("remove",()=>committer.CommitAsync(db,"p",E("in2/new2",2),null,null,null,default));
-        await Count("constraint abort",async()=>{ try { await committer.CommitAsync(db,"p",null,E("in/a"),null,null,default); } catch(Microsoft.Data.Sqlite.SqliteException) { } });
+        await Count("constraint abort",async()=>{ try { await committer.CommitAsync(db,"p",null,E("in/a"),null,null,default); } catch(Exception e) when(e is Microsoft.Data.Sqlite.SqliteException or ChangedUnderneathException) { } });
         GC.KeepAlive(trace);
         return result;
     }

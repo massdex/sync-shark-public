@@ -37,7 +37,9 @@ public static class ItemChecks
         return queue;
     }
 
-    internal static PairConfig Pair() => new("pair", "Pair A", @"T:\Pair A", "/Pair A", "test", [], [], FirstRunPolicy.NewestWins, true, null);
+    // The default pair is a healthy bound pair: FakeSide reports these same roots unless a test scripts otherwise.
+    internal static RootIdentity SavedRoots { get; } = new(@"T:\Pair A", "/Pair A", "test", new(1, 1, null), new("account", "root", "home", "folder"));
+    internal static PairConfig Pair() => new("pair", "Pair A", @"T:\Pair A", "/Pair A", "test", [], [], FirstRunPolicy.NewestWins, true, null, SavedRoots);
     // The endpoint still advertises its high-water mark after the reader drains the page.
     internal static void Script(FakeSide side,ChangePage page)
     {

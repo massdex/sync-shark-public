@@ -253,7 +253,7 @@ public static class RepairChecks
 
     private static async Task<long> HealthyDirtySetAsync(int size,CancellationToken ct)
     {
-        var pair=ItemChecks.Pair(); pair=pair with {Roots=new(pair.LocalRoot,pair.DropboxRoot,pair.ConnectionId,new(1,1,null),new("a","r","h","d"))};
+        var pair=ItemChecks.Pair(); pair=pair with {Roots=ItemChecks.SavedRoots};
         using var store=new InMemoryStateStore(); var pc=Rooted(new FakeSide(Side.Local),pair); var db=Rooted(new FakeSide(Side.Dropbox),pair);
         await store.SavePairAsync(pair,ct); await store.FinishRepairAsync(pair.PairId,(0,0),"{}",ct);
         for(var i=0;i<size;i++)
@@ -295,7 +295,7 @@ public static class RepairChecks
     // A requested Repair must compare the pair, not finish from the reader's replay; a Dropbox-only item must reach both sides.
     private static async Task RequestedComparesAsync(CancellationToken ct)
     {
-        var pair=ItemChecks.Pair(); pair=pair with {Roots=new(pair.LocalRoot,pair.DropboxRoot,pair.ConnectionId,new(1,1,null),new("a","r","h","d"))};
+        var pair=ItemChecks.Pair(); pair=pair with {Roots=ItemChecks.SavedRoots};
         using var store=new InMemoryStateStore(); var pc=Rooted(new FakeSide(Side.Local),pair); var db=Rooted(new FakeSide(Side.Dropbox),pair);
         await store.SavePairAsync(pair,ct); await store.FinishRepairAsync(pair.PairId,(0,0),"{}",ct);
         const string path="cloud-only"; var item=ItemChecks.File(Side.Dropbox,path,1,"c1"); db.Seed(item,[1]);
@@ -312,7 +312,7 @@ public static class RepairChecks
         await FilteredChildKeepsNoticeAsync();
         foreach(var (healthy,interrupt) in new[]{(false,true),(false,false),(true,false)}) await WithRepairStore(async (store,pair,ct)=>
         {
-            pair=pair with {Roots=new(pair.LocalRoot,pair.DropboxRoot,pair.ConnectionId,new(1,1,null),new("a","r","h","d"))};
+            pair=pair with {Roots=ItemChecks.SavedRoots};
             var pc=Rooted(new FakeSide(Side.Local),pair); var db=Rooted(new FakeSide(Side.Dropbox),pair);
             await store.SavePairAsync(pair,ct);
             var queue=new WorkQueue(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
@@ -758,7 +758,7 @@ public static class RepairChecks
         Check.Require(await Raised("P/private")==0,"The missing-kept-child notice stayed after the item came back");
     });
 
-    private static PairConfig Bound(PairConfig pair) => pair with {Roots=new(pair.LocalRoot,pair.DropboxRoot,pair.ConnectionId,new(1,1,null),new("a","r","h","d"))};
+    private static PairConfig Bound(PairConfig pair) => pair with {Roots=ItemChecks.SavedRoots};
     // A fake endpoint whose top folder still has the pair's saved identity.
     private static FakeSide Rooted(FakeSide side,PairConfig pair) { side.Root=side.Side==Side.Local ? (pair.Roots!.Local,null,null,DriveType.Fixed) : (null,pair.Roots!.Dropbox,null,null); return side; }
     // A healthy, already-synced pair whose next Repair replays the journal instead of listing.
@@ -997,7 +997,7 @@ public static class RepairChecks
 
     private static async Task<(PairConfig Pair,FakeSide Pc,FakeSide Db,WorkQueue Queue)> CoveredQueueAsync(IStore store,PairConfig pair,CancellationToken token)
     {
-        pair=pair with {Roots=new(pair.LocalRoot,pair.DropboxRoot,pair.ConnectionId,new(1,1,null),new("a","r","h","d"))};
+        pair=pair with {Roots=ItemChecks.SavedRoots};
         await store.SavePairAsync(pair,token);
         var pc=Rooted(new FakeSide(Side.Local),pair); var db=Rooted(new FakeSide(Side.Dropbox),pair);
         pc.Pages.Enqueue(new([],null,new(7,31))); db.Pages.Enqueue(new([],"opaque",null));

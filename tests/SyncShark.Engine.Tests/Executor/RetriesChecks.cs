@@ -20,7 +20,7 @@ public static class RetriesChecks
 
     public static async Task RetryCarryingFolderAsync()
     {
-        var pair=ItemChecks.Pair(); var inner=pair with {PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"G/inner"),DropboxRoot=pair.DropboxRoot+"/G/inner"};
+        var pair=ItemChecks.Pair(); var inner=pair with {PairId="inner",LocalRoot=Path.Combine(pair.LocalRoot,"G/inner"),DropboxRoot=pair.DropboxRoot+"/G/inner",Roots=null};
         var paths=new PathScope(pair,[pair,inner],DriveType.Fixed); using var store=new InMemoryStateStore(); var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox);
         var old=ItemChecks.File(Side.Local,"F",0,"left",true); var peer=ItemChecks.File(Side.Dropbox,"F",0,"right",true); var moved=old with {Path="G"};
         await store.CommitAsync(pair.PairId,null,SyncedEntries.From(old,peer),null,null,default); pc.Seed(moved,[]); db.Seed(peer,[]);

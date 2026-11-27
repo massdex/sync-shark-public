@@ -100,7 +100,7 @@ public static class DropboxSideChecks
             return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(body) });
         }));
         var api = BoundApi(http, clock);
-        var side = new DropboxSide(ItemChecks.Pair() with { DropboxRoot = "" }, () => throw new InvalidOperationException(), api, null!);
+        var side = new DropboxSide(ItemChecks.Pair() with { DropboxRoot = "", Roots = null }, () => throw new InvalidOperationException(), api, null!);
         await ExpectThrottleAsync(async () => { await side.RootAsync(default); }, clock);
         await ExpectThrottleAsync(async () => { await side.RootAsync(default); }, clock, 23);
         var root = (await side.RootAsync(default)).Dropbox;

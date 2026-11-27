@@ -82,7 +82,7 @@ public static class UnfinishedChecks
             var old=SyncedEntries.From(f with {Path="Old/c"},r with {Path="Old/c"});var projected=SyncedEntries.From(f,r);
             await store.CommitAsync(pair.PairId,null,projected,null,null,default);pc.Seed(f,[1]);await pc.DeleteAsync(f,null,default);
             if(present)db.Seed(r,[1]);
-            await store.ArmAsync(pair.PairId,new(new(f,"volume",f.ContentHash),old),null,default);
+            await store.ArmAsync(pair.PairId,new(new(f,TestDoubles.FakeSide.Volume,f.ContentHash),old),null,default);
             await new Unfinished().CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
             if(present) Check.Require(store.Records.Values.Single()==projected && db.Items[r.Path].Entry==r,"Recovery retired a live projected member");
             else Check.Require(store.Records.Count==0 && await store.ArmedAsync(pair.PairId,default)==null && pc.Items.Count==0 && db.Items.Count==0,"A hop-projected binding of an armed, recycled file was not retired");
@@ -108,7 +108,7 @@ public static class UnfinishedChecks
             return result;
         }
         var local=FolderDeleteChecks.Observe.On(pc,(op,args)=>op==nameof(ISide.DeleteAsync)?Recycle((Entry)args[0]!,(RemovalSelection)args[1]!):
-            op==nameof(ISide.ReadByIdAsync) && pc.Items.Values.FirstOrDefault(v=>v.Entry.Id==(string?)args[0]).Entry is {} entry ? Task.FromResult<(IdentityLocation,bool)?>((new("volume",entry.Path,entry),true)):null);
+            op==nameof(ISide.ReadByIdAsync) && pc.Items.Values.FirstOrDefault(v=>v.Entry.Id==(string?)args[0]).Entry is {} entry ? Task.FromResult<(IdentityLocation,bool)?>((new(TestDoubles.FakeSide.Volume,entry.Path,entry),true)):null);
         var queue=await ItemChecks.StartQueueAsync(pair,paths,local,db,store);
         bool covered=false;Func<Func<(JournalPosition? Local,string? Dropbox),bool>> proof=()=>_=>covered;
         queue.GetType().GetProperty("ProofNow",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.SetValue(queue,proof);
@@ -156,7 +156,7 @@ public static class UnfinishedChecks
     private static async Task FolderNoteAsync(bool owned)
     {
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
-        var folder=ItemChecks.File(Side.Local,"f",0,"folder",true);var victim=new RemovalSelection(new(folder,"volume",null),null);await store.ArmAsync(pair.PairId,victim,null,default);
+        var folder=ItemChecks.File(Side.Local,"f",0,"folder",true);var victim=new RemovalSelection(new(folder,TestDoubles.FakeSide.Volume,null),null);await store.ArmAsync(pair.PairId,victim,null,default);
         var paths=new PathScope(pair,[pair],DriveType.Fixed);var owner=new Unfinished{CoversThrough=_=>false};
         if(owned)
         {
@@ -175,7 +175,7 @@ public static class UnfinishedChecks
     {
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
         var file=ItemChecks.File(Side.Local,"item",1,"local");var remote=ItemChecks.File(Side.Dropbox,file.Path,2,"remote");var saved=SyncedEntries.From(file,remote);await store.CommitAsync(pair.PairId,null,saved,null,null,default);
-        pc.History.Add((file,[1]));db.Seed(remote,[2]);var victim=new RemovalSelection(new(file,"volume",file.ContentHash),saved);
+        pc.History.Add((file,[1]));db.Seed(remote,[2]);var victim=new RemovalSelection(new(file,TestDoubles.FakeSide.Volume,file.ContentHash),saved);
         await using var stage=await pc.StageAsync(file.Path,new MemoryStream([2]),remote,file,default);await store.ArmAsync(pair.PairId,victim,stage.Proof,default);
         bool attempted=false;var locked=FolderDeleteChecks.Observe.On(pc,(op,_)=>{if(op==nameof(ISide.ReopenStageAsync)){attempted=true;throw new IOException("Sharing violation");}return null;});
         await new Unfinished().CheckLiveStageAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),locked,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
@@ -196,7 +196,7 @@ public static class UnfinishedChecks
         if(row is 9 or 11) db.Seed(fresh,[2]);
         if(row==14) db.Seed(d with {Path="b"},[1]);
         if(row==13){var x=ItemChecks.File(Side.Local,"f/x",1,"child");await store.CommitAsync(pair.PairId,null,SyncedEntries.From(x,x with {Id="peer-child"}),null,null,default);}
-        var victim=new RemovalSelection(new(a,"volume",a.IsFolder?null:a.ContentHash),saved);
+        var victim=new RemovalSelection(new(a,TestDoubles.FakeSide.Volume,a.IsFolder?null:a.ContentHash),saved);
         await using var stage=row>=15?await pc.StageAsync(path,new MemoryStream([2]),fresh,a,default):null;
         await store.ArmAsync(pair.PairId,victim,stage?.Proof,default);
         if(row>=16) await pc.PublishAsync(stage!,null,null,default);
@@ -251,7 +251,7 @@ public static class UnfinishedChecks
     {
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
         var local=ItemChecks.File(Side.Local,"arrival",1,"pc");var peer=ItemChecks.File(Side.Dropbox,"elsewhere",2,"peer");var saved=SyncedEntries.From(local with {Path="before"},peer with {Path="before"});
-        await store.CommitAsync(pair.PairId,null,saved,null,null,default);pc.History.Add((local,[1]));db.Seed(peer,[2]);var victim=new RemovalSelection(new(local,"volume",local.ContentHash),saved);
+        await store.CommitAsync(pair.PairId,null,saved,null,null,default);pc.History.Add((local,[1]));db.Seed(peer,[2]);var victim=new RemovalSelection(new(local,TestDoubles.FakeSide.Volume,local.ContentHash),saved);
         await store.ArmAsync(pair.PairId,victim,null,default);
         Task Restart()=>new Unfinished().CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
         bool VersionsIntact()=>store.Records.Values.Single()==saved && pc.Items.Count==0 && pc.History.Any(h=>h.Entry.Id==local.Id) && db.Items["elsewhere"].Bytes.SequenceEqual(new byte[]{2});
@@ -275,10 +275,10 @@ public static class UnfinishedChecks
         {
             var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
             var original=ItemChecks.File(Side.Local,"p",1,"old");var actual=ItemChecks.File(Side.Local,"p",2,same?original.Id:"substitute");var saved=SyncedEntries.From(original,original with {Id="peer"});
-            var note=new RemovalSelection(new(original,"volume",original.ContentHash),saved);await store.CommitAsync(pair.PairId,null,saved,null,null,default);await using var stage=await pc.StageAsync("p",new MemoryStream([2]),actual,original,default);await store.ArmAsync(pair.PairId,note,stage.Proof,default);
-            var receipt=new IdentityLocation("volume","bin",actual);var side=FolderDeleteChecks.Observe.On(pc,(op,args)=>{
+            var note=new RemovalSelection(new(original,TestDoubles.FakeSide.Volume,original.ContentHash),saved);await store.CommitAsync(pair.PairId,null,saved,null,null,default);await using var stage=await pc.StageAsync("p",new MemoryStream([2]),actual,original,default);await store.ArmAsync(pair.PairId,note,stage.Proof,default);
+            var receipt=new IdentityLocation(TestDoubles.FakeSide.Volume,"bin",actual);var side=FolderDeleteChecks.Observe.On(pc,(op,args)=>{
                 if(op==nameof(ISide.RestoreRecycledAsync)){pc.Seed(actual,[2]);throw new OperationCanceledException();}
-                if(op==nameof(ISide.ReadByIdAsync) && Equals(args[0],actual.Id) && pc.Items.ContainsKey(actual.Path))return Task.FromResult<(IdentityLocation,bool)?>((new("volume",actual.Path,actual),true));return null;});
+                if(op==nameof(ISide.ReadByIdAsync) && Equals(args[0],actual.Id) && pc.Items.ContainsKey(actual.Path))return Task.FromResult<(IdentityLocation,bool)?>((new(TestDoubles.FakeSide.Volume,actual.Path,actual),true));return null;});
             try{await HeldRecovery.PutBackSubstituteAsync(pair,new("p","p"),receipt,side,db,store,(_,_,_,_)=>Task.CompletedTask,default);}catch(OperationCanceledException){}
             await new Unfinished().CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,side,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
             Check.Require(await store.ArmedAsync(pair.PairId,default) ==null && stage.Proof!=null && store.OpenNotices.Any(n=>!n.Dismissed && n.Kind==NoticeKind.PutBack) && pc.Items["p"].Entry.Id==actual.Id && pc.Items["p"].Bytes.SequenceEqual(new byte[]{2}) && store.Records.Values.Single()==saved && db.Items.Count==0
@@ -288,7 +288,7 @@ public static class UnfinishedChecks
     private static async Task PublishedCommitAsync()
     {
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);var old=ItemChecks.File(Side.Local,"p",1,"victim");var remote=ItemChecks.File(Side.Dropbox,"p",2,"peer");var saved=SyncedEntries.From(old,remote);await store.CommitAsync(pair.PairId,null,saved,null,null,default);pc.History.Add((old,[1]));db.Seed(remote,[2]);
-        await using var stage=await pc.StageAsync("p",new MemoryStream([2]),remote,old,default);var note=new RemovalSelection(new(old,"volume",old.ContentHash),saved);await store.ArmAsync(pair.PairId,note,stage.Proof,default);var published=(await pc.PublishAsync(stage,null,null,default)).Final!;var final=SyncedEntries.From(published,remote);await store.CommitAsync(pair.PairId,saved,final,null,null,default);
+        await using var stage=await pc.StageAsync("p",new MemoryStream([2]),remote,old,default);var note=new RemovalSelection(new(old,TestDoubles.FakeSide.Volume,old.ContentHash),saved);await store.ArmAsync(pair.PairId,note,stage.Proof,default);var published=(await pc.PublishAsync(stage,null,null,default)).Final!;var final=SyncedEntries.From(published,remote);await store.CommitAsync(pair.PairId,saved,final,null,null,default);
         await new Unfinished().CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
         Check.Require(await store.ArmedAsync(pair.PairId,default)==null && store.Records.Values.Single()==final && pc.Requests[nameof(ISide.PublishAsync)]==1,"Committed stage replay did not release its exact note without republishing");
     }
@@ -373,7 +373,7 @@ public static class UnfinishedChecks
     private static async Task StaleStage(bool deleted,bool published=false)
     {
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox){Root=(null,pair.Roots!.Dropbox,null,null)};var old=ItemChecks.File(Side.Local,"f",1,"old");var remote=ItemChecks.File(Side.Dropbox,"f",2,"remote");var saved=SyncedEntries.From(old,remote with {ContentHash=old.ContentHash});await store.CommitAsync(pair.PairId,null,saved,null,null,default);pc.History.Add((old,[1]));if(!deleted) db.Seed(remote with {ContentHash=old.ContentHash},[1]);
-        await using var staged=await pc.StageAsync(old.Path,new MemoryStream([2]),remote,old,default);await store.ArmAsync(pair.PairId,new(new(old,"volume",old.ContentHash),saved),staged.Proof,default);
+        await using var staged=await pc.StageAsync(old.Path,new MemoryStream([2]),remote,old,default);await store.ArmAsync(pair.PairId,new(new(old,TestDoubles.FakeSide.Volume,old.ContentHash),saved),staged.Proof,default);
         if(published)
         {
             db.DeletedHistory[remote.Path]=new DeletionEvidence.DeletedFile(remote.Path,pair.Roots!.Dropbox.RootNamespaceId,remote.Id,remote.Revision,DateTimeOffset.UnixEpoch,null,remote.ContentHash,null);
@@ -384,14 +384,14 @@ public static class UnfinishedChecks
         await owner.CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,endpoint,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
         if(published){Check.Require(!pc.Items.ContainsKey(old.Path) && pc.History.Any(v=>v.Bytes.SequenceEqual(new byte[]{2})) && db.Mutations.Count==0 && store.Records.Count==0 && await store.ArmedAsync(pair.PairId,default)==null,"Published stage deletion did not settle through recycle without upload");return;}
         Check.Require((deleted?!pc.Items.ContainsKey("f"):pc.Items.TryGetValue("f",out var final) && final.Bytes.SequenceEqual(new byte[]{1}) && store.Records.Values.SingleOrDefault()?.LocalId==final.Entry.Id && store.Records.Values.Single().DropboxContentHash==old.ContentHash) && await store.ArmedAsync(pair.PairId,default)==null,deleted?"Deleted source resurrected from obsolete stage or note left armed":"Changed cloud source did not retire obsolete stage for redecision");
-        bool discarded=false;try{await using var residual=await pc.ReopenStageAsync(new(new(old,"volume",old.ContentHash),saved),staged.Proof!,default);}catch(ChangedUnderneathException){discarded=true;}
+        bool discarded=false;try{await using var residual=await pc.ReopenStageAsync(new(new(old,TestDoubles.FakeSide.Volume,old.ContentHash),saved),staged.Proof!,default);}catch(ChangedUnderneathException){discarded=true;}
         Check.Require(discarded,"Obsolete stage remained after note settlement");
     }
 
     private static async Task ComparedFolderAsync()
     {
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var local=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
-        var folder=ItemChecks.File(Side.Local,"p",0,"old",true);var saved=SyncedEntries.From(folder,folder with {Id="peer"});var selection=new RemovalSelection(new(folder,"volume",null),saved);
+        var folder=ItemChecks.File(Side.Local,"p",0,"old",true);var saved=SyncedEntries.From(folder,folder with {Id="peer"});var selection=new RemovalSelection(new(folder,TestDoubles.FakeSide.Volume,null),saved);
         local.History.Add((folder,[]));await store.CommitAsync(pair.PairId,null,saved,null,null,default);await store.ArmAsync(pair.PairId,selection,null,default);await store.CommitAsync(pair.PairId,saved,null,null,null,default);
         var full=FolderDeleteChecks.Admitted(local,db);bool acquired=false;var owner=new Unfinished{CoversThrough=f=>acquired && full(f)};Task Visit()=>owner.CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,local,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>throw new InvalidDataException("Recompared an already settled folder"),default);
         await Visit();Check.Require(await store.ArmedAsync(pair.PairId,default)==null && RecycleUnchecked(store,"p",folder.Id) && local.History.Count==1 && local.History[0].Entry.Id==folder.Id && store.Records.Count==0,"Start-up did not end the waiting folder note with one notice");
@@ -402,7 +402,7 @@ public static class UnfinishedChecks
     private static async Task ReplayNote(bool staged)
     {
         var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);var old=ItemChecks.File(Side.Local,"f",1,"old");var remote=ItemChecks.File(Side.Dropbox,"f",2,"remote");var saved=staged?null:SyncedEntries.From(old,remote);if(saved!=null) await store.CommitAsync(pair.PairId,null,saved,null,null,default);pc.History.Add((old,[1]));
-        var victim=new RemovalSelection(new(old,"volume",old.ContentHash),saved);await using var stage=staged?await pc.StageAsync(old.Path,new MemoryStream([2]),remote,old,default):null;
+        var victim=new RemovalSelection(new(old,TestDoubles.FakeSide.Volume,old.ContentHash),saved);await using var stage=staged?await pc.StageAsync(old.Path,new MemoryStream([2]),remote,old,default):null;
         if(staged)db.Seed(remote,[2]);await store.ArmAsync(pair.PairId,victim,stage?.Proof,default);
         await new Unfinished().CheckAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),null,pc,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default);
         Check.Require(await store.ArmedAsync(pair.PairId,default)==null && (staged?store.Records.Values.Single().LocalId==pc.Items[old.Path].Entry.Id:store.Records.Count==0 && pc.Items.Count==0),"Plain recycle or unbound publication remained armed without its exact outcome");

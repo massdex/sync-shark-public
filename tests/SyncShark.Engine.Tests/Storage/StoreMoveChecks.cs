@@ -449,10 +449,15 @@ public static class StoreMoveChecks
             await committer.CommitAsync(db,"p",before,after,null,null,default);Keys(step);
             foreach(var (id,row) in expected) if(Row(id) is var actual && actual!=row) wrong.Add($"{step}: {id} is {actual}");
         }
-        async Task Aborts(string step,SyncedEntry? before,SyncedEntry? after)
+        async Task Project(string step,string from,string to,params (string Id,string Row)[] expected)
+        {
+            await committer.ProjectSubtreeAsync(db,"p",new(from,from),new(to,to),default);Keys(step);
+            foreach(var (id,row) in expected) if(Row(id) is var actual && actual!=row) wrong.Add($"{step}: {id} is {actual}");
+        }
+        async Task Aborts(string step,Func<Task> write)
         {
             var snapshot=Snapshot();
-            try { await committer.CommitAsync(db,"p",before,after,null,null,default);wrong.Add(step+": the colliding write committed"); } catch(SqliteException) { }
+            try { await write();wrong.Add(step+": the colliding write committed"); } catch(Exception e) when(e is SqliteException or ChangedUnderneathException) { }
             if(Snapshot()!=snapshot) wrong.Add(step+": the aborted write changed bindings or keys");
         }
         static string K(string path)=>PathNames.Key(path);
@@ -463,11 +468,14 @@ public static class StoreMoveChecks
         await Write("content-only update",E("B/Y","a"),E("B/Y","a",size:2),("a",$"B/|Y|NULL|NULL|{K("B/Y")}"));
         await Write("delete",E("B/Y","a",size:2),null,("a","absent"));
         await Write("folder",null,E("F","f",folder:true));await Write("child",null,E("F/c","c"));await Write("remote-only",null,E("G/r","r","F/r"),("r",$"G/|r|'{K("F/r")}'|'F/r'|{K("G/r")}"));
-        await Write("folder rebase",E("F","f",folder:true),E("H","f",folder:true),("f",$"|H|NULL|NULL|{K("H")}"),("c",$"H/|c|NULL|NULL|{K("H/c")}"),("r",$"G/|r|'{K("H/r")}'|'H/r'|{K("G/r")}"));
-        await Aborts("colliding insert",null,E("H/c","z"));
-        await Aborts("colliding rename",E("G/r","r","H/r"),E("H/c","r","H/r"));
+        // The folder row commits alone; its descendants move in the separate projection step its callers run next.
+        await Write("folder rename",E("F","f",folder:true),E("H","f",folder:true),("f",$"|H|NULL|NULL|{K("H")}"),("c",$"F/|c|NULL|NULL|{K("F/c")}"));
+        await Project("folder rebase","F","H",("f",$"|H|NULL|NULL|{K("H")}"),("c",$"H/|c|NULL|NULL|{K("H/c")}"),("r",$"G/|r|'{K("H/r")}'|'H/r'|{K("G/r")}"));
+        await Aborts("colliding insert",()=>committer.CommitAsync(db,"p",null,E("H/c","z"),null,null,default));
+        await Aborts("colliding rename",()=>committer.CommitAsync(db,"p",E("G/r","r","H/r"),E("H/c","r","H/r"),null,null,default));
         await Write("bound target",null,E("K/c","k"));
-        await Aborts("rebase onto a bound key",E("H","f",folder:true),E("K","f",folder:true));
+        await Write("folder rename onto a bound child",E("H","f",folder:true),E("K","f",folder:true));
+        await Aborts("rebase onto a bound key",()=>committer.ProjectSubtreeAsync(db,"p",new("H","H"),new("K","K"),default));
         Fx.Exec(db,"DELETE FROM pair WHERE pair_id='p'");
         if(Snapshot()!="#") wrong.Add("pair removal left bindings or keys: "+Snapshot());
         Fx.Exec(db,"INSERT INTO pair(pair_id,def_json) VALUES('p','{}')");
@@ -519,7 +527,7 @@ public static class StoreMoveChecks
             await store.CommitAsync("p",E("A/x","a"),E("B/x","a"),null,null,default);await store.CommitAsync("p",E("B/x","a"),null,null,null,default);
         }
         GC.KeepAlive(trace);
-        using var plan=Open(path,SqliteOpenMode.ReadOnly);
+        using var plan=Open(path,SqliteOpenMode.ReadWrite);
         plan.CreateFunction<string,string,bool>("scansubtree",PathNames.IsSelfOrUnder,true);plan.CreateFunction<string,string,bool>("sameplace",PathNames.SamePlace,true);plan.CreateFunction<string,string,bool>("samename",PathNames.SameName,true);
         Fx.Exec(plan,"ATTACH ':memory:' AS scan_state;"+Schema.CreateScan);
         var table=new System.Text.RegularExpressions.Regex(@"\b(synced_entry|synced_key|folder)\b(?:\s+(?:AS\s+)?(?!(?:WHERE|JOIN|ON|LEFT|INNER|CROSS|USING|ORDER|GROUP|LIMIT|UNION|SET|INDEXED|NOT|VALUES|DEFAULT|SELECT)\b)(\w+))?",System.Text.RegularExpressions.RegexOptions.IgnoreCase);

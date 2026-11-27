@@ -14,7 +14,7 @@ public static class CallBudgetChecks
     {
         var pair = ItemChecks.Pair(); var pc = new FakeSide(Side.Local); var cloud = new FakeSide(Side.Dropbox);
         using var store = new InMemoryStateStore();
-        await store.SavePairAsync(pair, default); await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default);
+        await store.SavePairAsync(pair, default); await store.FinishRepairAsync(pair.PairId,(0,await store.OweRepairAsync(pair.PairId,Side.Dropbox,"requested",default)),"{}",default); await SavedHistoryAsync(store, pair.PairId);
         for (int i=0;i<size;i++)
         {
             string path = $"file-{i}"; var local = ItemChecks.File(Side.Local,path,1,$"local-{i}"); var remote = ItemChecks.File(Side.Dropbox,path,1,$"cloud-{i}");
@@ -42,11 +42,21 @@ public static class CallBudgetChecks
     private static PathScope Paths(PairConfig pair) => new(pair,[pair],DriveType.Fixed);
 
     /// <summary>A pair at steady state: a finished Repair plus `unchanged` settled identical files on both sides.</summary>
+    // A steady pair already holds its deletion history, published the way Repair publishes it, so no full run owes it.
+    private static async Task SavedHistoryAsync(IStore store, string pairId)
+    {
+        var scan = ResourceNames.NewScanToken();
+        static async IAsyncEnumerable<Listed> Empty() { await Task.CompletedTask; yield break; }
+        await store.AddScanAsync(pairId, scan, Side.Dropbox, Empty(), () => "history", default);
+        await store.PublishDeletedHistoryAsync(pairId, scan, default);
+        await store.ClearScanAsync(pairId, scan, default);
+    }
     private static async Task<(InMemoryStateStore Store, FakeSide Pc, FakeSide Cloud, long Commits)> SteadyAsync(PairConfig pair, int unchanged)
     {
         var store = new InMemoryStateStore(); var pc = new FakeSide(Side.Local); var cloud = new FakeSide(Side.Dropbox);
         await store.SavePairAsync(pair, default);
         await store.FinishRepairAsync(pair.PairId, (0, await store.OweRepairAsync(pair.PairId, Side.Dropbox, "requested", default)), "{}", default);
+        await SavedHistoryAsync(store, pair.PairId);
         for (int i = 0; i < unchanged; i++)
         {
             string path = $"unchanged-{i}";
@@ -372,7 +382,7 @@ public static class CallBudgetChecks
         wire.Add("files/list_revisions", native, head);
         wire.Add("files/get_metadata", id, Massdex.SyncShark.Engine.Tests.Dropbox.DropboxStubHandler.Missing, System.Net.HttpStatusCode.Conflict);
         using var store = new InMemoryStateStore(); await store.SavePairAsync(pair, default);
-        var pc = new FakeSide(Side.Local); var cloud = new FakeSide(Side.Dropbox);
+        var pc = FolderDeleteChecks.Rooted(new FakeSide(Side.Local), pair); var cloud = FolderDeleteChecks.Rooted(new FakeSide(Side.Dropbox), pair);
         for (var i = 0; i < size; i++)
         {
             var path = $"unchanged-{i}";
@@ -1051,7 +1061,7 @@ public static class CallBudgetChecks
         var roots = new RootIdentity(@"T:\Pair A", "/Pair A", "connection-a",
             new DirectoryIdentity(1, 2, null), new DropboxRootIdentity("account", "ns-root", "ns-home", "folder"));
         var pair = ItemChecks.Pair() with { Roots = roots };
-        var db = new FakeSide(Side.Dropbox); var local = new FakeSide(Side.Local);
+        var db = FolderDeleteChecks.Rooted(new FakeSide(Side.Dropbox), pair); var local = FolderDeleteChecks.Rooted(new FakeSide(Side.Local), pair);
         using var store = new InMemoryStateStore();
         var version = ItemChecks.File(Side.Dropbox, "held/item", 1, "selected");
         var reads = new List<Entry>();
@@ -1196,6 +1206,7 @@ public static class CallBudgetChecks
             var pc = new FakeSide(Side.Local); var cloud = new FakeSide(Side.Dropbox);
             await store.SavePairAsync(pair, default);
             Check.Require(await store.FinishRepairAsync(pair.PairId, (0, 0), "{}", default) is (true, true), "Missing steady-state baseline");
+            await SavedHistoryAsync(store, pair.PairId);
             foreach (var chunk in Enumerable.Range(0, count).Chunk(ItemChecks.Settings.StoreBatchRows))
                 await Task.WhenAll(chunk.Select(i => {
                     var path = $"item-{i}";

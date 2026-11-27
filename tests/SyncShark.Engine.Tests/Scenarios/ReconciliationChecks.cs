@@ -731,8 +731,8 @@ public static class ReconciliationChecks
     // overwrite its endpoint for an unchanged counterpart.
     public static Task A50IdenticalRootsPreserveSoleCopyAsync()
     {
-        var p1 = ItemChecks.Pair() with { PairId = "p1", LocalRoot = @"T:\A", DropboxRoot = "/X" };
-        var p2 = ItemChecks.Pair() with { PairId = "p2", LocalRoot = @"T:\A", DropboxRoot = "/Y" };
+        var p1 = ItemChecks.Pair() with { PairId = "p1", LocalRoot = @"T:\A", DropboxRoot = "/X", Roots = ItemChecks.SavedRoots with { LocalRoot = @"T:\A", DropboxRoot = "/X" } };
+        var p2 = ItemChecks.Pair() with { PairId = "p2", LocalRoot = @"T:\A", DropboxRoot = "/Y", Roots = ItemChecks.SavedRoots with { LocalRoot = @"T:\A", DropboxRoot = "/Y" } };
         return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
         await WithStoreAsync(p1, async store =>
         {
@@ -757,8 +757,8 @@ public static class ReconciliationChecks
     // state. An equal pair root is shared, not nested, and an exclusion holds only for the pair that configured it.
     public static Task A50VolumeRootPairsAsync()
     {
-        var p1 = ItemChecks.Pair() with { PairId = "p1", LocalRoot = @"F:\", DropboxRoot = "/X", Exclusions = [new(Side.Local, "e", false)] };
-        var p2 = ItemChecks.Pair() with { PairId = "p2", LocalRoot = @"F:\", DropboxRoot = "/Y" };
+        var p1 = ItemChecks.Pair() with { PairId = "p1", LocalRoot = @"F:\", DropboxRoot = "/X", Exclusions = [new(Side.Local, "e", false)], Roots = ItemChecks.SavedRoots with { LocalRoot = @"F:\", DropboxRoot = "/X" } };
+        var p2 = ItemChecks.Pair() with { PairId = "p2", LocalRoot = @"F:\", DropboxRoot = "/Y", Roots = ItemChecks.SavedRoots with { LocalRoot = @"F:\", DropboxRoot = "/Y" } };
         return global::Massdex.SyncShark.Engine.Tests.Run.AutoSyncChecks.WithinDeadline(async deadline =>
         {
             foreach (var type in new[] { DriveType.Removable, DriveType.Fixed })

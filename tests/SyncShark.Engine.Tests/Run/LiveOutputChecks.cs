@@ -23,8 +23,8 @@ public static class LiveOutputChecks
         return Task.CompletedTask;
     }
 
-    // A quiet period shows the newest open phase with its file and count once, then only that it is still working;
-    // the per-item records never reach the log file.
+    // Each quiet period after the last printed line shows the newest open phase with its file and count, or, with no open
+    // phase, that it is still working; the per-item records never reach the log file.
     public static Task QuietProgressAsync()
     {
         var output = new StringWriter(); var clock = new Ticks(); var logs = new HostChecks.MemoryLogs { Capture = new StringWriter() };
@@ -32,16 +32,16 @@ public static class LiveOutputChecks
         {
             log.Write(new RunEvent(RunEventKind.Stage, nameof(TextKey.StageRows), string.Empty, string.Empty, string.Empty));
             log.Write(new RunEvent(RunEventKind.Stage, nameof(TextKey.StageRows), "folder/current.txt", string.Empty, RunLog.InProgressOutcome) { Count = 7 });
-            clock.Fire(); // the stage start was shown in this period
-            clock.Fire();
+            clock.Fire(); // one quiet period after the stage start: the open phase's file
+            clock.Fire(); // the next period: the same open phase again
             log.Write(new RunEvent(RunEventKind.Stage, nameof(TextKey.StageRows), string.Empty, string.Empty, RunLog.EndedOutcome) { Ended = true });
-            clock.Fire(); // the stage end was shown in this period
+            clock.Fire(); // one period after the stage end, nothing open: still working
             clock.Fire();
         }
         var text = output.ToString();
         Check.Require(clock.Period == TimeSpan.FromSeconds(30), "the quiet period is not the owner's 30 seconds");
-        Check.Require(text.Split("folder/current.txt").Length == 2 && text.Contains(Text.Get(TextKey.StatusStillQuiet), StringComparison.Ordinal),
-            "a quiet period did not show the current file once, then still working");
+        Check.Require(text.Split("folder/current.txt").Length == 3 && text.Split(Text.Get(TextKey.StatusStillQuiet)).Length == 3,
+            "a quiet period did not show one line per period: the open phase's file while open, then still working");
         Check.Require(!logs.Capture.ToString().Contains("folder/current.txt", StringComparison.Ordinal), "a per-item progress record reached the log file");
         return Task.CompletedTask;
     }

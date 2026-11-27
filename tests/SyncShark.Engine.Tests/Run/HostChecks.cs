@@ -220,7 +220,7 @@ public static class HostChecks
                 try{await repair.WaitAsync(TimeSpan.FromSeconds(10),token);}catch(OperationCanceledException) when(!token.IsCancellationRequested){stopped=true;}
                 catch(TimeoutException e){throw new InvalidDataException("A root that was gone at the rewind left the Repair running",e);}
                 Check.Require(stopped && !finished.Task.IsCompleted,"A Repair finished after its root was gone");
-                Check.Require(raw.OpenNotices.Any(n=>n.Cause==TextKey.LocalRootMissing),"A root that was gone raised no root notice");
+                Check.Require(raw.OpenNotices.Any(n=>n.Kind==NoticeKind.RootIdentity && n.Cause==TextKey.RootUnavailable),"A root that was gone raised no root notice");
                 return;
             }
             try{await rewound.Task.WaitAsync(TimeSpan.FromSeconds(10),token);}
@@ -440,7 +440,7 @@ public static class HostChecks
             if(method!.Name==nameof(IStore.PairAsync) && PairFailure!=null && (string)args![0]! =="bad") return Task.FromException<PairConfig?>(PairFailure);
             if(method.Name==nameof(IDisposable.Dispose)) Disposed=true;
             if(method.Name==nameof(IStore.FindAsync)){Lookup?.Invoke((string)args![2]!);if(OnFind!=null || FindAt!=null)return Find();}
-            if(method.Name==nameof(IStore.SaveNoticeAsync) && NoticeFailure!=null)return Task.FromException(NoticeFailure);
+            if(method.Name==nameof(IStore.SaveNoticeAsync) && NoticeFailure!=null)return Task.FromException<Notice?>(NoticeFailure);
             if(method.Name==nameof(IStore.SaveNoticeAsync) && NoticeSaved!=null)return SaveNotice();
             if(ReadDropboxDebt!=null && (method.Name==nameof(IStore.ReadFullRepairAsync) || method.Name==nameof(IStore.ReadRepairAsync) && (Side)args![1]! ==Side.Dropbox)) return Debt();
             if(method.Name==nameof(IStore.OweRepairAsync) && Requested!=null){var result=Call();Requested();return result;}
@@ -457,7 +457,7 @@ public static class HostChecks
             }
             async Task<(long Revision,string? Reason)> Debt(){var debt=await (Task<(long Revision,string? Reason)>)Call()!;ReadDropboxDebt!(debt.Reason);return debt;}
             async Task<T> Finish<T>(Func<T,bool> done){if(BeforeFinish!=null)await BeforeFinish();var ok=await (Task<T>)Call()!;if(done(ok))Finished!();return ok;}
-            async Task SaveNotice(){await (Task)Call()!;NoticeSaved!((string)args![0]!);}
+            async Task<Notice?> SaveNotice(){var saved=await (Task<Notice?>)Call()!;NoticeSaved!((string)args![0]!);return saved;}
             async Task Cursor(){await (Task)Call()!;CursorSaved!();}
             async Task Save(){await OnSave!();await (Task)Call()!;}
             async Task<SyncedEntry?> Find(){if(FindAt!=null)await FindAt((string)args![2]!);else await OnFind!();return await Store.FindAsync((string)args![0]!, (Side)args[1]!, (string)args[2]!, (CancellationToken)args[3]!);}

@@ -102,7 +102,7 @@ public static class KeepBothChecks
 
     private static async Task OccupiedMovesAsync(CancellationToken ct)
     {
-        var pair=ItemChecks.Pair();var second=pair with {PairId="second",LocalRoot=pair.LocalRoot+"-other"};var settings=ItemChecks.Settings;
+        var pair=ItemChecks.Pair();var second=pair with {PairId="second",LocalRoot=pair.LocalRoot+"-other",Roots=null};var settings=ItemChecks.Settings;
         var remote=new FakeSide(Side.Dropbox);using var store=new InMemoryStateStore();
         var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

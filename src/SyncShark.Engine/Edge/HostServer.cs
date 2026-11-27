@@ -75,14 +75,14 @@ public sealed class HostServer : IDisposable
             return false;
         }
     }
-    /// <summary>Serve the claimed pipe; stop intake and drain before releasing its name.</summary>
-    public async Task ServeAsync(Run.Host host, CancellationToken ct)
+    /// <summary>Serve the claimed pipe; stop intake and drain before releasing its name. retryWait paces listener renewal.</summary>
+    public async Task ServeAsync(Run.Host host, Func<int,CancellationToken,Task> retryWait, CancellationToken ct)
     {
         var commands = new Commands();
         using var intake = CancellationTokenSource.CreateLinkedTokenSource(ct, host.Stopping);
         await ServeAsync((args, output, error, token) => commands.ExecuteAsync(args, host, output, error, token),
             token => host.Stopping.IsCancellationRequested ? Task.CompletedTask : host.StopAsync(token),
-            () => Listen(false), (f, t) => host.Settings.Backoff.WaitAsync(host.Settings.Backoff.RetryDelay(f), host.Clock, t), AuthenticatedPeer, intake.Token);
+            () => Listen(false), retryWait, AuthenticatedPeer, intake.Token);
     }
     /// <summary>Serve one authenticated command per connection; the dispatcher owns command semantics.</summary>
     private async Task ServeAsync(Func<string[], TextWriter, TextWriter, CancellationToken, Task<int>> execute, Func<CancellationToken,Task> shutdown,
@@ -139,7 +139,8 @@ public sealed class HostServer : IDisposable
         var args = JsonSerializer.Deserialize<string[]>(request.AsSpan(1));
         if (args == null || args.Any(a => a == null)) return false;
         await PipeFrame.WriteAsync(pipe, new byte[] {PipeFrame.Accepted}, ct);
-        using var gate = new SemaphoreSlim(1);
+        const int Mutex = 1; // the output and error frames share one pipe, so one writer at a time
+        using var gate = new SemaphoreSlim(Mutex);
         using var output = new Writer(pipe, PipeFrame.Output, gate, ct); using var error = new Writer(pipe, PipeFrame.Error, gate, ct);
         int code;
         try { code = await execute(args, output, error, CancellationToken.None); }
