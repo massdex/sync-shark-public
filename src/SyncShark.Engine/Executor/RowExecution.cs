@@ -249,7 +249,7 @@ public static class RowExecution
     }
 
     // An effect authorized by Dropbox absence acts only under the proved saved Dropbox root; an unread or unsaved root refuses.
-    internal static async Task RequireDropboxRootAsync(PairConfig pair,ISide dropbox,CancellationToken ct)
+    public static async Task RequireDropboxRootAsync(PairConfig pair,ISide dropbox,CancellationToken ct)
     {
         if(pair.Roots?.Dropbox is not {} saved || (await dropbox.RootAsync(ct)).Dropbox!=saved) throw new ChangedUnderneathException(pair.DropboxRoot);
     }

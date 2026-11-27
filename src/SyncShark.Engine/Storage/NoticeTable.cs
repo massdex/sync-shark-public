@@ -7,6 +7,7 @@ namespace Massdex.SyncShark.Engine.Storage;
 /// <summary>Stores a notice slot and its indexed subject members as one change.</summary>
 public sealed class NoticeTable
 {
+    private const long TickAdvance = 1; // one tick: the smallest DateTimeOffset step, so an accepted re-raise sorts strictly after the stored time
     private static Notice Row(SqliteDataReader rd)
     {
         var id=rd.GetInt64(0); var kind=(NoticeKind)rd.GetInt32(1);
@@ -119,7 +120,7 @@ public sealed class NoticeTable
                     if(replacing!=null && !(stored.Matches(replacing) && stored.At==replacing.At)) return (null,null); // only the exact generation being replaced gives up its slot
                     (var reject,same,notice)=ReconcileFailure(notice,stored);
                     if(reject) return (null,null);
-                    notice=notice with {At=new(Math.Max(stored.At.UtcTicks+1,notice.At.UtcTicks),TimeSpan.Zero)}; // every accepted re-raise moves the raised time forward
+                    notice=notice with {At=new(Math.Max(stored.At.UtcTicks+TickAdvance,notice.At.UtcTicks),TimeSpan.Zero)}; // every accepted re-raise moves the raised time forward
                 }
             }
         }

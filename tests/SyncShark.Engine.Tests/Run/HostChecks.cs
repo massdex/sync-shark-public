@@ -276,13 +276,17 @@ public static class HostChecks
             await host.RepairAsync(pair.PairId,token,open);
             Check.Require(open.ToString().Contains(Text.Get(TextKey.HumanFinished,(TextArg.Name,Text.Get(TextKey.HumanTitleRepair)),(TextArg.Status,string.Empty),(TextArg.Suffix,string.Empty)),StringComparison.Ordinal),
                 "the Repair's output did not reach its command before it returned");
-            finished=Signal();
+            finished=Signal();var handOff=Signal();
+            // The finished Repair's wake read waits on the store until Stop cancels the slot: the race Stop must not turn into a cancelled result.
+            tap.OnHandOffPair=async ct=>{handOff.TrySetResult();await Task.Delay(Timeout.Infinite,ct);};
             var repair=host.RepairAsync(pair.PairId,token,held);
-            await finished.Task.WaitAsync(token);await held.Entered.Task.WaitAsync(token);
+            await finished.Task.WaitAsync(token);await held.Entered.Task.WaitAsync(token);await handOff.Task.WaitAsync(token);
+            Check.Require(!repair.IsCompleted,"The Repair returned before its wake read");
             try{await host.StopAsync(token).WaitAsync(token);}
             catch(OperationCanceledException) when(token.IsCancellationRequested){throw new InvalidDataException("A stalled Repair reader held Host Stop");}
             Check.Require(host.Stopping.IsCancellationRequested && !held.Gate.Task.IsCompleted,"Stop did not cancel the pipe while the reader stayed stalled");
-            await repair.WaitAsync(token);
+            try{await repair.WaitAsync(token);}
+            catch(OperationCanceledException e) when(!token.IsCancellationRequested){throw new InvalidDataException("Stop during the wake read reported a finished Repair as cancelled",e);}
         }finally{held.Gate.TrySetResult();stop.Cancel();await host.StopAsync(default);}
     }
     // Stands in for the pipe writer: every write waits for the reader (the gate) or for the pipe's own cancellation.
@@ -432,6 +436,7 @@ public static class HostChecks
         internal Action? Finished,CursorSaved,Requested;
         internal IOException? NoticeFailure;
         internal Func<Task>? BeforeFinish;
+        internal Func<CancellationToken,Task>? OnHandOffPair;
         internal Action<string?>? ReadDropboxDebt;
         internal Exception? PairFailure;
         internal bool Disposed;
@@ -439,6 +444,7 @@ public static class HostChecks
         {
             if(method!.Name==nameof(IStore.PairAsync) && PairFailure!=null && (string)args![0]! =="bad") return Task.FromException<PairConfig?>(PairFailure);
             if(method.Name==nameof(IDisposable.Dispose)) Disposed=true;
+            if(method.Name==nameof(IStore.PairAsync) && OnHandOffPair is {} gate && Environment.StackTrace.Contains("HandOff",StringComparison.Ordinal)) return HandOffPair(gate);
             if(method.Name==nameof(IStore.FindAsync)){Lookup?.Invoke((string)args![2]!);if(OnFind!=null || FindAt!=null)return Find();}
             if(method.Name==nameof(IStore.SaveNoticeAsync) && NoticeFailure!=null)return Task.FromException<Notice?>(NoticeFailure);
             if(method.Name==nameof(IStore.SaveNoticeAsync) && NoticeSaved!=null)return SaveNotice();
@@ -457,6 +463,7 @@ public static class HostChecks
             }
             async Task<(long Revision,string? Reason)> Debt(){var debt=await (Task<(long Revision,string? Reason)>)Call()!;ReadDropboxDebt!(debt.Reason);return debt;}
             async Task<T> Finish<T>(Func<T,bool> done){if(BeforeFinish!=null)await BeforeFinish();var ok=await (Task<T>)Call()!;if(done(ok))Finished!();return ok;}
+            async Task<PairConfig?> HandOffPair(Func<CancellationToken,Task> gate){var ct=(CancellationToken)args![1]!;await gate(ct);return await Store.PairAsync((string)args[0]!,ct);}
             async Task<Notice?> SaveNotice(){var saved=await (Task<Notice?>)Call()!;NoticeSaved!((string)args![0]!);return saved;}
             async Task Cursor(){await (Task)Call()!;CursorSaved!();}
             async Task Save(){await OnSave!();await (Task)Call()!;}

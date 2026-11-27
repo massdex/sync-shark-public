@@ -256,7 +256,7 @@ public sealed class DropboxApi
             ct.ThrowIfCancellationRequested();
             throw new ItemFailedException(string.Empty, TextKey.RequestIncomplete, error) { Disposition = FailureDisposition.TemporaryNoEffect };
         }
-        if (token is not null) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        if (token is not null) request.Headers.Authorization = new AuthenticationHeaderValue(DropboxProtocol.BearerScheme, token);
         if (route == DropboxProtocol.GetCurrentAccount) return;
         if (token is null) throw new InvalidOperationException(nameof(_accessToken));
         if (_pathRootNamespaceId is null) throw new InvalidOperationException(nameof(_pathRootNamespaceId));

@@ -384,7 +384,9 @@ public static class AutoSyncChecks
                 var from=await live.Task.WaitAsync(ct); var localFrom=await localLive.Task.WaitAsync(ct);
                 Check.Require(from=="fresh",$"Live Dropbox reader did not continue from the reset cursor (read from {from ?? "null"})");
                 Check.Require(localFrom==end,$"Live PC reader did not continue from the finite end (read from {localFrom?.ToString() ?? "null"})");
-                Check.Require(!saved.Task.IsCompleted,"Live reader settled past a held finite page");
+                // A verified reset fences the old publication: the new cursor may save while the old effect is still held.
+                await saved.Task.WaitAsync(ct);
+                Check.Require(!blocker.IsCompleted && pc.Items["held"].Bytes.SequenceEqual(new byte[]{1}),"The old effect ran before its gate opened");
             }
             Check.Require(count==1 && pc.Pages.Count==0 && !intake.IsCompleted,"Finite reset waited for settlement or abandoned the other source");
         }
@@ -392,13 +394,14 @@ public static class AutoSyncChecks
         finally {allowLocal.TrySetResult(); release.TrySetResult();}
         try
         {
+            await blocker.WaitAsync(ct); // the old effect is joined before the reader is cancelled
             if(continuous)
             {
-                await saved.Task.WaitAsync(ct);timeout.Cancel();
+                Check.Require(pc.Items["held"].Bytes.SequenceEqual(new byte[]{2}) && await store.CursorAsync(pair.PairId,ct)=="after","The released old effect did not apply or rewound the new cursor");
+                timeout.Cancel();
                 try{await intake.WaitAsync(TimeSpan.FromSeconds(30));}catch(OperationCanceledException) when(ct.IsCancellationRequested){}
             }
             else await intake.WaitAsync(ct);
-            await blocker.WaitAsync(ct);
         }
         catch(TimeoutException e) {throw new InvalidDataException("Continuous reset reader did not stop",e);}
         catch(OperationCanceledException) when(ct.IsCancellationRequested) {throw new InvalidDataException("Admitted change did not settle after reset released its predecessor");}

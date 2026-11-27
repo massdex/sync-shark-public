@@ -168,7 +168,7 @@ public static class DirectoryListing
     private static SafeFileHandle OpenListed(SafeFileHandle parent, string name, long listedId, string path,
         out DriveIdentity.ByHandleFileInformation basic, bool folder = true)
     {
-        var unicode = new UnicodeString { Buffer = name, Length = checked((ushort)(name.Length * sizeof(char))), MaximumLength = checked((ushort)((name.Length + 1) * sizeof(char))) };
+        var unicode = new UnicodeString { Buffer = name, Length = checked((ushort)(name.Length * sizeof(char))), MaximumLength = checked((ushort)(name.Length * sizeof(char) + sizeof(char))) };
         var buffer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
         try
         {

@@ -28,7 +28,7 @@ public sealed class ItemFailedException(string path, TextKey cause, Exception? i
     /// <summary>Dropbox's stated wait left at <paramref name="now"/> (default: the clock's current time) on the receipt's clock, or null when
     /// it stated none (absent or zero); an elapsed positive wait is zero, not unstated.</summary>
     internal TimeSpan? WaitLeft(TimeProvider clock,long? now=null) => ProviderWait is {} wait && wait>TimeSpan.Zero
-        ? TimeSpan.FromTicks(Math.Max(0,(ProviderWaitStarted is {} start ? wait-clock.GetElapsedTime(start,now??clock.GetTimestamp()) : wait).Ticks)) : null;
+        ? TimeSpan.FromTicks(Math.Max(TimeSpan.Zero.Ticks,(ProviderWaitStarted is {} start ? wait-clock.GetElapsedTime(start,now??clock.GetTimestamp()) : wait).Ticks)) : null;
     // Of two no-effect refusals in one replay unit keep the one whose stated wait ends last, both read at ONE clock sample (an unstated
     // wait never displaces a stated one; ties keep the first). A null refusal is ignored.
     internal static ItemFailedException? Later(ItemFailedException? kept,ItemFailedException? next,TimeProvider clock)
