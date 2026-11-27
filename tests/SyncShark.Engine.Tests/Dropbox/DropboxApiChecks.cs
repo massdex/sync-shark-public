@@ -1,0 +1,1048 @@
+using System.IO.Compression;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
+using Massdex.SyncShark.Engine.Dropbox;
+using Massdex.SyncShark.Engine.Tests.TestDoubles;
+
+namespace Massdex.SyncShark.Engine.Tests.Dropbox;
+
+/// <summary>Contract checks for DropboxApi.</summary>
+public static class DropboxApiChecks
+{
+    /// <summary>Verifies the single send owner's catalog guards before any request is built.</summary>
+    public static async Task RunAsync()
+    {
+        var settings = SettingsParser.Load();
+        var wire = new Wire();
+        using var http = new HttpClient(wire);
+        var api = new DropboxApi(http, TimeProvider.System, settings, _ => { });
+
+        // A wrong typed style is rejected before any request; a rejected call never reaches the transport.
+        await ExpectArgumentException(() => api.DownloadAsync("files/delete_v2", "{}", CancellationToken.None));
+        await ExpectArgumentException(() => api.CallJsonAsync("files/download", "{}", CancellationToken.None));
+
+        Check.Require(wire.Paths.Count == 0, "a rejected call reached the transport");
+        var transport = Task.WhenAll(CheckConnectionProgressAsync(), CheckSlicesAsync(false), CheckSlicesAsync(true),
+            CheckCompressedAsync("gzip"), CheckCompressedAsync("deflate"), CheckBodyProgressAsync());
+        try { await transport; }
+        catch when (transport.Exception is not null) { throw transport.Exception; }
+        await CheckStalledRefusalAsync(false);
+        // A complete error envelope can extend past the old 64 KiB ceiling; a valid prefix alone is never evidence.
+        var padded = "{".PadRight(64 * 1024 + 1) + "\"error\":{\".tag\":\"path\",\"path\":{\".tag\":\"not_found\"}}}";
+        var account = api.CreateAccountScope("acct-a", _ => ValueTask.FromResult<string?>("token"), "root");
+        var listing = new DropboxListing();
+        wire.Status = (int)HttpStatusCode.Conflict;
+        wire.Body = padded;
+        Check.Require(await listing.ReadOneAsync(account, DropboxEntriesChecks.Pair, "Child", default) is null,
+            "complete metadata refusal did not establish absence");
+        wire.Body += "!";
+        try { await listing.ReadOneAsync(account, DropboxEntriesChecks.Pair, "Child", default); throw new InvalidDataException("malformed metadata refusal established absence"); }
+        catch (ItemFailedException error) when (error.Cause == TextKey.DropboxRefused && error.Disposition == FailureDisposition.Permanent) { }
+        await CheckClockPublicationAsync(settings);
+        await CheckLongpollTimeoutAsync(settings);
+    }
+
+    private static async Task CheckConnectionProgressAsync()
+    {
+        // Use the production handler, not an HttpMessageHandler that can bypass the plaintext filter.
+        using var server = Listen();
+        var address = Address(server);
+        var clock = new ConnectionClock();
+        using var client = DropboxApi.CreateHttpClient(clock);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        const int slices = 16;
+        var upload = new byte[slices * SliceContent.Slice];
+        using var request = new HttpRequestMessage(HttpMethod.Post, address) { Content = new ByteArrayContent(upload) };
+        var pending = client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, stop.Token);
+        using var connection = await server.AcceptTcpClientAsync(stop.Token);
+        using var reader = new StreamReader(connection.GetStream());
+        while (await reader.ReadLineAsync(stop.Token) is { Length: > 0 }) { }
+        Check.Require(await reader.ReadBlockAsync(new char[upload.Length].AsMemory(), stop.Token) == upload.Length,
+            "loopback upload did not deliver its bytes");
+        // The peer has read the request. Never return response headers. Expire pending (or next) activity.
+        clock.Expire();
+        bool timedOut = false;
+        try { using var unexpected = await pending; }
+        catch (Exception error) when (!stop.IsCancellationRequested && HasTimeout(error)) { timedOut = true; }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        Check.Require(timedOut, "ordinary pre-header read did not expire on its 120-second activity allowance");
+
+    }
+
+    private static System.Net.Sockets.TcpListener Listen()
+    {
+        var server = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+        server.Start();
+        return server;
+    }
+
+    private static Uri Address(System.Net.Sockets.TcpListener server) =>
+        new UriBuilder(Uri.UriSchemeHttp, IPAddress.Loopback.ToString(), ((IPEndPoint)server.LocalEndpoint).Port).Uri;
+
+    private static bool HasTimeout(Exception error) => error is TimeoutException || error.InnerException is { } inner && HasTimeout(inner);
+
+    private static async Task CheckCompressedAsync(string encoding)
+    {
+        using var server = Listen();
+        using var client = DropboxApi.CreateHttpClient(TimeProvider.System);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var get = client.GetByteArrayAsync(Address(server), stop.Token);
+        using var peer = await server.AcceptTcpClientAsync(stop.Token);
+        var socket = peer.GetStream();
+        using var reader = new StreamReader(socket, leaveOpen: true);
+        var offered = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (await reader.ReadLineAsync(stop.Token) is { Length: > 0 } header)
+            if (header.StartsWith("Accept-Encoding:", StringComparison.OrdinalIgnoreCase))
+                offered.UnionWith(header.Split(':', 2)[1].Split(',', StringSplitOptions.TrimEntries));
+        var bytes = "one two three"u8.ToArray();
+        using var compressed = new MemoryStream();
+        using (Stream codec = encoding == "gzip" ? new GZipStream(compressed, CompressionLevel.Fastest, true)
+            : new ZLibStream(compressed, CompressionLevel.Fastest, true)) codec.Write(bytes);
+        await socket.WriteAsync(Encoding.ASCII.GetBytes($"HTTP/1.1 200 OK\r\nContent-Encoding: {encoding}\r\nContent-Length: {compressed.Length}\r\n\r\n"), stop.Token);
+        await socket.WriteAsync(compressed.ToArray(), stop.Token);
+        var decoded = await get;
+        Check.Require(offered.Contains(encoding) && decoded.SequenceEqual(bytes), $"factory did not negotiate and decode {encoding}");
+    }
+
+    private static async Task CheckBodyProgressAsync()
+    {
+        using var server = Listen();
+        var clock = new ConnectionClock();
+        using var client = DropboxApi.CreateHttpClient(clock);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var request = new HttpRequestMessage(HttpMethod.Post, Address(server));
+        var get = client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, stop.Token);
+        using var peer = await server.AcceptTcpClientAsync(stop.Token);
+        var socket = peer.GetStream();
+        using var reader = new StreamReader(socket, leaveOpen: true);
+        while (await reader.ReadLineAsync(stop.Token) is { Length: > 0 }) { }
+        await socket.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na"u8.ToArray(), stop.Token);
+        using var response = await get;
+        var outcomes = new List<ResponseStream.BodyOutcome>();
+        await using var body = new ResponseStream().Open(response, await response.Content.ReadAsStreamAsync(stop.Token), stop.Token, outcomes.Add);
+        Check.Require(await body.ReadAsync(new byte[1], stop.Token) == 1, "download did not deliver its prefix");
+        clock.Advance(TimeSpan.FromSeconds(121));
+        var pending = body.ReadAsync(new byte[1], stop.Token).AsTask();
+        Check.Require(!pending.IsCompleted, "consumer idle expired a fresh transport read");
+        clock.Expire();
+        try { await pending; }
+        catch (Exception error) when (!stop.IsCancellationRequested && HasTimeout(error) && outcomes is [ResponseStream.BodyOutcome.Failed]) { return; }
+        throw new InvalidDataException("fresh stalled transport read did not report Failed before disposal");
+    }
+
+    private static async Task CheckSlicesAsync(bool expire)
+    {
+        using var server = Listen();
+        if (expire) server.Server.ReceiveBufferSize = 4096; // Limit the advertised window before the handshake.
+        var clock = new ConnectionClock();
+        using var client = DropboxApi.CreateHttpClient(clock);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var content = new SliceContent(clock, expire);
+        using var request = new HttpRequestMessage(HttpMethod.Post, Address(server)) { Content = content };
+        var post = client.SendAsync(request, stop.Token);
+        using var peer = await server.AcceptTcpClientAsync(stop.Token);
+        if (expire)
+        {
+            // Leave the socket open without reading: only the pending write's own deadline may end it.
+            try { using var unexpected = await post.WaitAsync(stop.Token); }
+            catch (Exception error) when (!stop.IsCancellationRequested && content.ExpiredPending && HasTimeout(error)) { return; }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+            throw new InvalidDataException("120-second write deadline did not cancel the already-pending socket write");
+        }
+        var socket = peer.GetStream();
+        // Keep the first body byte: a buffered text reader could read ahead into the measured slice.
+        var one = new byte[1];
+        int end = 0;
+        while (end < 4 && await socket.ReadAsync(one, stop.Token) == 1)
+            end = one[0] == "\r\n\r\n"[end] ? end + 1 : one[0] == 13 ? 1 : 0;
+        var bytes = new byte[content.Length];
+        await socket.ReadExactlyAsync(bytes, stop.Token);
+        await socket.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"u8.ToArray(), stop.Token);
+        using var result = await post;
+        result.EnsureSuccessStatusCode();
+        Check.Require(bytes.Take(SliceContent.Slice).All(x => x == 1) && bytes.Skip(SliceContent.Slice).All(x => x == 2),
+            "wire upload did not reset the progress deadline at the platform slice boundary");
+    }
+
+    private sealed class SliceContent(ConnectionClock clock, bool expire) : HttpContent
+    {
+        internal const int Slice = UploadContentChecks.CopyBufferBytes;
+        internal int Length => expire ? 4 * 1024 * 1024 : 2 * Slice;
+        internal bool ExpiredPending { get; private set; }
+        protected override bool TryComputeLength(out long length) { length = Length; return true; }
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => SerializeToStreamAsync(stream, context, default);
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken ct)
+        {
+            await stream.FlushAsync(ct); // Headers must not contribute to the measured body slice.
+            if (expire) { await WriteUntilBlockedAsync(stream, ct); return; }
+            var payload = Enumerable.Repeat((byte)1, Length).ToArray();
+            var count = 0;
+            clock.Writing.Value = (_, _) => { if (++count == 2) Array.Fill(payload, (byte)2); };
+            try { await stream.WriteAsync(payload.AsMemory(), ct); }
+            finally { clock.Writing.Value = null; }
+        }
+
+        private async Task WriteUntilBlockedAsync(Stream stream, CancellationToken ct)
+        {
+            var slice = new byte[Slice];
+            Action? fire = null;
+            clock.Writing.Value = (due, callback) => fire = due == TimeSpan.FromSeconds(120) ? callback : null;
+            try
+            {
+                for (int sent = 0; sent < Length; sent += Slice)
+                {
+                    fire = null;
+                    var write = stream.WriteAsync(slice.AsMemory(), ct).AsTask();
+                    // Ignore scheduling yields: expire only a write still pending against the non-reading peer.
+                    try { await write.WaitAsync(TimeSpan.FromSeconds(2), ct); }
+                    catch (TimeoutException) when (!write.IsCompleted && fire is not null)
+                    {
+                        ExpiredPending = true;
+                        fire();
+                        await write;
+                        throw new InvalidDataException("expired pending socket write succeeded");
+                    }
+                }
+            }
+            finally { clock.Writing.Value = null; }
+        }
+    }
+
+    private sealed class ConnectionClock : TimeProvider
+    {
+        private int expired;
+        internal readonly AsyncLocal<Action<TimeSpan, Action>?> Writing = new();
+        internal void Advance(TimeSpan amount) => Interlocked.Add(ref now, amount.Ticks);
+        private long now;
+        private event Action? OnExpiry, OnAdvance;
+        internal void Elapse(TimeSpan amount) { Advance(amount); OnAdvance?.Invoke(); }
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => Interlocked.Read(ref now);
+        internal void Expire() { Interlocked.Exchange(ref expired, 1); OnExpiry?.Invoke(); }
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new Active(this, callback, state);
+            OnExpiry += timer.Fire;
+            OnAdvance += timer.FireIfDue;
+            timer.Change(dueTime, period);
+            return timer;
+        }
+        private sealed class Active(ConnectionClock clock, TimerCallback callback, object? state) : ITimer
+        {
+            private int armed;
+            private long dueAt;
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                dueAt = dueTime == Timeout.InfiniteTimeSpan ? long.MaxValue : clock.GetTimestamp() + dueTime.Ticks;
+                var active = dueTime == TimeSpan.FromSeconds(120);
+                Interlocked.Exchange(ref armed, active ? 1 : 0);
+                if (dueTime != Timeout.InfiniteTimeSpan)
+                    clock.Writing.Value?.Invoke(dueTime, () => { clock.Advance(dueTime); callback(state); });
+                if (Volatile.Read(ref clock.expired) != 0) Fire();
+                return true;
+            }
+            internal void FireIfDue()
+            {
+                if (clock.GetTimestamp() < dueAt) return;
+                dueAt = long.MaxValue;
+                callback(state);
+            }
+            internal void Fire()
+            {
+                if (Interlocked.Exchange(ref armed, 0) == 0) return;
+                Interlocked.Add(ref clock.now, TimeSpan.FromSeconds(120).Ticks);
+                ThreadPool.QueueUserWorkItem(callback.Invoke, state);
+            }
+            public void Dispose() { clock.OnExpiry -= Fire; clock.OnAdvance -= FireIfDue; Interlocked.Exchange(ref armed, 0); }
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
+    }
+
+    private static async Task CheckStalledRefusalAsync(bool requireClassification)
+    {
+        await CheckIdleRefusalAsync(requireClassification);
+        var wait = TimeSpan.FromSeconds(17);
+        var clock = new ConnectionClock();
+        var wire = new Wire { Status = 429, HeaderWait = wait, Body = "{", ReadGate = Task.FromException(new TimeoutException()) };
+        using var http = new HttpClient(wire);
+        var api = new DropboxApi(http, clock, SettingsParser.Load(), _ => { });
+        try { await api.LongpollAsync("cursor", default); }
+        catch (ItemFailedException error) when (error.Disposition == FailureDisposition.TemporaryNoEffect &&
+            error.ProviderWait == wait && error.ProviderWaitStarted == clock.GetTimestamp()) { return; }
+        catch (NotImplementedException) when (!requireClassification && wire.LastReply?.Headers.RetryAfter?.Delta == wait) { return; }
+        catch (ItemFailedException) { }
+        throw new InvalidDataException("stalled refusal body lost the received Retry-After delay");
+    }
+
+    private static async Task CheckIdleRefusalAsync(bool requireClassification)
+    {
+        var clock = new ConnectionClock();
+        var entered = new TaskCompletionSource<CancellationToken>();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var wait = TimeSpan.FromMinutes(10);
+        var wire = new Wire { Status = 429, HeaderWait = wait, PendingBody = entered, ReadGate = release.Task };
+        using var http = new HttpClient(wire);
+        var api = new DropboxApi(http, clock, SettingsParser.Load(), _ => { });
+        using var stop = new CancellationTokenSource();
+        try
+        {
+            var cancelled = api.LongpollAsync("cursor", stop.Token);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            stop.Cancel();
+            try { await cancelled; throw new InvalidDataException("cancelled refusal returned normally"); }
+            catch (OperationCanceledException error) when (error.CancellationToken == stop.Token) { }
+            wire.PendingBody = new();
+            var idle = TimeSpan.FromSeconds(120);
+            var tick = TimeSpan.FromTicks(1);
+            var received = clock.GetTimestamp();
+            wire.WritePrefix = async (stream, token) =>
+            {
+                while (clock.GetElapsedTime(received) <= TimeSpan.FromSeconds(480 + 90))
+                {
+                    clock.Elapse(idle - tick);
+                    await stream.WriteAsync(" "u8.ToArray(), token);
+                }
+            };
+            var poll = api.LongpollAsync("cursor", default);
+            if (await Task.WhenAny(poll, wire.PendingBody.Task).WaitAsync(TimeSpan.FromSeconds(5)) == poll)
+                throw new InvalidDataException("refusal ended while bytes were arriving", poll.Exception);
+            var bodyToken = await wire.PendingBody.Task;
+            clock.Elapse(idle - tick);
+            Check.Require(!bodyToken.IsCancellationRequested, "refusal expired before one idle interval");
+            clock.Elapse(tick);
+            try { await poll.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (ItemFailedException error) when (bodyToken.IsCancellationRequested &&
+                error.Disposition == FailureDisposition.TemporaryNoEffect && error.ProviderWait == wait && error.ProviderWaitStarted == received) { return; }
+            catch (NotImplementedException) when (!requireClassification && bodyToken.IsCancellationRequested &&
+                wire.LastReply?.Headers.RetryAfter?.Delta == wait) { return; }
+            throw new InvalidDataException("120 seconds idle did not preserve the refusal and Retry-After receipt");
+        }
+        finally { release.TrySetResult(); }
+    }
+
+    private static async Task CheckClockPublicationAsync(EngineSettings settings)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var receipt = new ReceiptClock(clock, TimeSpan.FromSeconds(1));
+        var wire = new Wire { Date = DateTimeOffset.UnixEpoch.AddSeconds(10) };
+        using var http = new HttpClient(wire);
+        var api = new DropboxApi(http, receipt, settings, _ => { });
+        using var older = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("oauth2/token"));
+        using var newer = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("oauth2/token"));
+        Task<HttpResponseMessage>? inner = null;
+        (TimeSpan Offset, TimeSpan Uncertainty)? latest = null;
+        receipt.AfterWall = () =>
+        {
+            wire.Date = DateTimeOffset.UnixEpoch.AddMinutes(1);
+            inner = api.SendAsync(newer, default);
+            latest = api.ClockOffset;
+        };
+        using var first = await api.SendAsync(older, default);
+        using var second = await (inner ?? throw new InvalidDataException("newer request was not sent"));
+        Check.Require(latest?.Offset == TimeSpan.FromSeconds(59) && api.ClockOffset == latest,
+            "older dated receipt overwrote the newer clock sample");
+        wire.Date = DateTimeOffset.UnixEpoch.AddMinutes(2);
+        wire.Clock = clock;
+        wire.Advance = TimeSpan.FromSeconds(3);
+        using var last = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("oauth2/token"));
+        using var third = await api.SendAsync(last, default);
+        Check.Require(api.ClockOffset == (TimeSpan.FromSeconds(115), TimeSpan.FromSeconds(5)),
+            "later dated receipt did not replace the first published clock sample");
+    }
+
+    private static async Task CheckLongpollTimeoutAsync(EngineSettings settings)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var entered = new TaskCompletionSource<CancellationToken>();
+        var unblock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var wire = new Wire { PendingBody = entered, ReadGate = unblock.Task };
+        using var http = new HttpClient(wire) { Timeout = Timeout.InfiniteTimeSpan };
+        var api = new DropboxApi(http, clock, settings, _ => { });
+        using var stop = new CancellationTokenSource();
+        var timed = api.LongpollAsync("cursor", stop.Token);
+        using var args = System.Text.Json.JsonDocument.Parse(wire.Bodies.Single());
+        var sent480 = args.RootElement.TryGetProperty("timeout", out var seconds) && seconds.GetInt32() == 480;
+        try
+        {
+            Check.Require(!timed.IsCompleted && entered.Task.IsCompletedSuccessfully,
+                "longpoll did not reach its response body after headers");
+            Check.Require(clock.ScheduledDelay == TimeSpan.FromSeconds(480 + 90),
+                "longpoll did not use the requested wait plus its client allowance");
+            clock.ElapseScheduledDelay();
+            var bodyExpired = (await entered.Task).IsCancellationRequested;
+            var errors = new List<string>();
+            if (!sent480) errors.Add("longpoll wire timeout was not 480 seconds");
+            if (!bodyExpired) errors.Add("longpoll response body was not cancelled at 570 seconds");
+            Check.Require(errors.Count == 0, string.Join("; ", errors));
+            try { await timed.WaitAsync(TimeSpan.FromSeconds(5)); throw new InvalidDataException("timed-out longpoll was accepted as quiet"); }
+            catch (ItemFailedException error) when (error.Cause == TextKey.ReadDropboxFailed &&
+                error.Disposition == FailureDisposition.TemporaryNoEffect && !stop.IsCancellationRequested) { }
+            catch (Exception error) when (error is not InvalidDataException)
+            { throw new InvalidDataException("expired longpoll body did not produce a retryable read failure", error); }
+        }
+        finally { unblock.TrySetResult(); }
+        wire.PendingBody = null;
+        wire.HoldSend = true;
+        wire.ClientTimeout = true;
+        try { await api.LongpollAsync("cursor", stop.Token); throw new InvalidDataException("client timeout was accepted as quiet"); }
+        catch (ItemFailedException error) when (error.Cause == TextKey.ReadDropboxFailed &&
+            error.Disposition == FailureDisposition.TemporaryNoEffect && !stop.IsCancellationRequested) { }
+        catch (Exception error) when (error is not InvalidDataException)
+        { throw new InvalidDataException("client timeout did not produce a retryable read failure", error); }
+        wire.ClientTimeout = false;
+
+        var cancelled = api.LongpollAsync("cursor", stop.Token);
+        stop.Cancel();
+        try { await cancelled; throw new InvalidDataException("caller cancellation was swallowed"); }
+        catch (OperationCanceledException error) when (error.CancellationToken == stop.Token) { }
+        catch (Exception error) when (error is not InvalidDataException)
+        { throw new InvalidDataException("longpoll did not preserve the caller cancellation token", error); }
+    }
+
+    /// <summary>Checks transport binding, receiver timing, storage replies and classified refusals.</summary>
+    public static async Task SendPathAsync()
+    {
+        var settings = SettingsParser.Load();
+
+        var tokenWire = new Wire();
+        using (var tokenHttp = new HttpClient(tokenWire))
+        {
+            var signIn = new ItemFailedException(string.Empty, TextKey.SignInReturnRetry, null);
+            foreach (Exception failure in new Exception[] { new HttpRequestException(), new IOException(), new TimeoutException(), signIn })
+            {
+                var tokenApi = new DropboxApi(tokenHttp, TimeProvider.System, settings, _ => { }, _ => throw failure, "root");
+                using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint(DropboxProtocol.Delete));
+                try { using var response = await tokenApi.SendAsync(request, default); throw new InvalidOperationException("Token failure was ignored"); }
+                catch (ItemFailedException error)
+                {
+                    Check.Require(tokenWire.Paths.Count == 0 && (failure == signIn ? ReferenceEquals(error, signIn) :
+                        error.Disposition == FailureDisposition.TemporaryNoEffect && error.Cause == TextKey.RequestIncomplete &&
+                        ReferenceEquals(error.InnerException, failure)),
+                        "Token acquisition lost its pre-send failure");
+                }
+            }
+        }
+        await CheckStalledRefusalAsync(true);
+        await CheckDecoderStallAsync(settings);
+        await CheckReadRepliesAsync(settings);
+        await CheckGrowthAsync(settings);
+        // Separate hosts: failure to start the first period must not hide a failure at expiry.
+        var periods = Task.WhenAll(CheckContentionWidthAsync(settings, "start"), CheckContentionWidthAsync(settings, "inside"),
+            CheckContentionWidthAsync(settings, "expiry"), CheckContentionWidthAsync(settings, "zero"));
+        try { await periods; }
+        catch (NotImplementedException) when (periods.Exception!.InnerExceptions.All(error => error is NotImplementedException)) { throw; }
+        catch when (periods.Exception is not null) { throw periods.Exception; }
+        foreach (var (olderWait, reverse, expected, status) in new[] { (2, false, 2, 429), (2, true, 4, 429), (20, true, 4, 429),
+            (20, false, 4, 429), (20, false, 4, 503) })
+            await CheckBusyReceiptsAsync(settings, olderWait, reverse, expected, status);
+        foreach (var aFirst in new[] { true, false }) await CheckAccountsSeparateAsync(settings, aFirst);
+        await CheckAccountGrowthAsync(settings); await CheckAccountSharedAsync(settings); await CheckUnboundHostAsync(settings);
+        await CheckSharedPauseAsync(settings);
+
+        // The prepared path uses the same binding: each account's own token, and the same verified root.
+        var preparedWire = new Wire();
+        using (var preparedHttp = new HttpClient(preparedWire))
+        {
+            var preparedApi = new DropboxApi(preparedHttp, TimeProvider.System, settings, _ => { },
+                _ => new ValueTask<string?>("token-b"), "shared-root");
+            using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/delete_v2"))
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json")
+            };
+            using var response = await preparedApi.SendAsync(request, CancellationToken.None);
+            Check.Require(preparedWire.Authorizations.Count == 1 &&
+                preparedWire.Authorizations[0] == "Bearer token-b", "prepared path missing its token");
+            Check.Require(preparedWire.PathRoots.Count == 1 &&
+                preparedWire.PathRoots[0].Contains("shared-root", StringComparison.Ordinal), "prepared path missing its root");
+        }
+
+        // A refused prepared upload must leave the caller-owned source open (no request disposal closes it).
+        var caller = new TrackingStream(new byte[] { 1, 2, 3 });
+        var refusalWire = new Wire { Status = 409, Body = "{\"error_summary\":\"path/not_found\"}" };
+        using (var refusalHttp = new HttpClient(refusalWire))
+        {
+            var refusalApi = new DropboxApi(refusalHttp, TimeProvider.System, settings, _ => { },
+                _ => new ValueTask<string?>("token"), "root-id");
+            using var upload = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/upload"))
+            {
+                Content = new StreamContent(caller)
+            };
+            upload.Content!.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            using var refusedResponse = await refusalApi.SendAsync(upload, CancellationToken.None);
+            Check.Require(refusedResponse.StatusCode == HttpStatusCode.Conflict, "prepared refusal status not returned");
+            Check.Require(await refusedResponse.Content.ReadAsStringAsync() == refusalWire.Body, "prepared refusal body changed");
+            Check.Require(!caller.Disposed, "a refused send closed the caller-owned upload source");
+        }
+    }
+
+    private static async Task CheckDecoderStallAsync(EngineSettings settings)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var wire = new Wire { ReadGate = gate.Task, DecoderRead = entered, Body = "{\"changes\":false}" };
+        using var http = new HttpClient(wire) { Timeout = Timeout.InfiniteTimeSpan };
+        var api = new DropboxApi(http, clock, settings, _ => { });
+        var poll = api.LongpollAsync("cursor", default);
+        try
+        {
+            // A missing decoder must stay NOT IMPLEMENTED; it cannot count as entering an open stream.
+            if (await Task.WhenAny(poll, entered.Task).WaitAsync(TimeSpan.FromSeconds(5)) == poll) await poll;
+            var reader = await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.ElapseScheduledDelay();
+            Check.Require(reader.IsCancellationRequested, "open longpoll stream decoder did not receive the expired poll token");
+            try { await poll.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (ItemFailedException failure) when (failure.Disposition == FailureDisposition.TemporaryNoEffect) { return; }
+            throw new InvalidDataException("open longpoll stream expiry was not a temporary failure");
+        }
+        finally { gate.TrySetResult(); }
+    }
+
+    private static async Task CheckReadRepliesAsync(EngineSettings settings)
+    {
+        // Clock: exact signed offset and full-RTT-plus-one-second uncertainty from a successful dated reply.
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var gap = TimeSpan.FromSeconds(7);
+        var receiptClock = new ReceiptClock(clock, gap);
+        var rtt = TimeSpan.FromSeconds(5);
+        var serverDate = DateTimeOffset.UnixEpoch.AddSeconds(100);
+        var clockWire = new Wire
+        {
+            Clock = clock,
+            Advance = rtt,
+            Date = serverDate,
+            Body = "{\"used\":1,\"allocation\":{\".tag\":\"individual\",\"allocated\":2}}"
+        };
+        using (var clockHttp = new HttpClient(clockWire))
+        {
+            var clockApi = new DropboxApi(clockHttp, receiptClock, settings, _ => { },
+                _ => new ValueTask<string?>("token"), "root-id");
+            var (used, allocated) = await clockApi.SpaceUsageAsync(CancellationToken.None);
+            Check.Require(used == 1 && allocated == 2, "individual space usage decode");
+            Check.Require(clockWire.Bodies.Count == 1 && clockWire.Bodies[0] == "null", "void wire body is not JSON null");
+            var sample = clockApi.ClockOffset ?? throw new InvalidDataException("clock sample not recorded");
+            Check.Require(sample.Offset == serverDate - (DateTimeOffset.UnixEpoch + rtt), "clock offset wrong");
+            Check.Require(sample.Uncertainty == rtt + gap + TimeSpan.FromSeconds(1), "clock uncertainty wrong");
+            await CheckHeaderReceiptAsync(clockApi, clockWire, clock);
+            await CheckReadRefusalsAsync(clockApi, clockWire, serverDate);
+            Check.Require(clockApi.ClockOffset == sample, "a later dated refusal replaced the sample");
+            clockWire.Status = 200;
+            clockWire.Body = """{"used":1,"allocation":{".tag":"team","used":7,"allocated":11}}""";
+            Check.Require(await clockApi.SpaceUsageAsync(default) == (7, 11), "team usage came from the account");
+            foreach (var (usedBytes, allocatedBytes) in new[] { (-1, 2), (1, -2) })
+            {
+                clockWire.Body = System.Text.Json.JsonSerializer.Serialize(new { used = usedBytes, allocation = new { allocated = allocatedBytes } });
+                try { await clockApi.SpaceUsageAsync(default); }
+                catch (InvalidDataException) { continue; }
+                throw new InvalidDataException("negative storage amount accepted");
+            }
+        }
+    }
+
+    private static async Task CheckHeaderReceiptAsync(DropboxApi api, Wire wire, FakeTimeProvider clock)
+    {
+        wire.Status = 429;
+        wire.Body = "{";
+        var headerWall = clock.GetUtcNow() + wire.Advance;
+        var stamp = headerWall.UtcTicks;
+        var requested = TimeSpan.FromSeconds(30);
+        wire.HeaderDate = headerWall + requested;
+        try { await api.SpaceUsageAsync(default); }
+        catch (ItemFailedException error) when (error.ProviderWaitStarted == stamp && error.ProviderWait == requested)
+        {
+            wire.HeaderDate = null;
+            clock.Advance(requested); // the account pause ends before the next request
+            return;
+        }
+        throw new InvalidDataException("refusal did not use the paired header receipt samples");
+    }
+
+    private static async Task CheckReadRefusalsAsync(DropboxApi clockApi, Wire clockWire, DateTimeOffset serverDate)
+    {
+        clockWire.Status = 429;
+        clockWire.Date = serverDate.AddDays(1);
+        clockWire.Body = """{"error":{"retry_after":13}}""";
+        clockWire.HeaderWait = TimeSpan.FromSeconds(2);
+        try
+        {
+            await clockApi.SpaceUsageAsync(default);
+            throw new InvalidDataException("busy read accepted");
+        }
+        catch (ItemFailedException error)
+        {
+            Check.Require(error.Disposition == FailureDisposition.TemporaryNoEffect &&
+                error.ProviderWait == TimeSpan.FromSeconds(13) && error.ProviderWaitStarted.HasValue,
+                "busy read lost its nested provider delay or retry disposition");
+        }
+        clockWire.Clock!.Advance(TimeSpan.FromSeconds(13));
+        clockWire.Body = "{";
+        try
+        {
+            await clockApi.SpaceUsageAsync(default);
+            throw new InvalidDataException("malformed busy read accepted");
+        }
+        catch (ItemFailedException error) when (error.Disposition == FailureDisposition.TemporaryNoEffect &&
+            error.ProviderWait == clockWire.HeaderWait) { }
+        clockWire.Clock.Advance(clockWire.HeaderWait.Value);
+        clockWire.Status = 409;
+        foreach (var (payload, reset) in new[]
+        {
+            ("""{"error":{".tag":"reset"}}""", true),
+            ("""{"error":{".tag":"other"}}""", false),
+            ("""{"error":{".tag":"other"},"error_summary":"reset/..."}""", false),
+            ("""{"error_summary":42}""", false)
+        })
+        {
+            clockWire.Body = payload;
+            try { using var unused = await clockApi.CallJsonAsync("files/list_folder/continue", "{}", default); }
+            catch (ListingCursorResetException) when (reset) { continue; }
+            catch (ItemFailedException) when (!reset) { continue; }
+            throw new InvalidDataException("continuation refusal accepted");
+        }
+    }
+
+    private static async Task CheckContentionWidthAsync(EngineSettings settings, string scenario)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch.AddSeconds(scenario == "start" ? 5 : 10));
+        var wire = new Wire { Status = 429 };
+        using var http = new HttpClient(wire);
+        var api = Bind(new DropboxApi(http, clock, settings with { InitialLimiterLevel = 8 }, _ => { }), "acct-a", "a", "root");
+        // The shared pause holds a later request, so a reply inside an open period is one already in flight: gate holds its body.
+        async Task RefusalAsync(bool contention, int? seconds, Task? gate = null)
+        {
+            var cause = contention ? TextKey.WaitTooManyWrites : TextKey.DropboxRefused;
+            wire.Body = contention ? """{"error":{"reason":{".tag":"too_many_write_operations"},"retry_after":20}}""" : "{}";
+            wire.HeaderWait = seconds is { } delay ? TimeSpan.FromSeconds(delay) : null;
+            wire.ReadGate = gate;
+            var wait = contention ? TimeSpan.FromSeconds(20) : wire.HeaderWait;
+            try { await api.SpaceUsageAsync(default).WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (ItemFailedException error) when (error.Cause == cause && error.ProviderWait == wait) { return; }
+            throw new InvalidDataException("unexpected busy read disposition");
+        }
+        if (scenario == "start")
+        {
+            await RefusalAsync(true, null);
+            await CheckAdmissionAsync(api, wire, 8, "write contention reduced or paused admission");
+            clock.Advance(TimeSpan.FromSeconds(5));
+            await RefusalAsync(false, 2);
+            clock.Advance(TimeSpan.FromSeconds(2));
+            await CheckAdmissionAsync(api, wire, 4, "contention at 5 suppressed the first request throttle at 10");
+            return;
+        }
+        if (scenario == "zero")
+        {
+            await RefusalAsync(false, 0); // Open [10,10).
+            // Same instant, no clock advance: any positive window, however short, would suppress this reduction.
+            await RefusalAsync(false, 2);
+            clock.Advance(TimeSpan.FromSeconds(2));
+            await CheckAdmissionAsync(api, wire, 2, "a stated zero opened a positive period");
+            return;
+        }
+        var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var later = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = RefusalAsync(false, 2, opened.Task); // Received at 10; opens [10,12) when its body is read.
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var inside = RefusalAsync(scenario == "expiry", null, later.Task); // Received at 11.
+        opened.SetResult();
+        await first;
+        later.SetResult();
+        await inside;
+        clock.Advance(TimeSpan.FromSeconds(1));
+        if (scenario == "inside")
+        {
+            await CheckAdmissionAsync(api, wire, 4, "a request throttle inside the open period reduced admission again");
+            return;
+        }
+        await RefusalAsync(false, 2);
+        clock.Advance(TimeSpan.FromSeconds(2));
+        await CheckAdmissionAsync(api, wire, 2, "contention at 11 suppressed the new request throttle at expiry 12");
+    }
+
+    private static async Task CheckBusyReceiptsAsync(EngineSettings settings, int olderWait, bool reverse, int expected, int status)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch.AddSeconds(5));
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var wire = new Wire { Status = status, HeaderWait = TimeSpan.FromSeconds(olderWait), ReadGate = release.Task };
+        using var http = new HttpClient(wire);
+        var api = Bind(new DropboxApi(http, clock, settings with { InitialLimiterLevel = 8 }, _ => { }), "acct-a", "a", "root");
+        Task RefusalAsync() => BusyRefusalAsync(api);
+        var first = RefusalAsync();
+        Check.Require(!first.IsCompleted, "first refusal body was not delayed");
+        // The shared pause holds a request made after a reported period, so the later request is admitted now and held at the wire.
+        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var later = Task.CompletedTask;
+        if (!reverse)
+        {
+            wire.SendGate = hold.Task;
+            later = RefusalAsync();
+            release.SetResult();
+            await first;
+        }
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var otherEarly = reverse ? RefusalAsync() : Task.CompletedTask;
+        clock.Advance(TimeSpan.FromSeconds(14));
+        wire.HeaderWait = TimeSpan.FromSeconds(10);
+        wire.ReadGate = null;
+        if (reverse) await RefusalAsync();
+        else { hold.SetResult(); await later; wire.SendGate = null; }
+        if (reverse) { release.SetResult(); await Task.WhenAll(first, otherEarly); }
+        clock.Advance(TimeSpan.FromSeconds(10)); // Every period has ended.
+        await CheckAdmissionAsync(api, wire, expected);
+    }
+
+    private static async Task CheckGrowthAsync(EngineSettings settings)
+    {
+        var wire = new Wire();
+        using var http = new HttpClient(wire);
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var api = new DropboxApi(http, clock, settings with { InitialLimiterLevel = 1 }, _ => { },
+            _ => ValueTask.FromResult<string?>("a"), "root");
+        using (await api.CallJsonAsync("files/get_metadata", "{}", default)) { }
+        await using (var abandoned = await api.DownloadAsync("files/download", "{}", default))
+        {
+            await CheckAdmissionAsync(api, wire, 0);
+            Check.Require(await abandoned.ReadAsync(new byte[1]) == 1, "prefix was not delivered");
+            await CheckAdmissionAsync(api, wire, 0);
+        }
+        await CheckAdmissionAsync(api, wire, 1);
+        var unblock = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        wire.ReadGate = unblock.Task;
+        await using (var stalled = await api.DownloadAsync("files/download", "{}", default))
+        {
+            try
+            {
+                var reading = stalled.ReadAsync(new byte[1]).AsTask();
+                await CheckAdmissionAsync(api, wire, 0, "pending ordinary read did not hold its slot");
+                unblock.SetException(new TimeoutException()); // The connection activity guard terminates the read.
+                try { await reading; throw new InvalidDataException("stalled download returned bytes"); }
+                catch (TimeoutException) { }
+                await CheckAdmissionAsync(api, wire, 1, "expired ordinary read held its slot until disposal");
+            }
+            finally { unblock.TrySetResult(); wire.ReadGate = null; }
+        }
+        wire.FailRead = true;
+        await using (var failed = await api.DownloadAsync("files/download", "{}", default))
+        {
+            try { await failed.ReadAsync(new byte[1]); throw new InvalidDataException("failed download was readable"); }
+            catch (IOException error) when (error.GetType() == typeof(IOException)) { }
+        }
+        wire.FailRead = false;
+        await CheckAdmissionAsync(api, wire, 1);
+        await using (var complete = await api.DownloadAsync("files/download", "{}", default))
+        {
+            Check.Require(await complete.ReadAsync(new byte[1]) == 1, "complete case did not read a prefix");
+            await CheckAdmissionAsync(api, wire, 0);
+            await complete.CopyToAsync(Stream.Null);
+            await CheckAdmissionAsync(api, wire, 2);
+        }
+        await CheckAdmissionAsync(api, wire, 2);
+        await using (var next = await api.DownloadAsync("files/download", "{}", default))
+        {
+            await next.CopyToAsync(Stream.Null);
+            await CheckAdmissionAsync(api, wire, 2); // Double credit on the previous close would have grown to four.
+        }
+    }
+
+    private static DropboxApi Bind(DropboxApi host, string account, string token, string root) =>
+        host.CreateAccountScope(account, _ => ValueTask.FromResult<string?>(token), root);
+
+    private static async Task BusyRefusalAsync(DropboxApi api)
+    {
+        try { await api.SpaceUsageAsync(default); }
+        catch (ItemFailedException error) when (error.Disposition == FailureDisposition.TemporaryNoEffect) { return; }
+        throw new InvalidDataException("busy reply accepted");
+    }
+
+    // Two accounts, overlapping positive windows: each account's busy period and level are its own.
+    private static async Task CheckAccountsSeparateAsync(EngineSettings settings, bool aFirst)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch.AddSeconds(10));
+        var wire = new Wire { Status = 429, HeaderWait = TimeSpan.FromSeconds(10) };
+        using var http = new HttpClient(wire);
+        var host = new DropboxApi(http, clock, settings with { InitialLimiterLevel = 8 }, _ => { });
+        var a = Bind(host, "acct-a", "a", "root-a");
+        var b = Bind(host, "acct-b", "b", "root-b");
+        var (first, second) = aFirst ? (a, b) : (b, a);
+        await BusyRefusalAsync(first); // Opens first's [10,20).
+        await CheckAdmissionAsync(second, wire, 8, "one account's busy period reduced or paused another account");
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await BusyRefusalAsync(second); // Receipt 11, inside first's window.
+        clock.Advance(TimeSpan.FromSeconds(10)); // Both periods have ended.
+        await CheckAdmissionAsync(second, wire, 4, "another account's open period suppressed this account's reduction");
+        await CheckAdmissionAsync(first, wire, 4, "an account's busy reply did not reduce it exactly once");
+    }
+
+    private static async Task CheckAccountGrowthAsync(EngineSettings settings)
+    {
+        var wire = new Wire();
+        using var http = new HttpClient(wire);
+        var host = new DropboxApi(http, new FakeTimeProvider(DateTimeOffset.UnixEpoch), settings with { InitialLimiterLevel = 1 }, _ => { });
+        var a = Bind(host, "acct-a", "a", "root-a");
+        var b = Bind(host, "acct-b", "b", "root-b");
+        await using (var complete = await a.DownloadAsync("files/download", "{}", default)) await complete.CopyToAsync(Stream.Null);
+        await CheckAdmissionAsync(a, wire, 2, "a finished transfer did not grow its account");
+        await CheckAdmissionAsync(b, wire, 1, "a finished transfer grew another account");
+    }
+
+    // One account, two scopes with their own token and namespace: one level and one busy period.
+    private static async Task CheckAccountSharedAsync(EngineSettings settings)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch.AddSeconds(10));
+        var wire = new Wire { Status = 429, HeaderWait = TimeSpan.FromSeconds(10) };
+        using var http = new HttpClient(wire);
+        var host = new DropboxApi(http, clock, settings with { InitialLimiterLevel = 8 }, _ => { });
+        var one = Bind(host, "acct-a", "a1", "root-1");
+        var two = Bind(host, "acct-a", "a2", "root-2");
+        await CheckAdmissionAsync(one, wire, 8, "two scopes of one account admitted past its level", other: two);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        wire.ReadGate = gate.Task;
+        var firstReply = BusyRefusalAsync(one);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var secondReply = BusyRefusalAsync(two); // In flight: two busy replies inside one positive period.
+        gate.SetResult();
+        await Task.WhenAll(firstReply, secondReply);
+        wire.ReadGate = null;
+        clock.Advance(TimeSpan.FromSeconds(10));
+        await CheckAdmissionAsync(one, wire, 4, "one shared busy period was not exactly one reduction", other: two);
+    }
+
+    // The unbound host keeps its own limiter: its classified refusal reduces itself, never a verified account.
+    private static async Task CheckUnboundHostAsync(EngineSettings settings)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch.AddSeconds(10));
+        var wire = new Wire { Status = 429, HeaderWait = TimeSpan.FromSeconds(10) };
+        using var http = new HttpClient(wire);
+        var host = new DropboxApi(http, clock, settings with { InitialLimiterLevel = 8 }, _ => { });
+        var account = Bind(host, "acct-a", "a", "root");
+        try
+        {
+            using (await host.CallJsonAsync(DropboxProtocol.GetCurrentAccount, "null", default)) { }
+            throw new InvalidDataException("busy identity read accepted");
+        }
+        catch (ItemFailedException) { }
+        await CheckAdmissionAsync(account, wire, 8, "the unbound host's refusal reduced or paused a verified account");
+        clock.Advance(TimeSpan.FromSeconds(10));
+        await CheckAdmissionAsync(host, wire, 4, "the host's classified refusal did not reduce the host", route: DropboxProtocol.GetCurrentAccount);
+    }
+
+    // One route, several items: after one 429 with Retry-After on get_metadata no get_metadata of that account calls Dropbox until
+    // the wait ends, while its other routes and other accounts go on; write contention pauses nothing; cancellation ends the wait.
+    private static async Task CheckSharedPauseAsync(EngineSettings settings)
+    {
+        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch.AddSeconds(10));
+        var wire = new Wire { Status = 429, Body = """{"error":{"reason":{".tag":"too_many_write_operations"},"retry_after":20}}""" };
+        using var http = new HttpClient(wire);
+        var host = new DropboxApi(http, clock, settings with { InitialLimiterLevel = 8 }, _ => { });
+        var one = Bind(host, "acct-a", "a1", "root-1");
+        var two = Bind(host, "acct-a", "a2", "root-2");
+        var other = Bind(host, "acct-b", "b", "root-b");
+        Task<System.Text.Json.JsonDocument> Read(DropboxApi api, CancellationToken ct = default) =>
+            api.CallJsonAsync(DropboxProtocol.GetMetadata, "{}", ct);
+        async Task RefuseAsync(DropboxApi api)
+        {
+            try { using (await Read(api)) { } }
+            catch (ItemFailedException error) when (error.Disposition == FailureDisposition.TemporaryNoEffect) { return; }
+            throw new InvalidDataException("busy metadata read accepted");
+        }
+        async Task UploadAsync(DropboxApi api)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/upload"));
+            using (await api.SendAsync(request, default).WaitAsync(TimeSpan.FromSeconds(5))) { }
+        }
+        await RefuseAsync(one);
+        wire.Status = 200;
+        using (await Read(two).WaitAsync(TimeSpan.FromSeconds(5))) { }
+        Check.Require(clock.Created == 0, "write contention paused an unrelated request");
+        wire.Status = 429;
+        wire.Body = "{}";
+        // Two refusals in flight together: the shorter wait reported last does not shorten the longer one.
+        var longer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var shorter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        (wire.HeaderWait, wire.ReadGate) = (TimeSpan.FromSeconds(30), longer.Task);
+        var first = RefuseAsync(one);
+        (wire.HeaderWait, wire.ReadGate) = (TimeSpan.FromSeconds(5), shorter.Task);
+        var second = RefuseAsync(two);
+        longer.SetResult();
+        await first;
+        shorter.SetResult();
+        await second;
+        (wire.Status, wire.ReadGate) = (200, null);
+        var baseline = wire.Paths.Count;
+        var items = new[] { one, two, one }.Select(api => Read(api)).ToArray();
+        Check.Require(clock.Live == 3 && clock.ScheduledDelay == TimeSpan.FromSeconds(30) && wire.Paths.Count == baseline &&
+            items.All(item => !item.IsCompleted), "a get_metadata of the paused account called Dropbox inside the stated wait");
+        await UploadAsync(two);
+        using (await two.CallJsonAsync("files/list_folder", "{}", default).WaitAsync(TimeSpan.FromSeconds(5))) { }
+        using (await Read(other).WaitAsync(TimeSpan.FromSeconds(5))) { }
+        Check.Require(wire.Paths.Count == baseline + 3, "one route's pause held another route or another account");
+        await CheckAdmissionAsync(two, wire, 4, "a paused request held an admission slot", route: "files/list_folder");
+        baseline = wire.Paths.Count;
+        clock.Fire(0);
+        clock.Fire(1, TimeSpan.Zero);
+        clock.Fire(2, TimeSpan.Zero);
+        foreach (var item in items) using (await item.WaitAsync(TimeSpan.FromSeconds(5))) { }
+        Check.Require(wire.Paths.Count == baseline + 3 && clock.Created == 3, "the end of the wait did not release each held request once");
+        wire.Status = 429;
+        await RefuseAsync(one);
+        using var stop = new CancellationTokenSource();
+        var held = Read(one, stop.Token);
+        var sent = wire.Paths.Count;
+        stop.Cancel();
+        try { using (await held.WaitAsync(TimeSpan.FromSeconds(5))) { } throw new InvalidDataException("a cancelled paused request completed"); }
+        catch (OperationCanceledException) { }
+        Check.Require(wire.Paths.Count == sent, "a cancelled paused request called Dropbox");
+    }
+
+    // Park ordinary requests at the wire; the ones reaching it before cancellation expose the actual admission level.
+    private static async Task CheckAdmissionAsync(DropboxApi api, Wire wire, int expected, string? reason = null,
+        DropboxApi? other = null, string route = "files/get_metadata")
+    {
+        using var stop = new CancellationTokenSource();
+        wire.HoldSend = true;
+        var baseline = wire.Paths.Count;
+        async Task ProbeAsync(DropboxApi target)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint(route));
+            try { using var response = await target.SendAsync(request, stop.Token); }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        }
+        var pending = Enumerable.Range(0, expected + 1).Select(i => ProbeAsync(i % 2 == 0 ? api : other ?? api)).ToArray();
+        var admitted = wire.Paths.Count - baseline;
+        stop.Cancel();
+        await Task.WhenAll(pending);
+        wire.HoldSend = false;
+        Check.Require(admitted == expected, (reason is null ? string.Empty : reason + ": ") + $"expected {expected} admitted requests, observed {admitted}");
+    }
+
+    private static async Task ExpectArgumentException(Func<Task> action)
+    {
+        try
+        {
+            await action();
+            throw new InvalidDataException("a rejected call was accepted");
+        }
+        catch (ArgumentException)
+        {
+        }
+    }
+
+    // A scheduler pause immediately after sampling wall time must be included in the elapsed bound.
+    private sealed class ReceiptClock(FakeTimeProvider clock, TimeSpan gap) : TimeProvider
+    {
+        internal Action? AfterWall { get; set; }
+        public override long TimestampFrequency => clock.TimestampFrequency;
+        public override long GetTimestamp() => clock.GetTimestamp();
+        public override DateTimeOffset GetUtcNow()
+        {
+            var wall = clock.GetUtcNow();
+            clock.Advance(gap);
+            var after = AfterWall;
+            AfterWall = null;
+            after?.Invoke();
+            return wall;
+        }
+    }
+
+    private sealed class Wire : HttpMessageHandler
+    {
+        internal TaskCompletionSource<CancellationToken>? PendingBody { get; set; }
+        internal Task? ReadGate { get; set; }
+        internal Func<Stream, CancellationToken, Task>? WritePrefix { get; set; }
+        internal TaskCompletionSource<CancellationToken>? DecoderRead { get; set; }
+        internal bool HoldSend { get; set; }
+        internal Task? SendGate { get; set; } // holds an admitted request at the wire until released
+        internal bool ClientTimeout { get; set; }
+        internal bool FailRead { get; set; }
+        internal HttpResponseMessage? LastReply { get; private set; }
+        internal int Status { get; set; } = 200;
+        internal string Body { get; set; } = "{}";
+        internal DateTimeOffset? Date { get; set; }
+        internal DateTimeOffset? HeaderDate { get; set; }
+        internal TimeSpan? HeaderWait { get; set; }
+        internal TimeSpan Advance { get; set; }
+        internal FakeTimeProvider? Clock { get; set; }
+        internal List<string> Paths { get; } = [];
+        internal List<string> Bodies { get; } = [];
+        internal List<string> Authorizations { get; } = [];
+        internal List<string> PathRoots { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            if (SendGate is { } hold) await hold.WaitAsync(cancellationToken);
+            Paths.Add(request.RequestUri!.AbsolutePath);
+            if (ClientTimeout) throw new TaskCanceledException("HTTP client timeout", new TimeoutException());
+            var current = request.Content;
+            Bodies.Add(current is null ? string.Empty : await current.ReadAsStringAsync(cancellationToken));
+            if (HoldSend) await Task.Delay(Timeout.Infinite, cancellationToken);
+            if (request.Headers.Authorization is { } authorization)
+                Authorizations.Add(authorization.Scheme + " " + (authorization.Parameter ?? string.Empty));
+            if (request.Headers.TryGetValues(DropboxProtocol.PathRootHeader, out var roots)) PathRoots.AddRange(roots);
+            Clock?.Advance(Advance);
+            var response = new HttpResponseMessage((HttpStatusCode)Status)
+            {
+                Content = PendingBody is { } pending
+                    ? new PendingContent(pending, ReadGate!, WritePrefix)
+                    : new StreamContent(new SplitReply(Encoding.UTF8.GetBytes(Body), ReadGate, FailRead, DecoderRead))
+            };
+            if (HeaderDate is { } expires) response.Headers.RetryAfter = new RetryConditionHeaderValue(expires);
+            if (HeaderWait is { } wait) response.Headers.RetryAfter = new RetryConditionHeaderValue(wait);
+            if (Date is { } date) response.Headers.Date = date;
+            return LastReply = response;
+        }
+    }
+
+    // HttpContent buffers a non-streaming reply on ReadAsStreamAsync, after the handler has returned its headers.
+    private sealed class PendingContent(TaskCompletionSource<CancellationToken> entered, Task release, Func<Stream, CancellationToken, Task>? writePrefix) : HttpContent
+    {
+        protected override async Task<Stream> CreateContentReadStreamAsync(CancellationToken ct)
+        {
+            using var buffer = new MemoryStream();
+            await CopyToAsync(buffer, ct);
+            return new MemoryStream(buffer.ToArray(), writable: false);
+        }
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            SerializeToStreamAsync(stream, context, CancellationToken.None);
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken ct)
+        {
+            if (writePrefix is not null) await writePrefix(stream, ct);
+            else await stream.WriteAsync("{"u8.ToArray(), ct);
+            entered.TrySetResult(ct);
+            await release.WaitAsync(ct);
+        }
+        protected override bool TryComputeLength(out long length) { length = 0; return false; }
+    }
+
+    private sealed class SplitReply(byte[] bytes, Task? gate, bool fail, TaskCompletionSource<CancellationToken>? entered) : MemoryStream(bytes, writable: false)
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            entered?.TrySetResult(ct);
+            if (gate != null) await gate.WaitAsync(ct);
+            if (fail) throw new IOException();
+            return await base.ReadAsync(buffer[..Math.Min(buffer.Length, 3)], ct);
+        }
+    }
+
+    private sealed class TrackingStream : MemoryStream
+    {
+        internal bool Disposed { get; private set; }
+
+        internal TrackingStream(byte[] bytes) : base(bytes, writable: false)
+        {
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            base.Dispose(disposing);
+        }
+
+        public override ValueTask DisposeAsync()
+        {
+            Disposed = true;
+            return base.DisposeAsync();
+        }
+    }
+}
