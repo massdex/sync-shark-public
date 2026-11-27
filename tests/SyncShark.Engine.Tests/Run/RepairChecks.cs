@@ -669,14 +669,15 @@ public static class RepairChecks
             if(m.Name==nameof(IDisposable.Dispose)) return null; // WithRepairStore owns this fixture.
             var result=AutoSyncChecks.Observation.Forward(store,m,args);
             if(m.Name==nameof(IStore.SaveNoticeAsync) && args[1] is Notice {Kind:NoticeKind.RootIdentity or NoticeKind.Failure} notice)
-                return AfterNotice((Task)result!,notice);
+                return AfterNotice((Task<Notice?>)result!,notice);
             return result;
         });
-        async Task AfterNotice(Task save,Notice notice)
+        async Task<Notice?> AfterNotice(Task<Notice?> save,Notice notice)
         {
-            await save;
+            var saved=await save;
             if(Volatile.Read(ref rootFaults)==0) disposition.TrySetException(new InvalidDataException($"Host reported {notice.Cause} before the selected Repair inventory"));
             else disposition.TrySetResult();
+            return saved;
         }
         var logs=AutoSyncChecks.Observation.Wrap<ILogFiles>((m,_)=>m.Name==nameof(ILogFiles.Open)?TextWriter.Null:null);
         var host=new Host((_,_)=>Task.FromResult<IStore?>(observed),(_,_,_,_)=>(Endpoint(pc),Endpoint(db)),ItemChecks.Settings,logs,TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);

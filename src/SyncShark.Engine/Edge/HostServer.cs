@@ -46,7 +46,7 @@ public sealed class HostServer : IDisposable
             var options=PipeOptions.Asynchronous | (first ? PipeOptions.FirstPipeInstance : PipeOptions.None);
             const uint RejectRemoteClients=0x8; // winbase.h PIPE_REJECT_REMOTE_CLIENTS; byte type/read mode and WAIT are zero.
             var handle=CreateNamedPipe(@"\\.\pipe\"+PipeName,(int)options | (int)PipeDirection.InOut,RejectRemoteClients,
-                byte.MaxValue,0,0,0,ref attributes); // winbase.h PIPE_UNLIMITED_INSTANCES; system-default buffers and wait.
+                byte.MaxValue,0,0,0,ref attributes); // winbase.h PIPE_UNLIMITED_INSTANCES; zero buffer quota (a write completes as the client reads it); default wait.
             try {
                 if(handle.IsInvalid) {
                     int hr=Marshal.GetHRForLastWin32Error();

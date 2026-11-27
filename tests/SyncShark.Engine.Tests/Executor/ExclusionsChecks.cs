@@ -439,8 +439,10 @@ public static class ExclusionsChecks
     {
         var exclusion = new Exclusion(Side.Local, "X", false);
         var pair = Scenarios.ItemChecks.Pair() with { Exclusions = [exclusion] };
+        // A fresh apply owes its path: unowed is the re-created-item case, where newest wins instead of keep both.
+        using var store = new TestDoubles.InMemoryStateStore(); await store.SavePairAsync(pair, default, [(pair.PairId, new Scope("X", "X"))]);
+        pair = (await store.PairAsync(pair.PairId, default))!;
         var paths = new PathScope(pair, [pair], DriveType.Fixed);
-        using var store = new TestDoubles.InMemoryStateStore(); await store.SavePairAsync(pair, default);
         var pc = new TestDoubles.FakeSide(Side.Local) { OutOfScope = p => PathNames.IsSelfOrUnder(p, "X") };
         var db = new TestDoubles.FakeSide(Side.Dropbox);
         db.Seed(Scenarios.ItemChecks.File(Side.Dropbox, "X", 0, "db-X", true), []); db.Seed(Scenarios.ItemChecks.File(Side.Dropbox, "X/f", 2, "db-f"), [2]);

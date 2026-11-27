@@ -377,7 +377,8 @@ public static class HostServerChecks
     });
 
     // A completed reply is never disconnected, even while no successor holds the name.
-    private static Task UnreadReplyRetainedAsync() => FixtureAsync("unread reply retained", async (server, ct, serving) => {
+    // The server's pipes have zero buffer quota, so each frame's write completes only as the client reads it.
+    private static Task UnreadReplyRetainedAsync() => FixtureAsync("completed reply retained", async (server, ct, serving) => {
         var renewal = new Renewal(server);
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         serving.Add(Serve(server, async (args, output, error, token) => { await output.WriteAsync("served"); return 0; },
@@ -385,13 +386,13 @@ public static class HostServerChecks
         using var client = await ConnectAsync();
         await SendAsync(client, "x");
         await Within(renewal.Waiting.Task, "The listener outage did not start");
+        Check.Require(await Within(ReplyAsync(client), "The reply was not readable") is (0, "served"), "Wrong reply");
         await Within(done.Task, "The exchange never completed");
-        // Accepted (5), Output "served" (5 + 6), Exit (5 + 4).
-        Check.Require(PeekNamedPipe(client.SafePipeHandle, 0, 0, 0, out var available, 0) && available == 25,
-            "The whole reply was not waiting unread in the pipe");
         using (var contender = new HostServer()) Check.Require(await Refused(contender), "A contender claimed during the outage");
-        Check.Require(await Within(ReplyAsync(client), "The unread reply was not readable") is (0, "served"), "A completed reply was disconnected");
+        // A disconnected client end fails the peek; the retained instance stays connected with nothing left to read.
+        Check.Require(PeekNamedPipe(client.SafePipeHandle, 0, 0, 0, out var available, 0) && available == 0, "A completed reply was disconnected");
         renewal.Recover();
+        Check.Require(await Within(EndedAsync(client), "The completed exchange stayed open after a successor held the name"), "Data after the reply");
     });
 
     // Shutdown during a renewal outage drains with the name held, then returns normally.
