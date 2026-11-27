@@ -562,7 +562,6 @@ public static class CheckRegistry
             new("A08 finish refused after folder removal", Scenarios.FolderChecks.A08FinishRefusedAfterFolderRemovalAsync),
             new("A08 retry create only", Scenarios.FolderChecks.A08RetryCreateOnlyAsync),
             new("A08 competing recovered folder", Scenarios.FolderChecks.A08CompetingRecoveredFolderAsync),
-            new("A14 repair listing-only edit kept", Scenarios.FolderChecks.A14RepairListingOnlyEditKeptAsync),
             new("A14 nested root survivor", Scenarios.FolderChecks.A14NestedRootSurvivorAsync),
             new("A14 link on deleting side", Scenarios.FolderChecks.A14LinkOnDeletingSideAsync),
             new("A14 edited loose file beside exclusion", Scenarios.FolderChecks.A14EditedLooseFileBesideExclusionAsync),

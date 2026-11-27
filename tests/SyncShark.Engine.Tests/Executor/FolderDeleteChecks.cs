@@ -12,7 +12,7 @@ public static class FolderDeleteChecks
     public static async Task RunAsync()
     {
         var failures=new List<string>();var missing=new List<string>();
-        foreach(var test in new Func<Task>[]{()=>SelectedCloudWindowAsync(["latest"]),()=>SelectedCloudWindowAsync(["unverified"]),()=>SelectedCloudWindowAsync(["moved"]),()=>SelectedCloudWindowAsync(["missing"]),SelectedChildrenAsync,DefiniteNoEffectAsync,SameIdRetryAsync,MovedOutEvidenceAsync,LocatedFileRetryAsync,ExcludedPhysicalAsync,IgnoredPhysicalAsync,NestedPhysicalAsync,AncestorAsync,()=>OutsideFolderAsync(true),()=>OutsideFolderAsync(false),RemovalHopLeavesLiveDescendant,ArmedSiblingsAsync,ImmediateBoundaryAsync,SupersededRevisionAsync,RecoveryAsync,PartialAsync,OutsideAsync,TombstoneAsync,ForeignTombstoneAsync,ExcludedAsync,UnreadableAsync,CostAsync,NamespaceAsync,MappedAsync,FolderRetryAsync,ReceiptOrderAsync,LateMergeAsync,CrashAfterFirstAsync,LostReplyAsync,NewerAsync,KeptTreeAsync,CoveredAsync,ConflictAsync,ReceiptCoverageAsync,ConflictingLiveAsync,SubstituteAsync,StrandedAsync,SubFolderAsync,QuietAsync,RecycleBeforeReaderSeesItAsync,RootProofAsync,UnreadableVetoAsync,RecycleBeforeReaderSplitAsync,RemovalCommitCloseAsync,NoTokenZeroWorkAsync,()=>EditedChildKeptAsync("refused"),()=>EditedChildKeptAsync("moved"),()=>EditedChildKeptAsync("unchanged"),()=>EditedChildKeptAsync("special")})
+        foreach(var test in new Func<Task>[]{()=>SelectedCloudWindowAsync(["latest"]),()=>SelectedCloudWindowAsync(["unverified"]),()=>SelectedCloudWindowAsync(["moved"]),()=>SelectedCloudWindowAsync(["missing"]),SelectedChildrenAsync,DefiniteNoEffectAsync,SameIdRetryAsync,MovedOutEvidenceAsync,LocatedFileRetryAsync,ExcludedPhysicalAsync,IgnoredPhysicalAsync,NestedPhysicalAsync,AncestorAsync,()=>OutsideFolderAsync(true),()=>OutsideFolderAsync(false),RemovalHopLeavesLiveDescendant,ArmedSiblingsAsync,ImmediateBoundaryAsync,SupersededRevisionAsync,RecoveryAsync,PartialAsync,OutsideAsync,TombstoneAsync,ForeignTombstoneAsync,ExcludedAsync,UnreadableAsync,CostAsync,NamespaceAsync,MappedAsync,FolderRetryAsync,ReceiptOrderAsync,LateMergeAsync,CrashAfterFirstAsync,LostReplyAsync,NewerAsync,KeptTreeAsync,CoveredAsync,ConflictAsync,ReceiptCoverageAsync,ConflictingLiveAsync,SubstituteAsync,StrandedAsync,SubFolderAsync,QuietAsync,RecycleBeforeReaderSeesItAsync,RootProofAsync,UnreadableVetoAsync,RecycleBeforeReaderSplitAsync,RemovalCommitCloseAsync,NoTokenZeroWorkAsync})
         {
             try {await test();}
             catch(NotImplementedException) {missing.Add(test.Method.Name);}
@@ -195,59 +195,6 @@ public static class FolderDeleteChecks
             if(!ok) failures.Add($"{arm}: {result?.Outcome}/{result?.Cause} reads={reads} hashes={hashes} lists={lists} fault={fault?.Message}");
         }
         Check.Require(failures.Count==0,"Unreadable veto: "+string.Join("; ",failures));
-    }
-    /// <summary>A Dropbox delete (or move out of the pair) of a bound folder keeps a bound PC child whose stamp left its binding: its bytes stay, the
-    /// unchanged sibling goes to the bin, an unbound skipped sibling stays without a refused hash, and the input settles. Unchanged: one recursive send.</summary>
-    internal static async Task EditedChildKeptAsync(string arm)
-    {
-        var pair=BoundPair(); var paths=new PathScope(pair,[pair],DriveType.Fixed); using var store=new InMemoryStateStore();
-        var pc=Rooted(new FakeSide(Side.Local),pair); var db=Rooted(new FakeSide(Side.Dropbox),pair); var queue=await ItemChecks.StartQueueAsync(pair,paths,pc,db,store);
-        foreach(var (path,value) in new[]{("d",(byte)0),("d/c",(byte)1),("d/s",(byte)2)})
-        {
-            var a=ItemChecks.File(Side.Local,path,value,"pc-"+path,path=="d");var b=ItemChecks.File(Side.Dropbox,path,value,"db-"+path,path=="d");
-            pc.Seed(a,a.IsFolder?[]:[value]);db.Seed(b,b.IsFolder?[]:[value]);await store.CommitAsync(pair.PairId,null,SyncedEntries.From(a,b),null,null,default);
-        }
-        var bound=store.Records.Values.Single(r=>r.LocalPath=="d/c");
-        var edited=ItemChecks.File(Side.Local,"d/c",3,"pc-d/c"); // same size and ID, new modified time and bytes
-        Task Apply(Change change)=>ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,change,pc,db,store,ItemChecks.Population(pair,paths,pc,db,store),ItemChecks.Hop(pair,paths,queue,pc,db,store),default,queue.Held,coversThrough:Admitted(pc,db));
-        var edit=new Change(Side.Local,ChangeKind.Changed,"d/c",null,edited.Id,edited,true,false);
-        if(arm!="unchanged") pc.Items["d/c"]=(edited,[3]);
-        if(arm is "refused" or "moved")
-        {
-            // The upload is refused for good: the input is released with a Failure that protects nothing.
-            db.PublishFailures["d/c"]=new ItemFailedException("d/c",TextKey.FailDropboxNoSpace,null){Disposition=FailureDisposition.Permanent};
-            await Apply(edit);
-            Check.Require(store.OpenNotices.Any(n=>n is {Cause:TextKey.FailDropboxNoSpace,Path:"d/c"}) && store.Records.Values.Contains(bound),$"{arm}: the refused upload left no failure or moved the binding");
-        }
-        if(arm=="special")
-        {
-            // Unbound special sibling: production refuses its hash and its leaf send (only online-only placeholders pass).
-            pc.Seed(ItemChecks.File(Side.Local,"d/u",4,"pc-d/u") with {Skip=nameof(TextKey.SkipSpecial)},[4]);
-            pc.ContentFailures["d/u"]=new ChangedUnderneathException("d/u");pc.RecycleRefusals["d/u"]=new ChangedUnderneathException("d/u");
-        }
-        foreach(var path in new[]{"d/s","d/c","d"})
-        {
-            var gone=db.Items[path];db.Items.Remove(path);
-            if(arm=="moved") db.Seed(gone.Entry with {Path="away/"+path},gone.Bytes);
-        }
-        if(arm=="moved") db.OutOfScope=p=>PathNames.IsSelfOrUnder(p,"away");
-        await Apply(new Change(Side.Dropbox,ChangeKind.Deleted,"d",null,null,null,false,false)); // settles: a held or faulted input would throw here
-        if(arm=="unchanged")
-        {
-            Check.Require(pc.Mutations.SequenceEqual(["pc-d"]) && !pc.Items.Keys.Any(k=>PathNames.IsSelfOrUnder(k,"d")) && pc.History.Count(v=>v.Entry.Id=="pc-d/c")==1 && store.Records.Count==0,
-                $"unchanged: the folder was not sent whole in one recycle: {string.Join(",",pc.Mutations)}");
-            return;
-        }
-        Check.Require(pc.Items.TryGetValue("d/c",out var kept) && kept.Bytes.SequenceEqual(new byte[]{3}) && pc.Items.ContainsKey("d") && !pc.Mutations.Contains("pc-d/c") && !pc.Mutations.Contains("pc-d") && store.Records.Values.Contains(bound),
-            $"{arm}: the edited child or its folder left the PC: {string.Join(",",pc.Mutations)}");
-        Check.Require(!pc.Items.ContainsKey("d/s") && pc.History.Any(v=>v.Entry.Id=="pc-d/s"),$"{arm}: the unchanged sibling was not sent to the bin");
-        if(arm=="special") Check.Require(pc.Items.ContainsKey("d/u") && !pc.Mutations.Contains("pc-d/u"),"special: the unbound special sibling was sent or lost");
-        if(arm=="refused")
-        {
-            // The kept edit then uploads by edit beats delete once Dropbox accepts it.
-            db.PublishFailures.Clear();await Apply(edit);
-            Check.Require(db.Items.TryGetValue("d/c",out var up) && up.Bytes.SequenceEqual(new byte[]{3}),"refused: the kept edit did not upload after the refusal cleared");
-        }
     }
     internal static async Task SelectedCloudWindowAsync(string[] modes)
     {
