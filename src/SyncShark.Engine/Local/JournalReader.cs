@@ -32,7 +32,7 @@ public sealed class JournalReader
     internal readonly record struct Hop(ulong Old,ulong New,ulong Id,string? FolderPath);
     internal sealed class Member
     {
-        public JournalPosition? Read, Settled, PausedThrough, Acknowledged;
+        public JournalPosition? Read, Settled, PausedThrough;
         public ulong? FailedUsn;
         public PairConfig? Pair;
         public bool Paused, ResetDue, RepairWake;
@@ -42,7 +42,7 @@ public sealed class JournalReader
         public readonly Dictionary<ulong,LinkedListNode<(ulong Usn,bool Projected)>> HoldNodes=[];
         public LinkedListNode<(ulong Usn,bool Projected)>? FirstUnprojected;
         public ImmutableDictionary<ulong,Hop> Physical=ImmutableDictionary<ulong,Hop>.Empty;
-        public void ClearLineage() { FailedUsn=null; Acknowledged=null; FirstUnprojected=null; OldNames=OldNames.Clear(); Physical=Physical.Clear(); Deferred=Deferred.Clear(); Paired.Clear(); Holds.Clear(); HoldNodes.Clear(); }
+        public void ClearLineage() { FailedUsn=null; FirstUnprojected=null; OldNames=OldNames.Clear(); Physical=Physical.Clear(); Deferred=Deferred.Clear(); Paired.Clear(); Holds.Clear(); HoldNodes.Clear(); }
         public IStore? Store;
         public Func<PathScope>? Scope;
         public Func<ulong,bool,CancellationToken,(string? Path,IReadOnlyList<string>? Links)>? Locate;
@@ -118,25 +118,8 @@ public sealed class JournalReader
                 if (m.HoldNodes.Remove(hop.Old,out var node)) m.Holds.Remove(node);
                 if (hop.FolderPath!=null && m.Physical.TryGetValue(hop.Id,out var physical) && physical==hop) m.Physical=m.Physical.Remove(hop.Id);
             }
-            if (m.Acknowledged is null || position.NextUsn>m.Acknowledged.NextUsn) m.Acknowledged=position;
             var bound=Prefix(position,m.FailedUsn,m.Holds.First?.Value.Usn);
             if (m.Settled is null || bound.NextUsn>m.Settled.NextUsn) { m.Settled=bound; if (m.Paused) m.Read=bound; }
-        }
-        return SaveCommon(key,v,store,ct);
-    }
-
-    /// <summary>A full Repair that retired every Local debt has compared what each unproven record could have changed: they stop holding the settled position.</summary>
-    public Task RepairedAsync(PairConfig pair,IStore store,CancellationToken ct)
-    {
-        if (pair.Roots is null && pair.Drive?.Serial is null) return Task.CompletedTask;
-        var key=Domain(pair); Volume? v;
-        lock(gate)
-        {
-            if (!volumes.TryGetValue(key,out v) || !v.Members.TryGetValue(pair.PairId,out var m)) return Task.CompletedTask;
-            m.FailedUsn=null;
-            if (m.Acknowledged is not { } acked || m.Settled is not { } settled || acked.JournalId!=settled.JournalId) return Task.CompletedTask;
-            var bound=Prefix(acked,null,m.Holds.First?.Value.Usn);
-            if (bound.NextUsn>settled.NextUsn) { m.Settled=bound; if (m.Paused) m.Read=bound; }
         }
         return SaveCommon(key,v,store,ct);
     }

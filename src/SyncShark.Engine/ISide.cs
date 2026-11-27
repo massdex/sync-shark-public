@@ -8,8 +8,6 @@ public interface ISide
     Task<JournalPosition?> SettledJournalAsync(CancellationToken ct) => throw new NotImplementedException();
     /// <summary>Notify a journal source when its pair membership changes.</summary>
     Task SetMembershipAsync(PairConfig pair, bool paused, bool removed, CancellationToken ct) => Task.CompletedTask;
-    /// <summary>A full Repair retired every Local debt; a journal source releases the records that debt was owed for.</summary>
-    Task JournalRepairedAsync(CancellationToken ct) => Task.CompletedTask;
     /// <summary>Native root identity for this side; PC also supplies drive evidence and observed drive type for its scope, recycle and startup trim; Dropbox has no PC drive type. A missing or unreadable root never implies a delete.</summary>
     Task<(DirectoryIdentity? Local, DropboxRootIdentity? Dropbox, DriveEvidence? Drive, DriveType? LocalDriveType)> RootAsync(CancellationToken ct);
     /// <summary>The entries under folder `under` ("" = the root; `under` itself is not yielded), in listing order,

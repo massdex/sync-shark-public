@@ -110,7 +110,7 @@ public static class JournalReaderChecks
     private static async Task ReviewCases()
     {
         var failures=new List<string>();
-        foreach(var test in new[]{"rename","rename-file","rename-keep","unreadable","repaired-unproven","settled-hops","reset-wrap","reset-id","root","skip","remove","skew","live-skew","early-write","child-hop","redacted-hop","locate-fails","entry-fails","join-reset","leave-reset","mismatch-fence","backlog16","backlog32","name-race","after-observation","alias-old","alias-new","alias-unbound","armed-child","link-race","link-unlink","cold-high","stale-valid","member-bound","paused-alias-write","paused-alias-write-excluded","armed-missing","armed-substitute","reset-crash","settlement-surface","armed-delete","lookup-hold","entry-hold","failed-order","child-lookup-failed","child-exact-absent","child-exact-substitute","stage-lookup-failure","stage-entry-failure","armed-stage-entry-failure","retired-stage-create","retired-stage-delete"})
+        foreach(var test in new[]{"rename","rename-file","rename-keep","unreadable","settled-hops","reset-wrap","reset-id","root","skip","remove","skew","live-skew","early-write","child-hop","redacted-hop","locate-fails","entry-fails","join-reset","leave-reset","mismatch-fence","backlog16","backlog32","name-race","after-observation","alias-old","alias-new","alias-unbound","armed-child","link-race","link-unlink","cold-high","stale-valid","member-bound","paused-alias-write","paused-alias-write-excluded","armed-missing","armed-substitute","reset-crash","settlement-surface","armed-delete","lookup-hold","entry-hold","failed-order","child-lookup-failed","child-exact-absent","child-exact-substitute","stage-lookup-failure","stage-entry-failure","armed-stage-entry-failure","retired-stage-create","retired-stage-delete"})
         {
             try { await RunCase(test); }
             catch(Exception error) { failures.Add(test+": "+error.GetType().Name+" "+error.Message); }
@@ -176,21 +176,6 @@ public static class JournalReaderChecks
         {
             var page=await Fetch(a,20); await reader.SettleAsync(a,page.Position!,store,default);
             Check.Require(await reader.SettledJournalAsync(a,default)==page.Position && await reader.SettledJournalAsync(b,default)==start && await store.PositionAsync("1",default)==start,"member settlement is not volume minimum or offered position");return;
-        }
-        if(test=="repaired-unproven")
-        {
-            await reader.Membership(b,false,true);
-            reader.Attach(a,actual,()=>scope,(id,_,_)=>id==91 ? throw new IOException() : (Path.Join(root,"independent"),null),
-                path=>new(path,false,1,DateTimeOffset.UnixEpoch,"14","","",null));
-            pages[10]=[R(11,0x100,null,91),R(12,1,"independent",14)];
-            var page=await Fetch(a,20);
-            Check.Require(page.Position==new JournalPosition(1,20) && page.ProjectedThrough==new JournalPosition(1,11) && (await store.ReadRepairAsync("a",Side.Local,default)).Revision==1,
-                "unproven first record owed no Local Repair or left the projected frontier");
-            await reader.SettleAsync(a,page.Position!,store,default);
-            Check.Require(await store.PositionAsync("1",default)==new JournalPosition(1,11),"unproven record released the position before its Repair finished");
-            await reader.RepairedAsync(a,store,default);
-            Check.Require(await reader.SettledJournalAsync(a,default)==page.Position && await store.PositionAsync("1",default)==page.Position,"finished Repair left the position pinned at the unproven record");
-            return;
         }
         if(test=="unreadable")
         {

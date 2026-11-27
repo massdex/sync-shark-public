@@ -86,7 +86,6 @@ public sealed class LocalSide : ISide
     { ct.ThrowIfCancellationRequested(); return Task.FromResult<(string?,JournalPosition?)>((null,usn.Current(pair.LocalRoot))); }
     public Task<JournalPosition?> SettledJournalAsync(CancellationToken ct)=>journal.SettledJournalAsync(pair,ct);
     public Task SettleJournalAsync(JournalPosition position,CancellationToken ct)=>journal.SettleAsync(pair,position,store,ct);
-    public Task JournalRepairedAsync(CancellationToken ct)=>journal.RepairedAsync(pair,store,ct);
     public Task<ChangePage> ReadChangesAsync(string? cursor,JournalPosition? position,CancellationToken ct)=>journal.ReadPageAsync(pair,position,null,settings,ct);
     public Task<ChangePage> ReadChangesAsync(string? cursor,JournalPosition? position,(string? Cursor,JournalPosition? Position) until,CancellationToken ct)=>journal.ReadPageAsync(pair,position,until.Position,settings,ct);
     public Task<DeletionEvidence> DeletedAsync(string path,CancellationToken ct)=>DeletedAsync(path,false,ct);

@@ -356,7 +356,7 @@ public static class ItemSyncChecks
         await OneDigestPerAttemptAsync();
         await IsolatedNoticeReadFaultOnRecordStillProgressesAsync();
         await HardLinkAliasAsync();
-        await ParentCaseReplacementAsync();
+        await ItemSyncChecks.ParentCaseReplacementAsync();
         await KindChangedRemovalRetainsAsync();
         await DirectTombstoneProvesContentAsync();
         await DirectTombstoneFailedUploadAsync();

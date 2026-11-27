@@ -323,7 +323,7 @@ internal sealed class RepairRun
         if(completed) foreach(var s in skipped) await store.OweScopeAsync(id,s,ct);
         if(full)
         {
-            if(matched.Local) { await local.JournalRepairedAsync(ct); localRepaired?.Invoke(); } // released before the wake's rewind reads the settled floor
+            if(matched.Local) localRepaired?.Invoke();
             // Owe each present no-keep root only after the finish, so its revision cannot supersede this run.
             foreach(var e in recreated) await store.OweScopeAsync(id,new Scope(e.Path,await ItemSync.CounterpartAsync(pair,Side.Local,e.Path,store,ct)),ct);
             if(recreated.Count!=0) queue.WakeOwedRepair?.Invoke(null);
