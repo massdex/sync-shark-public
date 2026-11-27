@@ -65,7 +65,7 @@ public sealed class UploadContent
                 // Staging cannot publish the target even if the server received this slice.
                 var classified = new DropboxErrors().Classify(status, refusal, route, true,
                     new(false, true, true, status == HttpStatusCode.TooManyRequests || (int)status >= 500));
-                api?.ReportBusy(response.StatusCode, classified, wait, received);
+                api?.ReportRefusal(response, classified, wait, received);
                 throw Dispatcher.ItemFailure(path, classified, wait, received);
             }
             await body.CompleteAsync(ct).ConfigureAwait(false);

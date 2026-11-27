@@ -62,7 +62,9 @@ public static class FolderJobsChecks
         var clock = new TestDoubles.FakeTimeProvider(DateTimeOffset.UnixEpoch);
         var jobs = new FolderJobs(); var api = DropboxSideChecks.BoundApi(http, clock);
         await DropboxSideChecks.ExpectThrottleAsync(async () => { await jobs.ReadAsync(api, pair, job, default); }, clock, 29);
+        clock.Advance(TimeSpan.FromSeconds(29)); // each stated wait pauses the route
         await DropboxSideChecks.ExpectThrottleAsync(async () => { await jobs.ReadAsync(api, pair, job, default); }, clock);
+        clock.Advance(TimeSpan.FromSeconds(17));
         Check.Require(await jobs.ReadAsync(api, pair, job, default) is JobReply.Invalid, "Exact structured invalid token was not Invalid");
         foreach (var _ in replies.Skip(1).Take(2))
         {

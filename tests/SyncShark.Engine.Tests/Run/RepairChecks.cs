@@ -19,6 +19,7 @@ public static class RepairChecks
         await ObservedAncestorCaseAsync(); await BilateralCaseRenameAsync(); await UnreadableFolderSkippedAsync();
         await RetirementGuardAsync(); await BoundaryWaitRetriesInPlaceAsync(); await PageWaitNoticeAsync(); await ReplacedRootStopsRepairAsync();
         await CleanupHopProvesRootAsync(); await IsolatedFileKeepsFolderAsync(); await HopOwesOnceAsync(); await OwedHistoryAfterFirstAsync();
+        await StampRestoredEditBeatsDeleteAsync();
     }
 
     // A Dropbox name Windows cannot use fails at the local side's path check: one notice for that item, and the Repair completes for the rest.
@@ -891,6 +892,18 @@ public static class RepairChecks
         await new global::Massdex.SyncShark.Engine.Executor.Effects().ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new global::Massdex.SyncShark.Engine.Planner.SyncAction(ActionKind.Record,row),
             pc,db,counted,ItemChecks.Population(pair,paths,pc,db,counted),ItemChecks.Hop(pair,paths,queue,pc,db,counted),ct);
         Check.Require(owes==1 && (await store.PairAsync(pair.PairId,ct))?.OwedScopes?.Contains(new Scope("new","new"))==true,$"A mapped hop owed its scope {owes} times");
+    });
+
+    // A listed row whose bound Dropbox file is gone while its PC copy was edited under a restored timestamp is decided on its bytes: the edit uploads, nothing is recycled.
+    public static Task StampRestoredEditBeatsDeleteAsync() => WithRepairStore(async (store,pair,ct)=>
+    {
+        var pc=new FakeSide(Side.Local); var db=new FakeSide(Side.Dropbox); var paths=new PathScope(pair,[pair],DriveType.Fixed);
+        var local=ItemChecks.File(Side.Local,"f",1,"pc-f"); await store.CommitAsync(pair.PairId,null,SyncedEntries.From(local,ItemChecks.File(Side.Dropbox,"f",1,"db-f")),null,null,ct);
+        pc.Seed(local,[2]); // same stamp, size and recorded hash as the binding; different bytes
+        var queue=await BoundQueueAsync(pair,paths,pc,db,store,ct); FolderChecks.AdmitFullRepair(queue,pc,db);
+        await Repair.RunAsync(pair,ItemChecks.Settings,_=>{},paths,queue,pc,db,store,null,null,ct);
+        Check.Require(pc.History.Count==0 && pc.Items.TryGetValue("f",out var kept) && kept.Bytes.SequenceEqual(new byte[]{2}),"A stamp-restored PC edit was recycled for a Dropbox delete");
+        Check.Require(db.Items.TryGetValue("f",out var sent) && sent.Bytes.SequenceEqual(new byte[]{2}) && await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("f"),ct) is {LocalId:"pc-f"},"The edit was not uploaded under its own binding");
     });
 
     // After first sync a full Repair lists with deleted entries only while the deleted-name history is owed.

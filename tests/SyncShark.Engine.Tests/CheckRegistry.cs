@@ -46,6 +46,7 @@ public static class CheckRegistry
             new("Dropbox/DispatcherChecks", Dropbox.DispatcherChecks.RunAsync),
             new("Dropbox/DropboxApiChecks", Dropbox.DropboxApiChecks.RunAsync),
             new("Dropbox/authenticated send path", Dropbox.DropboxApiChecks.SendPathAsync),
+            new("Dropbox/route pause", Dropbox.RoutePauseChecks.RunAsync),
             new("Dropbox/DropboxEntriesChecks", Dropbox.DropboxEntriesChecks.RunAsync),
             new("Dropbox/DropboxErrorsChecks", Dropbox.DropboxErrorsChecks.RunAsync),
             new("Dropbox/DropboxFeedChecks", Dropbox.DropboxFeedChecks.RunAsync),

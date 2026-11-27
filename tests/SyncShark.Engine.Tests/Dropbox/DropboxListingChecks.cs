@@ -60,7 +60,8 @@ public static class DropboxListingChecks
         catch (ItemFailedException) { }
 
         using var wire = new DropboxStubHandler();
-        var api = wire.Client();
+        var clock = new TestDoubles.FakeTimeProvider(DateTimeOffset.UnixEpoch);
+        var api = wire.Client(clock);
         var listing = new DropboxListing();
         var ct = CancellationToken.None;
         await CheckInterruptedContinuationAsync(listing, api, pair, wire);
@@ -94,6 +95,7 @@ public static class DropboxListingChecks
         try { await listing.ReadOneAsync(api, pair, "A/Note.txt", ct); Check.Require(false, "Throttle mistaken for absence."); }
         catch (ItemFailedException e) when (e.Disposition == FailureDisposition.TemporaryNoEffect &&
             e.ProviderWait == TimeSpan.FromSeconds(7) && e.ProviderWaitStarted.HasValue) { }
+        clock.Advance(TimeSpan.FromSeconds(7)); // each stated wait pauses the route
         wire.Add(metadata, path, """{"error":{"retry_after":9}}""", HttpStatusCode.TooManyRequests);
         wire.Add(metadata, path, null, HttpStatusCode.TooManyRequests, 9, new InterruptedContent());
         for (var attempt = 0; attempt < 2; attempt++)
@@ -101,6 +103,7 @@ public static class DropboxListingChecks
             try { await listing.ReadOneAsync(api, pair, "A/Note.txt", ct); Check.Require(false, "Throttle produced metadata."); }
             catch (ItemFailedException e) when (e.Path == "A/Note.txt" && e.Disposition == FailureDisposition.TemporaryNoEffect &&
                 e.ProviderWait == TimeSpan.FromSeconds(9) && e.ProviderWaitStarted.HasValue) { }
+            clock.Advance(TimeSpan.FromSeconds(9));
         }
         string? acquired = null;
         var options = new ListOptions(true, false) { CursorAcquired = value => acquired = value };

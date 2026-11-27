@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 
 namespace Massdex.SyncShark.Engine.Dropbox;
@@ -29,6 +31,7 @@ public sealed class DropboxApi
     private long _busyFloorReceipt;
     private TimeSpan _busyDuration;
     private ClockSample? _clockOffset;
+    private readonly Dictionary<string, (long Started, TimeSpan Wait)> _routePauses = new(StringComparer.Ordinal); // host only, under lock (_limiter)
 
     private sealed record ClockSample(long Received, TimeSpan Offset, TimeSpan Uncertainty);
 
@@ -215,13 +218,17 @@ public sealed class DropboxApi
     private async Task<HttpResponseMessage> SendPreparedAsync(HttpRequestMessage request, string? route,
         CancellationToken ct, Action<IAsyncDisposable>? retainPermit = null)
     {
+        if (Paused(request, route) is { } unsent) return unsent;
         await ApplyBindingAsync(request, route, ct).ConfigureAwait(false);
         var takePermit = route is not null && !string.Equals(route, DropboxProtocol.ListFolderLongpoll, StringComparison.Ordinal);
         IAsyncDisposable? permit = null;
         try
         {
             if (takePermit)
+            {
                 permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
+                if (Paused(request, route) is { } queued) return queued; // paused while queued: finally releases the slot unsent
+            }
             var started = _clock.GetTimestamp();
             var response = await _transport
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
@@ -273,6 +280,64 @@ public sealed class DropboxApi
             var observed = Interlocked.CompareExchange(ref _clockOffset, sample, previous);
             if (ReferenceEquals(observed, previous)) return;
             previous = observed;
+        }
+    }
+
+    // Inside a route pause Dropbox stated, answer with the 429 it would send again, without transmitting.
+    // Only the run log tells it apart: its provider fact says the call was paused locally.
+    private HttpResponseMessage? Paused(HttpRequestMessage request, string? route)
+    {
+        long now;
+        TimeSpan left, stated;
+        lock (_limiter)
+        {
+            now = _clock.GetTimestamp(); // under the lock, so a receipt never predates the pause it reads
+            if (route is null || !_host._routePauses.TryGetValue(route, out var pause) ||
+                (left = (stated = pause.Wait) - _clock.GetElapsedTime(pause.Started, now)) <= TimeSpan.Zero) return null;
+        }
+        var seconds = WholeSeconds(left);
+        var wall = _clock.GetUtcNow();
+        request.Options.Set(DropboxHttp.ReceiptKey, (now, wall));
+        var reply = new PausedReply(Text.Get(TextKey.ProviderPausedLocally, (TextArg.Operation, route),
+            (TextArg.Value, WholeSeconds(stated).ToString(CultureInfo.InvariantCulture)), (TextArg.Seconds, seconds.ToString(CultureInfo.InvariantCulture))))
+        {
+            RequestMessage = request, Content = new StringContent(
+                $$$"""{"error_summary":"{{{DropboxProtocol.TooManyRequests}}}/..","error":{"reason":{".tag":"{{{DropboxProtocol.TooManyRequests}}}"},"retry_after":{{{seconds}}}}}""",
+                Encoding.UTF8, "application/json")
+        };
+        // .NET's delta header holds at most Int32.MaxValue seconds: a longer wait keeps an HTTP-date where one can be
+        // written, and the body's retry_after always states the whole wait.
+        if (seconds <= int.MaxValue) reply.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(seconds));
+        else if (DateTimeOffset.MaxValue - wall > left) reply.Headers.RetryAfter = new RetryConditionHeaderValue(wall + left);
+        return reply;
+    }
+
+    // Retry-After's unit is whole seconds; a partial second still has to be waited.
+    private static long WholeSeconds(TimeSpan wait) => wait.Ticks / TimeSpan.TicksPerSecond + (wait.Ticks % TimeSpan.TicksPerSecond > 0 ? 1 : 0);
+
+    /// <summary>The run-log provider fact of a local pause reply, or null for a reply Dropbox sent.</summary>
+    internal static string? LocalFact(HttpResponseMessage response) => (response as PausedReply)?.Fact;
+
+    private sealed class PausedReply(string fact) : HttpResponseMessage(HttpStatusCode.TooManyRequests)
+    {
+        internal string Fact { get; } = fact;
+    }
+
+    // One classified HTTP refusal. A local pause reply is never evidence. A real 429 with a stated wait opens or extends its
+    // route's pause unless it is write contention (any reason may be unparsed); the latest stated end wins. Longpoll keeps
+    // out of the account busy feedback.
+    internal void ReportRefusal(HttpResponseMessage response, DropboxErrors.Classified failure,
+        TimeSpan? wait, long received, bool busy = true)
+    {
+        if (response is PausedReply) return;
+        lock (_limiter)
+        {
+            if (response.StatusCode == HttpStatusCode.TooManyRequests && wait > TimeSpan.Zero && failure.Cause != TextKey.WaitTooManyWrites &&
+                Routes.NameOf(response.RequestMessage?.RequestUri) is { } route &&
+                (!_host._routePauses.TryGetValue(route, out var open) || _clock.GetElapsedTime(open.Started, received) is var elapsed &&
+                    (elapsed >= TimeSpan.Zero ? wait > open.Wait - elapsed : wait + elapsed > open.Wait)))
+                _host._routePauses[route] = (received, wait.Value);
+            if (busy) ReportBusy(response.StatusCode, failure, wait, received);
         }
     }
 

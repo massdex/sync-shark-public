@@ -432,4 +432,5 @@ public enum TextKey
     CliHelpEffectLine,
     KeepRuleItemMissing,
     PairChangedDuringRequest,
+    ProviderPausedLocally,
 }

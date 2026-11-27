@@ -376,6 +376,7 @@ public static class DispatcherChecks
         private bool returned;
         internal long? AtHeaders { get; private set; }
         internal void Headers(){AtHeaders=clock.GetTimestamp();returned=true;}
+        internal void Advance(TimeSpan by)=>clock.Advance(by);
         public override long TimestampFrequency => clock.TimestampFrequency;
         public override long GetTimestamp() => clock.GetTimestamp();
         public override DateTimeOffset GetUtcNow(){var wall=clock.GetUtcNow();if(returned){returned=false;clock.Advance(TimeSpan.FromTicks(1));}return wall;}
@@ -479,6 +480,7 @@ public static class DispatcherChecks
         ready.SendReady(); var good=await results[0];
         Check.Require(good.MemberReply is JobReply.Terminal {Members.Count:1} t && t.Members[0] is ({Id:"id:created"},null,null),"Ensure lookup cancelled its successful neighbour");
         await VerifyWait(results[1], 1);
+        clock.Advance(wait); // the stated wait pauses the route
         await VerifyWait(d.ResolveCreateClashAsync(pair, new(null,"lookup",null),
             new JobReply.Terminal([(null,TextKey.ClashNameTaken,FailureDisposition.Permanent)]), default), 2);
         async Task VerifyWait(Task attempt, int expectedReads)
@@ -511,7 +513,8 @@ public static class DispatcherChecks
         bool sawWait=false;
         try {await Attempt();}
         catch(ItemFailedException e) when(e.Path=="lookup" && e.Cause==TextKey.DropboxRefused && e.Disposition==FailureDisposition.TemporaryNoEffect && e.ProviderWait==delay && e.ProviderWaitStarted==original){sawWait=true;}
-        Check.Require(wire.GoodReads==1 && wire.Reads==1 && clock.GetTimestamp()==original,"Good deferred ensure was blocked behind the held lookup");
+        // The lookup's stated wait pauses files/get_metadata for every caller, so the good read is answered locally.
+        Check.Require(wire.GoodReads==0 && wire.Reads==1 && clock.GetTimestamp()==original,"Good deferred read reached Dropbox inside the lookup's stated wait");
         Check.Require(sawWait && wire.Submits==1 && wire.Polls==1,"Deferred ensure lost its original wait or replayed the launch/token");
         clock.Advance(delay); await Attempt();
         var jobs=new List<AcceptedJob>(); await foreach(var job in store.JobsAsync(pair.PairId,default)) jobs.Add(job);

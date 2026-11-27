@@ -357,6 +357,8 @@ public static class ItemSyncChecks
         await IsolatedNoticeReadFaultOnRecordStillProgressesAsync();
         await HardLinkAliasAsync();
         await KindChangedRemovalRetainsAsync();
+        await DirectTombstoneProvesContentAsync();
+        await DirectTombstoneFailedUploadAsync();
         var defects=new List<string>();
         await RemoteReplacementAsync(defects);
         await UncertainDeleteAsync(defects);
@@ -916,6 +918,52 @@ public static class ItemSyncChecks
         Check.Require(key==binding.DropboxKey && reproducible==false && store.Records.Values.Single()==binding && pc.Mutations.Count==0 && db.Mutations.Count==0 && store.OpenNotices.Count==0,
             "A tombstone whose bound identity changed kind was decided instead of retained");
     }
+
+    // An id-less Dropbox tombstone over a bound PC file reads the PC bytes once: a stamp-restored edit uploads with one edit notice, unchanged bytes recycle.
+    private static async Task DirectTombstoneProvesContentAsync()
+    {
+        foreach(byte bytes in new byte[]{2,1})
+        {
+            var pair=FolderDeleteChecks.BoundPair();var paths=new PathScope(pair,[pair],DriveType.Fixed);using var store=new InMemoryStateStore();
+            var pc=FolderDeleteChecks.Rooted(new FakeSide(Side.Local),pair);var db=FolderDeleteChecks.Rooted(new FakeSide(Side.Dropbox),pair);
+            var left=ItemChecks.File(Side.Local,"c",1,"pc-c");var right=ItemChecks.File(Side.Dropbox,"c",1,"db-c");
+            pc.Seed(left,[bytes]); // the stamps still match the baseline whatever the bytes are
+            pc.IdleBoundary=new([],null,new(3,10));db.IdleBoundary=new([],"seen",null); // finite fences for the removal proof
+            await store.CommitAsync(pair.PairId,null,SyncedEntries.From(left,right),null,null,default);
+            var volume=pair.Roots!.Local.VolumeSerialNumber.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var local=FolderDeleteChecks.Observe.On(pc,(op,args)=>op==nameof(ISide.ReadByIdAsync) && pc.Items.Values.FirstOrDefault(v=>v.Entry.Id==(string?)args[0]).Entry is {} live
+                ?Task.FromResult<(IdentityLocation,bool)?>((new(volume,live.Path,live),true)):null);
+            await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Dropbox,ChangeKind.Deleted,"c",null,null,null,false,false),local,db,store,
+                (_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,_=>[],coversThrough:_=>true);
+            if(bytes==2)
+                Check.Require(db.Items.TryGetValue("c",out var up) && up.Bytes.SequenceEqual(new byte[]{2}) && pc.History.Count==0 && store.OpenNotices.Count(n=>n.Cause==TextKey.InfoEditBeatsDelete)==1,
+                    "A stamp-restored PC edit was deleted by an id-less Dropbox tombstone");
+            else
+                Check.Require(!pc.Items.ContainsKey("c") && pc.History.Count==1 && store.Records.Count==0 && store.OpenNotices.Count==0 && pc.Requests[nameof(ISide.ContentHashAsync)]==1,
+                    "An unchanged PC file under an id-less Dropbox tombstone was not recycled after one content read");
+        }
+    }
+
+    // The corrective upload of that edit fails for good or with an unknown outcome: the PC copy stays untouched and the
+    // Dropbox delete is kept (retained, not released), as for any failed delete; it is decided again on its next attempt.
+    private static Task DirectTombstoneFailedUploadAsync() => Run.AutoSyncChecks.WithinDeadline(async ct=>
+    {
+        foreach(var disposition in new[]{FailureDisposition.Permanent,FailureDisposition.UnknownEffect})
+        {
+            var pair=ItemChecks.Pair();var paths=new PathScope(pair,[pair],DriveType.Fixed);using var store=new InMemoryStateStore();await store.SavePairAsync(pair,ct);
+            var pc=FolderDeleteChecks.Rooted(new FakeSide(Side.Local),pair);var db=FolderDeleteChecks.Rooted(new FakeSide(Side.Dropbox),pair);
+            var left=ItemChecks.File(Side.Local,"c",1,"pc-c");pc.Seed(left,[2]); // same stamps as the baseline, different bytes
+            await store.CommitAsync(pair.PairId,null,SyncedEntries.From(left,ItemChecks.File(Side.Dropbox,"c",1,"db-c")),null,null,ct);
+            var local=FolderDeleteChecks.Observe.On(pc,(op,args)=>op==nameof(ISide.ReadByIdAsync) && pc.Items.Values.FirstOrDefault(v=>v.Entry.Id==(string?)args[0]).Entry is {} live
+                ?Task.FromResult<(IdentityLocation,bool)?>((new("1",live.Path,live),true)):null);
+            db.PublishFailures["c"]=new ItemFailedException("c",TextKey.DropboxRefused,null){Disposition=disposition};
+            bool? reproducible=null;
+            try { await ItemSync.ApplyAsync(pair,ItemChecks.Settings,_=>{},paths,new Change(Side.Dropbox,ChangeKind.Deleted,"c",null,null,null,false,false),local,db,store,(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,ct,_=>[],(_,ok)=>reproducible=ok,coversThrough:_=>true); }
+            catch(ItemFailedException) { }
+            Check.Require(db.Requests[nameof(ISide.PublishAsync)]==1 && reproducible==false && pc.History.Count==0 && pc.Items["c"].Bytes.SequenceEqual(new byte[]{2}) && !db.Items.ContainsKey("c") && store.Records.Count==1,
+                $"A failed corrective upload ({disposition}) released the Dropbox delete or changed the PC edit");
+        }
+    });
 
     /// <summary>Adds the exact terminal selected-folder receipt to the fake Dropbox delete; this fixture has no dispatcher.</summary>
     public class DeleteReceipt : System.Reflection.DispatchProxy

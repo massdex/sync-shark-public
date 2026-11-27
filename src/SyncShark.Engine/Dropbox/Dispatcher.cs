@@ -185,11 +185,11 @@ public sealed class Dispatcher
         if (body is not null) await body.StopAsync().ConfigureAwait(false);
         var refusal = await DropboxHttp.ReadErrorAsync(response, ct).ConfigureAwait(false);
         wait = DropboxProtocol.ProviderWait(wait, refusal);
-        var fact = DropboxErrors.Fact(route, response.StatusCode, DropboxErrors.Summary(refusal));
+        var fact = DropboxApi.LocalFact(response) ?? DropboxErrors.Fact(route, response.StatusCode, DropboxErrors.Summary(refusal));
         foreach (var item in group)
         {
             var classified = Classify(response.StatusCode, refusal, route, single == DropboxProtocol.CreateFolder || (single == DropboxProtocol.Upload && item.Revision is null));
-            if (ReferenceEquals(item, group[0])) api?.ReportBusy(response.StatusCode, classified, wait, received);
+            if (ReferenceEquals(item, group[0])) api?.ReportRefusal(response, classified, wait, received);
             if (classified.Disposition == FailureDisposition.TemporaryNoEffect)
                 item.Done.TrySetException(ItemFailure(item.Member.Path, classified, wait, received, fact));
             else if (classified.Disposition != FailureDisposition.UnknownEffect || group.Length > 1 || !await SettleSentAsync(pair, item, body, hash, ct).ConfigureAwait(false))

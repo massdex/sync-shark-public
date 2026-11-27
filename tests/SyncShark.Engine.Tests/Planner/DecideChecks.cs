@@ -68,6 +68,11 @@ public static class DecideChecks
         Expect(saved with { Local = null }, ActionKind.DeleteDropbox);
         Expect(saved with { Dropbox = null }, ActionKind.DeleteLocal);
         var sameHash = saved.Synced!.DropboxContentHash;
+        // A direct-tombstone row (destination set) proves the PC content before deleting; the by-ID row above keeps today's rule.
+        var direct = saved with { Dropbox = null, Context = saved.Context with { Destination = cloud.Path } };
+        Expect(direct, ActionKind.NeedLocalHash);
+        Expect(direct with { LocalHash = sameHash }, ActionKind.DeleteLocal);
+        Expect(direct with { LocalHash = new string('c', 64) }, ActionKind.Upload, cloud.Path, info: TextKey.InfoEditBeatsDelete);
         Expect(saved with { Dropbox = null, Local = local with { Id = "replaced" }, LocalHash = sameHash }, ActionKind.Upload, cloud.Path, info: TextKey.InfoEditBeatsDelete);
         Expect(saved with { Local = null, Dropbox = cloud with { Id = "replaced" } }, ActionKind.Download, local.Path, info: TextKey.InfoEditBeatsDelete);
         Expect(saved with { Local = changedLocal }, ActionKind.Upload, cloud.Path);

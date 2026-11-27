@@ -84,6 +84,7 @@
   "NoPairsYet": "There are no pairs yet.",
   "RequestIncomplete": "The request to Dropbox did not complete. {Message}",
   "WaitTooManyRequests": "Dropbox asked Sync Shark to slow down; waiting {Seconds} seconds.",
+  "ProviderPausedLocally": "{Operation} paused locally: Dropbox's {Value} s wait still running ({Seconds} s left), not sent",
   "WaitTooManyWrites": "Dropbox is busy with other changes in this account.",
   "RecoveryRecycleBin": "the Windows Recycle Bin",
   "RecoveryDropboxHistory": "Dropbox version history",

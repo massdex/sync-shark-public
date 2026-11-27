@@ -102,7 +102,9 @@ public static class DropboxSideChecks
         var api = BoundApi(http, clock);
         var side = new DropboxSide(ItemChecks.Pair() with { DropboxRoot = "", Roots = null }, () => throw new InvalidOperationException(), api, null!);
         await ExpectThrottleAsync(async () => { await side.RootAsync(default); }, clock);
+        clock.Advance(TimeSpan.FromSeconds(17)); // each stated wait pauses the route
         await ExpectThrottleAsync(async () => { await side.RootAsync(default); }, clock, 23);
+        clock.Advance(TimeSpan.FromSeconds(23));
         var root = (await side.RootAsync(default)).Dropbox;
         Check.Require(root == new DropboxRootIdentity("acct", "root", "home", "ns:root") && calls == 3, "Namespace root identity or call count changed");
         try { await side.RootAsync(default); }

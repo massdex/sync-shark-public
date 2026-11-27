@@ -17,7 +17,7 @@ public static class Decide
         var action = stub ? Placeholder(row, exclusion?.Excluded == Side.Local)
             : exclusion is { } rule ? Excluded(row, rule.Excluded, rule.Owed, policy, comparedAt, localContentDirty)
             : Ordinary(row, policy, comparedAt, localContentDirty);
-        return context.Held && context.HeldKind == NoticeKind.Tie && (row.Local is not null || row.Dropbox is not null)
+        return Tied(row) && (row.Local is not null || row.Dropbox is not null)
             && action.Kind != ActionKind.NeedLocalHash && !(action.Kind == ActionKind.Notice && action.NoticeKind == NoticeKind.Tie)
             ? None(row, NoneReason.Held) : action;
     }
@@ -105,7 +105,9 @@ public static class Decide
                 : synced with { DropboxKey = PathNames.DropboxKey(row.Dropbox!.Path), DropboxPath = row.Dropbox.Path };
             return WithRecord(row with { Synced = view }, localContentDirty) with { Row = row };
         }
-        var (localState, needHash) = LocalState(row, synced, localContentDirty);
+        // A Dropbox delete wins only over an identical PC copy; a stamp can be restored, so a path-prepared row with no Dropbox
+        // leg needs the hash - not under a legacy tie (Held, no read), and not on a by-ID move row (Destination unset), which keeps today's rule.
+        var (localState, needHash) = LocalState(row, synced, localContentDirty || row.Dropbox is null && row.Context.Destination is not null && !Tied(row));
         if (needHash) return NeedHash(row);
         return (localState, DropboxState(row, synced)) switch
         {
@@ -262,6 +264,8 @@ public static class Decide
         new(ActionKind.Notice, row, NoticeKind: kind, Cause: cause);
 
     internal static SyncAction None(Row row, NoneReason reason) => new(ActionKind.None, row, reason);
+
+    private static bool Tied(Row row) => row.Context.Held && row.Context.HeldKind == NoticeKind.Tie;
 
     /// <summary>The first-run folder action postponed to its independent folder phase.</summary>
     internal static SyncAction DeferFolder(Row row) => new(ActionKind.DeferFolder, row);
