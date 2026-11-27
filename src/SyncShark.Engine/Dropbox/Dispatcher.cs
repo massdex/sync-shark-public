@@ -76,6 +76,7 @@ public sealed class Dispatcher
         catch (Exception error) { foreach (var item in group) item.Done.TrySetException(error); }
     }
 
+    // One group's request and body share one lifetime; proof and reply handling stay in their own functions.
     private async Task SubmitGroupAsync(PairConfig? pair, string pairId, string single, string batch, Pending[] group, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
