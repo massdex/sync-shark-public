@@ -139,16 +139,19 @@ public static class RoutePauseChecks
         var (wire, _, api) = Create();
         var summaryOnly = Refusal(DropboxProtocol.TooManyWriteOperations, 300);
         summaryOnly.Content = new StringContent($$"""{"error_summary":"{{DropboxProtocol.TooManyWriteOperations}}/.."}""");
+        // Contradictory: the summary names too_many_requests but the structured reason is write contention.
+        var mixed = Refusal(DropboxProtocol.TooManyWriteOperations, 300);
+        mixed.Content = new StringContent($$$"""{"error_summary":"{{{DropboxProtocol.TooManyRequests}}}/..","error":{"reason":{".tag":"{{{DropboxProtocol.TooManyWriteOperations}}}"},"retry_after":300}}""");
         var index = 0;
-        foreach (var refusal in new[] { Refusal(DropboxProtocol.TooManyWriteOperations, 7), summaryOnly })
+        foreach (var refusal in new[] { Refusal(DropboxProtocol.TooManyWriteOperations, 7), summaryOnly, mixed })
         {
             var first = Call(api, Paused);
             await wire.Reply(index++, refusal);
             Check.Require((await Refused(first)).Cause == TextKey.WaitTooManyWrites, "fixture is not write contention");
         }
         var next = Call(api, Paused);
-        Check.Require(await wire.Settled(next, 3) == 3, "too_many_write_operations paused the route");
-        await wire.Reply(2, Ok());
+        Check.Require(await wire.Settled(next, 4) == 4, "too_many_write_operations paused the route");
+        await wire.Reply(3, Ok());
         await next.WaitAsync(Bound);
     }
 

@@ -323,7 +323,7 @@ public sealed class DropboxApi
         internal string Fact { get; } = fact;
     }
 
-    // One classified HTTP refusal. A local pause reply is never evidence. Only a real 429 that states too_many_requests with a
+    // One classified HTTP refusal. A local pause reply is never evidence. Only a real 429 that states too_many_requests, is not write contention, and has a
     // stated wait opens or extends its route's pause: a reasonless 429's wait binds only its own caller, because Dropbox was
     // seen answering that route inside such a wait. The latest stated end wins. Longpoll keeps out of the account busy feedback.
     internal void ReportRefusal(HttpResponseMessage response, JsonElement envelope, DropboxErrors.Classified failure,
@@ -332,7 +332,7 @@ public sealed class DropboxApi
         if (response is PausedReply) return;
         lock (_limiter)
         {
-            if (response.StatusCode == HttpStatusCode.TooManyRequests && wait > TimeSpan.Zero && DropboxErrors.TooManyRequests(envelope) &&
+            if (response.StatusCode == HttpStatusCode.TooManyRequests && wait > TimeSpan.Zero && failure.Cause != TextKey.WaitTooManyWrites && DropboxErrors.TooManyRequests(envelope) &&
                 Routes.NameOf(response.RequestMessage?.RequestUri) is { } route &&
                 (!_host._routePauses.TryGetValue(route, out var open) || _clock.GetElapsedTime(open.Started, received) is var elapsed &&
                     (elapsed >= TimeSpan.Zero ? wait > open.Wait - elapsed : wait + elapsed > open.Wait)))
