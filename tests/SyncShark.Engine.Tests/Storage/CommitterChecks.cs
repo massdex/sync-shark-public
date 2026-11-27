@@ -21,6 +21,8 @@ public static class CommitterChecks
         sql.CommandText = Schema.Create + "INSERT INTO pair(pair_id,def_json) VALUES('p','{}');" +
             "CREATE TEMP VIEW bindings AS SELECT b.*,f.path||b.name AS local_path,coalesce(b.dropbox_path_delta,f.path||b.name) AS dropbox_path FROM synced_entry b JOIN folder f ON f.id=b.folder_id;";
         sql.ExecuteNonQuery();
+        // A second-name install owes scopes into def_json, so the default pair carries a full definition too.
+        sql.CommandText="UPDATE pair SET def_json=$d WHERE pair_id='p'";sql.Parameters.AddWithValue("$d",System.Text.Json.JsonSerializer.Serialize(Scenarios.ItemChecks.Pair() with {PairId="p"}));sql.ExecuteNonQuery();sql.Parameters.Clear();
         foreach (var id in new[]{"owe","split","rollback","post"})
         {
             sql.CommandText="INSERT INTO pair(pair_id,def_json,first_repair_done) VALUES($p,$d,1)";sql.Parameters.AddWithValue("$p",id);

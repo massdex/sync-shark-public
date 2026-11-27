@@ -295,7 +295,7 @@ public static class ItemSync
     // A path-only tombstone's wait names it by an empty-ID Dropbox member; that member is matched by the binding's name.
     internal static bool Closable(Notice n) => n.Kind==NoticeKind.Failure && n.Subject.Move==null && n.Subject.Items.Count>0 && n.Subject.Items.All(i=>i.Id.Length!=0 || WaitsOnPath(n,i.Side,i.Path));
     internal static bool Exact(Notice n,SyncedEntry b) => n.Subject.Items.All(i=>(i.Id.Length==0 || i.Id==b.IdOn(i.Side)) && i.Path==b.PathOn(i.Side));
-    internal static bool WaitsOnPath(Notice n,Side side,string path) => n is {Kind:NoticeKind.Failure,Cause:TextKey.WaitItemRetry} && n.Subject.Items.Any(i=>i.Side==side && i.Id.Length==0 && PathNames.Same(i.Path,path)); // the path-only input's own identity is its member
+    public static bool WaitsOnPath(Notice n,Side side,string path) => n is {Kind:NoticeKind.Failure,Cause:TextKey.WaitItemRetry} && n.Subject.Items.Any(i=>i.Side==side && i.Id.Length==0 && PathNames.Same(i.Path,path)); // the path-only input's own identity is its member
 
     internal static bool Recursive(SyncAction action)
     {

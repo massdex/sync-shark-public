@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using Microsoft.Data.Sqlite;
 using static Massdex.SyncShark.Engine.Storage.StoreImage;
 
@@ -136,7 +135,7 @@ public sealed class StoreMove
             cleanup = verifyConnections(location.Root, root, ids);
             ct.ThrowIfCancellationRequested();
             Closed(target);
-            MoveWriteThrough(stage, target);
+            Local.WriteThroughMove.Move(stage, target);
             published = true;
         }
         catch (Exception e) when (e is SqliteException { SqliteErrorCode: 13 } || e is IOException && (e.HResult & 0xFFFF) is 39 or 112)
@@ -263,23 +262,6 @@ public sealed class StoreMove
         using (var file = new FileStream(stage, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             file.Flush(true);
         return ids;
-    }
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool MoveFileExW(string existing, string target, int flags);
-
-    // Write-through makes the rename itself durable before it returns; no replace flag, so an existing target refuses.
-    private static void MoveWriteThrough(string stage, string target)
-    {
-        if (MoveFileExW(stage, target, 0x8)) return;
-        var code = Marshal.GetLastPInvokeError();
-        throw code switch
-        {
-            80 or 183 => new InvalidDataException(Text.Get(TextKey.RecoveryStageLocationBlocked, (TextArg.Place, target))),
-            32 or 33 => InUse(stage, new IOException(null, unchecked((int)0x80070000) | code)),
-            39 or 112 => NoSpace(target, null),
-            _ => new IOException(new System.ComponentModel.Win32Exception(code).Message + " " + stage, unchecked((int)0x80070000) | code),
-        };
     }
 
     private static IOException NoSpace(string target, Exception? e) => new(Text.Get(TextKey.StoreMoveNoSpace, (TextArg.Path, Path.GetDirectoryName(target)!)), e);

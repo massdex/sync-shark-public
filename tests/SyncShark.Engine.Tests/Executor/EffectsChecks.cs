@@ -382,7 +382,7 @@ public static class EffectsChecks
         var oldPeer=peerFile with {Path="dir/former"}; var oldLink=SyncedEntries.From(obsolete,oldPeer);
         await store.CommitAsync(pair.PairId,null,oldLink,null,null,default);
         var successor=ItemChecks.File(Side.Dropbox,oldPeer.Path,5,"successor"); db.Seed(successor,[5]);
-        var selected=new RemovalSelection(new(obsolete,Side.Local.ToString(),obsolete.ContentHash),oldLink);
+        var selected=new RemovalSelection(new(obsolete,FakeSide.Volume,obsolete.ContentHash),oldLink);
         await store.ArmAsync(pair.PairId,selected,null,default);
         Scope? observed=null;
         var settled=await Collisions.CollisionAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),Side.Local,obsolete,incumbent,peerFile,oldLink,pc,db,store,scope=>{observed=scope;return [];},(_,_,_,_)=>throw new InvalidOperationException(),(_,_,_,_)=>throw new InvalidOperationException(),default,f=>f.Local==new JournalPosition(1,2) && f.Dropbox=="after");
@@ -391,12 +391,12 @@ public static class EffectsChecks
             !pc.Items.ContainsKey(obsolete.Path) && pc.History.Any(h=>h.Entry==obsolete && h.Bytes.SequenceEqual(new byte[]{7})) &&
             pc.Items[incumbent.Path].Entry==incumbent && db.Items[peerFile.Path].Entry==peerFile && db.Items[oldPeer.Path].Entry==successor &&
             db.Items[oldPeer.Path].Bytes.SequenceEqual(new byte[]{5}) && !db.Mutations.Contains(successor.Id),"Mapped cleanup did not settle the live link or touched the obsolete-name occupant");
-        await store.ArmAsync(pair.PairId,new(new(incumbent,Side.Local.ToString(),incumbent.ContentHash),null),null,default);
+        await store.ArmAsync(pair.PairId,new(new(incumbent,FakeSide.Volume,incumbent.ContentHash),null),null,default);
         Check.Require(await store.ArmedAsync(pair.PairId,default) is {} next && next.Victim.Proof.Expected.Id==incumbent.Id,"Next independent removal could not arm");
-        await store.DisarmAsync(pair.PairId,new(new(incumbent,Side.Local.ToString(),incumbent.ContentHash),null),null,default);
+        await store.DisarmAsync(pair.PairId,new(new(incumbent,FakeSide.Volume,incumbent.ContentHash),null),null,default);
         var victim=ItemChecks.File(Side.Local,"late",7,"late-id"); pc.Seed(victim,[7]);
         var prior=SyncedEntries.From(victim,victim with {Id="cloud-late"}); await store.CommitAsync(pair.PairId,null,prior,null,null,default);
-        var expectedNote=new RemovalSelection(new(victim,Side.Local.ToString(),victim.ContentHash),prior);
+        var expectedNote=new RemovalSelection(new(victim,FakeSide.Volume,victim.ContentHash),prior);
         await store.ArmAsync(pair.PairId,expectedNote,null,default);
         var newer=ItemChecks.File(Side.Local,victim.Path,8,victim.Id);bool consumed=false;bool read=false;
         var actualReport=new Change(Side.Local,ChangeKind.Changed,victim.Path,null,victim.Id,newer,true,false){ConsumeHeld=()=>consumed=true};

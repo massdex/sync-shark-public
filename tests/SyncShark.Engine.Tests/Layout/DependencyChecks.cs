@@ -167,7 +167,7 @@ public static class DependencyChecks
                 {
                     "SyncShark.Cli" => path=="apps/SyncShark.Cli/Program.cs" && (other,name) is ("Edge","Cli") or ("Local","LogFiles") or ("Contracts","ILogFiles" or "ResourceNames"),
                     "SyncShark" => path=="apps/SyncShark/Program.cs" && (other,name) is ("Storage","Store" or "StoreMove") or ("Dropbox","Connections" or "DropboxSide" or "DropboxApi" or "Dispatcher" or "CredentialStore" or "SignIn") or ("Local","LocalSide" or "RecycleBin" or "LogFiles") or ("Run","Host") or ("Edge","HostServer" or "Commands") or ("Contracts",_),
-                    _ => module==other || other=="Contracts" || (module,other) is ("Executor","Planner") or ("Run","Planner" or "Executor") or ("Edge","Run") || (module,file,other,name)==("Dropbox","DropboxSide","Local","LocalErrors")
+                    _ => module==other || other=="Contracts" || (module,other) is ("Executor","Planner") or ("Run","Planner" or "Executor") or ("Edge","Run") || (module,file,other,name) is ("Dropbox","DropboxSide","Local","LocalErrors") or ("Storage","StoreMove","Local","WriteThroughMove")
                 };
                 violates=!allowed || other!=module && other!="Contracts" && (symbol.DeclaredAccessibility==Accessibility.Internal || type.DeclaredAccessibility==Accessibility.Internal) || (other,name)==("Planner","Moves") && module!="Executor" && (module,file)!=("Planner","Moves") ||
                     other=="Local" && name is "InUse" or "VolumeSpace" && file!=name && (module,file)!=("Local","LocalSide") ||

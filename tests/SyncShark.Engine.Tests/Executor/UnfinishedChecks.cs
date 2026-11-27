@@ -450,7 +450,7 @@ public static class UnfinishedChecks
     private static async Task JobCheckRefusalReturnsAsync()
     {
         var clock=new TestDoubles.FakeTimeProvider(DateTimeOffset.UnixEpoch);var settings=ItemChecks.Settings with {Clock=clock};
-        var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local);var db=new TestDoubles.FakeSide(Side.Dropbox);
+        var pair=FolderDeleteChecks.BoundPair();using var store=new TestDoubles.InMemoryStateStore();var pc=new TestDoubles.FakeSide(Side.Local){IdleBoundary=new([],null,new(1,1))};var db=new TestDoubles.FakeSide(Side.Dropbox){IdleBoundary=new([],"cursor",null)};
         var root=ItemChecks.File(Side.Dropbox,"p",0,"selected",true);var saved=SyncedEntries.From(root with {Id="local"},root);
         await store.CommitAsync(pair.PairId,null,saved,null,null,default);
         var job=new AcceptedJob(pair.PairId,"files/delete_batch","refused",[new(root.Id,root.Path,null)]);await store.SaveJobAsync(job,default);

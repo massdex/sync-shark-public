@@ -102,10 +102,12 @@ public static class HostServerChecks
         try { await Within(pipe.ConnectAsync((int)Bound.TotalMilliseconds), "A client connect did not finish"); return pipe; } catch { pipe.Dispose(); throw; }
     }
 
-    internal static Task SendAsync(Stream pipe, params string[] args)
+    internal static Task SendAsync(Stream pipe, params string[] args) => Within(Request(pipe, args), "A request write did not finish");
+
+    private static Task Request(Stream pipe, params string[] args)
     {
         byte[] request = [Arguments, ..JsonSerializer.SerializeToUtf8Bytes(args)];
-        return Within(PipeFrame.WriteAsync(pipe, request, default), "A request write did not finish");
+        return PipeFrame.WriteAsync(pipe, request, default);
     }
 
     /// <summary>One whole argv exchange on a raw client: Accepted, the output text, then the exit code.</summary>
@@ -259,7 +261,7 @@ public static class HostServerChecks
             using var server = new HostServer();
             await ClaimAsync(server, "Terminal fixture could not claim the pipe");
             using var broken = await ConnectAsync();
-            await OversizedHeaderAsync(broken);
+            _ = OversizedHeaderAsync(broken);
             serve = Serve(server, OneLine, () => throw new UnauthorizedAccessException("listen denied"), (f, t) => Task.CompletedTask,
                 pipe => new MemoryStream(), default, async _ => { draining.TrySetResult(); await drained.Task; });
             await Within(draining.Task, "Shutdown did not start after the terminal renewal failure");
@@ -311,11 +313,13 @@ public static class HostServerChecks
         await FreshClaimAsync("A normal shutdown left the pipe claimed");
     }
 
-    private static async Task OversizedHeaderAsync(Stream pipe)
+    // Not awaited: a write issued before serving, or one the server refuses unread, may stay pending or break.
+    // The checks assert the refusal by the connection ending; disposing the client cancels a pending write.
+    private static Task OversizedHeaderAsync(Stream pipe)
     {
         var header = new byte[5]; // kind Arguments, then a length one past the one MiB payload cap
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(1), 1024 * 1024 + 1u);
-        await Within(pipe.WriteAsync(header).AsTask(), "The oversized header write did not finish");
+        return pipe.WriteAsync(header).AsTask();
     }
 
     /// <summary>Claim, run the body's serving, cancel it and require that a fresh claim succeeds afterwards.</summary>
@@ -344,9 +348,9 @@ public static class HostServerChecks
                 var renewal = new Renewal(server);
                 var trusted = 0;
                 using var broken = await ConnectAsync();
-                if (variant == "kind") await Within(PipeFrame.WriteAsync(broken, new byte[] { Accepted }, default), "The wrong-kind write did not finish");
-                else if (variant == "untrusted") await SendAsync(broken, "x");
-                else await OversizedHeaderAsync(broken);
+                // Written before serving starts, so not awaited (see OversizedHeaderAsync).
+                _ = variant == "kind" ? PipeFrame.WriteAsync(broken, new byte[] { Accepted }, default)
+                    : variant == "untrusted" ? Request(broken, "x") :OversizedHeaderAsync(broken);
                 serving.Add(Serve(server, OneLine, renewal.Listen, renewal.WaitAsync,
                     pipe => variant == "untrusted" && Interlocked.Increment(ref trusted) == 1 ? null : new MemoryStream(), ct));
                 await Within(renewal.Waiting.Task, "The listener outage did not start");

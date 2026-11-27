@@ -358,8 +358,11 @@ public static class AutoSyncChecks
         var localLive=new TaskCompletionSource<JournalPosition?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var live=new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var saved=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var applied=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var observed=Observation.Wrap<IStore>((m,args)=>m.Name==nameof(IStore.ResetCursorAsync) ? Reset((string)args[1]!, (string)args[2]!, (CancellationToken)args[3]!) :
-            m.Name==nameof(IStore.SaveCursorAsync) && (string?)args[1]=="after" ? SaveAfter((CancellationToken)args[2]!) : Observation.Forward(store,m,args));
+            m.Name==nameof(IStore.SaveCursorAsync) && (string?)args[1]=="after" ? SaveAfter((CancellationToken)args[2]!) :
+            m.Name==nameof(IStore.CommitAsync) ? Commit(m,args) : Observation.Forward(store,m,args));
+        async Task Commit(System.Reflection.MethodInfo m,object?[] args){await (Task)Observation.Forward(store,m,args)!;if(pc.Items["held"].Bytes.SequenceEqual(new byte[]{2})) applied.TrySetResult();} // the old effect's own commit, not a timed window
         async Task SaveAfter(CancellationToken t){await store.SaveCursorAsync(pair.PairId,"after",t);saved.TrySetResult();}
         async Task Reset(string fresh,string reason,CancellationToken t){await store.ResetCursorAsync(pair.PairId,fresh,reason,t);resetSaved.TrySetResult();}
         async Task<ChangePage> Idle(CancellationToken t){await Task.Delay(Timeout.Infinite,t);throw new InvalidOperationException();}
@@ -397,7 +400,8 @@ public static class AutoSyncChecks
             await blocker.WaitAsync(ct); // the old effect is joined before the reader is cancelled
             if(continuous)
             {
-                Check.Require(pc.Items["held"].Bytes.SequenceEqual(new byte[]{2}) && await store.CursorAsync(pair.PairId,ct)=="after","The released old effect did not apply or rewound the new cursor");
+                try{await applied.Task.WaitAsync(ct);}catch(OperationCanceledException) when(ct.IsCancellationRequested){throw new InvalidDataException("The released old effect did not apply");}
+                Check.Require(await store.CursorAsync(pair.PairId,ct)=="after","The released old effect rewound the new cursor");
                 timeout.Cancel();
                 try{await intake.WaitAsync(TimeSpan.FromSeconds(30));}catch(OperationCanceledException) when(ct.IsCancellationRequested){}
             }

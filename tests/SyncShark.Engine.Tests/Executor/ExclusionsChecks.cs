@@ -408,7 +408,7 @@ public static class ExclusionsChecks
             using var store = new TestDoubles.InMemoryStateStore();
             await store.SavePairAsync(pair, default, [(pair.PairId, new Scope("R", "R"))]);
             pair = (await store.PairAsync(pair.PairId, default))!;
-            var pc = new TestDoubles.FakeSide(Side.Local); var db = new TestDoubles.FakeSide(Side.Dropbox);
+            var pc = new TestDoubles.FakeSide(Side.Local); var db = new TestDoubles.FakeSide(Side.Dropbox) { IdleBoundary = new([], "cursor", null) };
             var folder = Scenarios.ItemChecks.File(Side.Local, "R", 0, "pc-R", true); var peer = Scenarios.ItemChecks.File(Side.Dropbox, "R", 0, "db-R", true);
             pc.Seed(folder, []); db.Seed(peer, []); await store.CommitAsync(pair.PairId, null, SyncedEntries.From(folder, peer), null, null, default);
             foreach (var name in new[] { "R/f1", "R/f2", "R/f3" })

@@ -197,7 +197,7 @@ public static class FolderDeleteChecks
             var pair=ItemChecks.Pair();using var store=new InMemoryStateStore();var pc=new FakeSide(Side.Local);var db=new FakeSide(Side.Dropbox);
             var root=ItemChecks.File(Side.Local,"p",0,"root",true);var child=ItemChecks.File(Side.Local,"p/c",1,"child");var changed=ItemChecks.File(Side.Local,child.Path,2,child.Id);pc.Seed(root,[]);pc.Seed(child,[1]);int lists=0;
             async IAsyncEnumerable<Listed> Receipt(){await Task.CompletedTask;yield return new(changed.Path,changed);}
-            async Task<RemovalResult> Send(){pc.Items[child.Path]=(changed,[2]);var result=await pc.DeleteAsync(root,null,default);return result with {RecycledVictim=new("Local","bin",root),Recycled=Receipt()};}
+            async Task<RemovalResult> Send(){pc.Items[child.Path]=(changed,[2]);var result=await pc.DeleteAsync(root,null,default);return result with {RecycledVictim=new(FakeSide.Volume,"bin",root),Recycled=Receipt()};}
             var side=Observe.On(pc,(op,args)=>{if(op==nameof(ISide.ReadAllAsync) && ++lists==2 && mode=="stale")pc.Items[child.Path]=(changed,[2]);return op==nameof(ISide.DeleteAsync)?Send():null;});
             var result=await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),root,null,Side.Local,ActionKind.DeleteLocal,side,db,store,_=>[],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>Task.CompletedTask,default,userSelected:mode!="automatic");
             if(mode=="late")Check.Require(result.Outcome==RemovalOutcome.Removed && pc.History.Any(x=>x.Entry==changed && x.Bytes.SequenceEqual(new byte[]{2})) && store.OpenNotices.Any(n=>n.Cause==TextKey.FailRecycledLate && n.Subject.Items.Any(i=>i.Id==changed.Id && i.Path==changed.Path)),"Selected recycle did not report the late child retained in its receipt");
@@ -295,7 +295,7 @@ public static class FolderDeleteChecks
         var v=ItemChecks.File(Side.Dropbox,"p/late",1,"child");db.Seed(v,[1]);bool ack=false,compared=false;
         var edit=new Change(Side.Dropbox,ChangeKind.Changed,v.Path,null,v.Id,v,false,false){ConsumeHeld=()=>ack=true};var cloud=Observe.On(DeleteSide(db),(op,_)=>op==nameof(ISide.BoundaryAsync)?Task.FromResult<(string?,JournalPosition?)>((db.Mutations.Count==0?"before":"after",null)):null);
         var result=await new FolderDelete().ApplyAsync(pair,ItemChecks.Settings,_=>{},new(pair,[pair],DriveType.Fixed),root,saved,Side.Dropbox,ActionKind.DeleteDropbox,pc,cloud,store,_=>[edit],(_,_,_,_)=>Task.CompletedTask,(_,_,_,_)=>{compared=true;return Task.CompletedTask;},default,coversThrough:f=>f.Dropbox=="before");
-        Check.Require(!ack && !compared && result.Outcome==RemovalOutcome.Pending && pc.Items.Count==0,"Immediate removal settled before reading through its post-effect boundary");
+        Check.Require(!ack && !compared && result.Outcome==(missingLocal?RemovalOutcome.Retained:RemovalOutcome.Pending) && pc.Items.Count==0,"Immediate removal settled before reading through its post-effect boundary");
         Check.Require(missingLocal?db.Mutations.Count==0 && db.Items[v.Path].Bytes.SequenceEqual(new byte[]{1}):db.Mutations.SequenceEqual(new[]{root.Id}) && !db.Items.ContainsKey(root.Path),"Removal did not require bilateral pre-send evidence");}
     }
     internal static Func<(JournalPosition? Local,string? Dropbox),bool> Admitted(FakeSide pc,FakeSide db)
