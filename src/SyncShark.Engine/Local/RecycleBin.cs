@@ -33,7 +33,7 @@ public sealed class RecycleBin
     private static (RemovalResult? Result, string? BinLocator) SendToShell(string fullPath,
         HeldInfo held, Entry expected, CancellationToken ct)
     {
-        // The shell parser rejects a relative path that keeps forward slashes (E_INVALIDARG), so normalise once here.
+        // The shell parser rejects a full path that keeps forward slashes (E_INVALIDARG), so normalise once here.
         var shellPath = Path.GetFullPath(fullPath);
         IFileOperation? operation = null;
         var item = IntPtr.Zero;

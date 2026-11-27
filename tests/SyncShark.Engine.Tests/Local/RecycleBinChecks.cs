@@ -205,6 +205,8 @@ public static class RecycleBinChecks
     // LocalSide.Full keeps the Dropbox relative path's forward slashes; the shell parser only accepts the normalised form.
     public static async Task ShellForwardSlashAsync()
     {
+        if(Environment.GetEnvironmentVariable("GITHUB_ACTIONS")!="true" || Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT")!="github-hosted")
+            throw new NotImplementedException("Requires disposable Windows runner");
         var root=Directory.CreateTempSubdirectory().FullName;
         try
         {
