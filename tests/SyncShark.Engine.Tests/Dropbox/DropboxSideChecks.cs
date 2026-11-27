@@ -223,11 +223,7 @@ public static class DropboxSideChecks
     {
         try { await call(); }
         catch (ItemFailedException error) when (error.Disposition == FailureDisposition.TemporaryNoEffect &&
-            error.ProviderWait == TimeSpan.FromSeconds(seconds) && error.ProviderWaitStarted == clock.GetTimestamp())
-        {
-            (clock as TestDoubles.FakeTimeProvider)?.Advance(error.ProviderWait.Value); // the route's pause ends before the next call
-            return;
-        }
+            error.ProviderWait == TimeSpan.FromSeconds(seconds) && error.ProviderWaitStarted == clock.GetTimestamp()) { return; }
         throw new InvalidDataException("Read did not preserve the HTTP 429 disposition and provider wait");
     }
 

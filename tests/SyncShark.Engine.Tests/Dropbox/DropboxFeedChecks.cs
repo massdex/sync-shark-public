@@ -122,7 +122,6 @@ public static class DropboxFeedChecks
         try { await finite.ReadChangePageAsync(api, pair, "b", ct); Check.Require(false, "Throttle produced a change page."); }
         catch (ItemFailedException e) when (e.Disposition == FailureDisposition.TemporaryNoEffect &&
             e.ProviderWait == TimeSpan.FromSeconds(7) && e.ProviderWaitStarted.HasValue) { }
-        clock.Advance(TimeSpan.FromSeconds(7)); // the route's pause ends before the retry
         wire.Add(read, "b", DropboxStubHandler.Page("d", false));
         Check.Require((await finite.ReadChangePageAsync(api, pair, "b", ct)).Cursor == "d", "Retry lost the held cursor.");
         wire.Done();

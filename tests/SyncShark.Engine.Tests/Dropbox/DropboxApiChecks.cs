@@ -438,7 +438,6 @@ public static class DropboxApiChecks
             await CheckBusyReceiptsAsync(settings, olderWait, reverse, expected, status);
         foreach (var aFirst in new[] { true, false }) await CheckAccountsSeparateAsync(settings, aFirst);
         await CheckAccountGrowthAsync(settings); await CheckAccountSharedAsync(settings); await CheckUnboundHostAsync(settings);
-        await CheckSharedPauseAsync(settings);
 
         // The prepared path uses the same binding: each account's own token, and the same verified root.
         var preparedWire = new Wire();
@@ -552,7 +551,6 @@ public static class DropboxApiChecks
         catch (ItemFailedException error) when (error.ProviderWaitStarted == stamp && error.ProviderWait == requested)
         {
             wire.HeaderDate = null;
-            clock.Advance(requested); // the account pause ends before the next request
             return;
         }
         throw new InvalidDataException("refusal did not use the paired header receipt samples");
@@ -575,7 +573,6 @@ public static class DropboxApiChecks
                 error.ProviderWait == TimeSpan.FromSeconds(13) && error.ProviderWaitStarted.HasValue,
                 "busy read lost its nested provider delay or retry disposition");
         }
-        clockWire.Clock!.Advance(TimeSpan.FromSeconds(13));
         clockWire.Body = "{";
         try
         {
@@ -584,7 +581,6 @@ public static class DropboxApiChecks
         }
         catch (ItemFailedException error) when (error.Disposition == FailureDisposition.TemporaryNoEffect &&
             error.ProviderWait == clockWire.HeaderWait) { }
-        clockWire.Clock.Advance(clockWire.HeaderWait.Value);
         clockWire.Status = 409;
         foreach (var (payload, reset) in new[]
         {
@@ -608,54 +604,43 @@ public static class DropboxApiChecks
         var wire = new Wire { Status = 429 };
         using var http = new HttpClient(wire);
         var api = Bind(new DropboxApi(http, clock, settings with { InitialLimiterLevel = 8 }, _ => { }), "acct-a", "a", "root");
-        // The shared pause holds a later request, so a reply inside an open period is one already in flight: gate holds its body.
-        async Task RefusalAsync(bool contention, int? seconds, Task? gate = null)
+        async Task RefusalAsync(bool contention, int? seconds)
         {
             var cause = contention ? TextKey.WaitTooManyWrites : TextKey.DropboxRefused;
             wire.Body = contention ? """{"error":{"reason":{".tag":"too_many_write_operations"},"retry_after":20}}""" : "{}";
             wire.HeaderWait = seconds is { } delay ? TimeSpan.FromSeconds(delay) : null;
-            wire.ReadGate = gate;
             var wait = contention ? TimeSpan.FromSeconds(20) : wire.HeaderWait;
-            try { await api.SpaceUsageAsync(default).WaitAsync(TimeSpan.FromSeconds(5)); }
+            try { await api.SpaceUsageAsync(default); }
             catch (ItemFailedException error) when (error.Cause == cause && error.ProviderWait == wait) { return; }
             throw new InvalidDataException("unexpected busy read disposition");
         }
         if (scenario == "start")
         {
             await RefusalAsync(true, null);
-            await CheckAdmissionAsync(api, wire, 8, "write contention reduced or paused admission");
+            await CheckAdmissionAsync(api, wire, 8, "write contention reduced admission");
             clock.Advance(TimeSpan.FromSeconds(5));
             await RefusalAsync(false, 2);
-            clock.Advance(TimeSpan.FromSeconds(2));
             await CheckAdmissionAsync(api, wire, 4, "contention at 5 suppressed the first request throttle at 10");
             return;
         }
+        await RefusalAsync(false, scenario == "zero" ? 0 : 2); // Open [10,12).
         if (scenario == "zero")
         {
-            await RefusalAsync(false, 0); // Open [10,10).
             // Same instant, no clock advance: any positive window, however short, would suppress this reduction.
             await RefusalAsync(false, 2);
-            clock.Advance(TimeSpan.FromSeconds(2));
             await CheckAdmissionAsync(api, wire, 2, "a stated zero opened a positive period");
             return;
         }
-        var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var later = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var first = RefusalAsync(false, 2, opened.Task); // Received at 10; opens [10,12) when its body is read.
-        clock.Advance(TimeSpan.FromSeconds(1));
-        var inside = RefusalAsync(scenario == "expiry", null, later.Task); // Received at 11.
-        opened.SetResult();
-        await first;
-        later.SetResult();
-        await inside;
         clock.Advance(TimeSpan.FromSeconds(1));
         if (scenario == "inside")
         {
+            await RefusalAsync(false, null);
             await CheckAdmissionAsync(api, wire, 4, "a request throttle inside the open period reduced admission again");
             return;
         }
+        await RefusalAsync(true, null);
+        clock.Advance(TimeSpan.FromSeconds(1));
         await RefusalAsync(false, 2);
-        clock.Advance(TimeSpan.FromSeconds(2));
         await CheckAdmissionAsync(api, wire, 2, "contention at 11 suppressed the new request throttle at expiry 12");
     }
 
@@ -669,25 +654,14 @@ public static class DropboxApiChecks
         Task RefusalAsync() => BusyRefusalAsync(api);
         var first = RefusalAsync();
         Check.Require(!first.IsCompleted, "first refusal body was not delayed");
-        // The shared pause holds a request made after a reported period, so the later request is admitted now and held at the wire.
-        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var later = Task.CompletedTask;
-        if (!reverse)
-        {
-            wire.SendGate = hold.Task;
-            later = RefusalAsync();
-            release.SetResult();
-            await first;
-        }
+        if (!reverse) { release.SetResult(); await first; }
         clock.Advance(TimeSpan.FromSeconds(1));
         var otherEarly = reverse ? RefusalAsync() : Task.CompletedTask;
         clock.Advance(TimeSpan.FromSeconds(14));
         wire.HeaderWait = TimeSpan.FromSeconds(10);
         wire.ReadGate = null;
-        if (reverse) await RefusalAsync();
-        else { hold.SetResult(); await later; wire.SendGate = null; }
+        await RefusalAsync();
         if (reverse) { release.SetResult(); await Task.WhenAll(first, otherEarly); }
-        clock.Advance(TimeSpan.FromSeconds(10)); // Every period has ended.
         await CheckAdmissionAsync(api, wire, expected);
     }
 
@@ -765,12 +739,12 @@ public static class DropboxApiChecks
         var b = Bind(host, "acct-b", "b", "root-b");
         var (first, second) = aFirst ? (a, b) : (b, a);
         await BusyRefusalAsync(first); // Opens first's [10,20).
-        await CheckAdmissionAsync(second, wire, 8, "one account's busy period reduced or paused another account");
+        await CheckAdmissionAsync(first, wire, 4, "an account's busy reply did not reduce it");
+        await CheckAdmissionAsync(second, wire, 8, "one account's busy period reduced another account");
         clock.Advance(TimeSpan.FromSeconds(1));
         await BusyRefusalAsync(second); // Receipt 11, inside first's window.
-        clock.Advance(TimeSpan.FromSeconds(10)); // Both periods have ended.
         await CheckAdmissionAsync(second, wire, 4, "another account's open period suppressed this account's reduction");
-        await CheckAdmissionAsync(first, wire, 4, "an account's busy reply did not reduce it exactly once");
+        await CheckAdmissionAsync(first, wire, 4, "another account's busy reply reduced this account again");
     }
 
     private static async Task CheckAccountGrowthAsync(EngineSettings settings)
@@ -795,15 +769,9 @@ public static class DropboxApiChecks
         var one = Bind(host, "acct-a", "a1", "root-1");
         var two = Bind(host, "acct-a", "a2", "root-2");
         await CheckAdmissionAsync(one, wire, 8, "two scopes of one account admitted past its level", other: two);
-        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        wire.ReadGate = gate.Task;
-        var firstReply = BusyRefusalAsync(one);
+        await BusyRefusalAsync(one);
         clock.Advance(TimeSpan.FromSeconds(1));
-        var secondReply = BusyRefusalAsync(two); // In flight: two busy replies inside one positive period.
-        gate.SetResult();
-        await Task.WhenAll(firstReply, secondReply);
-        wire.ReadGate = null;
-        clock.Advance(TimeSpan.FromSeconds(10));
+        await BusyRefusalAsync(two); // Two busy replies inside one positive period.
         await CheckAdmissionAsync(one, wire, 4, "one shared busy period was not exactly one reduction", other: two);
     }
 
@@ -821,77 +789,8 @@ public static class DropboxApiChecks
             throw new InvalidDataException("busy identity read accepted");
         }
         catch (ItemFailedException) { }
-        await CheckAdmissionAsync(account, wire, 8, "the unbound host's refusal reduced or paused a verified account");
-        clock.Advance(TimeSpan.FromSeconds(10));
         await CheckAdmissionAsync(host, wire, 4, "the host's classified refusal did not reduce the host", route: DropboxProtocol.GetCurrentAccount);
-    }
-
-    // One route, several items: after one 429 with Retry-After on get_metadata no get_metadata of that account calls Dropbox until
-    // the wait ends, while its other routes and other accounts go on; write contention pauses nothing; cancellation ends the wait.
-    private static async Task CheckSharedPauseAsync(EngineSettings settings)
-    {
-        var clock = new FakeTimeProvider(DateTimeOffset.UnixEpoch.AddSeconds(10));
-        var wire = new Wire { Status = 429, Body = """{"error":{"reason":{".tag":"too_many_write_operations"},"retry_after":20}}""" };
-        using var http = new HttpClient(wire);
-        var host = new DropboxApi(http, clock, settings with { InitialLimiterLevel = 8 }, _ => { });
-        var one = Bind(host, "acct-a", "a1", "root-1");
-        var two = Bind(host, "acct-a", "a2", "root-2");
-        var other = Bind(host, "acct-b", "b", "root-b");
-        Task<System.Text.Json.JsonDocument> Read(DropboxApi api, CancellationToken ct = default) =>
-            api.CallJsonAsync(DropboxProtocol.GetMetadata, "{}", ct);
-        async Task RefuseAsync(DropboxApi api)
-        {
-            try { using (await Read(api)) { } }
-            catch (ItemFailedException error) when (error.Disposition == FailureDisposition.TemporaryNoEffect) { return; }
-            throw new InvalidDataException("busy metadata read accepted");
-        }
-        async Task UploadAsync(DropboxApi api)
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Post, Routes.Endpoint("files/upload"));
-            using (await api.SendAsync(request, default).WaitAsync(TimeSpan.FromSeconds(5))) { }
-        }
-        await RefuseAsync(one);
-        wire.Status = 200;
-        using (await Read(two).WaitAsync(TimeSpan.FromSeconds(5))) { }
-        Check.Require(clock.Created == 0, "write contention paused an unrelated request");
-        wire.Status = 429;
-        wire.Body = "{}";
-        // Two refusals in flight together: the shorter wait reported last does not shorten the longer one.
-        var longer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var shorter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        (wire.HeaderWait, wire.ReadGate) = (TimeSpan.FromSeconds(30), longer.Task);
-        var first = RefuseAsync(one);
-        (wire.HeaderWait, wire.ReadGate) = (TimeSpan.FromSeconds(5), shorter.Task);
-        var second = RefuseAsync(two);
-        longer.SetResult();
-        await first;
-        shorter.SetResult();
-        await second;
-        (wire.Status, wire.ReadGate) = (200, null);
-        var baseline = wire.Paths.Count;
-        var items = new[] { one, two, one }.Select(api => Read(api)).ToArray();
-        Check.Require(clock.Live == 3 && clock.ScheduledDelay == TimeSpan.FromSeconds(30) && wire.Paths.Count == baseline &&
-            items.All(item => !item.IsCompleted), "a get_metadata of the paused account called Dropbox inside the stated wait");
-        await UploadAsync(two);
-        using (await two.CallJsonAsync("files/list_folder", "{}", default).WaitAsync(TimeSpan.FromSeconds(5))) { }
-        using (await Read(other).WaitAsync(TimeSpan.FromSeconds(5))) { }
-        Check.Require(wire.Paths.Count == baseline + 3, "one route's pause held another route or another account");
-        await CheckAdmissionAsync(two, wire, 4, "a paused request held an admission slot", route: "files/list_folder");
-        baseline = wire.Paths.Count;
-        clock.Fire(0);
-        clock.Fire(1, TimeSpan.Zero);
-        clock.Fire(2, TimeSpan.Zero);
-        foreach (var item in items) using (await item.WaitAsync(TimeSpan.FromSeconds(5))) { }
-        Check.Require(wire.Paths.Count == baseline + 3 && clock.Created == 3, "the end of the wait did not release each held request once");
-        wire.Status = 429;
-        await RefuseAsync(one);
-        using var stop = new CancellationTokenSource();
-        var held = Read(one, stop.Token);
-        var sent = wire.Paths.Count;
-        stop.Cancel();
-        try { using (await held.WaitAsync(TimeSpan.FromSeconds(5))) { } throw new InvalidDataException("a cancelled paused request completed"); }
-        catch (OperationCanceledException) { }
-        Check.Require(wire.Paths.Count == sent, "a cancelled paused request called Dropbox");
+        await CheckAdmissionAsync(account, wire, 8, "the unbound host's refusal reduced a verified account");
     }
 
     // Park ordinary requests at the wire; the ones reaching it before cancellation expose the actual admission level.
@@ -951,7 +850,6 @@ public static class DropboxApiChecks
         internal Func<Stream, CancellationToken, Task>? WritePrefix { get; set; }
         internal TaskCompletionSource<CancellationToken>? DecoderRead { get; set; }
         internal bool HoldSend { get; set; }
-        internal Task? SendGate { get; set; } // holds an admitted request at the wire until released
         internal bool ClientTimeout { get; set; }
         internal bool FailRead { get; set; }
         internal HttpResponseMessage? LastReply { get; private set; }
@@ -970,7 +868,6 @@ public static class DropboxApiChecks
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
             CancellationToken cancellationToken)
         {
-            if (SendGate is { } hold) await hold.WaitAsync(cancellationToken);
             Paths.Add(request.RequestUri!.AbsolutePath);
             if (ClientTimeout) throw new TaskCanceledException("HTTP client timeout", new TimeoutException());
             var current = request.Content;

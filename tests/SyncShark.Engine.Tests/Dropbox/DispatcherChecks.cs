@@ -138,6 +138,7 @@ public static class DispatcherChecks
         var file = Scenarios.ItemChecks.File(Side.Local, "item", 42, "pc");
         var path = pair.DropboxRoot.TrimEnd('/') + "/item";
         await GrowingDirectAsync(pair,file);
+        await LostUploadReplyAsync(pair,file);
         await FinishRefusalsAsync(pair,file);
         bool correct = false;
         async Task<HttpResponseMessage> Send(HttpRequestMessage request, CancellationToken ct)
@@ -255,6 +256,79 @@ public static class DispatcherChecks
         throw new InvalidDataException("Correct receipt for equal-length edited bytes was accepted as the selected version");
     }
 
+    /// <summary>A selected update whose reply is lost, unreadable, or an unreadable gateway error after the whole body settles by one
+    /// path read holding the selected ID and digest. A create (no selected ID), another ID or digest, a body that failed mid-way
+    /// or a definite refusal stays unsettled; no write is replayed.</summary>
+    private static async Task LostUploadReplyAsync(PairConfig pair, Entry file)
+    {
+        var other=new string('0',64);
+        const string conflict="{\"error\":{\".tag\":\"path\",\"reason\":{\".tag\":\"conflict\",\"conflict\":{\".tag\":\"file\"}},\"upload_session_id\":\"session\"}}"; // UploadWriteFailed
+        foreach (var (mode,id,held,expect,expectedReads) in new (string,string?,string,string,int)[]{
+            ("unreadable","id:result",file.ContentHash!,"proven",1),("unreadable","id:result",other,"unknown",1),
+            ("dropped","id:result",file.ContentHash!,"proven",1),("midbody","id:result",file.ContentHash!,"unknown",0),
+            ("session","id:result",file.ContentHash!,"proven",1),("session","id:result",other,"unknown",1),
+            ("unreadable","id:selected",file.ContentHash!,"unknown",1), // the path holds equal bytes under another ID
+            ("unreadable",null,file.ContentHash!,"unknown",0),("dropped",null,file.ContentHash!,"unknown",0), // a create cannot attribute equal bytes
+            ("gateway","id:result",file.ContentHash!,"proven",1),("gateway","id:result",other,"unknown",1),("gateway",null,file.ContentHash!,"unknown",0),
+            ("conflict","id:result",file.ContentHash!,"refused",0)})
+        {
+            // Mid-body: an unhashed source larger than one copy buffer, and a wire that accepts the first chunk only.
+            var bytes=mode=="midbody" ? new byte[200_000] : new byte[]{42};
+            using var source=new MemoryStream(bytes);
+            using var wire=new MemoryStream(new byte[bytes.Length-1]);
+            var sent=mode=="midbody" ? file with {Size=bytes.Length,ContentHash=""} : file;
+            var stage=mode=="session" ? global::Massdex.SyncShark.Engine.Dropbox.DropboxStaged.Session(file.Path,"session",file.Size,file,file.ContentHash!)
+                : global::Massdex.SyncShark.Engine.Dropbox.DropboxStaged.Single(file.Path,source,sent);
+            using var store=new InMemoryStateStore(); int uploads=0, reads=0; string? wrong=null; // the dispatcher absorbs wire exceptions
+            var path=pair.DropboxRoot.TrimEnd('/')+"/"+file.Path;
+            async Task<HttpResponseMessage> Send(HttpRequestMessage request,CancellationToken ct)
+            {
+                if (!request.RequestUri!.AbsolutePath.EndsWith("/get_metadata",StringComparison.Ordinal))
+                {
+                    uploads++;
+                    if (!request.RequestUri.AbsolutePath.EndsWith(mode=="session" ? "/upload_session/finish" : "/files/upload",StringComparison.Ordinal)) wrong="route";
+                    using var arg=JsonDocument.Parse(request.Headers.GetValues("Dropbox-API-Arg").Single());
+                    var commit=mode=="session" ? arg.RootElement.GetProperty("commit") : arg.RootElement;
+                    var sentMode=commit.GetProperty("mode");
+                    if (id is null ? sentMode.ValueKind!=JsonValueKind.String || sentMode.GetString()!="add" : sentMode.ValueKind!=JsonValueKind.Object || sentMode.GetProperty("update").GetString()!="rev") wrong="mode";
+                    if (mode=="midbody")
+                    {
+                        await request.Content!.CopyToAsync(wire,ct); // throws once the second chunk overflows the wire
+                        throw new InvalidDataException("The mid-body fixture sent the whole body");
+                    }
+                    await request.Content!.CopyToAsync(Stream.Null,ct);
+                    if (mode is "unreadable" or "session") return new(HttpStatusCode.OK){Content=new StringContent("{\"name\":")};
+                    if (mode=="gateway") return new(HttpStatusCode.BadGateway){Content=new StringContent("<html>bad gateway</html>")};
+                    if (mode=="conflict") return new(HttpStatusCode.Conflict){Content=new StringContent(conflict)};
+                    throw new HttpRequestException("connection closed before headers");
+                }
+                reads++;
+                using (var lookup=JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct)))
+                    if (!string.Equals(lookup.RootElement.GetProperty("path").GetString(),path,StringComparison.OrdinalIgnoreCase)) wrong="lookup path";
+                return new(HttpStatusCode.OK){Content=new StringContent(JsonSerializer.Serialize(new Dictionary<string,object>{[".tag"]="file",["name"]=file.Path,["path_display"]=path,["path_lower"]=path.ToLowerInvariant(),["id"]="id:result",["rev"]="rev",["size"]=file.Size,["content_hash"]=held,["client_modified"]=file.Modified,["server_modified"]=file.Modified}))};
+            }
+            var clock=new ReceiptClock(); using var http=new HttpClient(new ReceiptWire(Send,clock));
+            var api=new global::Massdex.SyncShark.Engine.Dropbox.DropboxApi(http,clock,Scenarios.ItemChecks.Settings,_=>{},_=>ValueTask.FromResult<string?>("synthetic"),"test-namespace");
+            var d=new Dispatch(api,store);
+            (Entry? Entry, FailureDisposition? Failure) outcome;
+            try
+            {
+                var (_,reply)=await d.SubmitAsync(pair,"files/upload",new(id,file.Path,null),id is null ? null : "rev",false,stage,default);
+                var member=((JobReply.Terminal)reply).Members.Single();
+                outcome=(member.Entry,member.Failure);
+            }
+            catch(ItemFailedException error){outcome=(null,error.Disposition);}
+            bool met=expect switch
+            {
+                "proven" => outcome is ({Id:"id:result"},null),
+                "unknown" => outcome is (null,FailureDisposition.UnknownEffect),
+                _ => outcome is (null,FailureDisposition.Permanent)
+            };
+            Check.Require(wrong is null && met && uploads==1 && reads==expectedReads && (mode!="midbody" || wire.Position>0),
+                $"A lost upload reply ({mode}, {id ?? "create"}, {wrong}, {outcome.Failure}, {uploads}, {reads}) was credited without the selected ID and digest, missed a proven one, read after an unsent body or a definite refusal, or replayed the write");
+        }
+    }
+
     private static async Task GrowingDirectAsync(PairConfig pair, Entry file, bool beforeOnly=false)
     {
         foreach (bool before in beforeOnly ? new[]{true} : new[]{true,false})
@@ -275,11 +349,11 @@ public static class DispatcherChecks
             try
             {
                 var (_,reply)=await d.SubmitAsync(pair,"files/upload",new(null,file.Path,null),null,false,stage,default);
-                if (!before && calls==1 && reply is JobReply.Terminal {Members.Count:1} t && t.Members[0].Failure==FailureDisposition.UnknownEffect) continue;
+                // Dropbox echoed the sent digest, so the sent snapshot is our own write; the growth reads as a later local edit.
+                if (!before && calls==1 && reply is JobReply.Terminal {Members.Count:1} t && t.Members[0] is ({Id:"id:result"},null,null)) continue;
             }
             catch(ChangedUnderneathException) when(before && calls==0){continue;}
-            catch(ItemFailedException error) when(!before && calls==1 && error.Disposition==FailureDisposition.UnknownEffect){continue;}
-            throw new InvalidDataException("Growth before direct publication sent a stale prefix, or growth during publication was recorded as synced");
+            throw new InvalidDataException("Growth before direct publication sent a stale prefix, or a proven publication with growth after send was left unconfirmed");
         }
     }
 
@@ -302,7 +376,6 @@ public static class DispatcherChecks
         private bool returned;
         internal long? AtHeaders { get; private set; }
         internal void Headers(){AtHeaders=clock.GetTimestamp();returned=true;}
-        internal void Advance(TimeSpan by)=>clock.Advance(by);
         public override long TimestampFrequency => clock.TimestampFrequency;
         public override long GetTimestamp() => clock.GetTimestamp();
         public override DateTimeOffset GetUtcNow(){var wall=clock.GetUtcNow();if(returned){returned=false;clock.Advance(TimeSpan.FromTicks(1));}return wall;}
@@ -406,7 +479,6 @@ public static class DispatcherChecks
         ready.SendReady(); var good=await results[0];
         Check.Require(good.MemberReply is JobReply.Terminal {Members.Count:1} t && t.Members[0] is ({Id:"id:created"},null,null),"Ensure lookup cancelled its successful neighbour");
         await VerifyWait(results[1], 1);
-        clock.Advance(wait); // the account pause ends before the next read
         await VerifyWait(d.ResolveCreateClashAsync(pair, new(null,"lookup",null),
             new JobReply.Terminal([(null,TextKey.ClashNameTaken,FailureDisposition.Permanent)]), default), 2);
         async Task VerifyWait(Task attempt, int expectedReads)
@@ -437,15 +509,11 @@ public static class DispatcherChecks
         var owner=new global::Massdex.SyncShark.Engine.Executor.Unfinished();
         Task Attempt()=>owner.CheckAsync(pair,Scenarios.ItemChecks.Settings,_=>{},paths,null,pc,db,store,_=>[],Scenarios.ItemChecks.Population(pair,paths,pc,db,store),Scenarios.ItemChecks.Hop(pair,paths,new global::Massdex.SyncShark.Engine.Run.WorkQueue(),pc,db,store),default);
         bool sawWait=false;
-        // The lookup's 429 pauses the account: the good read waits out the stated time inside the same attempt, then settles.
-        var first=Attempt();
-        Check.Require(await clock.Registered.WaitAsync(TimeSpan.FromSeconds(5))==delay && wire.GoodReads==0 && wire.Reads==1,"Good deferred ensure called Dropbox inside the account pause");
-        clock.ElapseScheduledDelay();
-        try {await first.WaitAsync(TimeSpan.FromSeconds(5));}
+        try {await Attempt();}
         catch(ItemFailedException e) when(e.Path=="lookup" && e.Cause==TextKey.DropboxRefused && e.Disposition==FailureDisposition.TemporaryNoEffect && e.ProviderWait==delay && e.ProviderWaitStarted==original){sawWait=true;}
-        Check.Require(wire.GoodReads==1 && wire.Reads==1,"Good deferred ensure was blocked behind the held lookup");
+        Check.Require(wire.GoodReads==1 && wire.Reads==1 && clock.GetTimestamp()==original,"Good deferred ensure was blocked behind the held lookup");
         Check.Require(sawWait && wire.Submits==1 && wire.Polls==1,"Deferred ensure lost its original wait or replayed the launch/token");
-        await Attempt();
+        clock.Advance(delay); await Attempt();
         var jobs=new List<AcceptedJob>(); await foreach(var job in store.JobsAsync(pair.PairId,default)) jobs.Add(job);
         Check.Require(jobs.Count==0 && wire.GoodReads==1 && wire.Reads==2 && wire.Submits==1 && wire.Polls==1,"Deferred retry repeated a settled ordinal, mutation or job poll, or left the job unsettled");
     }

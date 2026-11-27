@@ -111,10 +111,31 @@ public sealed class Dispatcher
         catch (ChangedUnderneathException) { throw; } // Reobserve the local version and the possibly committed remote write.
         catch (Exception error) when (error is not NotImplementedException)
         {
+            if (!many && await SettleSentAsync(pair, first, body, hash, ct).ConfigureAwait(false)) return;
             foreach (var item in group) item.Done.TrySetException(new ItemFailedException(item.Member.Path, TextKey.FailDropboxOutcomeUnknown, error)
                 { Disposition = FailureDisposition.UnknownEffect });
         }
         finally { if (body is not null) await body.StopAsync().ConfigureAwait(false); }
+    }
+
+    /// <summary>Settles a single selected update whose reply was lost or unusable by one exact path read: only Dropbox holding the
+    /// selected ID with the digest of fully sent bytes (or of the finished session) counts as this write. No write is replayed.</summary>
+    private async Task<bool> SettleSentAsync(PairConfig? pair, Pending item, UploadContent.Body? body, ContentHash? hash, CancellationToken ct)
+    {
+        // A create has no selected ID: equal bytes at the path may be another file moved there, not our publication.
+        if (pair is null || api is null || item.Upload is not {} upload || item.Member.Id is null || ct.IsCancellationRequested) return false;
+        try
+        {
+            if (item.Digest is null && body is {Sent: true}) item.Digest = hash!.Finish();
+            var digest = item.Digest ?? upload.ContentHash;
+            if (digest is null) return false;
+            UploadContent.RequireSelectedDigest(item.Member.Path, upload.Source, digest);
+            var held = await new DropboxListing().ReadOneAsync(api, pair, item.Member.Path, ct).ConfigureAwait(false);
+            if (!string.Equals(held?.ContentHash, digest, StringComparison.OrdinalIgnoreCase)) return false;
+            await SettleAsync(pair, item, DropboxProtocol.Upload, (held, null, null), ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception error) when (error is not NotImplementedException) { return false; } // The unknown outcome stands.
     }
 
     private async Task<Pending[]> StageBatchAsync(Pending[] group, CancellationToken ct)
@@ -136,7 +157,7 @@ public sealed class Dispatcher
         var wait = response.Headers.RetryAfter is null ? null : DropboxHttp.RetryAfter(response, clock);
         if (!response.IsSuccessStatusCode)
         {
-            await RefuseGroupAsync(pair, single, route, group, response, body, wait, received, ct).ConfigureAwait(false);
+            await RefuseGroupAsync(pair, single, route, group, response, body, hash, wait, received, ct).ConfigureAwait(false);
             return;
         }
         if (body is not null)
@@ -152,8 +173,6 @@ public sealed class Dispatcher
                 ? await DropboxReply.ReadAsync(stream, DropboxReplyShapes.SelectedDelete(pair, first.Member.Id!), ct).ConfigureAwait(false)
                 : await DropboxReply.ReadAsync(stream, DropboxReplyShapes.Metadata(pair,
                     single == DropboxProtocol.Upload ? "file" : single == DropboxProtocol.CreateFolder ? "folder" : null, nested: single != DropboxProtocol.Upload), ct).ConfigureAwait(false);
-            // Growth after send cannot prove that the selected local version was published.
-            if (body is not null && first.Upload!.Content!.Length != first.Upload!.Total) entry = null;
             await SettleAsync(pair, first, single, (entry, null, null), ct).ConfigureAwait(false);
             return;
         }
@@ -161,7 +180,7 @@ public sealed class Dispatcher
     }
 
     private async Task RefuseGroupAsync(PairConfig? pair, string single, string route, Pending[] group, HttpResponseMessage response,
-        UploadContent.Body? body, TimeSpan? wait, long received, CancellationToken ct)
+        UploadContent.Body? body, ContentHash? hash, TimeSpan? wait, long received, CancellationToken ct)
     {
         if (body is not null) await body.StopAsync().ConfigureAwait(false);
         var refusal = await DropboxHttp.ReadErrorAsync(response, ct).ConfigureAwait(false);
@@ -170,10 +189,10 @@ public sealed class Dispatcher
         foreach (var item in group)
         {
             var classified = Classify(response.StatusCode, refusal, route, single == DropboxProtocol.CreateFolder || (single == DropboxProtocol.Upload && item.Revision is null));
-            if (ReferenceEquals(item, group[0])) api?.ReportBusy(response.StatusCode, classified, wait, received, route);
+            if (ReferenceEquals(item, group[0])) api?.ReportBusy(response.StatusCode, classified, wait, received);
             if (classified.Disposition == FailureDisposition.TemporaryNoEffect)
                 item.Done.TrySetException(ItemFailure(item.Member.Path, classified, wait, received, fact));
-            else
+            else if (classified.Disposition != FailureDisposition.UnknownEffect || group.Length > 1 || !await SettleSentAsync(pair, item, body, hash, ct).ConfigureAwait(false))
                 await SettleAsync(pair, item, single, (null, classified.Cause, classified.Disposition), ct,
                     SelectedIdAbsent(single == DropboxProtocol.Delete, group.Length > 1, item.Member, classified.Absent), fact).ConfigureAwait(false);
         }
@@ -219,7 +238,7 @@ public sealed class Dispatcher
                 var classified = new DropboxErrors.Classified(receipt.Cause ?? TextKey.DropboxRefused, FailureDisposition.TemporaryNoEffect, true);
                 if (!reportedBusy && classified.Cause == TextKey.WaitTooManyWrites)
                 {
-                    api?.ReportBusy(status, classified, wait, received, route);
+                    api?.ReportBusy(status, classified, wait, received);
                     reportedBusy = true;
                 }
                 item.Done.TrySetException(ItemFailure(item.Member.Path, classified, wait, received, DropboxErrors.Fact(route, status, null)));

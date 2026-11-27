@@ -28,7 +28,6 @@ public sealed class DropboxApi
     private long? _busyStarted;
     private long _busyFloorReceipt;
     private TimeSpan _busyDuration;
-    private readonly Dictionary<string, (long Received, TimeSpan Wait)> _routePauses = new(StringComparer.Ordinal); // account root only
     private ClockSample? _clockOffset;
 
     private sealed record ClockSample(long Received, TimeSpan Offset, TimeSpan Uncertainty);
@@ -222,12 +221,7 @@ public sealed class DropboxApi
         try
         {
             if (takePermit)
-            {
-                // One pause per route (RQ-184): wait out that route's stated 429 time before, never while, holding a slot.
-                for (var left = RoutePauseLeft(route!); left > TimeSpan.Zero; left = RoutePauseLeft(route!))
-                    await WaitAsync(left, ct).ConfigureAwait(false);
                 permit = await _limiter.Value.AdmitAsync(ct).ConfigureAwait(false);
-            }
             var started = _clock.GetTimestamp();
             var response = await _transport
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
@@ -283,24 +277,12 @@ public sealed class DropboxApi
     }
 
     // Raw callers already own the error stream: they report its classified HTTP refusal once, not each batch member.
-    internal void ReportBusy(HttpStatusCode status, DropboxErrors.Classified failure, TimeSpan? wait, long received, string route)
+    internal void ReportBusy(HttpStatusCode status, DropboxErrors.Classified failure, TimeSpan? wait, long received)
     {
         lock (_limiter)
         {
             if (_host.BeginRequestThrottle(status, failure, wait, received)) _limiter.Value.SlowDown();
-            // Only a request throttle pauses its route; write contention stays a per-item retry. A later end is never shortened.
-            if (status != HttpStatusCode.TooManyRequests || failure.Cause == TextKey.WaitTooManyWrites || wait is not { } stated ||
-                stated <= TimeSpan.Zero) return;
-            if (!_host._routePauses.TryGetValue(route, out var open) || stated > open.Wait - _clock.GetElapsedTime(open.Received, received))
-                _host._routePauses[route] = (received, stated);
         }
-    }
-
-    // The route's remaining stated 429 wait for this account; zero when none is open.
-    private TimeSpan RoutePauseLeft(string route)
-    {
-        lock (_limiter)
-            return _host._routePauses.TryGetValue(route, out var open) ? open.Wait - _clock.GetElapsedTime(open.Received) : TimeSpan.Zero;
     }
 
     // Called under the host limiter lock. The period coalesces feedback; it does not delay admission.

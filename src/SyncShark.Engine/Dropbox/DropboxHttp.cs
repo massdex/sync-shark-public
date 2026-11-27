@@ -68,7 +68,7 @@ internal static class DropboxHttp
         var failure = new DropboxErrors().Classify(status, envelope, route, false,
             new(read, true, read || status == HttpStatusCode.TooManyRequests, IsBusy(status)));
         var providerWait = DropboxProtocol.ProviderWait(header, envelope);
-        if (route != DropboxProtocol.ListFolderLongpoll) api.ReportBusy(status, failure, providerWait, received, route);
+        if (route != DropboxProtocol.ListFolderLongpoll) api.ReportBusy(status, failure, providerWait, received);
         var wait = failure.Disposition == FailureDisposition.TemporaryNoEffect ? providerWait : null;
         if (readPath is not null && failure.Absent) return;
         // The pair root's own metadata read: a summary-only not_found is root evidence, never item absence.
