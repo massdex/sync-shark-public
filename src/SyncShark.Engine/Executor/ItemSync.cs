@@ -101,8 +101,10 @@ public static class ItemSync
             var incoming=row.EntryOn(change.Side);
             (row,var changedPutBack)=await ChangedPutBackAsync(pair,change,key,saved,row,incoming,candidates,notices,reviewed,local,store,ct);
             var (ok,_,decision)=await RowExecution.ExecuteWithOutcomeAsync(pair,settings,events,paths,row,candidates,observed.SafeSave||change.LocalContentDirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,false,coversThrough:coversThrough,observedMissing:selectedRemoval && change.Side==Side.Local?(change.Side,observed.Successor):null,failedNotice:failedNotice);
-            // A by-ID candidate the move owner rules out of scope (a live hard-link alias, or an excluded original) leaves this name an ordinary item.
-            if(decision is {Kind:ActionKind.None,None:NoneReason.OutOfScope} && candidates is [{} only] && !row.Context.OutOfScope && (change.OldPath is not {} from || PathNames.KeyFor(change.Side,from)!=only.Synced.KeyOn(change.Side)))
+            // A by-ID candidate the move owner rules out of scope (a live hard-link alias, or an excluded original) leaves this name an ordinary item;
+            // a kept original the first execution already followed here no longer sits at its own key, so it is not re-run.
+            if(decision is {Kind:ActionKind.None,None:NoneReason.OutOfScope} && candidates is [{} only] && !row.Context.OutOfScope && (change.OldPath is not {} from || PathNames.KeyFor(change.Side,from)!=only.Synced.KeyOn(change.Side))
+                && await store.FindAsync(pair.PairId,change.Side,only.Synced.KeyOn(change.Side),ct) is not null)
                 (ok,_,decision)=await RowExecution.ExecuteWithOutcomeAsync(pair,settings,events,paths,row,[],observed.SafeSave||change.LocalContentDirty,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,false,coversThrough:coversThrough,observedMissing:selectedRemoval && change.Side==Side.Local?(change.Side,observed.Successor):null,failedNotice:failedNotice);
             if(ok && saved==null && candidates.Count!=0 && decision is {Kind:ActionKind.ForgetOnly,InfoAfter:TextKey.InfoMovedDeleted,Row.Synced.IsFolder:true})
                 return await ChangeAsync(pair,settings,events,paths,change,local,dropbox,store,populate,compareOldBinding,ct,heldInput,failed,reviewed,member,coversThrough);

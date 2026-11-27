@@ -45,8 +45,11 @@ public sealed class HostServer : IDisposable
             var attributes=new SecurityAttributes { Length=Marshal.SizeOf<SecurityAttributes>(), Descriptor=pinned.AddrOfPinnedObject(), Inherit=0 };
             var options=PipeOptions.Asynchronous | (first ? PipeOptions.FirstPipeInstance : PipeOptions.None);
             const uint RejectRemoteClients=0x8; // winbase.h PIPE_REJECT_REMOTE_CLIENTS; byte type/read mode and WAIT are zero.
+            // Outbound room for exactly a Stop reply (Accepted, Exit; Stop writes no output), so host exit never waits on its requester.
+            // Set per instance before the request is known; a larger unread reply still waits for its client. Inbound zero; default wait.
+            const uint StopReply=2*PipeFrame.Header+sizeof(int);
             var handle=CreateNamedPipe(@"\\.\pipe\"+PipeName,(int)options | (int)PipeDirection.InOut,RejectRemoteClients,
-                byte.MaxValue,0,0,0,ref attributes); // winbase.h PIPE_UNLIMITED_INSTANCES; zero buffer quota (a write completes as the client reads it); default wait.
+                byte.MaxValue,StopReply,0,0,ref attributes); // winbase.h PIPE_UNLIMITED_INSTANCES
             try {
                 if(handle.IsInvalid) {
                     int hr=Marshal.GetHRForLastWin32Error();
@@ -150,7 +153,7 @@ public sealed class HostServer : IDisposable
         }
         var exit = new byte[1 + sizeof(int)]; exit[0] = PipeFrame.Exit;
         BinaryPrimitives.WriteInt32LittleEndian(exit.AsSpan(1), code);
-        // Stop cancels intake itself; its successful reply is the only remaining frame on this connection.
+        // Stop cancels intake itself; its successful reply is the only remaining frame and fits the outbound quota, so it completes unread.
         var replyToken = ct.IsCancellationRequested && code==Cli.SuccessExitCode && Cli.Parse(args)?.CommandKey==CommandKeys.HostStop ? CancellationToken.None : ct;
         await PipeFrame.WriteAsync(pipe, exit, replyToken);
         return true;

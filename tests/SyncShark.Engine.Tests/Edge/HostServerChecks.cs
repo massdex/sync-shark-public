@@ -69,6 +69,7 @@ public static class HostServerChecks
         await BrokenDuringOutageAsync();
         await BrokenAcceptDuringOutageAsync();
         await UnreadReplyRetainedAsync();
+        await StopReplyUnreadAsync();
         await ShutdownDuringRenewalAsync();
         await RenewalFailsThenRecoversAsync();
     }
@@ -222,6 +223,7 @@ public static class HostServerChecks
     }
 
     // A handler that blocks before its first await (here in trust) must not hold the accept loop.
+    // The gate has no timeout of its own, so it outlasts the second client's deadline; the finally always releases it.
     private static async Task InlineDispatchAsync()
     {
         using var hold = new ManualResetEventSlim();
@@ -233,7 +235,7 @@ public static class HostServerChecks
             using var server = new HostServer();
             await ClaimAsync(server, "Inline fixture could not claim the pipe");
             serve = Serve(server, OneLine, Listener(server), (f, t) => Task.Delay(Timeout.Infinite, t),
-                pipe => { if (Interlocked.Increment(ref calls) == 1) { held.TrySetResult(); hold.Wait(Bound); } return new MemoryStream(); }, stop.Token);
+                pipe => { if (Interlocked.Increment(ref calls) == 1) { held.TrySetResult(); hold.Wait(); } return new MemoryStream(); }, stop.Token);
             using var first = await ConnectAsync();
             var firstReply = ExchangeAsync(first, "held");
             await Within(held.Task, "The first handler never started");
@@ -382,7 +384,7 @@ public static class HostServerChecks
     });
 
     // A completed reply is never disconnected, even while no successor holds the name.
-    // The server's pipes have zero buffer quota, so each frame's write completes only as the client reads it.
+    // The outbound quota holds only a Stop reply, so this longer reply's writes complete only as the client reads it.
     private static Task UnreadReplyRetainedAsync() => FixtureAsync("completed reply retained", async (server, ct, serving) => {
         var renewal = new Renewal(server);
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -400,9 +402,22 @@ public static class HostServerChecks
         Check.Require(await Within(EndedAsync(client), "The completed exchange stayed open after a successor held the name"), "Data after the reply");
     });
 
+    // A Stop requester that reads nothing cannot hold host exit: the name is released first, then the requester still reads Exit 0.
+    private static Task StopReplyUnreadAsync() => FixtureAsync("unread stop reply", async (server, ct, serving) => {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var serve = Serve(server, async (args, output, error, token) => { await stop.CancelAsync(); return Cli.SuccessExitCode; },
+            Listener(server), (f, t) => Task.Delay(Timeout.Infinite, t), pipe => new MemoryStream(), stop.Token);
+        serving.Add(serve);
+        using var requester = await ConnectAsync();
+        await SendAsync(requester, "host", "stop");
+        await Within(serve, "Serving waited on the requester reading its Stop reply");
+        await FreshClaimAsync("The name stayed held for an unread Stop reply");
+        Check.Require(await Within(ReplyAsync(requester), "The unread Stop reply was not readable") is (Cli.SuccessExitCode, ""), "Stop reply");
+    });
+
     // Shutdown during a renewal outage drains with the name held, keeps a completed exchange on its client, then returns normally.
     // L13 R4 PART 3: "as UnreadReply_Retained up to the PeekNamedPipe observation, then cancel: ServeAsync returns; A reads ... then EOF".
-    // Zero buffer quota: no reply can wait unread, so A reads it first; the same client must stay connected through the drain, then see EOF.
+    // The outbound quota holds only a Stop reply, so this one cannot wait unread and A reads it first; the same client must stay connected through the drain, then see EOF.
     private static Task ShutdownDuringRenewalAsync() => FixtureAsync("shutdown during renewal", async (server, ct, serving) => {
         var renewal = new Renewal(server);
         var draining = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

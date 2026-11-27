@@ -801,7 +801,8 @@ public static class HostChecks
     }
     private static async Task ExplicitBind()
     {
-        using var db=new InMemoryStateStore();var pair=ItemChecks.Pair();await db.SavePairAsync(pair,default);
+        // Unbound, as this check was written: Bind stays refused, so no member starts reading the unscripted fake feeds.
+        using var db=new InMemoryStateStore();var pair=ItemChecks.Pair() with {Roots=null};await db.SavePairAsync(pair,default);
         var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var host=new Host((_,_)=>Task.FromResult<IStore?>(db),async (_,_,_,_,ct)=>{entered.TrySetResult();await release.Task.WaitAsync(ct);return(new FakeSide(Side.Local),new FakeSide(Side.Dropbox));},ItemChecks.Settings,new MemoryLogs(),TimeProvider.System,_=>Task.FromResult(""),(_,_)=>Task.CompletedTask);

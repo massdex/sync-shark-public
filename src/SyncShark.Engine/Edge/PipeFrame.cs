@@ -9,7 +9,7 @@ public static class PipeFrame
 {
     internal const byte Arguments = 0, Accepted = 1, Output = 2, Error = 3, Exit = 4;
     internal const int MaximumPayload = 1024 * 1024;
-    private const int Header = sizeof(byte) + sizeof(uint);
+    internal const int Header = sizeof(byte) + sizeof(uint);
 
     /// <summary>Write the kind and payload of one message as a single frame.</summary>
     public static async Task WriteAsync(Stream pipe, ReadOnlyMemory<byte> message, CancellationToken ct)
