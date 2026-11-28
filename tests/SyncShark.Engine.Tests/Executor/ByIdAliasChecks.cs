@@ -183,37 +183,31 @@ public static class ByIdAliasChecks
         Check.Require(f.Pc.Items["DRAFT (Dropbox copy)"].Entry==s.Kept && f.Pc.Items["DRAFT (Dropbox copy)"].Bytes.SequenceEqual(new byte[]{2}),$"{what}: the kept Dropbox label changed");
     }
 
+    // C1/C2: one stale-temp page settles on the one delete, the kept bindings and unchanged endpoints.
+    private static async Task SecondNamePageAsync(string what,Func<SecondName,ChangePage> page)
+    {
+        var f=New(); var s=await SecondNameAsync(f);
+        f.Db.Seed(s.DbTemp,[1]);
+        var queue=await ItemChecks.StartQueueAsync(f.Pair,f.Paths,f.Pc,f.Db,f.Store);
+        var moves=f.Db.Requests[nameof(ISide.MoveAsync)];
+        await PageAsync(f,queue,_=>{},page(s),what);
+        Check.Require(f.Db.Requests[nameof(ISide.MoveAsync)]==moves && f.Db.Requests[nameof(ISide.DeleteAsync)]==1,$"{what}: not exactly the one old-copy delete with no move");
+        Check.Require(f.Db.History.Any(h=>h.Entry.Id=="D" && h.Entry.Path=="DRAFT.tmp") && await BoundAsync(f,"DRAFT.tmp")==null,$"{what}: the old Dropbox copy did not go to history or the temp binding stayed");
+        Check.Require(await BoundAsync(f,"DRAFT")==s.DraftBinding && await BoundAsync(f,"DRAFT (Dropbox copy)")==s.LabelBinding,$"{what}: a kept binding changed");
+        KeptUnchanged(f,s,what);
+        Check.Require(f.Store.OpenNotices.Count==0,$"{what}: an open notice was left");
+    }
+
     /// <summary>U1: a kept-both and upload race leave the temp binding naming a PC file now bound at its destination; the stale name settles, deleting the unchanged old Dropbox copy or copying back the edited one.</summary>
     public static async Task SecondNameMoveAsync()
     {
         // C1 direct route: the PC rename of the old temp name is the page input.
-        {
-            var f=New(); var s=await SecondNameAsync(f);
-            f.Db.Seed(s.DbTemp,[1]);
-            var queue=await ItemChecks.StartQueueAsync(f.Pair,f.Paths,f.Pc,f.Db,f.Store);
-            var moves=f.Db.Requests[nameof(ISide.MoveAsync)];
-            await PageAsync(f,queue,_=>{},new Change(Side.Local,ChangeKind.Renamed,"DRAFT","DRAFT.tmp","X",s.Draft,false,false,2,JournalId:1),"Second-name move (direct)");
-            Check.Require(f.Db.Requests[nameof(ISide.MoveAsync)]==moves && f.Db.Requests[nameof(ISide.DeleteAsync)]==1,"Second-name move (direct): not exactly the one old-copy delete with no move");
-            Check.Require(f.Db.History.Any(h=>h.Entry.Id=="D" && h.Entry.Path=="DRAFT.tmp") && await BoundAsync(f,"DRAFT.tmp")==null,"Second-name move (direct): the old Dropbox copy did not go to history or the temp binding stayed");
-            Check.Require(await BoundAsync(f,"DRAFT")==s.DraftBinding && await BoundAsync(f,"DRAFT (Dropbox copy)")==s.LabelBinding,"Second-name move (direct): a kept binding changed");
-            KeptUnchanged(f,s,"Second-name move (direct)");
-            Check.Require(f.Store.OpenNotices.Count==0,"Second-name move (direct): an open notice was left");
-        }
+        await SecondNamePageAsync("Second-name move (direct)",s=>new ChangePage(
+            [new Change(Side.Local,ChangeKind.Renamed,"DRAFT","DRAFT.tmp","X",s.Draft,false,false,2,JournalId:1)],null,new(1,3)));
         // C2 borrowed route: the changed old temp name borrows the rename still held on the same page.
-        {
-            var f=New(); var s=await SecondNameAsync(f);
-            f.Db.Seed(s.DbTemp,[1]);
-            var queue=await ItemChecks.StartQueueAsync(f.Pair,f.Paths,f.Pc,f.Db,f.Store);
-            var moves=f.Db.Requests[nameof(ISide.MoveAsync)];
-            var page=new ChangePage([new Change(Side.Local,ChangeKind.Changed,"DRAFT.tmp",null,"X",null,false,false,1,JournalId:1),
-                new Change(Side.Local,ChangeKind.Renamed,"DRAFT","DRAFT.tmp","X",s.Draft,false,false,2,JournalId:1)],null,new(1,3));
-            await PageAsync(f,queue,_=>{},page,"Second-name move (borrowed)");
-            Check.Require(f.Db.Requests[nameof(ISide.MoveAsync)]==moves && f.Db.Requests[nameof(ISide.DeleteAsync)]==1,"Second-name move (borrowed): not exactly the one old-copy delete with no move");
-            Check.Require(f.Db.History.Any(h=>h.Entry.Id=="D" && h.Entry.Path=="DRAFT.tmp") && await BoundAsync(f,"DRAFT.tmp")==null,"Second-name move (borrowed): the old Dropbox copy did not go to history or the temp binding stayed");
-            Check.Require(await BoundAsync(f,"DRAFT")==s.DraftBinding && await BoundAsync(f,"DRAFT (Dropbox copy)")==s.LabelBinding,"Second-name move (borrowed): a kept binding changed");
-            KeptUnchanged(f,s,"Second-name move (borrowed)");
-            Check.Require(f.Store.OpenNotices.Count==0,"Second-name move (borrowed): an open notice was left");
-        }
+        await SecondNamePageAsync("Second-name move (borrowed)",s=>new ChangePage(
+            [new Change(Side.Local,ChangeKind.Changed,"DRAFT.tmp",null,"X",null,false,false,1,JournalId:1),
+             new Change(Side.Local,ChangeKind.Renamed,"DRAFT","DRAFT.tmp","X",s.Draft,false,false,2,JournalId:1)],null,new(1,3)));
         // C3 edited temp: the old Dropbox copy changed, so its bytes copy back to the old PC name with the edit notice.
         {
             var f=New(); var s=await SecondNameAsync(f);
@@ -223,10 +217,10 @@ public static class ByIdAliasChecks
             var (deletes,moves)=(f.Db.Requests[nameof(ISide.DeleteAsync)],f.Db.Requests[nameof(ISide.MoveAsync)]);
             await PageAsync(f,queue,_=>{},new Change(Side.Local,ChangeKind.Renamed,"DRAFT","DRAFT.tmp","X",s.Draft,false,false,2,JournalId:1),"Edited temp download");
             var bound=await BoundAsync(f,"DRAFT.tmp");
-            Check.Require(f.Pc.Items.TryGetValue("DRAFT.tmp",out var got) && got.Bytes.SequenceEqual(new byte[]{3}) && bound is {DropboxId:"D",LocalPath:"DRAFT.tmp"} && bound.LocalId==got.Entry.Id,"Edited temp download: the old name does not hold the edited bytes on Dropbox id D");
+            Check.Require(f.Pc.Items.TryGetValue("DRAFT.tmp",out var got) && got.Bytes.SequenceEqual(new byte[]{3}) && bound is {DropboxId:"D",LocalPath:"DRAFT.tmp"} && bound.LocalId==got.Entry.Id && bound.LocalId!=s.Draft.Id && bound.LocalId!=s.TempBinding.LocalId,"Edited temp download: the old name does not hold the edited bytes on a fresh binding to Dropbox id D");
             Check.Require(f.Db.Items["DRAFT.tmp"].Entry==editedTemp && f.Db.Items["DRAFT.tmp"].Bytes.SequenceEqual(new byte[]{3}),"Edited temp download: the Dropbox temp edition changed");
             Check.Require(f.Db.Requests[nameof(ISide.DeleteAsync)]==deletes && f.Db.Requests[nameof(ISide.MoveAsync)]==moves,"Edited temp download: a delete or move ran");
-            Check.Require(f.Store.OpenNotices.Count(n=>n.Kind==NoticeKind.Info && n.Cause==TextKey.InfoEditBeatsDelete && n.Path=="DRAFT.tmp")==1 && !f.Store.OpenNotices.Any(n=>n.Kind==NoticeKind.Failure),"Edited temp download: wrong open notices");
+            Check.Require(f.Store.OpenNotices.Count==1 && f.Store.OpenNotices.Single() is {Kind:NoticeKind.Info,Cause:TextKey.InfoEditBeatsDelete,Path:"DRAFT.tmp"},"Edited temp download: the open notices are not exactly the one expected Info");
         }
         // C4a grouped baseline: a real PC + Dropbox group still splits as moved twice.
         {
@@ -244,17 +238,18 @@ public static class ByIdAliasChecks
             var dbC=DbEntry("C",1,"D"); f.Db.Seed(dbC,[1]);
             var plan=await MoveDecision.DecideMoveAsync(f.Pair,ItemChecks.Settings,f.Paths,[new RenameCandidate(Side.Local,s.Draft,s.TempBinding)],f.Pc,f.Db,f.Store,false,default);
             Check.Require(plan.Kind==ActionKind.ForgetOnly && plan.InfoAfter==TextKey.InfoMovedDeleted,"Ungrouped move: not the baseline moved-deleted split");
+            Check.Require(f.Db.Items["C"].Entry==dbC && f.Db.Items["C"].Bytes.SequenceEqual(new byte[]{1}),"Ungrouped move: the planner wrote to Dropbox");
         }
         // C4c case intermediate baseline: the saved file mid-hop still plans the ordinary move to DRAFT.
         {
             var f=New(); await SecondNameAsync(f);
             var intermediate=PathNames.CaseRenamePath("DRAFT.tmp",ItemChecks.Settings.CaseRenameSuffix);
-            f.Db.Seed(DbEntry(intermediate,1,"D"),[1]);
+            var atHop=DbEntry(intermediate,1,"D"); f.Db.Seed(atHop,[1]);
             var group=(await Retries.ObserveMoveAsync(f.Pair,f.Paths,new IssueSubject.UnknownMove("D","DRAFT.tmp","DRAFT.tmp",intermediate,false),f.Pc,f.Db,f.Store,default))?.Group;
             Check.Require(group is {Count:2} && group![0].Side==Side.Local && group![1].Side==Side.Dropbox,"Case intermediate: the public observation did not return both members");
             var plan=await MoveDecision.DecideMoveAsync(f.Pair,ItemChecks.Settings,f.Paths,group!,f.Pc,f.Db,f.Store,false,default);
             Check.Require(plan.Kind==ActionKind.MoveDropbox && plan.Side==Side.Dropbox && plan.Target=="DRAFT","Case intermediate: not the baseline move to DRAFT");
-            Check.Require(f.Db.Items[intermediate].Entry.Id=="D","Case intermediate: the planner wrote to Dropbox");
+            Check.Require(f.Db.Items.TryGetValue(intermediate,out var keptHop) && keptHop.Entry==atHop && keptHop.Bytes.SequenceEqual(new byte[]{1}),"Case intermediate: the planner wrote to Dropbox");
         }
         // C4d pure planner: the removed null-group conjunct would delete the untouched moved Dropbox copy instead of splitting.
         {
