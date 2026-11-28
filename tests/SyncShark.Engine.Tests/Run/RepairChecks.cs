@@ -274,7 +274,8 @@ public static class RepairChecks
             await pc.ReadByIdAsync(id,token) is {} hit ? (hit.Location with {Domain=volume},hit.InScope) : null;
         var cloud=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.BoundaryAsync)?Task.FromResult(((string?)cursor,(JournalPosition?)null)):AutoSyncChecks.Observation.Forward(db,m,args));
         var queue=new WorkQueue(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
-        // The AutoSync feed path reads the one dirty page through and settles it, without listing the pair.
+        // Bind the queue's job owner (a null target reads nothing), then drive the live feed path over the one dirty page.
+        await new PairRunner().CatchUpAsync(pair,(null,null),ItemChecks.Settings,_=>{},paths,queue,local,cloud,store,static()=>{},ct);
         var pcEnd=await local.BoundaryAsync(ct); var dbEnd=await AutoSync.ReadPageAsync(cloud.BoundaryAsync,Side.Dropbox,ItemChecks.Settings,_=>{},ct);
         Check.Require(pcEnd.Position!=null && dbEnd.Cursor!=null,"The feed path did not expose its finite target");
         await AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,cloud,store,(pcEnd.Position,dbEnd.Cursor),static()=>{},ct);
