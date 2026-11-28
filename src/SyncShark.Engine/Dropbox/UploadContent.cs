@@ -59,14 +59,13 @@ public sealed class UploadContent
             {
                 var received = api is null ? clock.GetTimestamp() : DropboxHttp.ReceivedAt(response, clock);
                 var refusal = await DropboxHttp.ReadErrorAsync(response, ct).ConfigureAwait(false);
-                var summary = DropboxErrors.Summary(refusal);
                 var wait = DropboxApi.ReplyWait(response, refusal, clock);
                 var status = response.StatusCode;
                 // Staging cannot publish the target even if the server received this slice.
                 var classified = new DropboxErrors().Classify(status, refusal, route, true,
-                    new(false, true, true, status == HttpStatusCode.TooManyRequests || (int)status >= 500), summary);
+                    new(false, true, true, status == HttpStatusCode.TooManyRequests || (int)status >= 500));
                 api?.ReportRefusal(response, classified, wait, received);
-                throw Dispatcher.ItemFailure(path, classified, wait, received, DropboxApi.ProviderFact(response, route, summary));
+                throw Dispatcher.ItemFailure(path, classified, wait, received, DropboxApi.ProviderFact(response, route, refusal));
             }
             await body.CompleteAsync(ct).ConfigureAwait(false);
             var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);

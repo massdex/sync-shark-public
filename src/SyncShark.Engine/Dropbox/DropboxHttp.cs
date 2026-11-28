@@ -63,24 +63,23 @@ internal static class DropboxHttp
         var received = ReceivedAt(response, api.Clock);
         var status = response.StatusCode;
         var envelope = await ReadErrorAsync(response, ct, route == DropboxProtocol.ListFolderLongpoll ? api.Clock : null).ConfigureAwait(false);
-        var summary = DropboxErrors.Summary(envelope);
         var read = Routes.PolicyOf(route) == Routes.Policy.Read;
         var failure = new DropboxErrors().Classify(status, envelope, route, false,
-            new(read, true, read || status == HttpStatusCode.TooManyRequests, IsBusy(status)), summary);
+            new(read, true, read || status == HttpStatusCode.TooManyRequests, IsBusy(status)));
         var providerWait = DropboxApi.ReplyWait(response, envelope, api.Clock);
         api.ReportRefusal(response, failure, providerWait, received, route != DropboxProtocol.ListFolderLongpoll);
         var wait = failure.Disposition == FailureDisposition.TemporaryNoEffect ? providerWait : null;
         if (readPath is not null && failure.Absent) return;
         // The pair root's own metadata read: a summary-only not_found is root evidence, never item absence.
         var cause = readPath?.Length == 0 && route == DropboxProtocol.GetMetadata && status == HttpStatusCode.Conflict &&
-            DropboxErrors.SummaryNotFound(envelope, summary)
+            DropboxErrors.SummaryNotFound(envelope)
                 ? TextKey.RootDropboxFolderChanged : failure.Cause;
         var refusal = new HttpRequestException(Text.Get(TextKey.DropboxRefused), null, status);
         if (failure.CursorReset) throw new ListingCursorResetException(refusal);
         throw new ItemFailedException(readPath ?? string.Empty, cause, refusal)
         {
             Disposition = failure.Disposition, ProviderWait = wait, ProviderWaitStarted = wait.HasValue ? received : null,
-            Provider = DropboxApi.ProviderFact(response, route, summary)
+            Provider = DropboxApi.ProviderFact(response, route, envelope)
         };
     }
 

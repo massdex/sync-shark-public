@@ -317,8 +317,8 @@ public sealed class DropboxApi
     private static long WholeSeconds(TimeSpan wait) => wait.Ticks / TimeSpan.TicksPerSecond + (wait.Ticks % TimeSpan.TicksPerSecond > 0 ? 1 : 0);
 
     /// <summary>The run-log provider fact of a refusal: a local pause reply's own, else the safe facts of the reply Dropbox sent.</summary>
-    internal static string ProviderFact(HttpResponseMessage response, string route, string summary) =>
-        (response as PausedReply)?.Fact ?? DropboxErrors.Fact(route, response.StatusCode, summary);
+    internal static string ProviderFact(HttpResponseMessage response, string route, JsonElement envelope) =>
+        (response as PausedReply)?.Fact ?? DropboxErrors.Fact(route, response.StatusCode, DropboxErrors.Summary(envelope));
 
     /// <summary>The wait a refusal states: a local pause reply's exact remaining interval (its wire copies are rounded up to
     /// whole seconds for raw callers), else the provider's header and body wait.</summary>

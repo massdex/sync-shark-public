@@ -191,13 +191,14 @@ public sealed class Dispatcher
     {
         if (body is not null) await body.StopAsync().ConfigureAwait(false);
         var refusal = await DropboxHttp.ReadErrorAsync(response, ct).ConfigureAwait(false);
-        var summary = DropboxErrors.Summary(refusal);
         var wait = DropboxApi.ReplyWait(response, refusal, clock);
-        var fact = DropboxApi.ProviderFact(response, route, summary);
+        var fact = DropboxApi.ProviderFact(response, route, refusal);
+        // One decision per response: only a singleton's route reads the create context, so the first member's serves all.
+        var classified = new DropboxErrors().Classify(response.StatusCode, refusal, route, single == DropboxProtocol.CreateFolder || (single == DropboxProtocol.Upload && group[0].Revision is null),
+            new(false, true, response.StatusCode == HttpStatusCode.TooManyRequests, response.StatusCode == HttpStatusCode.TooManyRequests));
+        api?.ReportRefusal(response, classified, wait, received);
         foreach (var item in group)
         {
-            var classified = Classify(response.StatusCode, refusal, route, single == DropboxProtocol.CreateFolder || (single == DropboxProtocol.Upload && item.Revision is null), summary);
-            if (ReferenceEquals(item, group[0])) api?.ReportRefusal(response, classified, wait, received);
             if (classified.Disposition == FailureDisposition.TemporaryNoEffect)
                 item.Done.TrySetException(ItemFailure(item.Member.Path, classified, wait, received, fact));
             else await SettleAsync(pair, item, single, (null, classified.Cause, classified.Disposition), ct,
@@ -342,9 +343,6 @@ public sealed class Dispatcher
             Refusal = settled ? null : refusal }));
     }
 
-    internal static DropboxErrors.Classified Classify(HttpStatusCode status, JsonElement envelope, string route, bool create, string summary) =>
-        new DropboxErrors().Classify(status, envelope, route, create,
-            new(false, true, status == HttpStatusCode.TooManyRequests, status == HttpStatusCode.TooManyRequests), summary);
     internal static ItemFailedException ItemFailure(string path, DropboxErrors.Classified failure, TimeSpan? wait, long started, string? provider = null) => new(path, failure.Cause, null)
     {
         Disposition=failure.Disposition, ProviderWait=wait, ProviderWaitStarted=wait is null ? null : started, Provider=provider

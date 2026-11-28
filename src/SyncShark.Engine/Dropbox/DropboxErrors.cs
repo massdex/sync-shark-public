@@ -34,30 +34,26 @@ public sealed class DropboxErrors
     /// summary-only refusal counts only when no error payload is present; absence needs the exact structured miss.
     /// Otherwise the request evidence decides, and an unproved dispatched write stays unknown.</summary>
     public Classified Classify(HttpStatusCode status, JsonElement body, string route, bool expectedIsNull,
-        RequestEvidence evidence, string? stated = null)
+        RequestEvidence evidence)
     {
         ArgumentNullException.ThrowIfNull(route);
-        // A caller that also builds the refusal's safe log fact passes the error_summary it decoded, so it is unescaped once.
-        var summary = stated ?? Summary(body);
         JsonElement failure = default;
         var hasError = body.ValueKind == JsonValueKind.Object && body.TryGetProperty(DropboxProtocol.Error, out failure);
-        // error.reason is the direct-upload WriteError union: decode it and its tag here once for both the
-        // too_many_requests decision and the write refusal.
-        JsonElement reason = failure.ValueKind == JsonValueKind.Object && failure.TryGetProperty(DropboxProtocol.Reason, out var named)
-            ? named : default;
-        var reasonTag = DropboxErrorCauses.UnionTag(reason);
-        return Decode(status, body, route, expectedIsNull, evidence, hasError, failure, summary, reason, reasonTag) with
-            { TooManyRequests = Prefixed(summary, DropboxProtocol.TooManyRequests) || reasonTag == DropboxProtocol.TooManyRequests };
+        var stated = Summary(body);
+        var reason = failure.ValueKind == JsonValueKind.Object && failure.TryGetProperty(DropboxProtocol.Reason, out var named)
+            ? DropboxErrorCauses.UnionTag(named) : null;
+        return Decode(status, body, route, expectedIsNull, evidence, hasError, failure, stated, reason) with
+            { TooManyRequests = Prefixed(stated, DropboxProtocol.TooManyRequests) || reason == DropboxProtocol.TooManyRequests };
     }
 
     private static Classified Decode(HttpStatusCode status, JsonElement body, string route, bool expectedIsNull,
-        RequestEvidence evidence, bool hasError, JsonElement failure, string stated, JsonElement reason, string? reasonTag)
+        RequestEvidence evidence, bool hasError, JsonElement failure, string stated, string? reason)
     {
         var fallback = Unclassified(evidence);
-        // A documented summary-only refusal counts only then; anything else proves nothing from its summary.
-        var summary = IsSummaryOnly(body) ? stated : string.Empty;
+        // A documented summary-only refusal: no error union and no tag; anything else proves nothing from its summary.
+        var summary = hasError || body.ValueKind != JsonValueKind.Object || body.TryGetProperty(DropboxProtocol.Tag, out _) ? string.Empty : stated;
         // RateLimitError is an untagged struct. An unrelated tagged error may carry its own reason.
-        if (Prefixed(summary, DropboxProtocol.TooManyWriteOperations) || IsRateLimitContention(failure, reasonTag))
+        if (Prefixed(summary, DropboxProtocol.TooManyWriteOperations) || IsRateLimitContention(failure, reason))
             return Contention();
 
         Classified? decoded = hasError ? route switch
@@ -72,7 +68,7 @@ public sealed class DropboxErrors
             DropboxProtocol.Delete => DeleteMember(failure),
             DropboxProtocol.Move => MoveMember(failure, batch: false),
             DropboxProtocol.Upload or DropboxProtocol.UploadSessionFinish or DropboxProtocol.UploadSessionAppend or
-                DropboxProtocol.UploadSessionStart or DropboxProtocol.CreateFolder => WriteRefusal(route, failure, expectedIsNull, reason, reasonTag),
+                DropboxProtocol.UploadSessionStart or DropboxProtocol.CreateFolder => WriteRefusal(route, failure, expectedIsNull),
             _ => null // Batch launch errors are not individual member results.
         } : SingleSummaryRefusal(route, summary, expectedIsNull);
         if (decoded is not { } result) return fallback;
@@ -158,8 +154,7 @@ public sealed class DropboxErrors
 
     // Decode one structured write union (an upload, upload-finish or create member, single or batch). A refusal counts
     // only when it is well shaped: a conflict carries its required subtype, and malformed_path carries its string.
-    private static Classified? WriteRefusal(string route, JsonElement failure, bool expectedIsNull,
-        JsonElement reason = default, string? reasonTag = null)
+    private static Classified? WriteRefusal(string route, JsonElement failure, bool expectedIsNull)
     {
         var tag = DropboxErrorCauses.UnionTag(failure);
         if (route != DropboxProtocol.CreateFolder && tag is DropboxProtocol.PayloadTooLarge or DropboxProtocol.ContentHashMismatch)
@@ -176,12 +171,8 @@ public sealed class DropboxErrors
         var direct = route == DropboxProtocol.Upload;
         if (direct && (!failure.TryGetProperty(DropboxProtocol.UploadSessionId, out var session) ||
             session.ValueKind != JsonValueKind.String)) return null;
-        JsonElement write;
-        string? writeTag;
-        if (direct) { write = reason; writeTag = reasonTag; }
-        else if (failure.TryGetProperty(DropboxProtocol.Path, out write))
-            writeTag = DropboxErrorCauses.UnionTag(write);
-        else return null;
+        if (!failure.TryGetProperty(direct ? DropboxProtocol.Reason : DropboxProtocol.Path, out var write)) return null;
+        var writeTag = DropboxErrorCauses.UnionTag(write);
         if (writeTag is null) return null;
         if (writeTag == DropboxProtocol.Conflict)
             return DropboxErrorCauses.IsWellFormedConflict(write)
@@ -269,13 +260,12 @@ public sealed class DropboxErrors
             ? DropboxProtocol.StringValue(summary) ?? string.Empty
             : string.Empty;
 
-    // A documented summary-only refusal: an object with no error union and no tag.
-    private static bool IsSummaryOnly(JsonElement body) =>
+    // A documented summary-only refusal: an object with no error union and no tag; anything else proves nothing from its summary.
+    private static string SummaryOnly(JsonElement body) =>
         body.ValueKind == JsonValueKind.Object && !body.TryGetProperty(DropboxProtocol.Error, out _) &&
-        !body.TryGetProperty(DropboxProtocol.Tag, out _);
+        !body.TryGetProperty(DropboxProtocol.Tag, out _) ? Summary(body) : string.Empty;
 
-    internal static bool SummaryNotFound(JsonElement body, string summary) =>
-        Prefixed(IsSummaryOnly(body) ? summary : string.Empty, DropboxProtocol.PathNotFound);
+    internal static bool SummaryNotFound(JsonElement body) => Prefixed(SummaryOnly(body), DropboxProtocol.PathNotFound);
 
     // A complete tag segment: equal to the prefix, or the prefix followed by the summary separator. So
     // "path_lookup/not_found_extra" is not "path_lookup/not_found".
