@@ -136,6 +136,7 @@ public sealed class Dispatcher
                 item.Digest = sent.Hash!.Finish();
                 UploadContent.RequireSelectedDigest(item.Member.Path, upload.Source, item.Digest);
             }
+            if ((item.Digest ?? upload.ContentHash) is null) return false; // a partial send has no digest to prove: no read
             held = await new DropboxListing().ReadOneAsync(api, pair, item.Member.Path, ct).ConfigureAwait(false);
         }
         // A failed read proves neither outcome, and its own wait or refusal is not this write's: the unknown outcome stands.
