@@ -23,6 +23,10 @@ public sealed class DropboxErrors
     {
         /// <summary>Whether this continuation cursor needs to be replaced by a fresh listing.</summary>
         public bool CursorReset { get; init; }
+
+        /// <summary>Whether the refusal names too_many_requests (its error_summary tag or its error.reason tag), decoded once
+        /// here; only such a refusal can open an endpoint pause.</summary>
+        public bool TooManyRequests { get; init; }
     }
 
     /// <summary>Classify one single response. <paramref name="body"/> is the parsed reply. A documented write
@@ -33,12 +37,23 @@ public sealed class DropboxErrors
         RequestEvidence evidence)
     {
         ArgumentNullException.ThrowIfNull(route);
-        var fallback = Unclassified(evidence);
         JsonElement failure = default;
         var hasError = body.ValueKind == JsonValueKind.Object && body.TryGetProperty(DropboxProtocol.Error, out failure);
-        var summary = SummaryOnly(body);
+        var stated = Summary(body);
+        var reason = failure.ValueKind == JsonValueKind.Object && failure.TryGetProperty(DropboxProtocol.Reason, out var named)
+            ? DropboxErrorCauses.UnionTag(named) : null;
+        return Decode(status, body, route, expectedIsNull, evidence, hasError, failure, stated, reason) with
+            { TooManyRequests = Prefixed(stated, DropboxProtocol.TooManyRequests) || reason == DropboxProtocol.TooManyRequests };
+    }
+
+    private static Classified Decode(HttpStatusCode status, JsonElement body, string route, bool expectedIsNull,
+        RequestEvidence evidence, bool hasError, JsonElement failure, string stated, string? reason)
+    {
+        var fallback = Unclassified(evidence);
+        // A documented summary-only refusal: no error union and no tag; anything else proves nothing from its summary.
+        var summary = hasError || body.ValueKind != JsonValueKind.Object || body.TryGetProperty(DropboxProtocol.Tag, out _) ? string.Empty : stated;
         // RateLimitError is an untagged struct. An unrelated tagged error may carry its own reason.
-        if (Prefixed(summary, DropboxProtocol.TooManyWriteOperations) || IsRateLimitContention(failure))
+        if (Prefixed(summary, DropboxProtocol.TooManyWriteOperations) || IsRateLimitContention(failure, reason))
             return Contention();
 
         Classified? decoded = hasError ? route switch
@@ -219,17 +234,9 @@ public sealed class DropboxErrors
     private static bool IsJobCheckRoute(string route) => route is
         DropboxProtocol.DeleteBatchCheck or DropboxProtocol.MoveBatchCheck or DropboxProtocol.CreateFolderBatchCheck;
 
-    /// <summary>True when the refusal names too_many_requests: its error.reason tag or its error_summary tag, read by the
-    /// same decoders as classification and the log, so an unreadable field is no evidence and the other is still read.</summary>
-    internal static bool TooManyRequests(JsonElement body) =>
-        Prefixed(Summary(body), DropboxProtocol.TooManyRequests) ||
-        body.ValueKind == JsonValueKind.Object && body.TryGetProperty(DropboxProtocol.Error, out var failure) &&
-            failure.ValueKind == JsonValueKind.Object && failure.TryGetProperty(DropboxProtocol.Reason, out var reason) &&
-            DropboxErrorCauses.UnionTag(reason) == DropboxProtocol.TooManyRequests;
-
-    private static bool IsRateLimitContention(JsonElement failure) =>
+    private static bool IsRateLimitContention(JsonElement failure, string? reason) =>
         failure.ValueKind == JsonValueKind.Object && !failure.TryGetProperty(DropboxProtocol.Tag, out _) &&
-        failure.TryGetProperty(DropboxProtocol.Reason, out var reason) && DropboxErrorCauses.UnionTag(reason) == DropboxProtocol.TooManyWriteOperations &&
+        reason == DropboxProtocol.TooManyWriteOperations &&
         (!failure.TryGetProperty(DropboxProtocol.RetryAfter, out var wait) || wait.ValueKind == JsonValueKind.Number && wait.TryGetUInt64(out _));
 
     /// <summary>A refusal as safe log facts: the route constant, the HTTP status and Dropbox's error tag. Only a known leading

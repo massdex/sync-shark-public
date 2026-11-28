@@ -128,18 +128,17 @@ public sealed class Dispatcher
         // A create has no selected ID: equal bytes at the path may be another file moved there, not our publication.
         if (pair is null || api is null || item.Single is not {} sent || item.Upload is not {} upload || item.Member.Id is null ||
             ct.IsCancellationRequested) return false;
-        Entry? held;
-        try
+        if (item.Digest is null && sent.Body is {Sent: true})
         {
-            if (item.Digest is null && sent.Body is {Sent: true})
-            {
-                item.Digest = sent.Hash!.Finish();
-                UploadContent.RequireSelectedDigest(item.Member.Path, upload.Source, item.Digest);
-            }
-            if ((item.Digest ?? upload.ContentHash) is null) return false; // a partial send has no digest to prove: no read
-            held = await new DropboxListing().ReadOneAsync(api, pair, item.Member.Path, ct).ConfigureAwait(false);
+            item.Digest = sent.Hash!.Finish();
+            // Sent bytes that are not the selected version: re-observe the source, as when the reply arrives (no read).
+            UploadContent.RequireSelectedDigest(item.Member.Path, upload.Source, item.Digest);
         }
-        // A failed read proves neither outcome, and its own wait or refusal is not this write's: the unknown outcome stands.
+        if ((item.Digest ?? upload.ContentHash) is null) return false; // a partial send has no digest to prove: no read
+        Entry? held;
+        try { held = await new DropboxListing().ReadOneAsync(api, pair, item.Member.Path, ct).ConfigureAwait(false); }
+        // A failed read proves neither outcome, and its own wait or refusal is not this write's: the unknown outcome stands,
+        // also when the caller cancels, as for a cancelled send (an uncertain effect outlives the run's cancellation).
         catch (Exception error) when (error is not NotImplementedException) { return false; }
         if (!Proven(item, DropboxProtocol.Upload, held)) return false;
         Finish(item, DropboxProtocol.Upload, (held, null, null), false, null);
@@ -197,7 +196,7 @@ public sealed class Dispatcher
         foreach (var item in group)
         {
             var classified = Classify(response.StatusCode, refusal, route, single == DropboxProtocol.CreateFolder || (single == DropboxProtocol.Upload && item.Revision is null));
-            if (ReferenceEquals(item, group[0])) api?.ReportRefusal(response, refusal, classified, wait, received);
+            if (ReferenceEquals(item, group[0])) api?.ReportRefusal(response, classified, wait, received);
             if (classified.Disposition == FailureDisposition.TemporaryNoEffect)
                 item.Done.TrySetException(ItemFailure(item.Member.Path, classified, wait, received, fact));
             else await SettleAsync(pair, item, single, (null, classified.Cause, classified.Disposition), ct,

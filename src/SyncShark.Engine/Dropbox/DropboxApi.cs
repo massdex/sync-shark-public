@@ -334,18 +334,19 @@ public sealed class DropboxApi
     // One classified HTTP refusal. A local pause reply is never evidence. Only a real 429 that states too_many_requests, is not write contention, and has a
     // stated wait opens or extends its route's pause: a reasonless 429's wait binds only its own caller, because Dropbox was
     // seen answering that route inside such a wait. The latest stated end wins. Longpoll keeps out of the account busy feedback.
-    internal void ReportRefusal(HttpResponseMessage response, JsonElement envelope, DropboxErrors.Classified failure,
+    internal void ReportRefusal(HttpResponseMessage response, DropboxErrors.Classified failure,
         TimeSpan? wait, long received, bool busy = true)
     {
         if (response is PausedReply) return;
         lock (_limiter)
         {
-            if (response.StatusCode == HttpStatusCode.TooManyRequests && wait > TimeSpan.Zero && failure.Cause != TextKey.WaitTooManyWrites && DropboxErrors.TooManyRequests(envelope) &&
+            if (response.StatusCode == HttpStatusCode.TooManyRequests && wait > TimeSpan.Zero && failure.Cause != TextKey.WaitTooManyWrites && failure.TooManyRequests &&
                 Routes.NameOf(response.RequestMessage?.RequestUri) is { } route &&
                 (!_routePauses.TryGetValue(route, out var open) || EndsLater(wait.Value, open.Wait, _clock.GetElapsedTime(open.Started, received))))
                 _routePauses[route] = (received, wait.Value);
+            // Account feedback is a separate fact from the route pause, applied in the same refusal transaction.
+            if (busy) Feedback(response.StatusCode, failure, wait, received);
         }
-        if (busy) ReportBusy(response.StatusCode, failure, wait, received); // account feedback, a separate fact from the route pause
     }
 
     // Whether a wait received elapsed after a held one ends later. Compare ends without converting provider seconds to clock
@@ -356,10 +357,13 @@ public sealed class DropboxApi
     // Raw callers already own the error stream: they report its classified HTTP refusal once, not each batch member.
     internal void ReportBusy(HttpStatusCode status, DropboxErrors.Classified failure, TimeSpan? wait, long received)
     {
-        lock (_limiter)
-        {
-            if (_host.BeginRequestThrottle(status, failure, wait, received)) _limiter.Value.SlowDown();
-        }
+        lock (_limiter) Feedback(status, failure, wait, received);
+    }
+
+    // Called under the host limiter lock.
+    private void Feedback(HttpStatusCode status, DropboxErrors.Classified failure, TimeSpan? wait, long received)
+    {
+        if (_host.BeginRequestThrottle(status, failure, wait, received)) _limiter.Value.SlowDown();
     }
 
     // Called under the host limiter lock. The period coalesces feedback; it does not delay admission.

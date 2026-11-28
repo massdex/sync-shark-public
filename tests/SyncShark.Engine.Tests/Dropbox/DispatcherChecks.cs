@@ -271,13 +271,15 @@ public static class DispatcherChecks
             ("unreadable",null,file.ContentHash!,"unknown",0),("dropped",null,file.ContentHash!,"unknown",0), // a create cannot attribute equal bytes
             ("gateway","id:result",file.ContentHash!,"proven",1),("gateway","id:result",other,"unknown",1),("gateway",null,file.ContentHash!,"unknown",0),
             ("invalid","id:result",file.ContentHash!,"proven",1),("invalid","id:result",other,"unknown",1),("invalid",null,file.ContentHash!,"unknown",0),
-            ("conflict","id:result",file.ContentHash!,"refused",0)})
+            ("conflict","id:result",file.ContentHash!,"refused",0),
+            ("changed","id:result",file.ContentHash!,"changed",0)})
         {
-            // Mid-body: an unhashed source larger than one copy buffer, and a wire that accepts the first chunk only.
-            var bytes=mode=="midbody" ? new byte[200_000] : new byte[]{42};
+            // Mid-body: an unhashed source one byte past one copy buffer, and a wire that accepts the first chunk only.
+            var bytes=mode=="midbody" ? new byte[UploadContentChecks.CopyBufferBytes+1] : new byte[]{42};
             using var source=new MemoryStream(bytes);
             using var wire=new MemoryStream(new byte[bytes.Length-1]);
-            var sent=mode=="midbody" ? file with {Size=bytes.Length,ContentHash=""} : file;
+            // Changed: the whole body went out but is not the selected version, and its reply is lost.
+            var sent=mode=="midbody" ? file with {Size=bytes.Length,ContentHash=""} : mode=="changed" ? file with {ContentHash=other} : file;
             var stage=mode=="session" ? global::Massdex.SyncShark.Engine.Dropbox.DropboxStaged.Session(file.Path,"session",file.Size,file,file.ContentHash!)
                 : global::Massdex.SyncShark.Engine.Dropbox.DropboxStaged.Single(file.Path,source,sent);
             using var store=new InMemoryStateStore(); int uploads=0, reads=0; string? wrong=null; // the dispatcher absorbs wire exceptions
@@ -312,7 +314,7 @@ public static class DispatcherChecks
             var clock=new ReceiptClock(); using var http=new HttpClient(new ReceiptWire(Send,clock));
             var api=new global::Massdex.SyncShark.Engine.Dropbox.DropboxApi(http,clock,Scenarios.ItemChecks.Settings,_=>{},_=>ValueTask.FromResult<string?>("synthetic"),"test-namespace");
             var d=new Dispatch(api,store);
-            (Entry? Entry, FailureDisposition? Failure) outcome;
+            (Entry? Entry, FailureDisposition? Failure) outcome=(null,null); bool changed=false;
             try
             {
                 var (_,reply)=await d.SubmitAsync(pair,"files/upload",new(id,file.Path,null),id is null ? null : "rev",false,stage,default);
@@ -320,8 +322,10 @@ public static class DispatcherChecks
                 outcome=(member.Entry,member.Failure);
             }
             catch(ItemFailedException error){outcome=(null,error.Disposition);}
-            bool met=expect switch
+            catch(ChangedUnderneathException error) when(error.Path==file.Path){changed=true;}
+            bool met=changed==(expect=="changed") && expect switch
             {
+                "changed" => true,
                 "proven" => outcome is ({Id:"id:result"},null),
                 "unknown" => outcome is (null,FailureDisposition.UnknownEffect),
                 _ => outcome is (null,FailureDisposition.Permanent)

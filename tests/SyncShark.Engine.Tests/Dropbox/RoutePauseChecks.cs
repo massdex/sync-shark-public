@@ -22,6 +22,9 @@ public static class RoutePauseChecks
         await ReasonlessDoesNotPauseAsync("{}");
         await ReasonedPausesAsync($$"""{"error_summary":"{{DropboxProtocol.TooManyRequests}}/.."}""");
         await ReasonedPausesAsync($$$$"""{"error":{"reason":{".tag":"{{{{DropboxProtocol.TooManyRequests}}}}"}}}""");
+        // One readable record of the reason is enough when the other cannot be read.
+        await ReasonedPausesAsync($$$$"""{"error_summary":"\uD800","error":{"reason":{".tag":"{{{{DropboxProtocol.TooManyRequests}}}}"}}}""");
+        await ReasonedPausesAsync($$$$"""{"error_summary":"{{{{DropboxProtocol.TooManyRequests}}}}/..","error":{"reason":{".tag":"\uD800"}}}""");
         await BeyondDeltaHeaderAsync(false);
         await BeyondDeltaHeaderAsync(true);
         await DispatcherFactAsync();
