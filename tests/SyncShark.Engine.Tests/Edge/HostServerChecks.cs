@@ -1,0 +1,516 @@
+using System.Buffers.Binary;
+using System.IO.Pipes;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Text;
+using System.Text.Json;
+using Massdex.SyncShark.Engine.Edge;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.Win32.SafeHandles;
+using Execute = System.Func<string[], System.IO.TextWriter, System.IO.TextWriter, System.Threading.CancellationToken, System.Threading.Tasks.Task<int>>;
+
+namespace Massdex.SyncShark.Engine.Tests.Edge;
+
+public static class HostServerChecks
+{
+    public static async Task RunAsync()
+    {
+        var root = Environment.GetEnvironmentVariable("GITHUB_WORKSPACE") ?? Environment.CurrentDirectory;
+        var source = File.ReadAllText(Path.Combine(root, "src", "SyncShark.Engine", "Edge", "HostServer.cs"));
+        var client = File.ReadAllText(Path.Combine(root, "src", "SyncShark.Engine", "Edge", "HostClient.cs"));
+        foreach (var unit in new[] {source,client})
+        {
+            var connect = CSharpSyntaxTree.ParseText(unit).GetRoot().DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Single(call => call.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "ConnectAsync" });
+            Check.Require(connect.ArgumentList.Arguments[0].Expression.ToString() == "0" &&
+                connect.ArgumentList.Arguments[1].Expression.ToString() == "ct", "Both connect paths must use the pipe's own default wait and observe cancellation");
+        }
+        var handler = CSharpSyntaxTree.ParseText(source).GetRoot().DescendantNodes().OfType<MethodDeclarationSyntax>()
+            .Where(method => method.Identifier.ValueText == nameof(HostServer.ServeAsync))
+            .SelectMany(method => method.DescendantNodes().OfType<LocalFunctionStatementSyntax>())
+            .Single(local => local.Identifier.ValueText == "HandleAsync");
+        // Count only the dispatch try's own catches, so the finally's Disconnect guard is outside the count.
+        var dispatch = handler.DescendantNodes().OfType<TryStatementSyntax>().Single(attempt => attempt.Block.DescendantNodes()
+            .OfType<InvocationExpressionSyntax>().Any(call => call.Expression.ToString() == "trust"));
+        Check.Require(dispatch.Catches is [{ Declaration.Type: var type, Filter.FilterExpression: var filter, Block.Statements.Count: 0 }] &&
+            type.ToString() == nameof(Exception) && filter.ToString() == "e is not OutOfMemoryException",
+            "The connection handler must end a failed exchange silently without stopping the listener");
+        Check.Require(!source.Contains("Console.Error"), "The host server writes to stderr");
+        var frameWrites=CSharpSyntaxTree.ParseText(source).GetRoot().DescendantNodes().OfType<InvocationExpressionSyntax>()
+            .Where(call=>call.Expression.ToString()=="PipeFrame.WriteAsync").ToArray();
+        Check.Require(frameWrites.Length!=0 && frameWrites.All(call=>call.ArgumentList.Arguments.Last().Expression.ToString()!="default"),
+            "A server frame write still ignores shutdown");
+        var hostPipe=PipeName;
+        using (var owner = new HostServer()) {
+            await ClaimAsync(owner, "First server failed to claim the pipe");
+            // Use SMB loopback, not the local pipe namespace. A broken SMB route must not count as rejection.
+            var controlName=Guid.NewGuid().ToString("N");
+            using var control=new NamedPipeServerStream(controlName,PipeDirection.InOut,1,PipeTransmissionMode.Byte,PipeOptions.CurrentUserOnly);
+            using var allowed=new NamedPipeClientStream("127.0.0.1",controlName,PipeDirection.InOut);
+            await Within(Task.Run(() => allowed.Connect(0)), "The SMB loopback control connect did not finish");
+            using var remote=new NamedPipeClientStream("127.0.0.1",hostPipe,PipeDirection.InOut);
+            try {await Within(Task.Run(() => remote.Connect(0)), "The remote connect did not finish");throw new InvalidDataException("Host accepted a network pipe connection");}
+            catch(UnauthorizedAccessException) { /* The available host listener refused the remote client. */ }
+            using var contender = new HostServer();
+            Check.Require(await Refused(contender), "Second claim succeeded before the owner released the pipe");
+        }
+        using (var next = new HostServer()) {
+            await ClaimAsync(next, "Released pipe could not be claimed");
+            using var local=new NamedPipeClientStream(".",hostPipe,PipeDirection.InOut,PipeOptions.CurrentUserOnly);
+            await Within(Task.Run(() => local.Connect(0)), "The local connect did not finish");
+        }
+        await RenewalSinkAsync(blocking: true);
+        await RenewalSinkAsync(blocking: false);
+        await InlineDispatchAsync();
+        await BrokenAfterTerminalRenewalAsync();
+        await RegistrationBeforeReapAsync();
+        await BrokenDuringOutageAsync();
+        await BrokenAcceptDuringOutageAsync();
+        await UnreadReplyRetainedAsync();
+        await StopReplyUnreadAsync();
+        await ShutdownDuringRenewalAsync();
+        await RenewalFailsThenRecoversAsync();
+    }
+
+    internal const byte Arguments = 0, Accepted = 1, Exit = 4;
+    internal static readonly TimeSpan Bound = TimeSpan.FromSeconds(10);
+    internal static readonly Func<NamedPipeServerStream> Outage = () => throw new IOException("listen outage");
+    internal static readonly Execute OneLine = (args, output, error, token) => { output.WriteLine("served"); return Task.FromResult(0); };
+
+    internal static string PipeName {
+        get { using var identity = WindowsIdentity.GetCurrent(); return $"{nameof(HostServer)}.{ResourceNames.HostExecutable}.{identity.User!.Value}"; }
+    }
+
+    /// <summary>The private ServeAsync with its listen, retry-wait and trust seams.</summary>
+    internal static Task Serve(HostServer server, Execute execute, Func<NamedPipeServerStream> listen, Func<int, CancellationToken, Task> retryWait,
+        Func<PipeStream, IDisposable?> trust, CancellationToken ct, Func<CancellationToken, Task>? shutdown = null) =>
+        // Started on the pool, so a synchronous stall inside serving can never hold the check itself.
+        Task.Run(() => (Task)typeof(HostServer).GetMethod("ServeAsync", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(server,
+            BindingFlags.DoNotWrapExceptions, null, [execute, shutdown ?? (_ => Task.CompletedTask), listen, retryWait, trust, ct], null)!);
+
+    /// <summary>The server's own non-first listener, so a recovered renewal serves real clients.</summary>
+    internal static Func<NamedPipeServerStream> Listener(HostServer server)
+    {
+        var listen = typeof(HostServer).GetMethod("Listen", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        return () => (NamedPipeServerStream)listen.Invoke(server, BindingFlags.DoNotWrapExceptions, null, [false], null)!;
+    }
+
+    internal static async Task<NamedPipeClientStream> ConnectAsync()
+    {
+        var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        try { await Within(pipe.ConnectAsync((int)Bound.TotalMilliseconds), "A client connect did not finish"); return pipe; } catch { pipe.Dispose(); throw; }
+    }
+
+    internal static Task SendAsync(Stream pipe, params string[] args) => Within(Request(pipe, args), "A request write did not finish");
+
+    private static Task Request(Stream pipe, params string[] args)
+    {
+        byte[] request = [Arguments, ..JsonSerializer.SerializeToUtf8Bytes(args)];
+        return PipeFrame.WriteAsync(pipe, request, default);
+    }
+
+    /// <summary>One whole argv exchange on a raw client: Accepted, the output text, then the exit code.</summary>
+    internal static async Task<(int Code, string Output)> ExchangeAsync(Stream pipe, params string[] args)
+    {
+        await SendAsync(pipe, args);
+        return await ReplyAsync(pipe);
+    }
+
+    internal static async Task<(int Code, string Output)> ReplyAsync(Stream pipe)
+    {
+        Check.Require((await PipeFrame.ReadAsync(pipe, default))[0] == Accepted, "The server did not accept a valid request");
+        var text = new StringBuilder();
+        while (true) {
+            var frame = await PipeFrame.ReadAsync(pipe, default);
+            if (frame[0] == Exit) return (BinaryPrimitives.ReadInt32LittleEndian(frame.AsSpan(1)), text.ToString());
+            text.Append(Encoding.UTF8.GetString(frame, 1, frame.Length - 1));
+        }
+    }
+
+    /// <summary>True when the client's end was closed: EOF or a broken pipe, never data.</summary>
+    internal static async Task<bool> EndedAsync(Stream pipe)
+    {
+        try { return await pipe.ReadAsync(new byte[1]) == 0; } catch (IOException) { return true; }
+    }
+
+    internal static async Task<T> Within<T>(Task<T> task, string failure)
+    {
+        Check.Require(await Task.WhenAny(task, Task.Delay(Bound)) == task, failure);
+        return await task;
+    }
+
+    internal static async Task Within(Task task, string failure)
+    {
+        Check.Require(await Task.WhenAny(task, Task.Delay(Bound)) == task, failure);
+        await task;
+    }
+
+    internal static async Task<bool> Refused(HostServer contender)
+    {
+        try { return !await Within(contender.ClaimAsync(default), "A contender claim did not finish"); }
+        catch (Exception e) when (e is UnauthorizedAccessException or TimeoutException) { return true; }
+    }
+
+    internal static Task<bool> BusyAsync() => Within(Task.Run(() => {
+        using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.CurrentUserOnly);
+        try { pipe.Connect(0); return false; } catch (TimeoutException) { return true; }
+    }), "A busy probe did not finish");
+
+    internal static async Task ClaimAsync(HostServer server, string failure) =>
+        Check.Require(await Within(server.ClaimAsync(default), failure + " (claim did not finish)"), failure);
+
+    internal static async Task FreshClaimAsync(string failure)
+    {
+        using var fresh = new HostServer();
+        await ClaimAsync(fresh, failure);
+    }
+
+    internal static Task CancelAsync(CancellationTokenSource stop) => Within(stop.CancelAsync(), "Cancelling serving did not finish");
+
+    /// <summary>Cleanup form: bounded, and never replaces the failure that led here.</summary>
+    internal static Task CancelQuietlyAsync(CancellationTokenSource stop) => Task.WhenAny(stop.CancelAsync(), Task.Delay(Bound));
+
+    // Renewal and handler faults write no diagnostic, so a blocked or closed stderr cannot stall intake or shutdown.
+    private static async Task RenewalSinkAsync(bool blocking)
+    {
+        var original = Console.Error;
+        var sink = new Sink(blocking);
+        Console.SetError(sink);
+        using var stop = new CancellationTokenSource();
+        Task? serve = null;
+        try {
+            using var server = new HostServer();
+            await ClaimAsync(server, "Sink fixture could not claim the pipe");
+            var real = Listener(server);
+            var outage = false;
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var faults = 0;
+            serve = Serve(server, OneLine, () => outage ? Outage() : real(),
+                (failures, token) => { entered.TrySetResult(); return gate.Task.WaitAsync(token); },
+                pipe => { if (faults > 0) { faults--; throw new InvalidOperationException("trust fault"); } return new MemoryStream(); }, stop.Token);
+            for (var episode = 0; episode < 2; episode++) {
+                outage = true; entered = new(TaskCreationOptions.RunContinuationsAsynchronously); gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                using (var during = await ConnectAsync())
+                    Check.Require((await Within(ExchangeAsync(during, "x"), "A client was not served during an outage")).Code == 0, "Outage reply");
+                await Within(entered.Task, "The listener outage was not retried");
+                outage = false; gate.SetResult();
+                using var after = await ConnectAsync();
+                Check.Require((await Within(ExchangeAsync(after, "x"), "A recovered listener did not serve")).Code == 0, "Recovered reply");
+            }
+            Check.Require(sink.Entries == 0, "Listener renewal wrote to stderr");
+            faults = 3;
+            for (var fault = 0; fault < 3; fault++) {
+                using var faulted = await ConnectAsync();
+                // The server may close a faulted client before reading it, so a broken send also means the exchange ended.
+                var ended = true;
+                try { await SendAsync(faulted, "x"); ended = await Within(EndedAsync(faulted), "A faulted handler left its client open"); }
+                catch (IOException) { /* Closed before the request was read. */ }
+                Check.Require(ended, "A faulted handler replied");
+            }
+            Check.Require(sink.Entries == 0, "A handler fault wrote to stderr");
+            await CancelAsync(stop);
+            await Within(serve, "Serving did not stop after cancellation");
+        } finally {
+            Console.SetError(original);
+            sink.Release();
+            await CancelQuietlyAsync(stop);
+            if (serve != null) await Task.WhenAny(serve, Task.Delay(Bound));
+        }
+        await FreshClaimAsync("The pipe stayed claimed after a sink fixture");
+    }
+
+    // A handler that blocks before its first await (here in trust) must not hold the accept loop.
+    // The gate has no timeout of its own, so it outlasts the second client's deadline; the finally always releases it.
+    private static async Task InlineDispatchAsync()
+    {
+        using var hold = new ManualResetEventSlim();
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        using var stop = new CancellationTokenSource();
+        Task? serve = null;
+        try {
+            using var server = new HostServer();
+            await ClaimAsync(server, "Inline fixture could not claim the pipe");
+            serve = Serve(server, OneLine, Listener(server), (f, t) => Task.Delay(Timeout.Infinite, t),
+                pipe => { if (Interlocked.Increment(ref calls) == 1) { held.TrySetResult(); hold.Wait(); } return new MemoryStream(); }, stop.Token);
+            using var first = await ConnectAsync();
+            var firstReply = ExchangeAsync(first, "held");
+            await Within(held.Task, "The first handler never started");
+            using (var second = await ConnectAsync())
+                Check.Require((await Within(ExchangeAsync(second, "small"), "A blocked handler held the accept loop")).Code == 0, "Second reply");
+            hold.Set();
+            Check.Require((await Within(firstReply, "The held client was not served after release")).Code == 0, "First reply");
+            await CancelAsync(stop);
+            await Within(serve, "Serving did not stop after cancellation");
+        } finally {
+            hold.Set();
+            await CancelQuietlyAsync(stop);
+            if (serve != null) await Task.WhenAny(serve, Task.Delay(Bound));
+        }
+        await FreshClaimAsync("The pipe stayed claimed after the inline fixture");
+    }
+
+    // A terminal renewal failure leaves no successor: a broken exchange is disconnected at once, while the name stays held.
+    private static async Task BrokenAfterTerminalRenewalAsync()
+    {
+        var draining = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? serve = null;
+        try {
+            using var server = new HostServer();
+            await ClaimAsync(server, "Terminal fixture could not claim the pipe");
+            using var broken = await ConnectAsync();
+            _ = OversizedHeaderAsync(broken);
+            serve = Serve(server, OneLine, () => throw new UnauthorizedAccessException("listen denied"), (f, t) => Task.CompletedTask,
+                pipe => new MemoryStream(), default, async _ => { draining.TrySetResult(); await drained.Task; });
+            await Within(draining.Task, "Shutdown did not start after the terminal renewal failure");
+            Check.Require(await Within(EndedAsync(broken), "A broken exchange stayed open through the drain"), "A broken exchange received data");
+            using (var contender = new HostServer()) Check.Require(await Refused(contender), "A contender claimed during the drain");
+            Check.Require(await BusyAsync(), "A new client reached the draining host");
+            drained.SetResult();
+            try { await Within(serve, "Serving did not end after the drain"); throw new InvalidDataException("Serving hid the renewal failure"); }
+            catch (UnauthorizedAccessException) { /* The terminal renewal failure is the outcome. */ }
+        } finally {
+            drained.TrySetResult();
+            if (serve != null) await Task.WhenAny(serve, Task.Delay(Bound));
+        }
+        await FreshClaimAsync("The pipe stayed claimed after a terminal renewal failure");
+    }
+
+    // A reap that rethrows must leave every instance with exactly one closer.
+    private static async Task RegistrationBeforeReapAsync()
+    {
+        Task? serve = null;
+        try {
+            using var server = new HostServer();
+            await ClaimAsync(server, "Reap fixture could not claim the pipe");
+            var calls = 0;
+            serve = Serve(server, OneLine, Listener(server), (f, t) => Task.Delay(Timeout.Infinite, t),
+                pipe => Interlocked.Increment(ref calls) == 1 ? throw new OutOfMemoryException("fault marker") : new MemoryStream(), default);
+            using (var first = await ConnectAsync()) await Within(EndedAsync(first), "The faulted handler left its client open");
+            var deadline = DateTime.UtcNow + Bound;
+            while (!serve.IsCompleted && DateTime.UtcNow < deadline) {
+                try { using var next = await ConnectAsync(); await Task.WhenAny(ExchangeAsync(next, "x"), Task.Delay(Bound)); }
+                catch (Exception e) when (e is IOException or TimeoutException or InvalidDataException) { /* Serving ended under this client. */ }
+            }
+            try { await Within(serve, "The reap never observed the faulted handler"); throw new InvalidDataException("Serving hid the handler fault"); }
+            catch (OutOfMemoryException) { /* The marker fault is the outcome. */ }
+        } finally {
+            if (serve != null) await Task.WhenAny(serve, Task.Delay(Bound));
+        }
+        await FreshClaimAsync("A reap fault orphaned a pipe instance");
+        using (var stop = new CancellationTokenSource()) {
+            using (var server = new HostServer()) {
+                await ClaimAsync(server, "Reap fixture could not reclaim the pipe");
+                var normal = Serve(server, OneLine, Listener(server), (f, t) => Task.Delay(Timeout.Infinite, t), pipe => new MemoryStream(), stop.Token);
+                using (var client = await ConnectAsync())
+                    Check.Require((await Within(ExchangeAsync(client, "x"), "A normal client was not served")).Code == 0, "Normal reply");
+                await CancelAsync(stop);
+                await Within(normal, "Serving did not stop after cancellation");
+            }
+        }
+        await FreshClaimAsync("A normal shutdown left the pipe claimed");
+    }
+
+    // Not awaited: a write issued before serving, or one the server refuses unread, may stay pending or break.
+    // The checks assert the refusal by the connection ending; disposing the client cancels a pending write.
+    private static Task OversizedHeaderAsync(Stream pipe)
+    {
+        var header = new byte[5]; // kind Arguments, then a length one past the one MiB payload cap
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(1), 1024 * 1024 + 1u);
+        return pipe.WriteAsync(header).AsTask();
+    }
+
+    /// <summary>Claim, run the body's serving, cancel it and require that a fresh claim succeeds afterwards.</summary>
+    private static async Task FixtureAsync(string name, Func<HostServer, CancellationToken, List<Task>, Task> body)
+    {
+        using var stop = new CancellationTokenSource();
+        var serving = new List<Task>();
+        try {
+            using var server = new HostServer();
+            await ClaimAsync(server, $"{name}: could not claim the pipe");
+            await body(server, stop.Token, serving);
+            await CancelAsync(stop);
+            foreach (var serve in serving) await Within(serve, $"{name}: serving did not stop after cancellation");
+        } finally {
+            await CancelQuietlyAsync(stop);
+            foreach (var serve in serving) await Task.WhenAny(serve, Task.Delay(Bound));
+        }
+        await FreshClaimAsync($"{name}: the pipe stayed claimed");
+    }
+
+    // During an outage a broken exchange is disconnected at once; the name stays held until a successor exists.
+    private static async Task BrokenDuringOutageAsync()
+    {
+        foreach (var variant in new[] { "kind", "untrusted", "oversized" })
+            await FixtureAsync($"broken during outage ({variant})", async (server, ct, serving) => {
+                var renewal = new Renewal(server);
+                var trusted = 0;
+                using var broken = await ConnectAsync();
+                // Written before serving starts, so not awaited (see OversizedHeaderAsync).
+                _ = variant == "kind" ? PipeFrame.WriteAsync(broken, new byte[] { Accepted }, default)
+                    : variant == "untrusted" ? Request(broken, "x") :OversizedHeaderAsync(broken);
+                serving.Add(Serve(server, OneLine, renewal.Listen, renewal.WaitAsync,
+                    pipe => variant == "untrusted" && Interlocked.Increment(ref trusted) == 1 ? null : new MemoryStream(), ct));
+                await Within(renewal.Waiting.Task, "The listener outage did not start");
+                Check.Require(await Within(EndedAsync(broken), "A broken exchange stayed open during the outage"), "A broken exchange received data");
+                using (var contender = new HostServer()) Check.Require(await Refused(contender), "A contender claimed during the outage");
+                Check.Require(await BusyAsync(), "A new client reached the host during the outage");
+                renewal.Recover();
+                using var next = await ConnectAsync();
+                Check.Require((await Within(ExchangeAsync(next, "x"), "The recovered listener did not serve")).Code == 0, "Recovered reply");
+            });
+    }
+
+    // A client that left before the accept takes the broken-accept branch, which renews while the name stays held.
+    // L13 R5 3.1: "WaitForConnectionAsync deterministically meets the :96 branch ... the name stays held (contender refused)".
+    private static Task BrokenAcceptDuringOutageAsync() => FixtureAsync("broken accept during outage", async (server, ct, serving) => {
+        var renewal = new Renewal(server);
+        var trusted = 0;
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using (var gone = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.CurrentUserOnly))
+            await Within(Task.Run(() => gone.Connect(0)), "The early client connect did not finish");
+        var serve = Serve(server, OneLine, renewal.Listen, renewal.WaitAsync, pipe => { Interlocked.Increment(ref trusted); return new MemoryStream(); }, stop.Token);
+        serving.Add(serve);
+        await Within(renewal.Waiting.Task, "A broken accept did not renew the listener");
+        using (var contender = new HostServer()) Check.Require(await Refused(contender), "A contender claimed during the outage");
+        Check.Require(await BusyAsync(), "A new client reached the host during the broken-accept outage");
+        renewal.Recover();
+        using var next = await ConnectAsync();
+        Check.Require((await Within(ExchangeAsync(next, "x"), "The recovered listener did not serve")).Code == 0, "Recovered reply");
+        // Counted after serving joins, so every handler has run: trust only for the recovery exchange, never for the early disconnect.
+        await CancelAsync(stop);
+        await Within(serve, "Serving did not stop after cancellation");
+        Check.Require(Volatile.Read(ref trusted) == 1, "A broken accept took the connected-dispatch route");
+    });
+
+    // A completed reply is never disconnected, even while no successor holds the name.
+    // The outbound quota holds only a Stop reply, so this longer reply's writes complete only as the client reads it.
+    private static Task UnreadReplyRetainedAsync() => FixtureAsync("completed reply retained", async (server, ct, serving) => {
+        var renewal = new Renewal(server);
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        serving.Add(Serve(server, async (args, output, error, token) => { await output.WriteAsync("served"); return 0; },
+            renewal.Listen, renewal.WaitAsync, pipe => new Ended(done), ct));
+        using var client = await ConnectAsync();
+        await SendAsync(client, "x");
+        await Within(renewal.Waiting.Task, "The listener outage did not start");
+        Check.Require(await Within(ReplyAsync(client), "The reply was not readable") is (0, "served"), "Wrong reply");
+        await Within(done.Task, "The exchange never completed");
+        using (var contender = new HostServer()) Check.Require(await Refused(contender), "A contender claimed during the outage");
+        // A disconnected client end fails the peek; the retained instance stays connected with nothing left to read.
+        Check.Require(PeekNamedPipe(client.SafePipeHandle, 0, 0, 0, out var available, 0) && available == 0, "A completed reply was disconnected");
+        renewal.Recover();
+        Check.Require(await Within(EndedAsync(client), "The completed exchange stayed open after a successor held the name"), "Data after the reply");
+    });
+
+    // A Stop requester that reads nothing cannot hold host exit: the name is released first, then the requester still reads Exit 0.
+    private static Task StopReplyUnreadAsync() => FixtureAsync("unread stop reply", async (server, ct, serving) => {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var serve = Serve(server, async (args, output, error, token) => { await stop.CancelAsync(); return Cli.SuccessExitCode; },
+            Listener(server), (f, t) => Task.Delay(Timeout.Infinite, t), pipe => new MemoryStream(), stop.Token);
+        serving.Add(serve);
+        using var requester = await ConnectAsync();
+        await SendAsync(requester, "host", "stop");
+        await Within(serve, "Serving waited on the requester reading its Stop reply");
+        await FreshClaimAsync("The name stayed held for an unread Stop reply");
+        Check.Require(await Within(ReplyAsync(requester), "The unread Stop reply was not readable") is (Cli.SuccessExitCode, ""), "Stop reply");
+    });
+
+    // Shutdown during a renewal outage drains with the name held, keeps a completed exchange on its client, then returns normally.
+    // L13 R4 PART 3: "as UnreadReply_Retained up to the PeekNamedPipe observation, then cancel: ServeAsync returns; A reads ... then EOF".
+    // The outbound quota holds only a Stop reply, so this one cannot wait unread and A reads it first; the same client must stay connected through the drain, then see EOF.
+    private static Task ShutdownDuringRenewalAsync() => FixtureAsync("shutdown during renewal", async (server, ct, serving) => {
+        var renewal = new Renewal(server);
+        var draining = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var serve = Serve(server, OneLine, renewal.Listen, renewal.WaitAsync, pipe => new Ended(done), stop.Token,
+            async _ => { draining.TrySetResult(); await drained.Task; });
+        serving.Add(serve);
+        try {
+            using var client = await ConnectAsync();
+            await SendAsync(client, "x");
+            await Within(renewal.Waiting.Task, "The listener outage did not start");
+            Check.Require((await Within(ReplyAsync(client), "A client was not served during the outage")).Code == 0, "Outage reply");
+            await Within(done.Task, "The exchange never completed");
+            Check.Require(PeekNamedPipe(client.SafePipeHandle, 0, 0, 0, out var before, 0) && before == 0, "A completed reply was disconnected before shutdown");
+            await CancelAsync(stop);
+            await Within(draining.Task, "Shutdown did not start during the renewal outage");
+            using (var contender = new HostServer()) Check.Require(await Refused(contender), "A contender claimed during the drain");
+            Check.Require(PeekNamedPipe(client.SafePipeHandle, 0, 0, 0, out var during, 0) && during == 0, "Shutdown disconnected a completed exchange before the drain ended");
+            drained.SetResult();
+            await Within(serve, "Serving did not return after shutdown during renewal");
+            Check.Require(await Within(EndedAsync(client), "The completed exchange stayed open after shutdown"), "Data after the reply");
+        } finally { drained.TrySetResult(); }
+    });
+
+    // Each failed listen waits on the backoff with its failure count, then the recovered listener serves.
+    // L13 R4 PART 3: "while gated a contender ClaimAsync throws (claim stays exclusive) and A, connected before the failure, is served;
+    // release: B Connect(0) succeeds and is served".
+    private static Task RenewalFailsThenRecoversAsync() => FixtureAsync("renewal fails then recovers", async (server, ct, serving) => {
+        var real = Listener(server);
+        var left = 3;
+        var failures = new List<int>();
+        var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        serving.Add(Serve(server, OneLine, () => left-- > 0 ? Outage() : real(),
+            (failure, token) => { lock (failures) failures.Add(failure); if (failure != 0) return Task.CompletedTask; waiting.TrySetResult(); return gate.Task.WaitAsync(token); },
+            pipe => new MemoryStream(), ct));
+        try {
+            using (var a = await ConnectAsync()) {
+                await SendAsync(a, "x");
+                await Within(waiting.Task, "The first renewal failure did not wait");
+                using (var contender = new HostServer()) Check.Require(await Refused(contender), "A contender claimed while renewal was gated");
+                Check.Require(await BusyAsync(), "A new client reached the host while renewal was gated");
+                Check.Require((await Within(ReplyAsync(a), "A client connected before the failure was not served while gated")).Code == 0, "Gated reply");
+            }
+            gate.SetResult();
+            using (var b = await ConnectAsync())
+                Check.Require((await Within(ExchangeAsync(b, "x"), "A client was not served after the renewal recovered")).Code == 0, "Recovered reply");
+            lock (failures) Check.Require(failures is [0, 1, 2], "Renewal did not retry each failure with its count");
+        } finally { gate.TrySetResult(); }
+    });
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool PeekNamedPipe(SafePipeHandle pipe, nint buffer, uint size, nint read, out uint available, nint left);
+
+    /// <summary>A listener that fails while down; its retry wait parks on a gate until Recover.</summary>
+    private sealed class Renewal(HostServer server)
+    {
+        private readonly Func<NamedPipeServerStream> real = Listener(server);
+        private readonly TaskCompletionSource gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private volatile bool down = true;
+        public TaskCompletionSource Waiting { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public NamedPipeServerStream Listen() => down ? Outage() : real();
+        public Task WaitAsync(int failures, CancellationToken ct) { Waiting.TrySetResult(); return gate.Task.WaitAsync(ct); }
+        public void Recover() { down = false; gate.TrySetResult(); }
+    }
+
+    /// <summary>A trust result whose disposal marks the end of its dispatch.</summary>
+    private sealed class Ended(TaskCompletionSource done) : IDisposable
+    {
+        public void Dispose() => done.TrySetResult();
+    }
+
+    /// <summary>A stderr replacement whose writes either block on a gate or throw; every entry is counted.</summary>
+    private sealed class Sink(bool blocking) : TextWriter
+    {
+        private readonly ManualResetEventSlim gate = new();
+        private int entries;
+        public int Entries => Volatile.Read(ref entries);
+        public override Encoding Encoding => Encoding.UTF8;
+        public void Release() => gate.Set();
+        public override void Write(char value) => Enter();
+        public override void Write(string? value) => Enter();
+        public override void Write(char[] buffer, int index, int count) => Enter();
+        private void Enter()
+        {
+            Interlocked.Increment(ref entries);
+            if (blocking) gate.Wait(Bound); else throw new IOException("closed stderr");
+        }
+    }
+}
