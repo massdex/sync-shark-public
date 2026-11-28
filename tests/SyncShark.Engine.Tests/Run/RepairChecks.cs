@@ -274,8 +274,10 @@ public static class RepairChecks
             await pc.ReadByIdAsync(id,token) is {} hit ? (hit.Location with {Domain=volume},hit.InScope) : null;
         var cloud=AutoSyncChecks.Observation.Wrap<ISide>((m,args)=>m.Name==nameof(ISide.BoundaryAsync)?Task.FromResult(((string?)cursor,(JournalPosition?)null)):AutoSyncChecks.Observation.Forward(db,m,args));
         var queue=new WorkQueue(); var paths=new PathScope(pair,[pair],DriveType.Fixed);
-        // The AutoSync feed path consumes the dirty edit and publishes the cursor without listing the pair.
-        await new PairRunner().CatchUpAsync(pair,(null,null),ItemChecks.Settings,_=>{},paths,queue,local,cloud,store,static()=>{},ct);
+        // The AutoSync feed path reads the one dirty page through and settles it, without listing the pair.
+        var pcEnd=await local.BoundaryAsync(ct); var dbEnd=await AutoSync.ReadPageAsync(cloud.BoundaryAsync,Side.Dropbox,ItemChecks.Settings,_=>{},ct);
+        Check.Require(pcEnd.Position!=null && dbEnd.Cursor!=null,"The feed path did not expose its finite target");
+        await AutoSync.ReadThroughAsync(pair,ItemChecks.Settings,_=>{},paths,queue,local,cloud,store,(pcEnd.Position,dbEnd.Cursor),static()=>{},ct);
         foreach(var side in new[]{pc,db}) Check.Require(side.Requests[nameof(ISide.ReadAllAsync)]==0 && side.Items.Count==size && side.Items[edit.Path].Bytes.SequenceEqual(new byte[]{2}),"The feed path skipped the edit or rescanned the pair");
         Check.Require(await store.CursorAsync(pair.PairId,ct)=="after-edit","The feed path did not consume its dirty input");
         return pc.Requests[nameof(ISide.ReadOneAsync)]+db.Requests[nameof(ISide.ReadOneAsync)];
