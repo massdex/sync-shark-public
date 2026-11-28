@@ -950,7 +950,7 @@ public static class HostChecks
             Check.Require(db.Items.ContainsKey("file"),"The start-up Repair did not run a full inventory");
             Check.Require((await raw.ReadRepairAsync(pair.PairId,Side.Dropbox,ct)).Reason==null,"The start-up Repair did not retire the legacy reason");
         }
-        finally {stop.Cancel();try{await host.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));}catch(TimeoutException){}}
+        finally {stop.Cancel();await host.StopAsync(default);} // Cleanup only; the CI job watchdog guards a hang, so a stop that never drains fails the test.
     }
     // A scoped endpoint read failing with the production acquisition exception keeps its debt; an unrelated scope still settles.
     private static async Task OwedScopeReadFailureAsync()

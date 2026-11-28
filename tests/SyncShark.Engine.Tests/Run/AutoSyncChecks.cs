@@ -434,6 +434,9 @@ public static class AutoSyncChecks
         await store.FinishRepairAsync(pair.PairId,(localRev,remoteRev),"{}",ct);
         await store.OweScopeAsync(pair.PairId,new("s","s"),ct); await Pages("g","h");
         Check.Require(wakes==1,"A scoped Repair debt alone did not wake a proof-bearing page");
+        // A newer scope revision must get its own wake (once per newer revision, not once per queue).
+        await store.OweScopeAsync(pair.PairId,new("t","t"),ct); await Pages("i","j");
+        Check.Require(wakes==2,"A newer scope revision did not get its own wake");
     });
 
     public static async Task RunAsync()
