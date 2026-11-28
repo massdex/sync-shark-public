@@ -1370,10 +1370,13 @@ public static class CallBudgetChecks
         // The replay re-reads the saved notice and re-lists the protected folder; it must not equal the first pass.
         Check.Require(small.Replay is { ReadOne: 3, ReadById: 1, Hash: 0, ReadAll: 1, NoticeRead: 1, Save: 1, Slot: 1 },
             $"Budget: held hand-off replay work: {small.Replay}");
-        Check.Require(small.Replay.Sql > small.First.Sql && small.First.Sql > 0,
-            $"Budget: held hand-off replay SQL ({small.Replay.Sql}) did not exceed the first pass ({small.First.Sql})");
-        Check.Require(small.First.Rows > 0 && small.Replay.Rows > 0,
-            $"Budget: held hand-off notice write changed no rows: first {small.First.Rows}, replay {small.Replay.Rows}");
+        // Absolute SQL and changed rows, derived from the store code for this one-child fixture: 4 shared statements
+        // (scoped notice header + footprint range, binding read, exact-path notice read). The notice save adds BEGIN,
+        // slot/update SELECT, header write, member DELETE, member INSERT and COMMIT: first inserts the header (1 row)
+        // and member (1 row) over an empty slot (DELETE 0). The replay first re-reads the saved notice, then updates the
+        // header (1 row), deletes (1) and reinserts (1) the member.
+        Check.Require(small.First.Sql == 10 && small.First.Rows == 2, $"Budget: held hand-off first pass SQL/rows: {small.First}");
+        Check.Require(small.Replay.Sql == 11 && small.Replay.Rows == 3, $"Budget: held hand-off replay SQL/rows: {small.Replay}");
     }
 
     private readonly record struct Handoff(long ReadOne, long ReadById, long Hash, long ReadAll, long NoticeRead, long Save, long Slot, long Sql, long Rows);
@@ -1436,7 +1439,18 @@ public static class CallBudgetChecks
                     if (n.Kind == NoticeKind.PutBack && n.Subject.Items.Any(i => i.Id == child.Id && i.Path == child.Path)) slot++;
                 return measured with { Slot = slot };
             }
-            var first = await PassAsync(); var replay = await PassAsync();
+            var first = await PassAsync();
+            Notice? notice = null;
+            await foreach (var n in store.NoticesAtAsync(pair.PairId, PathNames.Key(child.Path), default))
+                if (n.Kind == NoticeKind.PutBack && n.Subject.Items.Any(i => i.Id == child.Id && i.Path == child.Path)) notice = n;
+            Check.Require(notice != null && await store.UpdateNoticeVisibilityAsync(pair.PairId, notice, true, default),
+                "Fixture could not ignore the held hand-off notice");
+            var replay = await PassAsync();
+            // The replay re-saves the same PutBack owner; it must keep the user's Ignore, never make the hidden child visible again.
+            Notice? after = null;
+            await foreach (var n in store.NoticesAtAsync(pair.PairId, PathNames.Key(child.Path), default))
+                if (n.Kind == NoticeKind.PutBack && n.Subject.Items.Any(i => i.Id == child.Id && i.Path == child.Path)) after = n;
+            Check.Require(after is { Ignored: true }, "Budget: replaying the held hand-off un-hid the ignored notice");
             return (first, replay);
         }
         finally { trace.Detach(); dir.Delete(true); }

@@ -208,7 +208,8 @@ internal sealed class HeldCandidate(HeldRun run,Entry version)
         throw new ChangedUnderneathException(version.Path);
     }
 
-    private Task Notice(NoticeKind kind,TextKey cause)=>run.Store.SaveNoticeAsync(run.Pair.PairId,new(0,kind,cause,version.Path,IssueSubject.FromDistinct(items,run.Side) with {DropboxVersion=kind==NoticeKind.PutBack?exact:null},owner?.At??run.IdentifiedAt,false),run.Ct);
+    // Re-saving the existing PutBack owner keeps the user's Ignore: the same item has not changed, so it stays hidden until Unignore. A new notice is visible.
+    private Task Notice(NoticeKind kind,TextKey cause)=>run.Store.SaveNoticeAsync(run.Pair.PairId,new(0,kind,cause,version.Path,IssueSubject.FromDistinct(items,run.Side) with {DropboxVersion=kind==NoticeKind.PutBack?exact:null},owner?.At??run.IdentifiedAt,false,kind==NoticeKind.PutBack && owner is {} kept && kept.Ignored),run.Ct);
 
     private static bool ClassifiedFailure(Exception ex)=>ex is ItemFailedException or ChangedUnderneathException or PathOccupiedException or IOException;
 }
