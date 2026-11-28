@@ -137,9 +137,9 @@ public static class RepairCompletionChecks
     });
 
     // ---------------------------------------------------------------------------------------------------------------------------
-    // L2 MEMBERS RepairClosesSettledTable (AMEND): "an earlier run's Failure on each of these rows [Record equal bytes, Upload Applied,
-    // Download, overwrite upload] stays open after the commit, as at bdb8c6f85", and the KEEP stays-open rows (InSync, dismissed/ignored,
-    // member of another row, memberless). Each row's effect still lands; no commit closes another run's notice.
+    // L2 MEMBERS RepairClosesSettledTable (AMEND 2): an earlier run's Failure on a FILE row now closes once that row's own turn
+    // settles in sync or applied, so the Record/Upload/Download/overwrite and InSync rows close. The rows a Failure does not describe
+    // (ignored, member of another row, memberless) stay open with their generation. Each row's effect still lands.
     public static Task RepairClosesSettledTableAsync() => RepairChecks.WithRepairStore(async (store,pair,ct)=>
     {
         await store.FinishRepairAsync(pair.PairId,(0,0),"{}",ct);
@@ -166,7 +166,10 @@ public static class RepairCompletionChecks
         Check.Require(db.Items.TryGetValue("up",out var up) && up.Bytes.SequenceEqual(new byte[]{1}) && pc.Items.TryGetValue("down",out var down) && down.Bytes.SequenceEqual(new byte[]{1}) &&
             db.Items["over"].Bytes.SequenceEqual(new byte[]{2}) && await store.FindAsync(pair.PairId,Side.Local,PathNames.Key("rec"),ct) is {DropboxId:"db-rec"},"A table row's own effect did not land");
         var now=new Dictionary<long,Notice>(); await foreach(var n in store.NoticesAsync(pair.PairId,ct)) now[n.Id]=n;
-        foreach(var n in earlier) Check.Require(now.TryGetValue(n.Id,out var kept) && !kept.Dismissed && kept.At==n.At && kept.Ignored==n.Ignored,$"An earlier run's Failure at {n.Path} was closed or rewritten by this Repair's commit");
+        var closing=new HashSet<string>{"up","down","over","rec","insync"};
+        foreach(var n in earlier)
+            if(closing.Contains(n.Path)) Check.Require(!now.ContainsKey(n.Id),$"A settled file row's earlier Failure at {n.Path} stayed open");
+            else Check.Require(now.TryGetValue(n.Id,out var kept) && !kept.Dismissed && kept.At==n.At && kept.Ignored==n.Ignored,$"An earlier run's Failure at {n.Path} was closed or rewritten");
     });
 
     // ---------------------------------------------------------------------------------------------------------------------------

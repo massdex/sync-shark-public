@@ -142,11 +142,11 @@ public static class RepairChecks
             var queue=await ReadyQueueAsync(pair,paths,pc,db,store,ct);
             var local=ItemChecks.File(Side.Local,"item",1,"pc-item"); var drop=ItemChecks.File(Side.Dropbox,"item",1,"db-item");
             await BindAsync(store,pair,pc,db,local,drop,1,1,ct);
-            pc.ReadFailures["item"]=new IOException("unreadable");
+            pc.ReadFailures["item"]=new ItemFailedException("item",TextKey.ReadLocalFailed,null);
             await store.SaveNoticeAsync(pair.PairId,Failure("item",TextKey.DropboxRefused,Item(Side.Local,"item",local),Item(Side.Dropbox,"item",drop)),ct);
             var calls=new StoreCalls();
             await ScopedRepairAsync(pair,Watch(store,calls),pc,db,queue,paths,new Scope("",""),ct);
-            Check.Require((await OpenNoticesAsync(store,pair.PairId,ct)).Any(n=>n.Cause==TextKey.DropboxRefused) && calls.Close==0,"A Failure on an unreadable PC entry was retired");
+            Check.Require((await OpenNoticesAsync(store,pair.PairId,ct)).Count(n=>n.Kind==NoticeKind.Failure && n.Path=="item")==1 && calls.Close==0,"A Failure on an unreadable PC entry was closed or lost");
         });
         await WithRepairStore(async(store,pair,ct)=>
         {

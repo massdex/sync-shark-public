@@ -44,7 +44,7 @@ internal sealed class RepairRetirement(RepairRun run)
     {
         var (left,right)=Row.Paths(raw); var items=notice.Subject.Items;
         // A Failure naming exactly this file row's current entries, one per side, stops describing current state once the row's own claimed turn settles: for a file, settled means in sync or applied.
-        var current=run.physicalHop==null && !raw.IsFolder() && notice.Kind==NoticeKind.Failure && member!=null && member==items[0] && items.Select(i=>i.Side).Distinct().Count()==items.Count &&
+        var current=run.physicalHop==null && !raw.IsFolder() && notice.Kind==NoticeKind.Failure && member!=null && member==items[0] && PathNames.Same(notice.Path,member.Path) && items.Select(i=>i.Side).Distinct().Count()==items.Count &&
             items.All(i=>raw.EntryOn(i.Side) is {Skip:null} now && now.Id==i.Id && PathNames.Same(now.Path,i.Path));
         if(Retirable(notice) && !notice.Ignored && !notice.Dismissed && !raw.CounterpartElsewhere && !raw.Ambiguous && raw.Context.CompleteInventory &&
             (current || (member==null ? items.Count==0 : items.Count==1 && items[0]==member ||
