@@ -1396,12 +1396,14 @@ public static class CallBudgetChecks
             var childBinding = SyncedEntries.From(ItemChecks.File(Side.Local, "p/f", 2, "local"), child with { Id = "old-db-id" });
             await store.CommitAsync(pair.PairId, null, saved, null, null, default);
             await store.CommitAsync(pair.PairId, null, childBinding, null, null, default);
-            for (int i = 0; i < size; i++)
-            {
-                var l = ItemChecks.File(Side.Local, $"item-{i}", 1, $"l-{i}"); var r = ItemChecks.File(Side.Dropbox, $"item-{i}", 1, $"r-{i}");
-                pc.Seed(l, [1]); db.Seed(r, [1]);
-                await store.CommitAsync(pair.PairId, null, SyncedEntries.From(l, r), null, null, default);
-            }
+            // The store's committer coalesces concurrent commits into batched transactions; seeding one at a time would fsync per item.
+            foreach (var chunk in Enumerable.Range(0, size).Chunk(ItemChecks.Settings.StoreBatchRows))
+                await Task.WhenAll(chunk.Select(i =>
+                {
+                    var l = ItemChecks.File(Side.Local, $"item-{i}", 1, $"l-{i}"); var r = ItemChecks.File(Side.Dropbox, $"item-{i}", 1, $"r-{i}");
+                    pc.Seed(l, [1]); db.Seed(r, [1]);
+                    return store.CommitAsync(pair.PairId, null, SyncedEntries.From(l, r), null, null, default);
+                }));
             var change = new Change(Side.Dropbox, ChangeKind.Changed, child.Path, null, child.Id, child, false, false);
             var calls = new Dictionary<string, long>();
             var counted = FolderDeleteChecks.Observe.Wrap<IStore>(store, (op, _) => { calls[op] = calls.GetValueOrDefault(op) + 1; return null; });
