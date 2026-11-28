@@ -229,7 +229,7 @@ public static class ItemSyncChecks
                 Check.Require(pc.Requests[nameof(ISide.ContentHashAsync)]==1 && db.Items.TryGetValue("c",out var up) && up.Bytes.SequenceEqual(new byte[]{2}) && pc.History.Count==0 && store.Records.Values.Single().DropboxPath=="c",
                     "A stamp-restored PC edit departing by ID was recycled instead of uploaded");
             else
-                Check.Require(pc.Requests[nameof(ISide.ContentHashAsync)]==1 && !pc.Items.ContainsKey("c") && pc.History.Count==1 && pc.History[0].Bytes.SequenceEqual(new byte[]{1}) && db.Mutations.Count==0 && store.Records.Count==0,
+                Check.Require(pc.Requests[nameof(ISide.ContentHashAsync)]==1 && !pc.Items.ContainsKey("c") && pc.History.Count==1 && pc.History[0].Bytes.SequenceEqual(new byte[]{1}) && db.Requests[nameof(ISide.PublishAsync)]==0 && db.Requests[nameof(ISide.DeleteAsync)]==0 && store.Records.Count==0,
                     "An unchanged PC file departing by ID was not recycled through the proven removal");
         }
     }

@@ -105,7 +105,7 @@ public static class Decide
                 : synced with { DropboxKey = PathNames.DropboxKey(row.Dropbox!.Path), DropboxPath = row.Dropbox.Path };
             return WithRecord(row with { Synced = view }, localContentDirty) with { Row = row };
         }
-        // A Dropbox delete wins only over an identical PC copy; a stamp can be restored, so a row with no Dropbox leg needs the hash - not under a legacy tie (Held, no read).
+        // A Dropbox delete wins only over an identical PC copy; a stamp can be restored, so a row with no Dropbox leg needs the hash - not under a legacy tie (Held, no forced read).
         var (localState, needHash) = LocalState(row, synced, localContentDirty || row.Dropbox is null && !Tied(row));
         if (needHash) return NeedHash(row);
         return (localState, DropboxState(row, synced)) switch
